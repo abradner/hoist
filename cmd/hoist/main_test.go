@@ -104,6 +104,44 @@ func TestPlanDryRunPrintsOneChangedLinePerOccurrence(t *testing.T) {
 	}
 }
 
+// The root flagset advertises --repo/--apps-root/--promotable; given there, they must reach
+// the plan command as its defaults, and a plan-level flag must still win.
+func TestPlanTakesRootFlagsAsDefaults(t *testing.T) {
+	var out, errOut bytes.Buffer
+	args := []string{"--repo", fixture, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	plus := 0
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++ ") {
+			plus++
+		}
+	}
+	if plus != 6 {
+		t.Errorf("diff has %d added lines, want 6:\n%s", plus, out.String())
+	}
+	// The other shared flags travel the same way: a root --promotable that excludes
+	// everything is BuildPlan's "no promotable" error, not the default prefix.
+	errOut.Reset()
+	if got := run([]string{"--repo", fixture, "--promotable", " ", "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != exitFailure || !strings.Contains(errOut.String(), "no promotable") {
+		t.Errorf("root --promotable not passed through: exit %d, stderr: %s", got, errOut.String())
+	}
+	errOut.Reset()
+	if got := run([]string{"--repo", fixture, "--apps-root", "nowhere", "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != exitFailure || !strings.Contains(errOut.String(), "apps root nowhere") {
+		t.Errorf("root --apps-root not passed through: exit %d, stderr: %s", got, errOut.String())
+	}
+	// A plan-level flag overrides the root value.
+	errOut.Reset()
+	if got := run([]string{"--repo", t.TempDir(), "plan", "--repo", fixture, "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != 0 {
+		t.Errorf("plan-level --repo did not override the root value: exit %d, stderr: %s", got, errOut.String())
+	}
+	// Positive control: the unchanged form still works.
+	if got := run(planArgs("--dry-run"), io.Discard, io.Discard); got != 0 {
+		t.Errorf("plan --repo form: exit %d, want 0", got)
+	}
+}
+
 func TestPlanWithoutDryRunExitsThreeAndWritesNothing(t *testing.T) {
 	before := treeHash(t)
 	var out, errOut bytes.Buffer

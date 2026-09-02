@@ -68,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
-		return runPlan(fs.Args()[1:], stdout, stderr)
+		return runPlan(fs.Args()[1:], rootFlags{repo: *repo, appsRoot: *appsRoot, promotable: *promotable}, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "hoist: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -112,14 +112,21 @@ func (d digestFlag) Set(s string) error {
 	return nil
 }
 
-func runPlan(args []string, stdout, stderr io.Writer) int {
+// rootFlags carries the values of the flags the root flagset shares with a command, so that
+// hoist --repo X plan … and hoist plan --repo X … mean the same thing. A command re-parses
+// its own flagset with these as the defaults; a flag given at the command level still wins.
+type rootFlags struct {
+	repo, appsRoot, promotable string
+}
+
+func runPlan(args []string, root rootFlags, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	repo := fs.String("repo", "", "path to the GitOps repo checkout (required)")
-	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo")
+	repo := fs.String("repo", root.repo, "path to the GitOps repo checkout (required; may also be given before the command)")
+	appsRoot := fs.String("apps-root", root.appsRoot, "directory of Argo Application wrappers, relative to --repo")
 	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
-	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder until config files are read (a later milestone) — set it to your registry path. An empty list is an error, not \"everything\"")
+	promotable := fs.String("promotable", root.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder until config files are read (a later milestone) — set it to your registry path. An empty list is an error, not \"everything\"")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
