@@ -339,7 +339,7 @@ func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests dige
 	if len(prefixes) > 0 {
 		var outside []string
 		for repo := range digests {
-			if !isPromotable(repo, prefixes) {
+			if !gitops.IsPromotable(repo, prefixes) {
 				outside = append(outside, repo)
 			}
 		}
@@ -447,20 +447,10 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 }
 
 func untouchedReason(ref image.Ref, src string, prefixes []string) string {
-	if isPromotable(ref.Repo, prefixes) {
+	if gitops.IsPromotable(ref.Repo, prefixes) {
 		return "not running in " + src
 	}
 	return "third-party: outside " + strings.Join(prefixes, ",")
-}
-
-// isPromotable mirrors BuildPlan's prefix test so the CLI's messages agree with its plan.
-func isPromotable(repo string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if p != "" && strings.HasPrefix(repo, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func splitList(s string) []string {

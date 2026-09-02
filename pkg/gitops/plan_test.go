@@ -372,3 +372,29 @@ func TestBuildPlanUnwritableOverrideFailsEvenWithoutTarget(t *testing.T) {
 		}
 	}
 }
+
+// MatchesPrefix requires a host boundary: "ghcr.io" must not match
+// "ghcr.io.attacker.example/org/app" merely because it shares leading bytes — a raw
+// strings.HasPrefix would let a manifest naming that host be treated as covered by
+// whichever credentials a "ghcr.io" prefix carries (AGENTS.md §4.4/§4.10, R-002).
+func TestMatchesPrefixRequiresHostBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, repo, prefix string
+		want               bool
+	}{
+		{"slash prefix, real repo", "ghcr.io/abradner/app", "ghcr.io/", true},
+		{"bare prefix, real repo", "ghcr.io/abradner/app", "ghcr.io", true},
+		{"bare prefix, exact host", "ghcr.io", "ghcr.io", true},
+		{"bare prefix, attacker host", "ghcr.io.attacker.example/org/app", "ghcr.io", false},
+		{"bare prefix, attacker host no slash", "ghcr.ioattacker.example", "ghcr.io", false},
+		{"slash prefix never matches attacker host", "ghcr.io.attacker.example/org/app", "ghcr.io/", false},
+		{"scoped prefix", "ghcr.io/acme/app", "ghcr.io/acme/", true},
+		{"scoped prefix, sibling owner", "ghcr.io/acmeevil/app", "ghcr.io/acme/", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MatchesPrefix(tc.repo, tc.prefix); got != tc.want {
+				t.Errorf("MatchesPrefix(%q, %q) = %v, want %v", tc.repo, tc.prefix, got, tc.want)
+			}
+		})
+	}
+}

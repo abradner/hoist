@@ -159,10 +159,15 @@ func TestRegistryEntryForPicksLongestMatchNeverFirstOverlap(t *testing.T) {
 	cases := []struct {
 		repo, wantPrefix string
 	}{
-		{"ghcr.io/example/web", "ghcr.io/example/web"},      // matches both; the longer, more specific entry wins
-		{"ghcr.io/example/webhooks", "ghcr.io/example/web"}, // still a prefix match on the longer entry
-		{"ghcr.io/example/marketing", "ghcr.io/"},           // only the broad entry covers it
-		{"quay.io/example/other", ""},                       // no entry covers it at all
+		{"ghcr.io/example/web", "ghcr.io/example/web"}, // matches both; the longer, more specific entry wins
+		// "ghcr.io/example/web" carries no trailing slash, so it must not cover a
+		// same-string-prefixed but distinct repo path any more than a bare host prefix
+		// may cover a different host (TestRegistryEntryForRejectsHostConfusion) — the
+		// boundary rule in gitops.MatchesPrefix is the same rule at every path segment,
+		// not a host-only special case. "web" and "webhooks" are different image repos.
+		{"ghcr.io/example/webhooks", "ghcr.io/"},  // falls through to the broad entry, not the web-scoped one
+		{"ghcr.io/example/marketing", "ghcr.io/"}, // only the broad entry covers it
+		{"quay.io/example/other", ""},             // no entry covers it at all
 	}
 	for _, tc := range cases {
 		e := registryEntryFor(registries, tc.repo)
@@ -630,5 +635,22 @@ func TestMultiRegistryRoutesDirectCallsByRepo(t *testing.T) {
 	}
 	if _, err := m.Tags(ctx, "ghcr.io/nobody/app"); err == nil {
 		t.Fatal("Tags for an unmatched repo must error, not use the primary client")
+	}
+}
+
+// Codex P1 (draft #29 pass): a bare-host prefix like "ghcr.io" must never match a
+// different host that merely shares its leading bytes. Before the fix, registryEntryFor
+// used a raw strings.HasPrefix, so an entry configured for "ghcr.io" (no trailing slash)
+// — with an op ref or a cluster secret attached — matched "ghcr.io.attacker.example/…"
+// too, and entryAuthConfig would hand that host the entry's credentials.
+func TestRegistryEntryForRejectsHostConfusion(t *testing.T) {
+	registries := []config.RegistryConfig{
+		{Prefix: "ghcr.io", Op: "op://vault/ghcr/field"}, // no trailing slash, deliberately
+	}
+	if e := registryEntryFor(registries, "ghcr.io.attacker.example/org/app"); e != nil {
+		t.Fatalf("registryEntryFor matched an attacker-controlled host via prefix confusion: %+v", e)
+	}
+	if e := registryEntryFor(registries, "ghcr.io/abradner/app"); e == nil || e.Op != "op://vault/ghcr/field" {
+		t.Fatalf("registryEntryFor(real repo) = %+v, want the ghcr.io entry", e)
 	}
 }

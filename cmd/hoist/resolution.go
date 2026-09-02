@@ -110,11 +110,16 @@ func resolutionOptions(cfg *config.Config, rc *config.RepoConfig, f resolveFlags
 // still resolves through the registry source, but with the default auth chain and no
 // cluster or op link (F4): a config entry scoped to one prefix must never lend its
 // credentials to a repo it does not cover.
+// registryEntryFor picks the registries[] entry whose prefix best covers repo (the
+// longest matching prefix wins, so a more specific entry — e.g. ghcr.io/acme/ — takes
+// precedence over a broader one — ghcr.io/). Matching goes through gitops.MatchesPrefix,
+// never a raw strings.HasPrefix: a bare-host prefix like "ghcr.io" must not match
+// "ghcr.io.attacker.example/..." and hand that host this entry's credentials.
 func registryEntryFor(registries []config.RegistryConfig, repo string) *config.RegistryConfig {
 	var best *config.RegistryConfig
 	for i := range registries {
 		r := &registries[i]
-		if r.Prefix != "" && strings.HasPrefix(repo, r.Prefix) {
+		if gitops.MatchesPrefix(repo, r.Prefix) {
 			if best == nil || len(r.Prefix) > len(best.Prefix) {
 				best = r
 			}
@@ -268,7 +273,7 @@ func runResolution(ctx context.Context, r *gitops.Repo, from string, prefixes []
 	if env, ok := r.Envs[from]; ok {
 		for _, f := range env.Families {
 			for _, o := range f.Occurrences {
-				if isPromotable(o.Ref.Repo, prefixes) {
+				if gitops.IsPromotable(o.Ref.Repo, prefixes) {
 					occ = append(occ, o)
 				}
 			}
