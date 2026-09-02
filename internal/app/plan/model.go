@@ -80,8 +80,13 @@ type BackMsg struct{}
 type loadedMsg struct {
 	plan    gitops.Plan
 	outcome ResolveOutcome
-	warn    string // resolveFn's error text, "" when resolution was skipped or succeeded
-	err     error  // a BuildPlan failure; fatal for this screen (rendered, never panics)
+	// err is fatal for this screen (rendered, never panics): either resolveFn failed —
+	// which AGENTS.md §4.10 states is a whole-operation failure whenever resolution was
+	// attempted at all, the same asymmetry cmd/hoist's runPlan enforces for the CLI — or
+	// BuildPlan itself failed. The screen must not have a looser gate on that rule than
+	// the command line does; it never plans from unverified manifest values when the
+	// cluster it was told to consult could not be reached.
+	err error
 }
 
 type keyMap struct {
@@ -217,21 +222,27 @@ func (m Model) loadCmd() tea.Cmd {
 	repo, source, target, promotable, resolveFn := m.repo, m.source, m.target, m.promotable, m.resolveFn
 	return func() tea.Msg {
 		var outcome ResolveOutcome
-		var warn string
 		if resolveFn != nil {
 			out, err := resolveFn(context.Background(), repo, source)
 			if err != nil {
-				warn = err.Error()
-			} else {
-				outcome = out
+				// A resolveFn error means digest resolution was attempted and failed
+				// outright — the cluster was unreachable, or the resolution
+				// configuration itself was invalid. It is never a per-repo registry
+				// miss (pkg/resolve handles that as an unresolved Resolution, not an
+				// error return), so there is nothing safe left to plan from: fail the
+				// screen exactly as cmd/hoist's plan command fails the whole run,
+				// rather than building a selectable plan from manifest values nobody
+				// has confirmed against the running environment.
+				return loadedMsg{err: fmt.Errorf("digest resolution: %w", err)}
 			}
+			outcome = out
 		}
 		digests := resolve.Digests(outcome.Resolutions)
 		pl, err := gitops.BuildPlan(repo, source, target, promotable, digests)
 		if err == nil {
 			pl.Warnings = append(resolve.Warnings(outcome.Resolutions), pl.Warnings...)
 		}
-		return loadedMsg{plan: pl, outcome: outcome, warn: warn, err: err}
+		return loadedMsg{plan: pl, outcome: outcome, err: err}
 	}
 }
 
@@ -273,12 +284,6 @@ func (m Model) onLoaded(msg loadedMsg) Model {
 	}
 	m.plan = msg.plan
 	m.outcome = msg.outcome
-	if msg.warn != "" {
-		m.plan.Warnings = append([]gitops.Warning{{
-			Code:    "resolution-unavailable",
-			Message: "digest resolution failed, planning from manifests alone: " + msg.warn,
-		}}, m.plan.Warnings...)
-	}
 	m.rows = DeriveRows(m.plan, m.outcome.Resolutions)
 	m.buildMultiSelect()
 	m = m.recomputeDiff()

@@ -128,33 +128,30 @@ func TestAsyncLoad(t *testing.T) {
 	}
 }
 
-// TestResolveErrorDegradesToWarning: a ResolveFunc error must not fail the screen — it
-// plans from the manifests alone and reports the failure as a warning (AGENTS.md
-// principle 5), matching "digest sources: none" mode's own graceful path.
-func TestResolveErrorDegradesToWarning(t *testing.T) {
+// TestResolveErrorFailsTheScreen: a ResolveFunc error means digest resolution was
+// attempted and failed outright (the cluster was unreachable, or its config was
+// invalid) — AGENTS.md §4.10 states that as a whole-operation failure, the same
+// asymmetry cmd/hoist's plan command already enforces (a runResolution error there
+// prints to stderr and exits without ever printing a plan). The screen must not be a
+// second, looser gate on that rule: it fails too, rather than building a selectable
+// plan from manifest values nobody has confirmed against the running environment.
+// (An earlier version of this test asserted the opposite — a Codex review of the
+// draft followup caught it as the exact bypass the rule exists to prevent.)
+func TestResolveErrorFailsTheScreen(t *testing.T) {
 	r := discoverFixture(t)
 	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
 		return ResolveOutcome{}, errCannotReachCluster
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
 	m = runInit(t, m)
-	if m.state != stateReady {
-		t.Fatalf("state = %v, want stateReady even when resolveFn errors", m.state)
+	if m.err == nil {
+		t.Fatal("m.err = nil, want the resolve error to fail the screen")
 	}
-	if m.err != nil {
-		t.Fatalf("m.err = %v, want nil (a resolve error degrades, it does not fail the screen)", m.err)
+	if !strings.Contains(m.err.Error(), errCannotReachCluster.Error()) {
+		t.Errorf("m.err = %v, want it to name the resolve failure", m.err)
 	}
-	if len(m.rows) == 0 {
-		t.Error("want rows planned from the manifests alone")
-	}
-	found := false
-	for _, w := range m.plan.Warnings {
-		if strings.Contains(w.Message, errCannotReachCluster.Error()) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("warnings missing the resolve error: %+v", m.plan.Warnings)
+	if len(m.rows) != 0 {
+		t.Errorf("rows = %+v, want none — nothing is planned when resolution fails outright", m.rows)
 	}
 }
 
