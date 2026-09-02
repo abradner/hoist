@@ -281,11 +281,74 @@ func TestApplyWritesOnlyPlannedFiles(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesPathEscape names the attacker: an Edit whose File leaves the repo. The
+// victim is a real, applicable copy of the edited fixture file placed one level above the
+// root, so a containment check that only looked at the first path element would read it,
+// verify it and write it.
 func TestApplyRefusesPathEscape(t *testing.T) {
 	p := planFixture(t)
 	e := p.Edits[0]
-	e.File = "../" + e.File
-	if _, err := Apply(t.TempDir(), []Edit{e}); err == nil {
-		t.Error("edit outside root accepted")
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(parent, "victim.yaml")
+	orig := readFixture(t, e.File)
+	if err := os.WriteFile(victim, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.yaml")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: the same edit against the victim's bytes really does apply, so an
+	// accepted escape below would have written.
+	if _, err := ApplyBytes(orig, []Edit{e}); err != nil {
+		t.Fatalf("control: edit does not apply to the victim file: %v", err)
+	}
+	for _, file := range []string{"../victim.yaml", "a/../../victim.yaml", "link.yaml", "/" + victim} {
+		esc := e
+		esc.File = file
+		changed, err := Apply(root, []Edit{esc})
+		if err == nil {
+			t.Errorf("%s: edit outside root accepted (changed %v)", file, changed)
+		}
+		got, readErr := os.ReadFile(victim)
+		if readErr != nil || !bytes.Equal(got, orig) {
+			t.Fatalf("%s: victim file was modified (read err %v)", file, readErr)
+		}
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"dir/in.yaml", "top.yaml"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(parent, "out.yaml"), []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(parent, "out.yaml"), filepath.Join(root, "dir", "escape.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "top.yaml"), filepath.Join(root, "dir", "stay.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ok := range []string{"dir/in.yaml", "top.yaml", "dir/../top.yaml", "dir/stay.yaml", "dir/missing.yaml"} {
+		if _, err := ResolvePath(root, ok); err != nil {
+			t.Errorf("%s: refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"../out.yaml", "dir/../../out.yaml", "dir/escape.yaml", ".", "..", "/etc/passwd", filepath.Join(parent, "out.yaml")} {
+		if p, err := ResolvePath(root, bad); err == nil {
+			t.Errorf("%s: accepted as %s", bad, p)
+		}
 	}
 }

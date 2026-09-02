@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -232,7 +231,11 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	sort.Strings(files)
 	fmt.Fprintf(w, "hoist plan: %s -> %s (%d edits in %d files)\n\n", plan.SourceEnv, plan.TargetEnv, changes, len(files))
 	for _, f := range files {
-		before, err := os.ReadFile(filepath.Join(r.Root, filepath.FromSlash(f)))
+		p, err := gitops.ResolvePath(r.Root, f)
+		if err != nil {
+			return err
+		}
+		before, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}

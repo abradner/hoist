@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/abradner/hoist/pkg/gitops"
 )
 
 const fixture = "../../testdata/repo"
@@ -285,6 +287,31 @@ func TestPlanFailsCleanlyOnBadRepo(t *testing.T) {
 	}
 	if got := run(planArgs("--dry-run", "--to", "nope"), io.Discard, &errOut); got != exitFailure {
 		t.Fatalf("unknown env: exit %d, want %d", got, exitFailure)
+	}
+}
+
+// printPlan reads every edited file from disk; a plan whose Edit.File escapes the repo
+// must be refused there too, not only in Apply.
+func TestPrintPlanRefusesFileOutsideRepo(t *testing.T) {
+	r, err := gitops.Discover(fixture, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: the unmodified plan prints.
+	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	for _, file := range []string{"../" + plan.Edits[0].File, "x/../../" + plan.Edits[0].File} {
+		esc := plan
+		esc.Edits = append([]gitops.Edit(nil), plan.Edits...)
+		esc.Edits[0].File = file
+		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
+			t.Errorf("%s: printPlan err = %v, want a containment refusal", file, err)
+		}
 	}
 }
 

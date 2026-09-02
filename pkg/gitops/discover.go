@@ -99,11 +99,43 @@ func Discover(root, appsRoot string) (*Repo, error) {
 	return r, nil
 }
 
+// checkRelative is the lexical half of staying inside the repo: after cleaning, p must be
+// relative and must not climb out. Cleaning first is what catches a/../../victim.yaml, which
+// begins innocently and only resolves upward once joined to a root.
 func checkRelative(p string) error {
-	if path.IsAbs(p) || p == "." || p == ".." || strings.HasPrefix(p, "../") {
+	c := path.Clean(p)
+	if path.IsAbs(c) || filepath.IsAbs(filepath.FromSlash(c)) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
 		return fmt.Errorf("%q must be a relative path inside the repo", p)
 	}
 	return nil
+}
+
+// ResolvePath joins rel (slash-separated, relative) to root and proves the result stays
+// inside root — lexically (checkRelative) and, when the file exists, physically: a symlink
+// inside the repo that points outside it is refused, so nothing hoist reads or writes through
+// an Edit.File can land outside the checkout. Every place an Edit.File is joined to a root
+// goes through here.
+func ResolvePath(root, rel string) (string, error) {
+	if err := checkRelative(rel); err != nil {
+		return "", err
+	}
+	joined := filepath.Join(root, filepath.FromSlash(rel))
+	resolved, err := filepath.EvalSymlinks(joined)
+	if errors.Is(err, fs.ErrNotExist) {
+		return joined, nil // the caller's own read reports the missing file
+	}
+	if err != nil {
+		return "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	inside, err := filepath.Rel(realRoot, resolved)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) || filepath.IsAbs(inside) {
+		return "", fmt.Errorf("%q resolves to %s, outside the repo", rel, resolved)
+	}
+	return joined, nil
 }
 
 func readApps(root, appsRoot string) ([]ArgoApp, error) {

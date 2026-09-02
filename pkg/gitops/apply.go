@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,18 +23,21 @@ var plainSafe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]*$`)
 func Apply(root string, edits []Edit) (changed []string, err error) {
 	byFile := map[string][]Edit{}
 	var files []string
+	paths := map[string]string{}
 	for _, e := range edits {
-		if err := checkRelative(e.File); err != nil {
-			return nil, fmt.Errorf("edit file: %w", err)
-		}
 		if _, ok := byFile[e.File]; !ok {
+			p, err := ResolvePath(root, e.File)
+			if err != nil {
+				return nil, fmt.Errorf("edit file: %w", err)
+			}
+			paths[e.File] = p
 			files = append(files, e.File)
 		}
 		byFile[e.File] = append(byFile[e.File], e)
 	}
 	sort.Strings(files)
 	for _, f := range files {
-		p := filepath.Join(root, filepath.FromSlash(f))
+		p := paths[f]
 		info, err := os.Stat(p)
 		if err != nil {
 			return changed, err
