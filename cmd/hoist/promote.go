@@ -194,6 +194,27 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
+	// M5: the Argo Applications this promotion's plan touches, computed once from the same
+	// discovered repo BuildPlan already read (engine.ArgoAppNames' own doc comment), plus the
+	// Argo/Deployment adaptors themselves. AllSteps always wires all seven-plus-three steps
+	// (AGENTS.md invariant 4 of M1-M4: Steps run unconditionally, Observe decides what's
+	// actually left to do), so these are built here alongside the forge client rather than
+	// lazily once a promotion actually reaches Argo — the same posture newForge already takes.
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	a, _, err := newArgo(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	ro, _, err := newRollout(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -206,7 +227,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// Invariant 5: one in-flight promotion per target env. A different image set for the same
 	// target env gets a different id (§4.1), so this can only find *another* promotion's state
 	// file — re-observed fresh, never trusted from its own Phase (findInFlight/ObserveAll).
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, newGit, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
 		return exitFailure
 	} else if conflict != nil {
@@ -244,7 +265,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// the state file this process just wrote. Re-running the same scan now, while still holding
 	// the claim, closes that window: nothing else can win the claim while this check runs, and
 	// anything that raced into existence on disk between the first scan and now is caught here.
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, newGit, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
 		return exitFailure
 	} else if conflict != nil {
@@ -272,6 +293,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		Approval:       eff.cfg.Approval(plan.TargetEnv),
 		Approvers:      eff.cfg.Approvers,
 		Collaborators:  eff.cfg.Collaborators,
+		ArgoNamespace:  eff.cfg.Kube.ArgoNamespace,
+		ArgoApps:       argoApps,
 	}
 	// The state file is an index of what to look at, never evidence of what happened
 	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the
@@ -308,7 +331,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintln(stderr, "hoist promote: waiting for signing approval...")
 		}
 	}
-	steps := engine.AllSteps(newGit, f, onWaiting)
+	steps := engine.AllSteps(newGit, f, a, ro, onWaiting)
 	// The claim only needs to outlive the gap up to the first durable state write — once that
 	// lands, findInFlight's own re-observation of the real state file is what enforces invariant
 	// 5 for the rest of the (possibly hours-long) promotion, so release it here rather than

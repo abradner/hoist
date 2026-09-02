@@ -9,9 +9,11 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // pollInterval picks the poll interval for whichever step Drive most recently stopped at
@@ -93,7 +95,7 @@ func retryableStep(step engine.StepName) bool {
 // found is nil when no conflicting in-flight promotion exists. An error re-observing a
 // candidate is treated conservatively — reported rather than silently skipped — since a
 // promotion this call can't verify is done must not be treated as safely finished.
-func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
+func findInFlight(ctx context.Context, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
 	states, err := engine.ListStates()
 	if err != nil {
 		return nil, engine.StepStatus{}, err
@@ -102,7 +104,7 @@ func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, t
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.AllSteps(g, f, nil), prev)
+		done, last, oerr := engine.ObserveAll(ctx, engine.AllSteps(g, f, a, ro, nil), prev)
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}

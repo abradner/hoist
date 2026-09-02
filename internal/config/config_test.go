@@ -70,7 +70,7 @@ func TestLoadFullFile(t *testing.T) {
 			Approvers:     []string{"me"},
 			Collaborators: true,
 			CI:            CIConfig{None: "prompt", Grace: Duration(90 * time.Second)},
-			Kube:          KubeConfig{Context: "my-cluster"},
+			Kube:          KubeConfig{Context: "my-cluster", ArgoNamespace: "argocd"},
 			DigestSources: []string{"pods", "registry"},
 			Apps:          map[string]string{"ghcr.io/me/app": "me/app"},
 		}},
@@ -111,6 +111,7 @@ func TestDefaults(t *testing.T) {
 		"Approval(prod)":   r.Approval("prod"),
 		"Approval(other)":  r.Approval("staging"),
 		"kube.context":     r.Kube.Context,
+		"kube.argo_ns":     r.Kube.ArgoNamespace,
 		"github":           r.GitHub,
 		"registries.op":    c.Registries[0].Op,
 		"registries.clust": c.Registries[0].Cluster,
@@ -132,6 +133,7 @@ func TestDefaults(t *testing.T) {
 			"Approval(prod)":   "comment",
 			"Approval(other)":  "auto",
 			"kube.context":     "",
+			"kube.argo_ns":     "argocd",
 			"github":           "",
 			"registries.op":    "",
 			"registries.clust": ClusterSecret{},
@@ -328,6 +330,7 @@ func TestSurroundingWhitespaceRejected(t *testing.T) {
 		{"pairs value padded", "repos:\n  - path: /x\n    envs: { pairs: { staging: ' production' } }\n", "repos[0].envs.pairs.staging: \" production\" has surrounding whitespace"},
 		{"approval key padded", "repos:\n  - path: /x\n    envs: { approval: { ' prod': comment } }\n", "repos[0].envs.approval[ prod] (key): \" prod\" has surrounding whitespace"},
 		{"registry prefix padded", "registries:\n  - prefix: ' ghcr.io/'\n", "registries[0].prefix: \" ghcr.io/\" has surrounding whitespace"},
+		{"argo_namespace padded", "repos:\n  - path: /x\n    kube: { argo_namespace: ' argocd' }\n", "repos[0].kube.argo_namespace: \" argocd\" has surrounding whitespace"},
 	}
 	for _, tc := range cases {
 		p := write(t, tc.body)
