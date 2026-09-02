@@ -67,8 +67,8 @@ type PromotionState struct {
 	// RepoConfig — a fix landed after that invariant was found violated in an earlier draft;
 	// don't reintroduce a re-read here without updating this comment and the invariant it states.
 
-	// CINone and CIGrace are RepoConfig.CI as of when this promotion started: none|prompt|block
-	// and the grace duration CIGreenStep waits before applying none's policy to a PR reporting
+	// CINone and CIGrace are RepoConfig.CI as of when this promotion started: green|prompt|block
+	// and the grace duration CIGreenStep waits before applying that policy to a PR reporting
 	// zero checks.
 	CINone  string
 	CIGrace time.Duration
