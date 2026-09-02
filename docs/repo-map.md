@@ -92,11 +92,15 @@ it reads private state and writes to systems that deploy software.
 - **Post-merge base drift.** `pr.Merged == true` is a historical forge record, not proof the
   base branch still holds what this promotion produced: `MergedStep.Observe` additionally
   fetches `s.Base`'s live tip from origin (`Git.FetchBranch`, never a locally cached ref) and
-  confirms every edited path still matches `s.ExpectedBlobs` there before ever reporting done.
-  Someone resetting the base directly outside hoist after a real merge is caught this way —
-  re-running the identical promotion (same deterministic id/branch/PR) Blocks, naming the base,
-  instead of silently reporting success (M4 hardening, closes a gap AGENTS.md invariant 2 exists
-  to prevent).
+  confirms the promotion's own merge commit (the forge's `pr.MergeSHA`) is still an ancestor of
+  that live tip (`Git.IsAncestor`, `git merge-base --is-ancestor`) before ever reporting done.
+  This is an ancestry check, not a content comparison, precisely because a later, legitimate
+  promotion to the same env can move the base forward past this one's merge without reverting
+  it — content would misclassify that ordinary case as reverted. Someone resetting the base
+  directly outside hoist after a real merge (making the merge commit unreachable) is caught this
+  way — re-running the identical promotion (same deterministic id/branch/PR) Blocks, naming the
+  base, instead of silently reporting success (M4 hardening, closes a gap AGENTS.md invariant 2
+  exists to prevent).
 - **PR bodies, commit messages, logs.** These leave the machine. Nothing internal (cluster
   addresses, context names, hostnames) may be written into them; enforced by `scripts/public-safety.sh`
   over the repo's own tracked files and by template tests over rendered output (R-004).
