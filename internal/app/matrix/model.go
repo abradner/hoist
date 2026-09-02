@@ -30,10 +30,14 @@ type Model struct {
 	width, height int
 	showHelp      bool
 	notice        string
+	// col is the focused env column: CurrentEnv's index into matrix.Envs. It has no
+	// visual marker yet (a follow-up, not this screen's shipped concern) but is real state:
+	// Left/Right move it, and it is what OpenPlanMsg names as Source.
+	col int
 }
 
 type keyMap struct {
-	Up, Down, Promote, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the status bar.
@@ -43,17 +47,30 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Promote, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Promote: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "promote (later milestone)")),
-		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Left:      key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "source env")),
+		Right:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "source env")),
+		Promote:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "plan promotion")),
+		PromoteAs: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "plan promotion to…")),
+		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
+}
+
+// OpenPlanMsg is emitted when the operator asks to plan a promotion from CurrentEnv: p asks
+// for the configured pair (envs.pairs[Source] — the root looks it up, since this package
+// never imports internal/config, matching AGENTS.md §4.8's "screens never import app" the
+// other way round too), P (Force) always prompts for the target instead. The root
+// recognizes this by concrete type in its own Update switch (see internal/app/screen.go).
+type OpenPlanMsg struct {
+	Source string
+	Force  bool
 }
 
 // New builds the screen for a discovered repo. promotable lists the first-party image repo
@@ -88,14 +105,39 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Help):
 			m.showHelp = !m.showHelp
 			return m.layout(), nil
-		case key.Matches(msg, m.keys.Promote):
-			m.notice = "promotion lands in a later milestone"
+		case key.Matches(msg, m.keys.Left):
+			if m.col > 0 {
+				m.col--
+			}
 			return m, nil
+		case key.Matches(msg, m.keys.Right):
+			if m.col < len(m.matrix.Envs)-1 {
+				m.col++
+			}
+			return m, nil
+		case key.Matches(msg, m.keys.Promote):
+			source := m.CurrentEnv()
+			return m, func() tea.Msg { return OpenPlanMsg{Source: source} }
+		case key.Matches(msg, m.keys.PromoteAs):
+			source := m.CurrentEnv()
+			return m, func() tea.Msg { return OpenPlanMsg{Source: source, Force: true} }
 		}
 	}
 	var cmd tea.Cmd
 	m.tbl, cmd = m.tbl.Update(msg)
 	return m, cmd
+}
+
+// CurrentEnv is the env the column cursor is on, "" when the repo has none.
+func (m Model) CurrentEnv() string {
+	if len(m.matrix.Envs) == 0 {
+		return ""
+	}
+	col := m.col
+	if col < 0 || col >= len(m.matrix.Envs) {
+		col = 0
+	}
+	return m.matrix.Envs[col]
 }
 
 // View is the table, the help line when toggled, and the status bar.

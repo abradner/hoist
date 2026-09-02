@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/registry"
@@ -363,8 +364,8 @@ func TestNoCommandWithRepoDispatchesToTUI(t *testing.T) {
 		promotable     []string
 		calls          int
 	}
-	tuiRunner = func(repo, appsRoot string, promotable []string, _, _ io.Writer) int {
-		got.repo, got.appsRoot, got.promotable = repo, appsRoot, promotable
+	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = eff.repo, eff.appsRoot, eff.promotable
 		got.calls++
 		return 42
 	}
@@ -391,7 +392,8 @@ func TestNoCommandWithRepoDispatchesToTUI(t *testing.T) {
 
 func TestRunTUIFailsBeforeStartingOnBadRepo(t *testing.T) {
 	var errOut bytes.Buffer
-	if code := runTUI(t.TempDir(), "", []string{"ghcr.io/"}, io.Discard, &errOut); code != exitFailure {
+	eff := effective{repo: t.TempDir(), appsRoot: "", promotable: []string{"ghcr.io/"}}
+	if code := runTUI(eff, &config.Config{}, io.Discard, &errOut); code != exitFailure {
 		t.Fatalf("exit %d, want %d", code, exitFailure)
 	}
 	if s := errOut.String(); !strings.HasPrefix(s, "hoist: ") || !strings.Contains(s, "apps root cluster/apps") {
@@ -440,8 +442,8 @@ func captureTUI(t *testing.T) *struct {
 		repo, appsRoot string
 		promotable     []string
 	}{}
-	tuiRunner = func(repo, appsRoot string, promotable []string, _, _ io.Writer) int {
-		got.repo, got.appsRoot, got.promotable = repo, appsRoot, promotable
+	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = eff.repo, eff.appsRoot, eff.promotable
 		return 42
 	}
 	return got
