@@ -420,9 +420,32 @@ func authFailure(err error) bool {
 	return false
 }
 
+// knownErrorCodes is the OCI distribution spec's error code enum. A registry chooses its
+// own "code" string in an error response body — it is attacker-controlled input from a
+// registry a caller does not have to trust — so describe renders a code only when it is
+// one of these; anything else becomes "unknown error code" rather than being echoed
+// verbatim into a warning or the CLI output.
+var knownErrorCodes = map[string]bool{
+	"BLOB_UNKNOWN":          true,
+	"BLOB_UPLOAD_INVALID":   true,
+	"BLOB_UPLOAD_UNKNOWN":   true,
+	"DIGEST_INVALID":        true,
+	"MANIFEST_BLOB_UNKNOWN": true,
+	"MANIFEST_INVALID":      true,
+	"MANIFEST_UNKNOWN":      true,
+	"NAME_INVALID":          true,
+	"NAME_UNKNOWN":          true,
+	"SIZE_INVALID":          true,
+	"UNAUTHORIZED":          true,
+	"DENIED":                true,
+	"UNSUPPORTED":           true,
+	"TOOMANYREQUESTS":       true,
+}
+
 // describe renders a request error with nothing from the response body: the status and
-// the registry's error codes for a registry error, the redacted cause otherwise. Every
-// string in hide is scrubbed afterwards.
+// the registry's error codes for a registry error, the redacted cause otherwise. Never
+// message or detail — those are free-form text the registry chose. Every string in hide
+// is scrubbed afterwards.
 func describe(err error, hide []string) string {
 	var te *transport.Error
 	if errors.As(err, &te) {
@@ -431,7 +454,13 @@ func describe(err error, hide []string) string {
 		seen := map[string]bool{}
 		for _, d := range te.Errors {
 			code := string(d.Code)
-			if code == "" || seen[code] {
+			if code == "" {
+				continue
+			}
+			if !knownErrorCodes[code] {
+				code = "unknown error code"
+			}
+			if seen[code] {
 				continue
 			}
 			seen[code] = true

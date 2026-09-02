@@ -31,10 +31,11 @@ import (
 // lacks scope (AGENTS.md §6.1 items 1 and 2), and error bodies that echo the credential
 // they rejected — which the client must never repeat.
 type gate struct {
-	inner    http.Handler
-	users    map[string]string // user → password
-	denied   map[string]bool   // users that authenticate but get 403 on everything
-	pingFail bool              // answer every request 500 with a secret in the body
+	inner      http.Handler
+	users      map[string]string // user → password
+	denied     map[string]bool   // users that authenticate but get 403 on everything
+	pingFail   bool              // answer every request 500 with a secret in the body
+	injectCode string            // once authenticated, answer 404 with this attacker-chosen "code"
 
 	mu       sync.Mutex
 	attempts map[string]int // per user, "" for anonymous
@@ -79,6 +80,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if g.denied[user] {
 		writeErr(w, http.StatusForbidden, "DENIED", "user "+user+" with credential "+pass+" lacks read:packages")
+		return
+	}
+	if g.injectCode != "" {
+		writeErr(w, http.StatusNotFound, g.injectCode, "irrelevant")
 		return
 	}
 	g.inner.ServeHTTP(w, r)
@@ -373,6 +378,39 @@ func TestResponseBodyNeverReachesHeadError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status 500") {
 		t.Errorf("error lost the status: %v", err)
+	}
+}
+
+// F5 regression: a registry's error response "code" field is the registry's own choice,
+// not something the client can trust — a hostile registry could put anything there,
+// including a fragment of a credential it wants echoed back through a warning or the CLI
+// output. describe must only ever render one of the fixed OCI distribution codes;
+// anything else becomes "unknown error code".
+func TestUnknownRegistryErrorCodeNeverEchoed(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	// Tags does a GET, which (unlike Head's HEAD request) carries a response body the
+	// error code can travel in.
+	tr.gate.injectCode = "SECRET-TOKEN-XYZ"
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	_, err := c.Tags(context.Background(), "ghcr.io/example/app")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN-XYZ") {
+		t.Errorf("attacker-chosen error code echoed verbatim: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unknown error code") {
+		t.Errorf("error lost the fact that an unrecognised code was seen: %v", err)
+	}
+	// Positive control: a real OCI code from the same handler still renders — the
+	// allowlist is what does the filtering, not a check that drops every code.
+	tr.gate.injectCode = "NAME_UNKNOWN"
+	c2 := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	_, err = c2.Tags(context.Background(), "ghcr.io/example/app")
+	if err == nil || !strings.Contains(err.Error(), "NAME_UNKNOWN") {
+		t.Errorf("an allowlisted code must still render: %v", err)
 	}
 }
 
