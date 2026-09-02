@@ -13,7 +13,7 @@
 //     file with no terminal dependency (matrix/cells.go) so it is unit-testable as plain
 //     values; the model file only lays that data out.
 //   - internal/ui holds the shared Styles palette and the status-bar helper; it imports
-//     Lip Gloss only.
+//     Lip Gloss and x/ansi (width and strip), no Bubbles.
 //   - No layout library (AGENTS.md §4.7): screens compose strings with strings.Join and the
 //     Bubbles components they embed.
 //
