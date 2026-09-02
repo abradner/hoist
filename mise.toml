@@ -1,0 +1,14 @@
+# Toolchain pins — run `mise install` before working in this repo.
+# [KEEL:FILL — uncomment/pin the tools for this repo's stack, delete the rest.]
+
+[tools]
+# ruby = "4.0.5"
+# go = "1.26"
+# bun = "1.3"
+# node = "lts"
+
+# [env]
+# Per-project env vars and port offsets go here if several projects run
+# concurrently on one machine. Never put required production config here —
+# required config fails fast at boot (see AGENTS.md §6), it doesn't get
+# defaults in a checked-in file.
