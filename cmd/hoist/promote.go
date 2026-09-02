@@ -215,6 +215,26 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return exitFailure
 	}
 
+	// findInFlight above is read-only (it only ever looks at state files already on disk), so a
+	// second `hoist promote` racing this one for the same target env could pass that check too,
+	// before either process has written its own state file — engine.ClaimInFlight closes that
+	// window with an atomic filesystem claim; a concurrent loser gets a clear conflict error here
+	// rather than silently proceeding to open a second branch/PR for the same env. released
+	// tracks whether it's already been let go so the deferred cleanup below is a no-op once the
+	// first successful state save has released it for real (see the save wrapper further down).
+	release, err := engine.ClaimInFlight(eff.cfg.GitHub, plan.TargetEnv, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	released := false
+	defer func() {
+		if !released {
+			released = true
+			release()
+		}
+	}()
+
 	s := &engine.PromotionState{
 		ID:             id,
 		RepoFullName:   eff.cfg.GitHub,
@@ -256,7 +276,20 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 	}
 	steps := engine.AllSteps(newGit, f, onWaiting)
-	save := func(st *engine.PromotionState) error { return engine.SaveState(statePath, st) }
+	// The claim only needs to outlive the gap up to the first durable state write — once that
+	// lands, findInFlight's own re-observation of the real state file is what enforces invariant
+	// 5 for the rest of the (possibly hours-long) promotion, so release it here rather than
+	// holding it for the whole run.
+	save := func(st *engine.PromotionState) error {
+		if err := engine.SaveState(statePath, st); err != nil {
+			return err
+		}
+		if !released {
+			released = true
+			release()
+		}
+		return nil
+	}
 
 	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
 	return reportDriveResult(stdout, stderr, "hoist promote", plan.SourceEnv, plan.TargetEnv, s, err)
