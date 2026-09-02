@@ -250,10 +250,10 @@ func (a ApprovedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 }
 
 // isAllowed is R-001's author check: named in RepoConfig.Approvers (case-insensitive — GitHub
-// logins are), or, when the repo opts in (RepoConfig.Collaborators), a write-or-admin
-// collaborator per the forge's own permission API. A permission-scope error from
-// IsAllowedAuthor is returned, never folded into false (Known bug classes: "don't silently
-// deny on 403").
+// logins are), or, when the repo opts in (RepoConfig.Collaborators), a write-or-higher
+// collaborator (write, maintain, or admin) per the forge's own permission API. A permission-scope
+// error from IsAllowedAuthor is returned, never folded into false (Known bug classes: "don't
+// silently deny on 403").
 func (a ApprovedStep) isAllowed(ctx context.Context, login string, s *PromotionState) (bool, error) {
 	for _, ap := range s.Approvers {
 		if strings.EqualFold(ap, login) {

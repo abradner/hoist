@@ -300,14 +300,14 @@ func TestCommentsPaginatesBeyondFirstPage(t *testing.T) {
 	}
 }
 
-func TestIsAllowedAuthorAcceptsWriteAndAdminOnly(t *testing.T) {
+func TestIsAllowedAuthorAcceptsWriteMaintainAndAdmin(t *testing.T) {
 	for _, tc := range []struct {
 		permission string
 		want       bool
 	}{
 		{"admin", true},
+		{"maintain", true},
 		{"write", true},
-		{"maintain", false},
 		{"triage", false},
 		{"read", false},
 		{"none", false},

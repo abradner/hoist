@@ -282,16 +282,18 @@ type permissionResponse struct {
 	Permission string `json:"permission"`
 }
 
-// IsAllowedAuthor implements forge.Forge: true only for "admin" or "write" — R-001's stated bar
-// is "collaborator with write permission", so "maintain"/"triage"/"read" do not qualify even
-// though GitHub itself ranks maintain above triage/read.
+// IsAllowedAuthor implements forge.Forge: true for "admin", "maintain" or "write" — R-001's
+// stated bar is "collaborator with write (or higher) permission" (forge.Forge's own doc
+// comment), and GitHub ranks maintain strictly above write (admin > maintain > write > triage >
+// read), so a maintain-level collaborator qualifies exactly like write and admin do; only
+// "triage" and "read" fall below the bar.
 func (c *Client) IsAllowedAuthor(ctx context.Context, login string) (bool, error) {
 	var resp permissionResponse
 	path := fmt.Sprintf("repos/%s/%s/collaborators/%s/permission", c.owner, c.repo, url.PathEscape(login))
 	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return false, translateErr("checking collaborator permission for "+login, err)
 	}
-	return resp.Permission == "admin" || resp.Permission == "write", nil
+	return resp.Permission == "admin" || resp.Permission == "maintain" || resp.Permission == "write", nil
 }
 
 // mergeResponse is PUT .../pulls/{n}/merge's body on success; its fields aren't otherwise
