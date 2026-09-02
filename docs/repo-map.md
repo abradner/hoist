@@ -37,8 +37,8 @@ it reads private state and writes to systems that deploy software.
 | Config file | `internal/config` (`$XDG_CONFIG_HOME/hoist/config.yaml`, `--config`) | Local user's file | Read once, never exec'd, no network. Names repos, envs, approvers, credential *sources* (env, keychain, cluster secret, `op` ref) — never credential values. `config show` redacts the `op` refs. |
 | GitOps repo (read + edit) | `pkg/gitops`, `pkg/git` | The user's git checkout and SSH/signing config, via `exec git` | Edits are byte-minimal image-scalar rewrites on a worktree, never the user's checkout. |
 | GitHub API | `pkg/forge/github` | `gh` auth token via go-gh | Creates branches/PRs, reads checks/reviews/comments, **merges**. Merge = deploy on an auto-sync repo. |
-| Container registry | `pkg/registry` | Credential chain, in the caller's order: env token → docker keychain → cluster pull secret → `op`, then anonymous | Read-only (manifest HEAD, tag list). Credentials never leave the adaptor; errors carry status and error codes, never the response body; the winning link is reported by name (`AuthSourceUsed`). `op` is executed only when an `op` ref is configured. |
-| Kubernetes API | `pkg/k8s`, `pkg/argo`, `pkg/rollout` | kubeconfig context named in hoist config or `--kube-context` | Reads pods in exactly the source namespace and one named pull secret (`pkg/k8s`, M2); later: Deployments, Argo `Application` CRs, and exactly one write, the refresh annotation. Every client error goes through `pkg/redact` and the API server address is scrubbed from it; only the context name may reach output. |
+| Container registry | `pkg/registry` | Credential chain, in the caller's order: env token → docker keychain → cluster pull secret → `op`, then anonymous | Read-only (manifest HEAD, tag list). Credentials never leave the adaptor; errors carry status and error codes, never the response body; the winning link is reported by name (`AuthSourceUsed`), and whether the registry was asked at all when nothing won (`Consulted`) — so "not consulted" and "consulted, every source failed" are never confused in the plan output. `op` is executed only when an `op` ref is configured, and links are built one at a time in order, never all up front (§9). |
+| Kubernetes API | `pkg/k8s`, `pkg/argo`, `pkg/rollout` | kubeconfig context named in hoist config or `--kube-context` | Reads pods in exactly the source namespace and one named pull secret (`pkg/k8s`, M2); later: Deployments, Argo `Application` CRs, and exactly one write, the refresh annotation. Every client error goes through `pkg/redact`, which scrubs the API server's URL, its bare `host:port`, and the host alone (an untyped TLS error can name just the host, with no port to strip); only the context name may reach output. |
 
 ## Trust boundaries
 
@@ -54,8 +54,12 @@ it reads private state and writes to systems that deploy software.
   are used inside `pkg/registry` and never appear in inputs, outputs, state files, or logs
   (R-002): the secret leaves `pkg/k8s` only as an `authn.Keychain`, every credential value the
   chain has seen is scrubbed from every message, and a failed link is reported by source name
-  ("keychain: status 403 Forbidden: DENIED"). The env token is sent to `ghcr.io` only, never to
-  another host a manifest happens to name.
+  ("keychain: status 403 Forbidden: DENIED"). A third, process-wide guard backs the per-call hide
+  lists: `pkg/k8s` and `pkg/registry` call `redact.Register` the instant a credential value is
+  read (an env token, a cluster secret's password, `op`'s output), so it is scrubbed from every
+  later message anywhere in the process — including the CLI's own printer — even from a path that
+  forgot to thread it through as a local hide argument. The env token is sent to `ghcr.io` only,
+  never to another host a manifest happens to name.
 - **kubeconfig.** hoist trusts the context it is pointed at. It never writes anything to the
   cluster except the Argo refresh annotation; the deploy itself is Argo acting on a merged commit.
   A wrong context is the operator's risk: the context name in use is printed on every plan so a

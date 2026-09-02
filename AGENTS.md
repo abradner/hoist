@@ -232,7 +232,9 @@ context (default the repo's `kube.context`, else the current context; the name i
 printed, its address never). The registry credential chain is `--registry-auth` (default
 `env,keychain,cluster,op`), with `--cluster-secret ns/name` and `--op-ref op://…` opting the last
 two links in; the dry run's "Resolution" section names each repo's digest and source, every
-alternative and disagreement, and which credential source authenticated — by name only. A
+alternative and disagreement, and which credential source authenticated, or — when the registry
+was asked and every source in the chain failed, the anonymous fallback included — that it was
+consulted and which sources were tried; either way, by name only, never a value. A
 `--digest` override still wins over every source. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
 `q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
@@ -567,6 +569,37 @@ test lives** (if one exists).
    discovery call is politeness (§8, layered checks) — deleting it moves the refusal, never the
    write. Regression tests: `TestApplyBytesKeyColonSpacingByteExact` in `pkg/gitops/apply_test.go`;
    `TestDiscoverRefusesKeyAndValueOnDifferentLines` in `pkg/gitops/discover_test.go`.
+4. **`docker/cli`'s `config.Dir()` is a `sync.Once`, so a test pointing `HOME` at a synthetic
+   `~/.docker/config.json` only works if it is the first thing in the process to resolve the real
+   keychain.** What happened: a second test doing the same with a different `HOME` does not get
+   its own directory — it silently resolves against whichever directory the first resolution
+   already cached, which outside a carefully ordered suite is the operator's real
+   `~/.docker/config.json`: a plausible credential for a plausible registry, not a loud failure.
+   Root cause: `github.com/docker/cli/cli/config`'s `Dir()` reads `DOCKER_CONFIG`/`HOME` once per
+   process behind a `sync.Once` and caches the result; go-containerregistry's
+   `authn.DefaultKeychain` calls back into that same cached directory on every `Resolve`, so env
+   vars set after the first resolution have no effect on it. Rule: at most one test per process may
+   exercise the real `authn.DefaultKeychain` with a synthetic `HOME`; every other test that needs a
+   keychain passes an explicit `AuthConfig.Keychain` (a fake, never nil) so it is deterministic
+   under any run order or `-run` filter. Regression test: `TestDefaultKeychainReadsDockerConfig` in
+   `pkg/registry/registry_test.go` is the one test in this branch that touches the real keychain;
+   `TestCredentialsAreRegisteredProcessWide/keychain_password` in the same file deliberately uses a
+   `k8s.StaticKeychain` instead of a second real one, precisely to avoid this trap.
+5. **go-containerregistry resolves a keychain or `exec` credential link the moment it is built,
+   not the moment it is chosen — so building every source in the order up front runs all of them.**
+   What happened: constructing a `link` for every configured auth source before trying any of them
+   would mean resolving each one immediately (a keychain hits disk; `op` execs a program), even for
+   a source the chain's walk never reaches because an earlier one already answered, and even for
+   `op` when the operator never opted it in with `--op-ref`. Root cause: naming a source in
+   `--registry-auth` states an order to try, not a set to prepare; conflating the two pays for I/O
+   and process execs the resolution never needed. Rule: `Client.do` calls `Client.link` for one
+   source at a time, in order, and stops at the first that succeeds; the cluster secret and `op`
+   are additionally cached per-`Client` (`cached[T]`) so a second attempt against another host does
+   not re-run them, but neither runs at all unless the caller lists it and the order actually
+   reaches it. Regression tests: `TestOpRunsOnlyWhenConfigured` in `pkg/registry/registry_test.go`
+   asserts `op` execs zero times without an `OpRef`; `TestPlanBuildsOnlyTheAdaptorsItNeeds` in
+   `cmd/hoist/resolution_test.go` asserts the CLI builds no cluster or registry adaptor beyond what
+   `--digest-sources` actually calls for.
 
 ## 10. Maintaining This Document
 
