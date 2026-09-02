@@ -54,7 +54,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge (resumable; see AGENTS.md §4.1)\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable; see AGENTS.md §4.1)\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
 	}
@@ -96,6 +96,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPromotions(fs.Args()[1:], cfg, stdout, stderr)
 	case "resume":
 		return runResume(fs.Args()[1:], cfg, stdout, stderr)
+	case "watch":
+		return runWatch(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
 		return runConfig(fs.Args()[1:], cfg, stdout, stderr)
 	default:
@@ -503,8 +505,22 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		githubRepo = eff.cfg.GitHub
 	}
 	f, forgeErr := newForge(githubRepo)
+	// The Argo/Deployment adaptors are built here for the same reason f is, and deferred the
+	// same way: buildPromotionForConfirm's one-in-flight scan re-observes OTHER promotions with
+	// engine.AllSteps, which from M5 on includes the Argo/rollout steps, so it needs real
+	// adaptors even though this screen never drives past Merged itself (see
+	// buildStartPromotion's own steps list, and buildPromotionForConfirm's doc comment for why
+	// nil would panic on an already-merged state file rather than degrade). kubeContext is
+	// resolved from the selected repo the same way resolutionOptions does it for the plan
+	// screen's own digest resolution.
+	kubeContext := ""
+	if eff.cfg != nil {
+		kubeContext = eff.cfg.Kube.Context
+	}
+	a, _, argoErr := newArgo(kubeContext)
+	ro, _, rolloutErr := newRollout(kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, newGit, f, forgeErr),
+		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,

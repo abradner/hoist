@@ -526,11 +526,6 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 	return nil
 }
 
-// AllSteps returns every step a promotion drives through, in order: Steps' four (branch,
-// commit, push, PR) plus CIGreen, Approved and Merged. Kept separate from Steps itself so M3's
-// own resume tests (which exercise exactly the four-step property) keep working unchanged —
-// `hoist promote` and `hoist resume` always drive AllSteps now (the issue's own "done when":
-// promote runs the full pipeline, not just to PROpened).
-func AllSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
-	return append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
-}
+// AllSteps is defined in steps_m5.go, which extends it with the M5 Argo/rollout steps; kept
+// out of this file only so the M4-era doc comment above doesn't have to describe M5's
+// dependencies too.

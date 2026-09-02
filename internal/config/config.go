@@ -85,9 +85,20 @@ type CIConfig struct {
 	Grace Duration `yaml:"grace"` // how long to wait for checks to appear; default 3m
 }
 
-// KubeConfig names the kubeconfig context hoist reads pods from (M2).
+// KubeConfig names the kubeconfig context hoist reads pods from (M2), and, from M5, where
+// Argo CD's own Application custom resources live on that cluster.
 type KubeConfig struct {
 	Context string `yaml:"context,omitempty"`
+	// ArgoNamespace is the namespace Argo CD Application custom resources live in — the
+	// control-plane namespace (conventionally "argocd"), which is a different thing from
+	// spec.destination.namespace (the workload's own target env: see gitops.Env's doc
+	// comment, and every family's Application wrapper in this repo's own fixtures, which sets
+	// metadata.namespace: argocd distinctly from spec.destination.namespace). pkg/argo's
+	// invariant 1 requires this be confirmed from config rather than assumed a fixed
+	// "argocd" — Normalize fills the "argocd" default so it need not be spelled out in every
+	// config file, but the value driving pkg/argo always came from here, never a hardcoded
+	// literal in pkg/argo itself.
+	ArgoNamespace string `yaml:"argo_namespace,omitempty"`
 }
 
 // RegistryConfig is the credential chain for one image repo prefix.
@@ -138,9 +149,10 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 
 // Defaults for the optional knobs, applied by Normalize.
 const (
-	DefaultAppsRoot = "cluster/apps"
-	DefaultCINone   = "green"
-	DefaultCIGrace  = Duration(3 * time.Minute)
+	DefaultAppsRoot      = "cluster/apps"
+	DefaultCINone        = "green"
+	DefaultCIGrace       = Duration(3 * time.Minute)
+	DefaultArgoNamespace = "argocd"
 
 	ApprovalComment = "comment"
 	ApprovalAuto    = "auto"
@@ -263,6 +275,9 @@ func (c *Config) Normalize() error {
 		}
 		if r.DigestSources == nil {
 			r.DigestSources = append([]string(nil), defaultDigestSources...)
+		}
+		if r.Kube.ArgoNamespace == "" {
+			r.Kube.ArgoNamespace = DefaultArgoNamespace
 		}
 		// §4.5: a production env is gated by the magic comment unless the file says
 		// otherwise for that env by name. Non-production envs default to auto and are
@@ -392,6 +407,11 @@ func validateRepo(p *problems, r RepoConfig) {
 			}
 		}
 	}
+	// Normalize already defaults an omitted or explicitly-empty value to "argocd" (a plain
+	// YAML string can't distinguish the two — unlike DigestSources/Promotable, which are
+	// slices and so can), so only a genuinely non-empty-but-padded value ever reaches here;
+	// checkNoSurroundingWhitespace itself is a no-op on "".
+	checkNoSurroundingWhitespace(p, k+".kube.argo_namespace", r.Kube.ArgoNamespace)
 	validateEnvs(p, k+".envs", r.Envs)
 	for i, a := range r.Approvers {
 		if strings.TrimSpace(a) == "" {

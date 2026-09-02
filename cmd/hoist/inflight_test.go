@@ -2,11 +2,36 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// satisfiedRollout builds a rollout.Fake pre-configured so every Deployment edits touches
+// already reports its image matching and its rollout complete — the M4-era in-flight tests
+// below don't care about M5's own rollout mechanics, only that AllSteps (now ten steps, not
+// seven) can still reach "done" in one pass. Argo is left nil throughout: these fixtures never
+// set PromotionState.ArgoApps, so ArgoRefreshedStep/ArgoSyncedStep's own "no Application in
+// this promotion's plan" short-circuit means neither ever calls it.
+func satisfiedRollout(namespace string, edits []gitops.Edit) *rollout.Fake {
+	f := &rollout.Fake{}
+	byName := map[string][]rollout.ContainerImage{}
+	for _, e := range edits {
+		if e.Kind != "Deployment" {
+			continue
+		}
+		byName[e.Name] = append(byName[e.Name], rollout.ContainerImage{
+			Name: e.Container, Init: strings.Contains(e.Path, "initContainers"), Image: e.New.String(),
+		})
+	}
+	for name, imgs := range byName {
+		f.SetDeployment(namespace, name, rollout.DeploymentStatus{Namespace: namespace, Name: name, Images: imgs, Complete: true})
+	}
+	return f
+}
 
 // TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight is AGENTS.md invariant 5 (one
 // in-flight promotion per target env), exercised directly against findInFlight rather than the
@@ -52,6 +77,8 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 		CINone:        "green",
 	}
 
+	ro := satisfiedRollout(plan.TargetEnv, plan.Edits)
+
 	// Drive to PROpened only (the four M3 steps) and leave it there — never approved, so
 	// ObserveAll's own walk through CIGreen/Approved must stop at Approved and report "not
 	// done".
@@ -62,7 +89,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-different-id")
+	conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-different-id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +104,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	}
 
 	// A distinct id for a *different* target env must never conflict, in-flight or not.
-	if conflict, _, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-staging", "a-different-id"); err != nil {
+	if conflict, _, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-staging", "a-different-id"); err != nil {
 		t.Fatal(err)
 	} else if conflict != nil {
 		t.Fatalf("a different target env must never conflict: %+v", conflict)
@@ -86,7 +113,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	// Finish it for real (auto approval, then merge) and persist that — findInFlight must then
 	// see it as done and stop conflicting.
 	s.Approval = "auto"
-	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil, ro, nil), s, nil); err != nil {
 		t.Fatalf("driving to done: %v", err)
 	}
 	// Simulate what a real GitHub squash-merge would actually do to the base branch: forge.Fake
@@ -98,7 +125,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	if err := engine.SaveState(statePath, s); err != nil {
 		t.Fatal(err)
 	}
-	if conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-different-id"); err != nil {
+	if conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-different-id"); err != nil {
 		t.Fatal(err)
 	} else if conflict != nil {
 		t.Fatalf("a fully done (merged, branch deleted) promotion must no longer conflict: stuck at %s: %+v", status.Step, status.Observation)
@@ -152,9 +179,11 @@ func TestFindInFlightDoesNotBlockNewPromotionAfterPriorOneFullyMerged(t *testing
 		CINone:        "green",
 	}
 
+	ro := satisfiedRollout(plan.TargetEnv, plan.Edits)
+
 	// Drive this one promotion all the way through Merged: merged, and its origin branch
-	// deleted by MergedStep's own Act (AllSteps' full seven steps, not just the four M3 ones).
-	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil), s, nil); err != nil {
+	// deleted by MergedStep's own Act (AllSteps' full ten steps, not just the four M3 ones).
+	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil, ro, nil), s, nil); err != nil {
 		t.Fatalf("driving to done: %v", err)
 	}
 	// Simulate what a real GitHub squash-merge would actually do to the base branch: forge.Fake
@@ -169,7 +198,7 @@ func TestFindInFlightDoesNotBlockNewPromotionAfterPriorOneFullyMerged(t *testing
 
 	// A brand-new promotion id targeting the same env must not be refused: the completed one
 	// re-observes as done, not as an in-flight conflict.
-	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-brand-new-id")
+	conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-brand-new-id")
 	if err != nil {
 		t.Fatal(err)
 	}

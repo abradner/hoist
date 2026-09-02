@@ -897,7 +897,8 @@ func TestResumeAfterKillDuringCIGreenConvergesWithoutDuplicating(t *testing.T) {
 	wt := filepath.Join(t.TempDir(), "wt")
 	f := &forge.Fake{}
 	g := git.Exec{}
-	all := AllSteps(g, f, nil)
+	ro := satisfiedRollout(fx.plan.TargetEnv, fx.plan.Edits)
+	all := AllSteps(g, f, nil, ro, nil)
 
 	s := newState(fx, wt)
 	s.CINone = "green"
@@ -941,7 +942,8 @@ func TestResumeAfterKillDuringApprovalConvergesWithoutDuplicating(t *testing.T) 
 	wt := filepath.Join(t.TempDir(), "wt")
 	f := &forge.Fake{}
 	g := git.Exec{}
-	all := AllSteps(g, f, nil)
+	ro := satisfiedRollout(fx.plan.TargetEnv, fx.plan.Edits)
+	all := AllSteps(g, f, nil, ro, nil)
 
 	s := newState(fx, wt)
 	s.CINone, s.CIGrace = "green", time.Nanosecond

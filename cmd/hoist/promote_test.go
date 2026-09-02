@@ -10,12 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // runGitHost runs git directly for fixture setup that is not itself part of what's under
@@ -98,10 +101,34 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	}
 
 	fakeForge := &forge.Fake{}
-	prevGit, prevForge := newGit, newForge
+	// M5: pre-configured so ArgoRefreshedStep/ArgoSyncedStep/RolledOutStep are already
+	// satisfied the moment MergedStep lands — the forge Fake's own MergeSHA is deterministic
+	// here ("merged-" + HeadSHA, and HeadSHAs is never populated by this fixture, so HeadSHA
+	// is always ""; see pkg/forge/fake.go's MergePR), which is what lets this be wired up
+	// front rather than injected mid-run. The Application name matches this fixture's own
+	// wrapper() naming ("app-" + env); the namespace is the "argocd" default (this fixture's
+	// config never sets kube.argo_namespace).
+	fakeArgo := &argo.Fake{}
+	fakeArgo.SetStatus(argo.Application{Namespace: "argocd", Name: "app-app-production"}, argo.Status{
+		SyncStatus:   argo.SyncStatusSynced,
+		SyncRevision: "merged-",
+		HealthStatus: argo.HealthStatusHealthy,
+		ReconciledAt: time.Now().Add(time.Hour), // safely after any anchor Drive will compute
+	})
+	fakeRollout := &rollout.Fake{}
+	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Namespace: "app-production",
+		Name:      "app",
+		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + digestNew}},
+		Complete:  true,
+	})
+
+	prevGit, prevForge, prevArgo, prevRollout := newGit, newForge, newArgo, newRollout
 	newGit = git.Exec{}
 	newForge = func(string) (forge.Forge, error) { return fakeForge, nil }
-	t.Cleanup(func() { newGit, newForge = prevGit, prevForge })
+	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
+	t.Cleanup(func() { newGit, newForge, newArgo, newRollout = prevGit, prevForge, prevArgo, prevRollout })
 
 	return cfgPath, clone, fakeForge
 }

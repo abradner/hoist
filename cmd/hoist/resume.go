@@ -14,7 +14,26 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// buildArgoRollout constructs this run's Argo/Rollout adaptors from rc's kube context —
+// exactly the pair `hoist promote` builds alongside its forge client (promote.go), needed here
+// too since runPromotions/runResume also drive/observe AllSteps, which always wires all ten
+// steps regardless of which one a given promotion currently sits at.
+func buildArgoRollout(rc config.RepoConfig) (argo.Argo, rollout.Rollout, error) {
+	a, _, err := newArgo(rc.Kube.Context)
+	if err != nil {
+		return nil, nil, err
+	}
+	ro, _, err := newRollout(rc.Kube.Context)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, ro, nil
+}
 
 // repoConfigFor finds cfg's repos[] entry whose GitHub name matches repoFullName — how both
 // runPromotions and runResume locate the credential/CloneDir context a stored PromotionState
@@ -74,7 +93,12 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build a forge client: %v)\n", s.ID, s.TargetEnv, err)
 			continue
 		}
-		done, status, err := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, nil), s)
+		a, ro, err := buildArgoRollout(rc)
+		if err != nil {
+			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build an Argo/rollout client: %s)\n", s.ID, s.TargetEnv, redact.Strings(err.Error()))
+			continue
+		}
+		done, status, err := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), s)
 		switch {
 		case err != nil:
 			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
@@ -165,7 +189,12 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
 				continue
 			}
-			done, _, oerr := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, nil), st)
+			a, ro, ferr := buildArgoRollout(rc)
+			if ferr != nil {
+				obsErrs = append(obsErrs, fmt.Sprintf("%s: building Argo/rollout clients: %v", st.ID, ferr))
+				continue
+			}
+			done, _, oerr := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), st)
 			if oerr != nil {
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
 				continue
@@ -207,6 +236,11 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
 		return exitFailure
 	}
+	a, ro, err := buildArgoRollout(rc)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
 
 	// s.CINone/CIGrace/Approval/Approvers/Collaborators are deliberately NOT re-read from rc
 	// here: PromotionState's own doc comment (internal/engine/state.go) states the invariant
@@ -218,6 +252,19 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 	// values (loaded by engine.ListStates/LoadState above) are trusted as-is. Only
 	// --override-ci-none is an explicit, one-shot operator instruction for *this* invocation, so
 	// it still always wins over whatever was persisted.
+	//
+	// ArgoNamespace is different in kind, not just carried along by analogy: it doesn't gate a
+	// decision against historical events the way the M4 fields above do (a re-read there could
+	// silently re-judge an already-recorded approval/CI comment against a changed policy), it
+	// only names where a *live* Get for this env's Argo Applications lands. If an operator moves
+	// those Applications to a different namespace while a promotion is mid-flight, re-reading it
+	// here means ArgoRefreshedStep/ArgoSyncedStep keep finding them; a stale value would instead
+	// fail loudly (Application not found) rather than misjudge anything quietly. So, unlike the
+	// M4 fields, it's re-read from the current config on every resume, same as a fresh `hoist
+	// promote` would compute it (AGENTS.md §4.9). ArgoApps does not follow either rule — it is a
+	// structural fact about the plan already committed to, exactly like Edits, which this
+	// function also never recomputes.
+	s.ArgoNamespace = rc.Kube.ArgoNamespace
 	if *overrideCINone {
 		s.CINoneOverride = true
 	}
@@ -244,7 +291,7 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 			fmt.Fprintln(stderr, "hoist resume: waiting for signing approval...")
 		}
 	}
-	steps := engine.AllSteps(newGit, f, onWaiting)
+	steps := engine.AllSteps(newGit, f, a, ro, onWaiting)
 	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
 	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, s, err)
 }
