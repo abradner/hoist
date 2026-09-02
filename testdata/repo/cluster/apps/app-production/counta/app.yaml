@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: counta
+  namespace: app-production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: counta
+  template:
+    metadata:
+      labels:
+        app: counta
+    spec:
+      initContainers:
+        - name: dbwait
+          image: ghcr.io/example/dbwait:v202601010101@sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01
+          command: ["dbwait", "--timeout=60s"]
+      containers:
+        - name: counta
+          image: 'ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea'
+          envFrom:
+            - configMapRef:
+                name: counta-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: counta-config
+  namespace: app-production
+data:
+  # Consumed by the app to label its own metrics; not a container image.
+  image: ghcr.io/example/counta:v202601151010
+  purge_after_days: "90"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: counta
+  namespace: app-production
+spec:
+  selector:
+    app: counta
+  ports:
+    - port: 80
+      targetPort: 8080

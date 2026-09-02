@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketing
+  namespace: app-production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: marketing
+  template:
+    metadata:
+      labels:
+        app: marketing
+    spec:
+      containers:
+        - name: marketing
+          image: "ghcr.io/example/marketing:sha-0000111122223333444455556666777788889999@sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234"
+          ports:
+            - containerPort: 8080

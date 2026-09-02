@@ -1,0 +1,400 @@
+{
+  "Root": "\u003cfixture\u003e",
+  "AppsRoot": "cluster/apps",
+  "Envs": {
+    "app-production": {
+      "Name": "app-production",
+      "Dir": "cluster/apps/app-production",
+      "Families": {
+        "counta": {
+          "Name": "counta",
+          "Dir": "cluster/apps/app-production/counta",
+          "App": "counta-app-production",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-production/counta/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "counta",
+              "Container": "dbwait",
+              "Path": "spec.template.spec.initContainers[0].image",
+              "Raw": "ghcr.io/example/dbwait:v202601010101@sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01",
+              "Ref": {
+                "Repo": "ghcr.io/example/dbwait",
+                "Tag": "v202601010101",
+                "Digest": "sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01"
+              }
+            },
+            {
+              "File": "cluster/apps/app-production/counta/app.yaml",
+              "Doc": 0,
+              "Line": 22,
+              "Col": 18,
+              "Style": 4,
+              "Kind": "Deployment",
+              "Name": "counta",
+              "Container": "counta",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202601151010",
+                "Digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea"
+              }
+            },
+            {
+              "File": "cluster/apps/app-production/counta/purge-cronjob.yaml",
+              "Doc": 0,
+              "Line": 16,
+              "Col": 22,
+              "Style": 0,
+              "Kind": "CronJob",
+              "Name": "counta-purge",
+              "Container": "purge",
+              "Path": "spec.jobTemplate.spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202601151010",
+                "Digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea"
+              }
+            }
+          ]
+        },
+        "marketing": {
+          "Name": "marketing",
+          "Dir": "cluster/apps/app-production/marketing",
+          "App": "site-production",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-production/marketing/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 2,
+              "Kind": "Deployment",
+              "Name": "marketing",
+              "Container": "marketing",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/marketing:sha-0000111122223333444455556666777788889999@sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234",
+              "Ref": {
+                "Repo": "ghcr.io/example/marketing",
+                "Tag": "sha-0000111122223333444455556666777788889999",
+                "Digest": "sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234"
+              }
+            }
+          ]
+        },
+        "temporal": {
+          "Name": "temporal",
+          "Dir": "cluster/apps/app-production/temporal",
+          "App": "temporal-app-production",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-production/temporal/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "temporal",
+              "Container": "server",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "docker.io/temporalio/server:1.31.2",
+              "Ref": {
+                "Repo": "docker.io/temporalio/server",
+                "Tag": "1.31.2",
+                "Digest": ""
+              }
+            },
+            {
+              "File": "cluster/apps/app-production/temporal/app.yaml",
+              "Doc": 0,
+              "Line": 22,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "temporal",
+              "Container": "ui",
+              "Path": "spec.template.spec.containers[1].image",
+              "Raw": "docker.io/temporalio/ui:2.34.0",
+              "Ref": {
+                "Repo": "docker.io/temporalio/ui",
+                "Tag": "2.34.0",
+                "Digest": ""
+              }
+            }
+          ]
+        },
+        "web": {
+          "Name": "web",
+          "Dir": "cluster/apps/app-production/web",
+          "App": "web-app-production",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-production/web/app.yaml",
+              "Doc": 0,
+              "Line": 23,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "web",
+              "Container": "web",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+              "Ref": {
+                "Repo": "ghcr.io/example/web",
+                "Tag": "v202601010101",
+                "Digest": "sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+              }
+            },
+            {
+              "File": "cluster/apps/app-production/web/app.yaml",
+              "Doc": 0,
+              "Line": 31,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "web",
+              "Container": "worker",
+              "Path": "spec.template.spec.containers[1].image",
+              "Raw": "ghcr.io/example/web:v202601010101",
+              "Ref": {
+                "Repo": "ghcr.io/example/web",
+                "Tag": "v202601010101",
+                "Digest": ""
+              }
+            },
+            {
+              "File": "cluster/apps/app-production/web/app.yaml",
+              "Doc": 0,
+              "Line": 35,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "web",
+              "Container": "queue",
+              "Path": "spec.template.spec.containers[2].image",
+              "Raw": "ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+              "Ref": {
+                "Repo": "ghcr.io/example/web",
+                "Tag": "v202601010101",
+                "Digest": "sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "app-staging": {
+      "Name": "app-staging",
+      "Dir": "cluster/apps/app-staging",
+      "Families": {
+        "counta": {
+          "Name": "counta",
+          "Dir": "cluster/apps/app-staging/counta",
+          "App": "counta-app-staging",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-staging/counta/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "counta",
+              "Container": "counta",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202602201200",
+                "Digest": "sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123"
+              }
+            },
+            {
+              "File": "cluster/apps/app-staging/counta/purge-cronjob.yaml",
+              "Doc": 0,
+              "Line": 16,
+              "Col": 22,
+              "Style": 0,
+              "Kind": "CronJob",
+              "Name": "counta-purge",
+              "Container": "purge",
+              "Path": "spec.jobTemplate.spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202602201200",
+                "Digest": "sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123"
+              }
+            }
+          ]
+        },
+        "marketing": {
+          "Name": "marketing",
+          "Dir": "cluster/apps/app-staging/marketing",
+          "App": "marketing-app-staging",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-staging/marketing/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 2,
+              "Kind": "Deployment",
+              "Name": "marketing",
+              "Container": "marketing",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/marketing:sha-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d@sha256:77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee",
+              "Ref": {
+                "Repo": "ghcr.io/example/marketing",
+                "Tag": "sha-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+                "Digest": "sha256:77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee"
+              }
+            }
+          ]
+        },
+        "temporal": {
+          "Name": "temporal",
+          "Dir": "cluster/apps/app-staging/temporal",
+          "App": "temporal-app-staging",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-staging/temporal/app.yaml",
+              "Doc": 0,
+              "Line": 18,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "temporal",
+              "Container": "server",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "docker.io/temporalio/server:1.31.2",
+              "Ref": {
+                "Repo": "docker.io/temporalio/server",
+                "Tag": "1.31.2",
+                "Digest": ""
+              }
+            },
+            {
+              "File": "cluster/apps/app-staging/temporal/app.yaml",
+              "Doc": 0,
+              "Line": 22,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "temporal",
+              "Container": "ui",
+              "Path": "spec.template.spec.containers[1].image",
+              "Raw": "docker.io/temporalio/ui:2.34.0",
+              "Ref": {
+                "Repo": "docker.io/temporalio/ui",
+                "Tag": "2.34.0",
+                "Digest": ""
+              }
+            }
+          ]
+        },
+        "web": {
+          "Name": "web",
+          "Dir": "cluster/apps/app-staging/web",
+          "App": "web-app-staging",
+          "Occurrences": [
+            {
+              "File": "cluster/apps/app-staging/web/app.yaml",
+              "Doc": 0,
+              "Line": 22,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "web",
+              "Container": "web",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f",
+              "Ref": {
+                "Repo": "ghcr.io/example/web",
+                "Tag": "v202602150930",
+                "Digest": "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"
+              }
+            },
+            {
+              "File": "cluster/apps/app-staging/web/app.yaml",
+              "Doc": 0,
+              "Line": 30,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "web",
+              "Container": "worker",
+              "Path": "spec.template.spec.containers[1].image",
+              "Raw": "ghcr.io/example/web:v202601010101",
+              "Ref": {
+                "Repo": "ghcr.io/example/web",
+                "Tag": "v202601010101",
+                "Digest": ""
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Apps": [
+    {
+      "Name": "counta-app-production",
+      "SourcePath": "cluster/apps/app-production/counta",
+      "Namespace": "app-production",
+      "File": "cluster/apps/counta-app-production-app.yaml"
+    },
+    {
+      "Name": "counta-app-staging",
+      "SourcePath": "cluster/apps/app-staging/counta",
+      "Namespace": "app-staging",
+      "File": "cluster/apps/counta-app-staging-app.yaml"
+    },
+    {
+      "Name": "marketing-app-staging",
+      "SourcePath": "cluster/apps/app-staging/marketing",
+      "Namespace": "app-staging",
+      "File": "cluster/apps/marketing-app-staging-app.yaml"
+    },
+    {
+      "Name": "site-production",
+      "SourcePath": "cluster/apps/app-production/marketing",
+      "Namespace": "app-production",
+      "File": "cluster/apps/site-app-production-app.yaml"
+    },
+    {
+      "Name": "temporal-app-production",
+      "SourcePath": "cluster/apps/app-production/temporal",
+      "Namespace": "app-production",
+      "File": "cluster/apps/temporal-app-production-app.yaml"
+    },
+    {
+      "Name": "temporal-app-staging",
+      "SourcePath": "cluster/apps/app-staging/temporal",
+      "Namespace": "app-staging",
+      "File": "cluster/apps/temporal-app-staging-app.yaml"
+    },
+    {
+      "Name": "web-app-production",
+      "SourcePath": "cluster/apps/app-production/web",
+      "Namespace": "app-production",
+      "File": "cluster/apps/web-app-production-app.yaml"
+    },
+    {
+      "Name": "web-app-staging",
+      "SourcePath": "cluster/apps/app-staging/web",
+      "Namespace": "app-staging",
+      "File": "cluster/apps/web-app-staging-app.yaml"
+    }
+  ],
+  "Unmanaged": [
+    "cluster/apps/app-production/hello-world",
+    "cluster/apps/app-staging/hello-world"
+  ]
+}

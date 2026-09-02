@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: app-production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      containers:
+        - name: server
+          image: docker.io/temporalio/server:1.31.2
+          ports:
+            - containerPort: 7233
+        - name: ui
+          image: docker.io/temporalio/ui:2.34.0
+          ports:
+            - containerPort: 8080

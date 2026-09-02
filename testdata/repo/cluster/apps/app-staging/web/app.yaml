@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: app-staging
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: web
+          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: RAILS_ENV
+              value: production
+        - name: worker
+          image: ghcr.io/example/web:v202601010101
+          imagePullPolicy: IfNotPresent
+          command: ["bundle", "exec", "good_job", "start"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: app-staging
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: app-staging
+spec:
+  parentRefs:
+    - name: public
+      namespace: gateway
+  hostnames:
+    - web-staging.example.test
+  rules:
+    - backendRefs:
+        - name: web
+          port: 80

@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: counta-app-staging
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://git.example.test/example/gitops.git
+    targetRevision: main
+    path: cluster/apps/app-staging/counta
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

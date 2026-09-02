@@ -1,0 +1,19 @@
+# No Argo Application points here: hoist reports the directory as unmanaged and never edits it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-world
+  namespace: app-staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-world
+  template:
+    metadata:
+      labels:
+        app: hello-world
+    spec:
+      containers:
+        - name: hello
+          image: ghcr.io/example/hello-world:v1

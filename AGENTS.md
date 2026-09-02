@@ -193,10 +193,13 @@ mise exec -- go run ./cmd/hoist --help
 ```
 
 Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml`; state under `$XDG_STATE_HOME/hoist/`;
-caches under `$XDG_CACHE_HOME/hoist/`. From M1 onward, `mise exec -- go run ./cmd/hoist plan --from
-<env> --to <env> --dry-run` is the read-only way to run against a real repo (prints the diff, touches
-no git state) and golden files regenerate with `mise exec -- go test ./pkg/... -update` — neither
-exists in the scaffold; this paragraph is updated when they land.
+caches under `$XDG_CACHE_HOME/hoist/`. `mise exec -- go run ./cmd/hoist plan --repo <path> --from
+<env> --to <env> --dry-run` is the read-only way to run against a real repo: it prints the unified
+diff, the untouched images and the warnings, and touches no git state (`--apps-root` defaults to
+`cluster/apps`, `--promotable` to `ghcr.io/`; config files are not read yet). Without `--dry-run` it
+prints the same and exits 3 — writing lands in a later milestone. Golden files under
+`testdata/golden/` regenerate with `mise exec -- go test ./pkg/gitops -update`; the fixture repo is
+`testdata/repo` (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
 

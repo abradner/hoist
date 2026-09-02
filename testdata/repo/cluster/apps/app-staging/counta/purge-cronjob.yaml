@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: counta-purge
+  namespace: app-staging
+spec:
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: purge
+              image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123 # keep in step with app.yaml
+              command: ["bin/rails", "counta:purge"]
