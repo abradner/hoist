@@ -274,6 +274,41 @@ func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
 	}
 }
 
+// TestChecksExactlyAtBoundIsNotAnError is the false-positive regression for
+// TestChecksMoreThanBoundFailsClosed's own fix: a commit with EXACTLY maxCheckRunPages*100
+// check-runs also has its last allowed page come back completely full — the same signal a
+// truncated result gives — but there is no page 11, so this must NOT error. Checks resolves the
+// ambiguity with one extra per_page=1 sentinel request for page maxCheckRunPages+1; this test
+// makes that request come back empty, exactly as it genuinely would for a commit with no more
+// check-runs beyond the bound.
+func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
+	fullPage := func(name string) string {
+		runs := make([]string, 100)
+		for i := range runs {
+			runs[i] = fmt.Sprintf(`{"name": "%s-%d", "status": "completed", "conclusion": "success"}`, name, i)
+		}
+		return `{"check_runs": [` + strings.Join(runs, ",") + `]}`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			page := r.URL.Query().Get("page")
+			if page == fmt.Sprint(maxCheckRunPages+1) {
+				// The sentinel request for the page just past the bound: nothing there, since
+				// this commit has EXACTLY maxCheckRunPages*100 check-runs, not more.
+				return 200, `{"check_runs": []}`
+			}
+			return 200, fullPage("page-" + page)
+		},
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatalf("a commit with exactly %d check-runs must not be treated as truncated: %v", maxCheckRunPages*100, err)
+	}
+	if sum.Total != maxCheckRunPages*100 {
+		t.Fatalf("Total = %d, want exactly %d", sum.Total, maxCheckRunPages*100)
+	}
+}
+
 // TestCommentsExcludesBots checks the exact set the filter is supposed to draw: a "User"
 // comment and an "Organization" comment (a real GitHub account type for an org-owned account,
 // not a bot — M4's real approval-comment author check depends on this list not silently
@@ -355,6 +390,37 @@ func TestCommentsMoreThanBoundFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "#7") || !strings.Contains(err.Error(), "10") {
 		t.Fatalf("error should name the PR and the page bound, got: %v", err)
+	}
+}
+
+// TestCommentsExactlyAtBoundIsNotAnError is Comments' half of the false-positive regression (see
+// TestChecksExactlyAtBoundIsNotAnError): a PR with EXACTLY maxCommentPages*100 comments must not
+// be treated as truncated just because its last allowed page came back full — Comments' own
+// per_page=1 sentinel request for the page past the bound resolves it, and this test makes that
+// request come back empty, exactly as it genuinely would here.
+func TestCommentsExactlyAtBoundIsNotAnError(t *testing.T) {
+	fullPage := func(page string) string {
+		items := make([]string, 100)
+		for i := range items {
+			items[i] = fmt.Sprintf(`{"id": %s%02d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, page, i)
+		}
+		return `[` + strings.Join(items, ",") + `]`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			page := r.URL.Query().Get("page")
+			if page == fmt.Sprint(maxCommentPages+1) {
+				return 200, "[]"
+			}
+			return 200, fullPage(page)
+		},
+	})
+	comments, err := c.Comments(context.Background(), 7, time.Time{})
+	if err != nil {
+		t.Fatalf("a PR with exactly %d comments must not be treated as truncated: %v", maxCommentPages*100, err)
+	}
+	if len(comments) != maxCommentPages*100 {
+		t.Fatalf("Comments returned %d, want exactly %d", len(comments), maxCommentPages*100)
 	}
 }
 

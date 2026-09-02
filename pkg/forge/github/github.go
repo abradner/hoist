@@ -207,10 +207,24 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 		lastPageFull = true
 	}
 	if lastPageFull {
-		return forge.CheckSummary{}, fmt.Errorf(
-			"github: checking checks for %s: more than %d check-runs (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a pending or failed run past the bound",
-			sha, maxCheckRunPages*100, maxCheckRunPages,
-		)
+		// A full last page alone cannot distinguish "there are more check-runs beyond the bound"
+		// from "this commit has exactly maxCheckRunPages*100 check-runs and the last page just
+		// happens to be completely full" — the latter is not truncation at all, and erroring on
+		// it would falsely block a promotion on an unusually large but entirely finite CI
+		// matrix. Resolve it with one more request for the page immediately past the bound, at
+		// per_page=1 (only whether ANY row exists there, not how many) — this is still a single
+		// bounded extra call, never a further unbounded scan.
+		sentinelPath := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=1&page=%d", c.owner, c.repo, sha, maxCheckRunPages+1)
+		var sentinel checkRunsResponse
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, sentinelPath, nil, &sentinel); err != nil {
+			return forge.CheckSummary{}, translateErr("listing checks", err)
+		}
+		if len(sentinel.CheckRuns) > 0 {
+			return forge.CheckSummary{}, fmt.Errorf(
+				"github: checking checks for %s: more than %d check-runs (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a pending or failed run past the bound",
+				sha, maxCheckRunPages*100, maxCheckRunPages,
+			)
+		}
 	}
 	var s forge.CheckSummary
 	s.Total = len(runs)
@@ -288,10 +302,24 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 		lastPageFull = true
 	}
 	if lastPageFull {
-		return nil, fmt.Errorf(
-			"github: listing comments for PR #%d: more than %d comments (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a later approve or reject past the bound",
-			prNumber, maxCommentPages*100, maxCommentPages,
-		)
+		// As in Checks: a full last page alone cannot distinguish "more comments exist beyond
+		// the bound" from "this PR has exactly maxCommentPages*100 comments and the last page
+		// just happens to be completely full" — the latter isn't truncation, and erroring on it
+		// would falsely block a promotion on a long-but-finite PR conversation. One more
+		// per_page=1 request for the page past the bound resolves it without any further
+		// unbounded scanning.
+		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"1"}, "page": {fmt.Sprint(maxCommentPages + 1)}}
+		sentinelPath := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
+		var sentinel []commentResponse
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, sentinelPath, nil, &sentinel); err != nil {
+			return nil, translateErr("listing comments", err)
+		}
+		if len(sentinel) > 0 {
+			return nil, fmt.Errorf(
+				"github: listing comments for PR #%d: more than %d comments (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a later approve or reject past the bound",
+				prNumber, maxCommentPages*100, maxCommentPages,
+			)
+		}
 	}
 	out := make([]forge.Comment, 0, len(resp))
 	for _, r := range resp {
