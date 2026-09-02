@@ -131,6 +131,9 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s: column is beyond the end of the line", where)
 	}
+	if err := checkScalarStart(line[:off], e.Path); err != nil {
+		return nil, fmt.Errorf("%s: %w", where, err)
+	}
 	var quote byte
 	switch e.Style {
 	case yaml.DoubleQuotedStyle:
@@ -177,6 +180,25 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 	out = append(out, repl...)
 	out = append(out, line[end:]...)
 	return out, nil
+}
+
+// checkScalarStart proves the recorded column is where the scalar starts, not somewhere
+// inside it: the bytes before it on the line must be the scalar's own key — the last element
+// of path — followed by a colon and blanks, after either indentation with an optional "- "
+// item marker (block style) or flow punctuation. Without this an Edit whose Col and Raw name a
+// suffix of the scalar (image: junk@ghcr.io/x/y:v1 with Col at the g) passes the prefix match
+// and the write keeps the junk. The opening quote, when Style has one, sits at Col itself and
+// is checked by the caller.
+func checkScalarStart(before []byte, path string) error {
+	key := path[strings.LastIndex(path, ".")+1:]
+	if key == "" || strings.HasSuffix(key, "]") {
+		return fmt.Errorf("edit path %q does not end in a mapping key", path)
+	}
+	re := regexp.MustCompile(`(?:^[ \t]*(?:- )?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `:[ \t]+$`)
+	if !re.Match(before) {
+		return fmt.Errorf("edit column is not at the start of the %s scalar (line begins %q)", key, truncate(before))
+	}
+	return nil
 }
 
 // byteOffset converts yaml.v3's 1-based character column into a byte offset.

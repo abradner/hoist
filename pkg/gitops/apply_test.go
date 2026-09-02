@@ -184,6 +184,36 @@ func TestApplyBytesRefusals(t *testing.T) {
 	})
 }
 
+// An Edit whose Col and Raw name a suffix of the scalar passes the text match on its own:
+// the bytes at Col really are the planned Raw. ApplyBytes must still refuse it, or the write
+// keeps whatever preceded Col and produces image: junk@ghcr.io/x/y:v2@sha256:….
+func TestApplyBytesRefusesColumnInsideScalar(t *testing.T) {
+	before := "spec:\n  containers:\n    - name: a\n      image: junk@ghcr.io/x/y:v1\n"
+	line := "      image: junk@ghcr.io/x/y:v1"
+	e := Edit{Occurrence: Occurrence{
+		File: "f.yaml", Line: 4, Col: strings.Index(line, "ghcr.io") + 1,
+		Path: "spec.containers[0].image", Raw: "ghcr.io/x/y:v1", Ref: mustRef(t, "ghcr.io/x/y:v1"),
+	}, New: mustRef(t, "ghcr.io/x/y:v2@"+digestA)}
+	got, err := ApplyBytes([]byte(before), []Edit{e})
+	if err == nil {
+		t.Fatalf("edit inside the scalar applied:\n%s", got)
+	}
+	if !strings.Contains(err.Error(), "not at the start of the image scalar") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// Positive control: the same edit with Col at the scalar's start is applied.
+	ok := "spec:\n  containers:\n    - name: a\n      image: ghcr.io/x/y:v1\n"
+	if _, err := ApplyBytes([]byte(ok), []Edit{singleEdit(t, ok, 0, "ghcr.io/x/y:v2@"+digestA)}); err != nil {
+		t.Errorf("edit at the scalar's start refused: %v", err)
+	}
+	// And the key is taken from the path, so a path that names another key is refused too.
+	wrongKey := singleEdit(t, ok, 0, "ghcr.io/x/y:v2@"+digestA)
+	wrongKey.Path = "spec.containers[0].imag"
+	if _, err := ApplyBytes([]byte(ok), []Edit{wrongKey}); err == nil {
+		t.Error("edit whose path names a different key than the line applied")
+	}
+}
+
 func TestApplyWritesOnlyPlannedFiles(t *testing.T) {
 	p := planFixture(t)
 	tmp := copyDir(t, fixtureRoot)
