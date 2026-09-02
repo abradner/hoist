@@ -696,6 +696,44 @@ func TestMergedSupersededByLaterPromotionIsSatisfiedNotBlocked(t *testing.T) {
 	}
 }
 
+// TestMergedUnresolvableMergeSHABlocksCleanly is round-4's regression: the forge can report a
+// merge sha this clone never fetched and cannot resolve locally (the base was reset far enough
+// past it that the object was pruned, or this clone simply never had it), which the old code
+// let bubble up from git.Git.IsAncestor's raw exit-128 "not a valid object name" error — a
+// confusing plumbing failure instead of the clean, actionable "reverted" signal every other
+// revert path already gives. An unresolvable merge sha is itself proof the merge is not part of
+// the base's current reachable history either way, so it must Block the same way a confirmed
+// revert does, not error.
+func TestMergedUnresolvableMergeSHABlocksCleanly(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	g := git.Exec{}
+	step := MergedStep{Forge: f, Git: g}
+
+	// A merge sha no git object anywhere backs (never pushed, never fetched) — the fake's own
+	// MergePR records whatever sha it's given verbatim when no HeadSHA was set to compare
+	// against (see fake.go's MergePR), so this never touches real git at all.
+	const bogusMergeSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if _, err := f.MergePR(ctx(), s.PR.Number, bogusMergeSHA); err != nil {
+		t.Fatalf("seeding the fake merge: %v", err)
+	}
+
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("expected a clean Blocked signal for an unresolvable merge sha, not an error: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("must not report satisfied for a merge sha this clone cannot resolve: %+v", obs)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected a clear Blocked signal, not a silent re-drive, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, bogusMergeSHA) {
+		t.Fatalf("Blocked reason should name the unresolvable merge sha, got: %s", obs.Blocked)
+	}
+}
+
 // TestMergedResumesAfterKilledMergeCall is the named adversary: MergePR errors (the client
 // never saw a response, but the merge may have landed server-side) — Act must re-check FindPR
 // before treating it as a real failure, never re-issue a second merge call blindly once it

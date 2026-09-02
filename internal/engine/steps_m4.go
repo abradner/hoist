@@ -444,6 +444,24 @@ func (m MergedStep) mergeWasReverted(ctx context.Context, s *PromotionState, mer
 			s.Base,
 		), nil
 	}
+	// mergeSHA can be unresolvable locally — the base was reset far enough past it, or this
+	// clone never fetched it — in which case IsAncestor's own `git merge-base` call would fail
+	// with a real error (exit 128, "not a valid object name"), not a clean "not an ancestor"
+	// answer. That specific failure is itself the answer this function needs: a merge commit
+	// this clone cannot even resolve anymore is not part of the base's reachable history either
+	// way, so it is treated the same as a confirmed revert (Blocked, actionable), rather than
+	// propagating a confusing raw git error upward. ObjectExists, not RevParse, is the right
+	// check here: RevParse's `git rev-parse --verify --quiet` treats any well-formed 40-hex-char
+	// string as "verified" even when no such object exists in this clone at all — it only
+	// validates the string parses as a revision, never that the object is actually present.
+	if exists, oerr := m.Git.ObjectExists(ctx, s.CloneDir, mergeSHA); oerr != nil {
+		return false, "", fmt.Errorf("checking whether this clone has this promotion's merge commit %s: %w", mergeSHA, oerr)
+	} else if !exists {
+		return true, fmt.Sprintf(
+			"this promotion's merge commit %s is no longer resolvable in this clone (origin's %s is now at %s) — the target may have been reset or rebuilt outside hoist; a fresh promotion is needed, not a retry of this one",
+			mergeSHA, s.Base, baseSHA,
+		), nil
+	}
 	isAncestor, err := m.Git.IsAncestor(ctx, s.CloneDir, mergeSHA, baseSHA)
 	if err != nil {
 		return false, "", fmt.Errorf("checking whether merge %s is still part of %s's history: %w", mergeSHA, s.Base, err)

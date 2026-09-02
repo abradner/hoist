@@ -235,6 +235,24 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 	}()
 
+	// The scan above and the claim just acquired are not one atomic operation: a second
+	// `hoist promote` (a different id, targeting the same env) can finish its own scan before
+	// this process claimed anything, then pause; this process claims, drives all the way to its
+	// first durable state save, and releases the claim (the claim's job is done once the state
+	// file itself can be found by a future scan); only then does the second process resume and
+	// successfully claim the now-free slot, without ever repeating its scan — so it never sees
+	// the state file this process just wrote. Re-running the same scan now, while still holding
+	// the claim, closes that window: nothing else can win the claim while this check runs, and
+	// anything that raced into existence on disk between the first scan and now is caught here.
+	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
+		return exitFailure
+	} else if conflict != nil {
+		fmt.Fprintf(stderr, "hoist promote: promotion %s targeting %s is still in flight (at %s: %s); run `hoist resume %s` instead of starting a second one\n",
+			conflict.ID, plan.TargetEnv, status.Step, statusDetail(status.Observation), conflict.ID)
+		return exitFailure
+	}
+
 	s := &engine.PromotionState{
 		ID:             id,
 		RepoFullName:   eff.cfg.GitHub,

@@ -85,6 +85,14 @@ type Git interface {
 	// point) does. An error here means ancestor or descendant could not be resolved at all (e.g.
 	// a truly unknown sha), not "not an ancestor" — that is ok=false, err=nil.
 	IsAncestor(ctx context.Context, dir, ancestor, descendant string) (isAncestor bool, err error)
+	// ObjectExists reports whether sha names an object this clone's own object database
+	// actually has (`git cat-file -e`), never a syntactic check. RevParse below cannot answer
+	// this: `git rev-parse --verify --quiet` on a well-formed 40-hex-character string returns it
+	// unchanged and "verified" even when no such object exists — it only validates that the
+	// string parses as a revision, not that the object is present. A caller checking whether a
+	// specific commit sha is genuinely resolvable in this clone (M4 hardening, MergedStep's
+	// mergeWasReverted) needs this method, not RevParse.
+	ObjectExists(ctx context.Context, dir, sha string) (bool, error)
 	// RevParse resolves rev to a commit sha inside worktreeDir, ok=false when rev cannot be
 	// resolved (e.g. HEAD before any commit exists). Added beyond the brief's listed shape:
 	// Observe needs to read the worktree's current HEAD without creating a commit to find
@@ -450,6 +458,21 @@ func (e Exec) LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (st
 // asked about the wrong sha deserves to know rather than be told a false negative.
 func (e Exec) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
 	_, exitCode, err := e.runRaw(ctx, dir, "merge-base", "--is-ancestor", ancestor, descendant)
+	switch {
+	case err == nil:
+		return true, nil
+	case exitCode == 1:
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// ObjectExists implements Git: `git cat-file -e`, which exits 0 when sha names an object
+// actually present in dir's object database and 1 when it does not (never treated as a
+// failure) — anything else is a genuine error worth surfacing.
+func (e Exec) ObjectExists(ctx context.Context, dir, sha string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, dir, "cat-file", "-e", sha)
 	switch {
 	case err == nil:
 		return true, nil

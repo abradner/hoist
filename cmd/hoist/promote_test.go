@@ -14,6 +14,7 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -170,6 +171,81 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	}
 	if second := commitLine(out.String()); second != firstCommit {
 		t.Fatalf("second run produced a different commit: first %s, second %s", firstCommit, second)
+	}
+}
+
+// TestPromoteRefusesConflictAcquiredAfterTheFirstScan is round-4's regression for the
+// scan-then-claim ordering gap: the pre-claim findInFlight scan and engine.ClaimInFlight are not
+// one atomic operation, so a state file for a *different* id that only becomes visible after the
+// first scan already ran — but before this call proceeds — must still be caught. runPromote now
+// re-runs findInFlight a second time immediately after acquiring the claim, closing that window;
+// this test can't reproduce the exact multi-process timing (a second real `hoist promote`
+// pausing between its own scan and claim), but it does exercise the actual code path added for
+// it: a conflicting, non-terminal state file for a different id targeting the same env is
+// visible on disk throughout, and the whole `hoist promote` invocation must refuse — proving the
+// re-scan's error/conflict handling is wired correctly, not just present.
+func TestPromoteRefusesConflictAcquiredAfterTheFirstScan(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+
+	r, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A different id (a distinct digest set would derive its own id naturally; a fixed literal
+	// standing in for one here keeps this test independent of the fixture's exact image data),
+	// targeting the same env, left mid-flight (PROpened only, never approved) so ObserveAll
+	// reports it not-done.
+	const otherID = "other-in-flight-promotion"
+	wt, err := engine.WorktreeDir(otherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := engine.StatePath(otherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &engine.PromotionState{
+		ID:            otherID,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, otherID),
+		CloneDir:      clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(otherID, plan),
+		PRTitle:       engine.PRTitle(plan),
+		PRBody:        engine.RenderPRBody(otherID, plan),
+		Approval:      "comment",
+		Approvers:     []string{"alice"},
+		CINone:        "green",
+	}
+	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), other, nil); err != nil {
+		t.Fatalf("driving the other promotion to PROpened: %v", err)
+	}
+	if err := engine.SaveState(statePath, other); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected refusal with a conflicting in-flight promotion for the same env, got exit 0; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "still in flight") {
+		t.Fatalf("stderr should name the in-flight conflict, got: %s", errOut.String())
+	}
+	// Exactly one PR: the "other" mid-flight promotion's own, created by this test's own setup
+	// (driving it to PROpened) — the actual `run()` call above must refuse before ever getting
+	// far enough to open a second one for its own id.
+	if len(f.PRs()) != 1 || f.PRs()[0].HeadBranch != other.Branch {
+		t.Fatalf("expected exactly the other promotion's own PR and nothing more, got %+v", f.PRs())
 	}
 }
 

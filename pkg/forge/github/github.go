@@ -343,10 +343,12 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 }
 
 // permissionResponse is GET .../collaborators/{username}/permission's body: the caller's own
-// effective permission on the repo (admin, write, maintain, triage, read, or none), always 200
-// for a real collaborator or not, so a 404/403 here means the login or the repo itself
-// couldn't be resolved (translateErr's "gh token may be missing the repo scope this needs"
-// message applies unchanged).
+// effective permission on the repo (admin, write, maintain, triage, read, or none). GitHub
+// returns 404, not 200, when login is not a collaborator at all — a routine, expected outcome
+// for anyone commenting on a public PR, never an error (IsAllowedAuthor folds it into a plain
+// "not allowed" below). A 403 here still means the repo itself or the token's scope couldn't
+// resolve the query (translateErr's "gh token may be missing the repo scope this needs" message
+// applies unchanged to that case).
 type permissionResponse struct {
 	Permission string `json:"permission"`
 }
@@ -355,11 +357,19 @@ type permissionResponse struct {
 // stated bar is "collaborator with write (or higher) permission" (forge.Forge's own doc
 // comment), and GitHub ranks maintain strictly above write (admin > maintain > write > triage >
 // read), so a maintain-level collaborator qualifies exactly like write and admin do; only
-// "triage" and "read" fall below the bar.
+// "triage" and "read" fall below the bar. A 404 (login is not a collaborator — the ordinary
+// case for a drive-by commenter on a public PR) is folded into (false, nil) rather than
+// propagated as an error: treating it as fatal would make any non-collaborator's comment error
+// and block the whole promotion whenever collaborators=true, rather than simply not counting
+// as an approval.
 func (c *Client) IsAllowedAuthor(ctx context.Context, login string) (bool, error) {
 	var resp permissionResponse
 	path := fmt.Sprintf("repos/%s/%s/collaborators/%s/permission", c.owner, c.repo, url.PathEscape(login))
 	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		var herr *ghapi.HTTPError
+		if errors.As(err, &herr) && herr.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
 		return false, translateErr("checking collaborator permission for "+login, err)
 	}
 	return resp.Permission == "admin" || resp.Permission == "maintain" || resp.Permission == "write", nil

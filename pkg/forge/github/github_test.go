@@ -471,6 +471,23 @@ func TestIsAllowedAuthorAcceptsWriteMaintainAndAdmin(t *testing.T) {
 	}
 }
 
+// TestIsAllowedAuthorFoldsNotFoundIntoFalse: a 404 (login is not a collaborator at all — the
+// ordinary outcome for a drive-by commenter on a public PR) must return (false, nil), not an
+// error — treating it as fatal would make any non-collaborator's comment error and block the
+// whole promotion whenever collaborators=true.
+func TestIsAllowedAuthorFoldsNotFoundIntoFalse(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/collaborators/random-commenter/permission": static(404, `{"message":"Not Found"}`),
+	})
+	got, err := c.IsAllowedAuthor(context.Background(), "random-commenter")
+	if err != nil {
+		t.Fatalf("expected a 404 to fold into (false, nil), got error: %v", err)
+	}
+	if got {
+		t.Fatal("IsAllowedAuthor = true for a 404 (not a collaborator)")
+	}
+}
+
 func TestIsAllowedAuthorSurfacesScopeGap(t *testing.T) {
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/collaborators/mallory/permission": static(403, `{"message":"Must have push access"}`),
