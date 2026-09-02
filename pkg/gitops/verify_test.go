@@ -167,6 +167,51 @@ func TestVerifyWiresStructureLayer(t *testing.T) {
 	}
 }
 
+// TestVerifyRejectsEditOutsideContainerItem: the fixture's ConfigMap carries an image: key
+// that discovery deliberately skips. An Edit built by hand for that scalar — with a Path
+// that is true for its position — passes the byte-level pass, so only the walk's own
+// eligibility test (shared with discovery) can refuse it.
+func TestVerifyRejectsEditOutsideContainerItem(t *testing.T) {
+	before := readFixture(t, countaFile)
+	docs, err := parseDocs(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edits []Edit
+	for i, d := range docs {
+		if scalarAt(d, "kind") != "ConfigMap" {
+			continue
+		}
+		img := lookup(d, "data", "image")
+		if img == nil {
+			continue
+		}
+		edits = append(edits, Edit{Occurrence: Occurrence{
+			File: countaFile, Doc: i, Line: img.Line, Col: img.Column, Style: img.Style,
+			Kind: "ConfigMap", Name: scalarAt(d, "metadata", "name"), Path: "data.image",
+			Raw: img.Value, Ref: mustRef(t, img.Value),
+		}, New: mustRef(t, countaNew)})
+	}
+	if len(edits) != 1 {
+		t.Fatalf("fixture has %d ConfigMap image keys, want 1; this test no longer proves anything", len(edits))
+	}
+	after, err := ApplyBytes(before, edits)
+	if err != nil {
+		t.Fatalf("ApplyBytes is structure-blind and should have rewritten the scalar: %v", err)
+	}
+	// Control: the byte-level half accepts the result, so the refusal below is the walk's.
+	if err := verifyLines(countaFile, before, after, edits); err != nil {
+		t.Fatalf("byte-level pass rejected the ConfigMap edit on its own, so this test would not isolate the walk: %v", err)
+	}
+	err = Verify(one(countaFile, before), one(countaFile, after), edits)
+	if err == nil {
+		t.Fatal("Verify accepted an edit at the ConfigMap's data.image, which discovery excludes")
+	}
+	if !strings.Contains(err.Error(), "not the image of a container item") {
+		t.Errorf("rejected for the wrong reason: %v", err)
+	}
+}
+
 func TestVerifyFileSetMismatch(t *testing.T) {
 	before, after, edits := applied(t, webFile)
 	if err := Verify(one(webFile, before), map[string][]byte{}, edits); err == nil {

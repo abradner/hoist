@@ -240,6 +240,49 @@ func childPath(p, key string) string {
 
 func indexPath(p string, i int) string { return p + "[" + strconv.Itoa(i) + "]" }
 
+// cursor is where a walk is inside one document: the dotted path of the current node plus
+// the facts that decide whether an image: scalar there is an occurrence. Discovery
+// (scanDoc) and Verify (walkPair) both walk with it, so the eligibility test exists once
+// (imageOfContainer) and a planned edit can only ever match a scalar discovery would have
+// recorded — never, say, a ConfigMap's data.image.
+type cursor struct {
+	path string
+	// key is the mapping key this node is the value of; "" for a key, a sequence item or the
+	// root.
+	key string
+	// seqKey is, when this node is a sequence item, the mapping key that sequence is the
+	// value of; "" otherwise.
+	seqKey string
+	// container is the enclosing container item when this node is a direct value of a
+	// mapping that is itself an item of a containers/initContainers/ephemeralContainers
+	// sequence; nil otherwise.
+	container *yaml.Node
+}
+
+// child positions the cursor on parent.Content[i].
+func (c cursor) child(parent *yaml.Node, i int) cursor {
+	switch parent.Kind {
+	case yaml.MappingNode:
+		if i%2 == 0 {
+			return cursor{path: c.path} // a key carries its parent's path and is never a value
+		}
+		key := parent.Content[i-1].Value
+		next := cursor{path: childPath(c.path, key), key: key}
+		if containerKeys[c.seqKey] {
+			next.container = parent
+		}
+		return next
+	case yaml.SequenceNode:
+		return cursor{path: indexPath(c.path, i), seqKey: c.key}
+	default:
+		return cursor{path: c.path}
+	}
+}
+
+// imageOfContainer reports whether the node under the cursor is the image: value of a
+// container item — the one shape of scalar hoist records and rewrites.
+func (c cursor) imageOfContainer() bool { return c.key == "image" && c.container != nil }
+
 func scanFamily(root string, fam *Family) error {
 	dir := filepath.Join(root, filepath.FromSlash(fam.Dir))
 	files, err := yamlFiles(dir)
@@ -264,7 +307,7 @@ func scanFamily(root string, fam *Family) error {
 }
 
 // scanDoc walks one document and records every image: scalar that is a direct field of an
-// item in a containers/initContainers/ephemeralContainers sequence.
+// item in a containers/initContainers/ephemeralContainers sequence (cursor.imageOfContainer).
 func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
 	body := unwrap(doc)
 	if body == nil {
@@ -273,45 +316,24 @@ func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
 	kind := scalarAt(doc, "kind")
 	name := scalarAt(doc, "metadata", "name")
 	var out []Occurrence
-	var walk func(n *yaml.Node, p string) error
-	walk = func(n *yaml.Node, p string) error {
-		switch n.Kind {
-		case yaml.MappingNode:
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				k, v := n.Content[i], n.Content[i+1]
-				cp := childPath(p, k.Value)
-				if containerKeys[k.Value] && v.Kind == yaml.SequenceNode {
-					for j, item := range v.Content {
-						if item.Kind != yaml.MappingNode {
-							continue
-						}
-						img := lookup(item, "image")
-						if img == nil {
-							continue
-						}
-						ip := childPath(indexPath(cp, j), "image")
-						occ, err := occurrenceAt(file, idx, kind, name, scalarAt(item, "name"), ip, img)
-						if err != nil {
-							return err
-						}
-						out = append(out, occ)
-					}
-				}
-				if err := walk(v, cp); err != nil {
-					return err
-				}
+	var walk func(n *yaml.Node, c cursor) error
+	walk = func(n *yaml.Node, c cursor) error {
+		if c.imageOfContainer() {
+			occ, err := occurrenceAt(file, idx, kind, name, scalarAt(c.container, "name"), c.path, n)
+			if err != nil {
+				return err
 			}
-		case yaml.SequenceNode:
-			for j, item := range n.Content {
-				if err := walk(item, indexPath(p, j)); err != nil {
-					return err
-				}
+			out = append(out, occ)
+			return nil
+		}
+		for i := range n.Content {
+			if err := walk(n.Content[i], c.child(n, i)); err != nil {
+				return err
 			}
-		default:
 		}
 		return nil
 	}
-	if err := walk(body, ""); err != nil {
+	if err := walk(body, cursor{}); err != nil {
 		return nil, err
 	}
 	return out, nil

@@ -109,7 +109,7 @@ func verifyStructure(file string, before, after []byte, edits []Edit) error {
 	}
 	matched := map[editKey]bool{}
 	for i := range bd {
-		if err := walkPair(file, bd[i], ad[i], "", want, matched); err != nil {
+		if err := walkPair(file, bd[i], ad[i], cursor{}, want, matched); err != nil {
 			return err
 		}
 	}
@@ -121,8 +121,11 @@ func verifyStructure(file string, before, after []byte, edits []Edit) error {
 	return nil
 }
 
-func walkPair(file string, b, a *yaml.Node, p string, want map[editKey]*Edit, matched map[editKey]bool) error {
-	where := fmt.Sprintf("%s:%d %s", file, b.Line, pathLabel(p))
+// walkPair compares b and a in lockstep. c is the shared discovery cursor, so a planned
+// edit is accepted only where discovery would have recorded an occurrence — the plan's own
+// Path is checked against the walk, never trusted on its own.
+func walkPair(file string, b, a *yaml.Node, c cursor, want map[editKey]*Edit, matched map[editKey]bool) error {
+	where := fmt.Sprintf("%s:%d %s", file, b.Line, pathLabel(c.path))
 	switch {
 	case b.Kind != a.Kind:
 		return fmt.Errorf("%s: node kind changed", where)
@@ -151,8 +154,10 @@ func walkPair(file string, b, a *yaml.Node, p string, want map[editKey]*Edit, ma
 			return fmt.Errorf("%s: unplanned scalar change: %q -> %q", where, b.Value, a.Value)
 		case e != nil && b.Kind != yaml.ScalarNode:
 			return fmt.Errorf("%s: planned edit sits on an alias", where)
-		case e != nil && p != e.Path:
-			return fmt.Errorf("%s: planned edit is for path %s but the scalar at that position is at %s", where, e.Path, p)
+		case e != nil && !c.imageOfContainer():
+			return fmt.Errorf("%s: planned edit is not the image of a container item; only image: fields of containers/initContainers/ephemeralContainers items are editable", where)
+		case e != nil && c.path != e.Path:
+			return fmt.Errorf("%s: planned edit is for path %s but the scalar at that position is at %s", where, e.Path, c.path)
 		case e != nil && b.Value != e.Raw:
 			return fmt.Errorf("%s: scalar before the edit is %q, plan expected %q", where, b.Value, e.Raw)
 		case e != nil && a.Value != e.New.String():
@@ -162,26 +167,11 @@ func walkPair(file string, b, a *yaml.Node, p string, want map[editKey]*Edit, ma
 		}
 	}
 	for i := range b.Content {
-		if err := walkPair(file, b.Content[i], a.Content[i], childPathOf(b, p, i), want, matched); err != nil {
+		if err := walkPair(file, b.Content[i], a.Content[i], c.child(b, i), want, matched); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// childPathOf mirrors the path construction in scanDoc so planned Paths line up.
-func childPathOf(parent *yaml.Node, p string, i int) string {
-	switch parent.Kind {
-	case yaml.MappingNode:
-		if i%2 == 0 {
-			return p // a key carries its parent's path
-		}
-		return childPath(p, parent.Content[i-1].Value)
-	case yaml.SequenceNode:
-		return indexPath(p, i)
-	default:
-		return p
-	}
 }
 
 func pathLabel(p string) string {
