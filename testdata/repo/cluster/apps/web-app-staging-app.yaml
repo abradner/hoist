@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos:
+    - "*"
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: web-app-staging
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://git.example.test/example/gitops.git
+    targetRevision: main
+    path: cluster/apps/app-staging/web
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

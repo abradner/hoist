@@ -1,0 +1,198 @@
+{
+  "SourceEnv": "app-staging",
+  "TargetEnv": "app-production",
+  "Edits": [
+    {
+      "File": "cluster/apps/app-production/counta/app.yaml",
+      "Doc": 0,
+      "Line": 22,
+      "Col": 18,
+      "Style": 4,
+      "Kind": "Deployment",
+      "Name": "counta",
+      "Container": "counta",
+      "Path": "spec.template.spec.containers[0].image",
+      "Raw": "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+      "Ref": {
+        "Repo": "ghcr.io/example/counta",
+        "Tag": "v202601151010",
+        "Digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea"
+      },
+      "New": {
+        "Repo": "ghcr.io/example/counta",
+        "Tag": "v202602201200",
+        "Digest": "sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123"
+      }
+    },
+    {
+      "File": "cluster/apps/app-production/counta/purge-cronjob.yaml",
+      "Doc": 0,
+      "Line": 16,
+      "Col": 22,
+      "Style": 0,
+      "Kind": "CronJob",
+      "Name": "counta-purge",
+      "Container": "purge",
+      "Path": "spec.jobTemplate.spec.template.spec.containers[0].image",
+      "Raw": "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+      "Ref": {
+        "Repo": "ghcr.io/example/counta",
+        "Tag": "v202601151010",
+        "Digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea"
+      },
+      "New": {
+        "Repo": "ghcr.io/example/counta",
+        "Tag": "v202602201200",
+        "Digest": "sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123"
+      }
+    },
+    {
+      "File": "cluster/apps/app-production/marketing/app.yaml",
+      "Doc": 0,
+      "Line": 18,
+      "Col": 18,
+      "Style": 2,
+      "Kind": "Deployment",
+      "Name": "marketing",
+      "Container": "marketing",
+      "Path": "spec.template.spec.containers[0].image",
+      "Raw": "ghcr.io/example/marketing:sha-0000111122223333444455556666777788889999@sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234",
+      "Ref": {
+        "Repo": "ghcr.io/example/marketing",
+        "Tag": "sha-0000111122223333444455556666777788889999",
+        "Digest": "sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234"
+      },
+      "New": {
+        "Repo": "ghcr.io/example/marketing",
+        "Tag": "sha-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+        "Digest": "sha256:77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee"
+      }
+    },
+    {
+      "File": "cluster/apps/app-production/web/app.yaml",
+      "Doc": 0,
+      "Line": 23,
+      "Col": 18,
+      "Style": 0,
+      "Kind": "Deployment",
+      "Name": "web",
+      "Container": "web",
+      "Path": "spec.template.spec.containers[0].image",
+      "Raw": "ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "Ref": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202601010101",
+        "Digest": "sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+      },
+      "New": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202602150930",
+        "Digest": "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"
+      }
+    },
+    {
+      "File": "cluster/apps/app-production/web/app.yaml",
+      "Doc": 0,
+      "Line": 31,
+      "Col": 18,
+      "Style": 0,
+      "Kind": "Deployment",
+      "Name": "web",
+      "Container": "worker",
+      "Path": "spec.template.spec.containers[1].image",
+      "Raw": "ghcr.io/example/web:v202601010101",
+      "Ref": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202601010101",
+        "Digest": ""
+      },
+      "New": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202602150930",
+        "Digest": "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"
+      }
+    },
+    {
+      "File": "cluster/apps/app-production/web/app.yaml",
+      "Doc": 0,
+      "Line": 35,
+      "Col": 18,
+      "Style": 0,
+      "Kind": "Deployment",
+      "Name": "web",
+      "Container": "queue",
+      "Path": "spec.template.spec.containers[2].image",
+      "Raw": "ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "Ref": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202601010101",
+        "Digest": "sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+      },
+      "New": {
+        "Repo": "ghcr.io/example/web",
+        "Tag": "v202602150930",
+        "Digest": "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"
+      }
+    }
+  ],
+  "Untouched": [
+    {
+      "Repo": "docker.io/temporalio/server",
+      "Tag": "1.31.2",
+      "Digest": ""
+    },
+    {
+      "Repo": "docker.io/temporalio/ui",
+      "Tag": "2.34.0",
+      "Digest": ""
+    },
+    {
+      "Repo": "ghcr.io/example/dbwait",
+      "Tag": "v202601010101",
+      "Digest": "sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01"
+    }
+  ],
+  "Warnings": [
+    {
+      "Code": "source-disagrees",
+      "Message": "app-staging: 2 occurrences of ghcr.io/example/web carry different refs; planning ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f (the only pinned ref):\n  cluster/apps/app-staging/web/app.yaml:22 Deployment/web container=web ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f\n  cluster/apps/app-staging/web/app.yaml:30 Deployment/web container=worker ghcr.io/example/web:v202601010101",
+      "Occurrences": [
+        {
+          "File": "cluster/apps/app-staging/web/app.yaml",
+          "Doc": 0,
+          "Line": 22,
+          "Col": 18,
+          "Style": 0,
+          "Kind": "Deployment",
+          "Name": "web",
+          "Container": "web",
+          "Path": "spec.template.spec.containers[0].image",
+          "Raw": "ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f",
+          "Ref": {
+            "Repo": "ghcr.io/example/web",
+            "Tag": "v202602150930",
+            "Digest": "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"
+          }
+        },
+        {
+          "File": "cluster/apps/app-staging/web/app.yaml",
+          "Doc": 0,
+          "Line": 30,
+          "Col": 18,
+          "Style": 0,
+          "Kind": "Deployment",
+          "Name": "web",
+          "Container": "worker",
+          "Path": "spec.template.spec.containers[1].image",
+          "Raw": "ghcr.io/example/web:v202601010101",
+          "Ref": {
+            "Repo": "ghcr.io/example/web",
+            "Tag": "v202601010101",
+            "Digest": ""
+          }
+        }
+      ]
+    }
+  ],
+  "GeneratedAt": "0001-01-01T00:00:00Z"
+}

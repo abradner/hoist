@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: counta
+  namespace: app-staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: counta
+  template:
+    metadata:
+      labels:
+        app: counta
+    spec:
+      containers:
+        - name: counta
+          image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123
+          envFrom:
+            - configMapRef:
+                name: counta-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: counta-config
+  namespace: app-staging
+data:
+  # Consumed by the app to label its own metrics; not a container image.
+  image: ghcr.io/example/counta:v202602201200
+  purge_after_days: "30"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: counta
+  namespace: app-staging
+spec:
+  selector:
+    app: counta
+  ports:
+    - port: 80
+      targetPort: 8080

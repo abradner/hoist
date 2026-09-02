@@ -1,0 +1,153 @@
+=== cluster/apps/app-production/counta/app.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: counta
+  namespace: app-production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: counta
+  template:
+    metadata:
+      labels:
+        app: counta
+    spec:
+      initContainers:
+        - name: dbwait
+          image: ghcr.io/example/dbwait:v202601010101@sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01
+          command: ["dbwait", "--timeout=60s"]
+      containers:
+        - name: counta
+          image: 'ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123'
+          envFrom:
+            - configMapRef:
+                name: counta-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: counta-config
+  namespace: app-production
+data:
+  # Consumed by the app to label its own metrics; not a container image.
+  image: ghcr.io/example/counta:v202601151010
+  purge_after_days: "90"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: counta
+  namespace: app-production
+spec:
+  selector:
+    app: counta
+  ports:
+    - port: 80
+      targetPort: 8080
+=== cluster/apps/app-production/counta/purge-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: counta-purge
+  namespace: app-production
+spec:
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: purge
+              image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123 # keep in step with app.yaml
+              command: ["bin/rails", "counta:purge"]
+=== cluster/apps/app-production/marketing/app.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketing
+  namespace: app-production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: marketing
+  template:
+    metadata:
+      labels:
+        app: marketing
+    spec:
+      containers:
+        - name: marketing
+          image: "ghcr.io/example/marketing:sha-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d@sha256:77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee"
+          ports:
+            - containerPort: 8080
+=== cluster/apps/app-production/web/app.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: app-production
+  labels:
+    app: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      # Production runs three processes from the one image; staging folds queue into worker.
+      containers:
+        - name: web
+          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: RAILS_ENV
+              value: production
+        - name: worker
+          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+          imagePullPolicy: IfNotPresent
+          command: ["bundle", "exec", "good_job", "start"]
+        - name: queue
+          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+          imagePullPolicy: IfNotPresent
+          command: ["bundle", "exec", "good_job", "start", "--queues=mail"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: app-production
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: app-production
+spec:
+  parentRefs:
+    - name: public
+      namespace: gateway
+  hostnames:
+    - web.example.test
+  rules:
+    - backendRefs:
+        - name: web
+          port: 80

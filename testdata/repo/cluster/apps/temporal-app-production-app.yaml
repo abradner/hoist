@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: temporal-app-production
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://git.example.test/example/gitops.git
+    targetRevision: main
+    path: cluster/apps/app-production/temporal
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app-production
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
