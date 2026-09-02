@@ -613,3 +613,22 @@ spec:
           image: ` + img + `
 `
 }
+
+// A direct Head/Tags call on the per-repo registry (M6's tag picker will make them) must be
+// routed to the client scoped to that repo and must error for a repo with no registry —
+// never fall through to whichever client happened to be built first (F4).
+func TestMultiRegistryRoutesDirectCallsByRepo(t *testing.T) {
+	a := &registry.Fake{Digests: map[string]string{"ghcr.io/acme/app:v1": "sha256:" + strings.Repeat("a", 64)}}
+	b := &registry.Fake{Digests: map[string]string{"quay.io/other/app:v1": "sha256:" + strings.Repeat("b", 64)}}
+	m := &multiRegistry{byRepo: map[string]registry.Registry{"ghcr.io/acme/app": a, "quay.io/other/app": b}, primary: a}
+	ctx := context.Background()
+	if d, err := m.Head(ctx, image.Ref{Repo: "quay.io/other/app", Tag: "v1"}); err != nil || !strings.HasPrefix(d, "sha256:bbbb") {
+		t.Fatalf("Head routed wrong: %q, %v", d, err)
+	}
+	if _, err := m.Head(ctx, image.Ref{Repo: "ghcr.io/nobody/app", Tag: "v1"}); err == nil || !strings.Contains(err.Error(), "no registry configured") {
+		t.Fatalf("unmatched repo: got %v, want no-registry error", err)
+	}
+	if _, err := m.Tags(ctx, "ghcr.io/nobody/app"); err == nil {
+		t.Fatal("Tags for an unmatched repo must error, not use the primary client")
+	}
+}

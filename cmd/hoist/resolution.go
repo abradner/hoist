@@ -177,7 +177,7 @@ func has[T comparable](xs []T, x T) bool {
 // was asked to resolve.
 type multiRegistry struct {
 	byRepo  map[string]registry.Registry
-	primary registry.Registry // the first Client built; used when the interface itself is called directly
+	primary registry.Registry // the first Client built; only its auth order is reported when every source fails
 }
 
 // ForRepo implements registry.PerRepo.
@@ -187,24 +187,24 @@ func (m *multiRegistry) ForRepo(repo string) registry.Registry { return m.byRepo
 // resolve.Resolve always calls ForRepo first when it sees PerRepo, so these are a fallback
 // that should not be reached in practice.
 func (m *multiRegistry) Head(ctx context.Context, ref image.Ref) (string, error) {
-	if m.primary == nil {
+	// Route by the repo itself, never through a "primary" client: a direct caller (M6's tag
+	// picker, or any future path that skips resolve) must get exactly the credentials
+	// scoped to this repo, or an error — never the first entry's token by accident (F4).
+	r := m.ForRepo(ref.Repo)
+	if r == nil {
 		return "", fmt.Errorf("registry: no registry configured for %s", ref.Repo)
 	}
-	return m.primary.Head(ctx, ref)
+	return r.Head(ctx, ref)
 }
 
 func (m *multiRegistry) Tags(ctx context.Context, repo string) ([]string, error) {
-	if m.primary == nil {
+	r := m.ForRepo(repo)
+	if r == nil {
 		return nil, fmt.Errorf("registry: no registry configured for %s", repo)
 	}
-	return m.primary.Tags(ctx, repo)
+	return r.Tags(ctx, repo)
 }
 
-// AuthSourceUsed implements registry.AuthReporter by combining every distinct Client this
-// run built. The common case — every promotable repo covered by the same entry, or by
-// none — built exactly one Client, so this reads exactly as it did before F4; several
-// distinct entries report "entry: source" per entry instead of collapsing into each
-// other's answer.
 func (m *multiRegistry) AuthSourceUsed() string {
 	clients := m.distinctClients()
 	if len(clients) == 1 {
