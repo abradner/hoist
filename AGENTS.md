@@ -238,7 +238,7 @@ consulted and which sources were tried; either way, by name only, never a value.
 `--digest` override still wins over every source. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
 `q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
-`mise exec -- go test ./pkg/gitops ./internal/app -update`; the fixture repo is `testdata/repo`
+`mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan -update`; the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
