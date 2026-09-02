@@ -243,6 +243,37 @@ func TestChecksPaginatesBeyondFirstPage(t *testing.T) {
 	}
 }
 
+// TestChecksMoreThanBoundFailsClosed is the P1-adjacent hardening regression: a commit with
+// MORE check-runs than maxCheckRunPages*100 (every page up to the bound comes back full) must
+// fail with a clear error, never silently return a truncated CheckSummary — round 1's own
+// pagination fix moved the "only page 1 is fetched" bug to a further-out boundary
+// (maxCheckRunPages) rather than removing the failure mode; a pending or failed run sitting
+// just past that boundary must never be hidden behind a false "green".
+func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
+	fullPage := func(name string) string {
+		runs := make([]string, 100)
+		for i := range runs {
+			runs[i] = fmt.Sprintf(`{"name": "%s-%d", "status": "completed", "conclusion": "success"}`, name, i)
+		}
+		return `{"check_runs": [` + strings.Join(runs, ",") + `]}`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			// Every page, including the last one this loop is allowed to fetch, comes back
+			// completely full — there is no way to tell from here whether a page 11 exists,
+			// which is exactly the point: it must refuse to answer rather than guess "no".
+			return 200, fullPage("page-" + r.URL.Query().Get("page"))
+		},
+	})
+	_, err := c.Checks(context.Background(), "deadbeef")
+	if err == nil {
+		t.Fatal("expected an error when every page up to the bound comes back full, got nil")
+	}
+	if !strings.Contains(err.Error(), "deadbeef") || !strings.Contains(err.Error(), "10") {
+		t.Fatalf("error should name the sha and the page bound, got: %v", err)
+	}
+}
+
 // TestCommentsExcludesBots checks the exact set the filter is supposed to draw: a "User"
 // comment and an "Organization" comment (a real GitHub account type for an org-owned account,
 // not a bot — M4's real approval-comment author check depends on this list not silently
@@ -297,6 +328,33 @@ func TestCommentsPaginatesBeyondFirstPage(t *testing.T) {
 	}
 	if comments[100].Author != "bob" || comments[100].Body != "hoist approve abc" {
 		t.Fatalf("last comment = %+v, want bob's page-2 approval", comments[100])
+	}
+}
+
+// TestCommentsMoreThanBoundFailsClosed is Comments' half of the P1-adjacent hardening
+// regression (see TestChecksMoreThanBoundFailsClosed): a PR with MORE comments than
+// maxCommentPages*100 must fail with a clear error rather than silently return a truncated
+// list — a later approve or reject sitting just past the bound must never be invisible to
+// ApprovedStep's newest-match scan.
+func TestCommentsMoreThanBoundFailsClosed(t *testing.T) {
+	fullPage := func(page string) string {
+		items := make([]string, 100)
+		for i := range items {
+			items[i] = fmt.Sprintf(`{"id": %s%02d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, page, i)
+		}
+		return `[` + strings.Join(items, ",") + `]`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			return 200, fullPage(r.URL.Query().Get("page"))
+		},
+	})
+	_, err := c.Comments(context.Background(), 7, time.Time{})
+	if err == nil {
+		t.Fatal("expected an error when every page up to the bound comes back full, got nil")
+	}
+	if !strings.Contains(err.Error(), "#7") || !strings.Contains(err.Error(), "10") {
+		t.Fatalf("error should name the PR and the page bound, got: %v", err)
 	}
 }
 

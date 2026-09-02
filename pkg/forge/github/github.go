@@ -185,6 +185,14 @@ const maxCheckRunPages = 10
 // does for GitHub's own free-form error messages (AGENTS.md invariant 6).
 func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, error) {
 	var runs []checkRun
+	// lastPageFull tracks whether the loop's final iteration returned a full 100-row page:
+	// true only when the loop ran out of pages (maxCheckRunPages) without ever seeing a
+	// short page, which is exactly "there may be more beyond the bound" (Known bug classes,
+	// the P1-adjacent hardening this pagination fix's own bound can reintroduce: silently
+	// truncating at maxCheckRunPages is the identical failure mode as never paginating at
+	// all, just moved further out — a later pending/failed run past the bound would make CI
+	// appear green when it isn't).
+	lastPageFull := false
 	for page := 1; page <= maxCheckRunPages; page++ {
 		var resp checkRunsResponse
 		path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", c.owner, c.repo, sha, page)
@@ -193,8 +201,16 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 		}
 		runs = append(runs, resp.CheckRuns...)
 		if len(resp.CheckRuns) < 100 {
+			lastPageFull = false
 			break
 		}
+		lastPageFull = true
+	}
+	if lastPageFull {
+		return forge.CheckSummary{}, fmt.Errorf(
+			"github: checking checks for %s: more than %d check-runs (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a pending or failed run past the bound",
+			sha, maxCheckRunPages*100, maxCheckRunPages,
+		)
 	}
 	var s forge.CheckSummary
 	s.Total = len(runs)
@@ -251,6 +267,12 @@ const maxCommentPages = 10
 // reject past the first page, so ApprovedStep's newest-match scan would never see it).
 func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([]forge.Comment, error) {
 	var resp []commentResponse
+	// lastPageFull mirrors Checks' own bound-vs-truncation tracking (Known bug classes, the
+	// P1-adjacent hardening this pagination fix's own bound can reintroduce): true only when
+	// every page up to maxCommentPages came back full, meaning there may be more comments
+	// beyond the bound this loop never saw — silently truncating here could hide a later
+	// approve or reject exactly as the original unpaginated bug did, just moved further out.
+	lastPageFull := false
 	for page := 1; page <= maxCommentPages; page++ {
 		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
 		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
@@ -260,8 +282,16 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 		}
 		resp = append(resp, batch...)
 		if len(batch) < 100 {
+			lastPageFull = false
 			break
 		}
+		lastPageFull = true
+	}
+	if lastPageFull {
+		return nil, fmt.Errorf(
+			"github: listing comments for PR #%d: more than %d comments (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a later approve or reject past the bound",
+			prNumber, maxCommentPages*100, maxCommentPages,
+		)
 	}
 	out := make([]forge.Comment, 0, len(resp))
 	for _, r := range resp {
