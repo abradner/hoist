@@ -44,15 +44,17 @@ it reads private state and writes to systems that deploy software.
 
 - **Approval comment → production merge.** Caller: whoever can comment on the PR (anyone, on a
   public repo). Identity: the GitHub login on the comment (`ApprovedStep`, `internal/engine`),
-  checked against the configured `approvers` list and/or write-collaborator permission via
-  `Forge.IsAllowedAuthor` when `RepoConfig.Collaborators` opts a repo into that; only
-  `AuthorType == "Bot"` is excluded — `Organization` is a real, non-bot account type and is not
-  filtered (corrected from an earlier, stricter statement here that would have silently dropped
-  a legitimate org-owned commenter); the comment must post-date the PR's head commit (anchored
-  to the PR's own `CreatedAt`, since this promotion's branch is exclusively its own — see
-  `steps_m4.go`'s package doc for why that anchor is safe here specifically). If they lie: they
-  cannot — the login comes from GitHub, not the comment body. The residual risk is a
-  misconfigured approver list (R-001).
+  checked against the configured `approvers` list and/or a write-or-higher (write, maintain, or
+  admin) collaborator permission via `Forge.IsAllowedAuthor` when `RepoConfig.Collaborators` opts
+  a repo into that; only `AuthorType == "Bot"` is excluded — `Organization` is a real, non-bot
+  account type and is not filtered (corrected from an earlier, stricter statement here that would
+  have silently dropped a legitimate org-owned commenter); the comment must post-date the head
+  commit's own committer date (`git.Git.CommitTime`, not `PR.CreatedAt` — corrected from an
+  earlier, weaker statement here: `PR.CreatedAt` would happen to be a safe anchor too, given this
+  repo's ordering/exclusivity invariants, but `ApprovedStep` anchors on the commit's own real time
+  directly rather than leaning on those other steps to make an earlier PR unreachable — see
+  `steps_m4.go`'s package doc for the full reasoning). If they lie: they cannot — the login comes
+  from GitHub, not the comment body. The residual risk is a misconfigured approver list (R-001).
 - **Registry credential chain.** Caller: hoist, on the user's behalf. The cluster-secret source
   reads a pull secret out of a namespace the kubeconfig can reach; that is a deliberate
   convenience and is opt-in per config (`registries[].cluster`, `--cluster-secret`). Credentials
