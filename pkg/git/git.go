@@ -76,6 +76,15 @@ type Git interface {
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
 	HashObject(ctx context.Context, worktreeDir string, content []byte) (blob string, err error)
+	// WorktreeBranch reports whether worktreeDir is registered as a linked worktree of
+	// cloneDir, and if so, which branch it is checked out on. ok=false means it is not
+	// currently registered — absent, or a stale directory git's own registry does not know
+	// about — which callers must treat identically to "not set up yet". This is the only
+	// trustworthy way to answer "is this worktree actually mine, on the right branch": the
+	// mere presence of a ".git" file at worktreeDir proves nothing about which clone or
+	// branch it resolves to (a stale pointer from an unrelated prior state, or one that
+	// happens to resolve into cloneDir's own real git dir but on a different branch).
+	WorktreeBranch(ctx context.Context, cloneDir, worktreeDir string) (branch string, ok bool, err error)
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -484,4 +493,17 @@ func (e Exec) HashObject(ctx context.Context, worktreeDir string, content []byte
 		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// WorktreeBranch implements Git.
+func (e Exec) WorktreeBranch(ctx context.Context, cloneDir, worktreeDir string) (string, bool, error) {
+	entries, err := e.listWorktrees(ctx, cloneDir)
+	if err != nil {
+		return "", false, fmt.Errorf("git worktree list: %w", err)
+	}
+	entry, ok := findWorktree(entries, worktreeDir)
+	if !ok {
+		return "", false, nil
+	}
+	return entry.branch, true, nil
 }

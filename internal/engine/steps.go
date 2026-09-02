@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -25,23 +24,28 @@ type BranchedStep struct{ Git git.Git }
 // Name implements Step.
 func (BranchedStep) Name() StepName { return StepBranched }
 
-// Observe checks the local filesystem, not the remote: "branched" is about this process's own
-// worktree, which nothing but this promotion's own runs ever create or reuse. A linked
-// worktree's ".git" is a *file* (a pointer into the clone's real git dir), not a directory —
-// that's exactly what distinguishes "the worktree is set up" from "the directory exists but
-// isn't one" (Known bug classes: recovering from a stale directory).
-func (b BranchedStep) Observe(_ context.Context, s *PromotionState) (Observation, error) {
-	fi, err := os.Stat(filepath.Join(s.WorktreeDir, ".git"))
-	switch {
-	case err == nil && !fi.IsDir():
-		return Observation{Satisfied: true, Detail: "worktree already present at " + s.WorktreeDir}, nil
-	case err == nil:
-		return Observation{Satisfied: false, Detail: ".git exists but is a directory, not a worktree pointer; will be recreated"}, nil
-	case os.IsNotExist(err):
-		return Observation{Satisfied: false}, nil
-	default:
+// Observe checks the local worktree registry, not the remote: "branched" is about this
+// process's own worktree, which nothing but this promotion's own runs ever create or reuse.
+// A file existing at "<WorktreeDir>/.git" is not by itself proof of anything — a stale
+// pointer file from an unrelated prior state, or one that happens to resolve into the right
+// clone's git dir but on the wrong branch, would satisfy that check while pointing Act's
+// subsequent git add/commit at the wrong repository or the wrong branch. WorktreeBranch asks
+// git's own worktree registry instead: satisfied only when WorktreeDir is registered against
+// CloneDir AND checked out on exactly s.Branch (Known bug classes: recovering from a stale
+// directory; trusting a filesystem shape instead of the registry that shape is supposed to
+// reflect).
+func (b BranchedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
+	branch, ok, err := b.Git.WorktreeBranch(ctx, s.CloneDir, s.WorktreeDir)
+	if err != nil {
 		return Observation{}, err
 	}
+	if !ok {
+		return Observation{Satisfied: false}, nil
+	}
+	if branch != s.Branch {
+		return Observation{Satisfied: false, Detail: fmt.Sprintf("worktree at %s is registered on %q, not %q; will be recreated", s.WorktreeDir, branch, s.Branch)}, nil
+	}
+	return Observation{Satisfied: true, Detail: "worktree already present at " + s.WorktreeDir + " on " + s.Branch}, nil
 }
 
 // Act implements Step.

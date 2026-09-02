@@ -36,6 +36,54 @@ func TestBranchedStepCreatesThenObservesSatisfied(t *testing.T) {
 	}
 }
 
+// TestBranchedStepObserveRejectsWorktreeOnWrongBranch reproduces the stale-".git"-file bug a
+// raw os.Stat check couldn't see: something (a leftover from an unrelated prior run, or the
+// deliberate setup here) has already registered a worktree at exactly the path Observe checks
+// — but on the WRONG branch. The old code trusted the presence of a ".git" file/pointer alone
+// and would have reported Satisfied: true, letting CommittedStep's git add/commit run against
+// a worktree checked out on the wrong branch entirely. WorktreeBranch must catch this: Observe
+// reports not satisfied, and Act must recreate the worktree correctly on s.Branch (Worktree's
+// own reuse-or-recreate logic, unchanged here).
+func TestBranchedStepObserveRejectsWorktreeOnWrongBranch(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	// Register a worktree at the exact path this promotion's Observe will check, but on a
+	// different branch entirely.
+	if err := g.Worktree(ctx(), fx.cloneDir, wt, "totally-unrelated-branch", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newState(fx, wt)
+	step := BranchedStep{Git: g}
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("should not be satisfied: worktree at %s is on the wrong branch, got %+v", wt, obs)
+	}
+
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("Act should recreate the worktree on the right branch: %v", err)
+	}
+	branch, ok, err := g.WorktreeBranch(ctx(), fx.cloneDir, wt)
+	if err != nil || !ok || branch != s.Branch {
+		t.Fatalf("after Act, worktree should be registered on %q, got branch=%q ok=%v err=%v", s.Branch, branch, ok, err)
+	}
+
+	// The honest case: once correctly registered on s.Branch, Observe must report satisfied
+	// without touching anything.
+	obs, err = step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("should be satisfied once registered on the correct branch: %+v", obs)
+	}
+}
+
 func TestCommittedStepAppliesAndCommitsThenIsIdempotent(t *testing.T) {
 	fx := newFixture(t)
 	wt := filepath.Join(t.TempDir(), "wt")
