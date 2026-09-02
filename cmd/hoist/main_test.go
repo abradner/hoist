@@ -256,3 +256,47 @@ func TestPlanFailsCleanlyOnBadRepo(t *testing.T) {
 		t.Fatalf("unknown env: exit %d, want %d", got, exitFailure)
 	}
 }
+
+func TestNoCommandWithRepoDispatchesToTUI(t *testing.T) {
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	var got struct {
+		repo, appsRoot string
+		promotable     []string
+		calls          int
+	}
+	tuiRunner = func(repo, appsRoot string, promotable []string, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = repo, appsRoot, promotable
+		got.calls++
+		return 42
+	}
+	if code := run([]string{"--repo", fixture}, io.Discard, io.Discard); code != 42 {
+		t.Fatalf("exit %d, want the runner's 42", code)
+	}
+	if got.repo != fixture || got.appsRoot != "cluster/apps" || strings.Join(got.promotable, ",") != "ghcr.io/" {
+		t.Errorf("runner got %+v", got)
+	}
+	if code := run([]string{"--repo", fixture, "--apps-root", "x", "--promotable", "a/,b/"}, io.Discard, io.Discard); code != 42 {
+		t.Fatalf("exit %d, want 42", code)
+	}
+	if got.appsRoot != "x" || strings.Join(got.promotable, ",") != "a/,b/" {
+		t.Errorf("flags not passed through: %+v", got)
+	}
+	// A command after the flags goes to the command, never to the TUI.
+	if code := run([]string{"--repo", fixture, "bogus"}, io.Discard, io.Discard); code != exitUsage {
+		t.Errorf("--repo with a command: exit %d, want %d", code, exitUsage)
+	}
+	if got.calls != 2 {
+		t.Errorf("runner called %d times, want 2", got.calls)
+	}
+}
+
+func TestRunTUIFailsBeforeStartingOnBadRepo(t *testing.T) {
+	var errOut bytes.Buffer
+	if code := runTUI(t.TempDir(), "", []string{"ghcr.io/"}, io.Discard, &errOut); code != exitFailure {
+		t.Fatalf("exit %d, want %d", code, exitFailure)
+	}
+	if s := errOut.String(); !strings.HasPrefix(s, "hoist: ") || !strings.Contains(s, "apps root cluster/apps") {
+		t.Errorf("stderr: %s", s)
+	}
+}
