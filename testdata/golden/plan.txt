@@ -1,0 +1,33 @@
+hoist plan: app-staging -> app-production                                                   mode: PR
+┃ > ✓ ghcr.io/example/counta             │ --- a/cluster/apps/app-production/counta/app.yaml          
+┃ v20260115101                           │ +++ b/cluster/apps/app-production/counta/app.yaml          
+┃   ✓ ghcr.io/example/marketing  sha-    │ @@ -19,7 +19,7 @@                                          
+┃ 00001                                  │            command: ["dbwait", "--timeout=60s"]            
+┃   ✓ ! ghcr.io/example/web              │        containers:                                         
+┃ v202601010101                          │          - name: counta                                    
+┃                                        │ -          image: 'ghcr.io/example/counta:v202601151010@sha
+┃                                        │ +          image: 'ghcr.io/example/counta:v202602201200@sha
+┃                                        │            envFrom:                                        
+┃                                        │              - configMapRef:                               
+┃                                        │                  name: counta-config                       
+┃                                        │                                                            
+┃                                        │ --- a/cluster/apps/app-production/counta/purge-cronjob.yaml
+┃                                        │ +++ b/cluster/apps/app-production/counta/purge-cronjob.yaml
+┃                                        │ @@ -13,5 +13,5 @@                                          
+┃                                        │            restartPolicy: OnFailure                        
+┃                                        │            containers:                                     
+┃                                        │              - name: purge                                 
+┃                                        │ -              image: ghcr.io/example/counta:v202601151010@
+┃                                        │ +              image: ghcr.io/example/counta:v202602201200@
+┃                                        │                command: ["bin/rails", "counta:purge"]      
+┃                                        │                                                            
+┃                                        │ --- a/cluster/apps/app-production/marketing/app.yaml       
+┃                                        │ +++ b/cluster/apps/app-production/marketing/app.yaml       
+┃                                        │ @@ -15,6 +15,6 @@                                          
+┃                                        │      spec:                                                 
+┃                                        │        containers:                                         
+┃                                        │          - name: marketing                                 
+┃                                        │ 
+┃                                        │ 
+┃                                        │ 
+                                             tab pane · x toggle · m mode · enter confirm · esc back
