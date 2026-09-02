@@ -126,6 +126,38 @@ func TestInitDrivesImmediately(t *testing.T) {
 	}
 }
 
+// TestDriveCmdBoundedByPollDeadline: a DriveFunc that hangs (blocks on ctx.Done() rather than
+// ever returning) must not stall driveCmd forever — poll.Deadline bounds it, so the call
+// returns (with ctx's own deadline error) once that elapses, instead of the goroutine blocking
+// indefinitely. A zero Deadline (the config zero value, not this repo's Normalize-filled
+// default) means no bound at all, by design — only the case actually reachable via real config
+// (deadline set) is tested here.
+func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
+	hung := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		<-ctx.Done()
+		return s, false, nil, ctx.Err()
+	}
+	m := New(fixtureState(), config.PollConfig{Deadline: config.Duration(20 * time.Millisecond)}, hung)
+	cmd := m.driveCmd()
+	if cmd == nil {
+		t.Fatal("driveCmd returned nil for a non-nil driveFn")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		res, ok := msg.(driveResultMsg)
+		if !ok {
+			t.Fatalf("got %T, want driveResultMsg", msg)
+		}
+		if !errors.Is(res.err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want context.DeadlineExceeded", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("driveCmd did not return within 2s of a 20ms poll.Deadline — a hung DriveFunc call can still stall the screen forever")
+	}
+}
+
 // TestNilDriveFuncNeverTicks: a read-only flight screen (driveFn nil, the shape app.go's
 // plan.StartMsg handler currently pushes — see app.go's own comment on why) never calls
 // anything and never schedules a tick.

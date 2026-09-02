@@ -142,13 +142,29 @@ func (m Model) Init() tea.Cmd {
 // driveCmd runs one DriveFunc call off the Update call stack (AGENTS.md §4.3: it talks to
 // git/the forge). state is captured by value at call time, so a concurrent Update never
 // races the copy this goroutine reads.
+//
+// The call is bounded by m.poll.Deadline, not left on context.Background(): without this, a
+// single hung network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout)
+// would block this goroutine — and therefore this screen's ability to ever show progress or
+// let the user act — forever, with no way to cancel. Deadline is generous (default 4h, the
+// same value cmd/hoist's own driveToCompletion bounds an entire promotion's wait by), so this
+// bounds one poll iteration by "the whole promotion's own budget" rather than a tighter
+// per-call figure this package has no config knob for — imperfect (ideally relative to when
+// the promotion started, not this call), but it turns "can hang forever" into "eventually
+// errors," which is the actual gap being closed.
 func (m Model) driveCmd() tea.Cmd {
-	driveFn, state := m.driveFn, m.state
+	driveFn, state, deadline := m.driveFn, m.state, time.Duration(m.poll.Deadline)
 	if driveFn == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		next, done, statuses, err := driveFn(context.Background(), state)
+		ctx := context.Background()
+		if deadline > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, deadline)
+			defer cancel()
+		}
+		next, done, statuses, err := driveFn(ctx, state)
 		return driveResultMsg{state: next, done: done, statuses: statuses, err: err}
 	}
 }
