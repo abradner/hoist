@@ -285,6 +285,14 @@ func guardDisposablePath(cloneDir, worktreeDir string) error {
 	if rel, err := filepath.Rel(wt, cd); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("refusing to remove %q: the clone directory %q is inside it", worktreeDir, cloneDir)
 	}
+	// The opposite direction: worktreeDir configured to be a path INSIDE cloneDir (e.g. a
+	// misconfigured $XDG_CACHE_HOME pointing inside the user's own checkout). Without this,
+	// os.RemoveAll(worktreeDir) below would delete a real subtree of the user's checkout, and
+	// the check above alone would never catch it — it only catches cloneDir being the one
+	// contained, not worktreeDir.
+	if rel, err := filepath.Rel(cd, wt); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to remove %q: it is inside the clone directory %q", worktreeDir, cloneDir)
+	}
 	return nil
 }
 

@@ -481,3 +481,24 @@ func TestWorktreeRefusesADirectoryContainingTheClone(t *testing.T) {
 		t.Fatal("RemoveWorktree(worktreeDir containing cloneDir) succeeded, want a refusal")
 	}
 }
+
+// TestWorktreeRefusesADirectoryInsideTheClone is Finding D: the opposite direction from
+// TestWorktreeRefusesADirectoryContainingTheClone above. A worktreeDir that is itself a
+// subdirectory of cloneDir (e.g. a misconfigured $XDG_CACHE_HOME pointing inside the user's
+// own checkout) must be refused too — os.RemoveAll(worktreeDir) would otherwise delete a real
+// subtree of the user's own clone, and the existing "cloneDir inside worktreeDir" check does
+// not catch this: it only ever inspects the relationship in the other direction.
+func TestWorktreeRefusesADirectoryInsideTheClone(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	worktreeDir := filepath.Join(cloneDir, "subdir-inside-the-clone")
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var g Exec
+	if err := g.RemoveWorktree(ctx(), cloneDir, worktreeDir); err == nil {
+		t.Fatal("RemoveWorktree(worktreeDir inside cloneDir) succeeded, want a refusal")
+	}
+	if _, err := os.Stat(worktreeDir); err != nil {
+		t.Fatalf("worktreeDir should still exist after the refusal: %v", err)
+	}
+}
