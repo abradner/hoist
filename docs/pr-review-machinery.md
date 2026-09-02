@@ -113,8 +113,24 @@ Two more harvest traps:
 ## 3. Triage by verifying
 
 A finding is a claim, not a verdict — whether it came from a bot, a human, or your own earlier
-session. Trace or reproduce it before acting. Ask whether the flagged path is actually reachable.
-When a finding says code and docs disagree, work out which end is wrong before "fixing" either.
+session. Trace or reproduce it before acting.
+
+Four questions that decide most findings, each of which has changed a real verdict:
+
+- **Is the flagged path reachable?** A finding can be correct about the external world and still
+  irrelevant, because this codebase cannot produce the input it describes. Guarding an unreachable
+  path costs maintenance and buys nothing. (A reviewer correctly noted a CLI rejects unknown
+  categories; the category the client sends is a constant in its own template map. Declined.)
+- **Which end is wrong?** When a comment reports code and documentation disagreeing, the
+  documentation is often the side to fix. (A reviewer flagged a fake's error string as not matching
+  the notes. The fake was right; the notes had dropped a prefix.)
+- **What does the finding actually support?** A comment can be right that wording is misleading
+  without being right that the underlying rule is wrong. Fix the wording, not the rule. (A reviewer
+  read an invariant as condemning two existing inputs. The invariant was right; its phrasing
+  invited an unnecessary refactor.)
+- **What context did the reviewer have?** A bot reviewing one PR cannot see a decision made three
+  PRs earlier. Severity badges and assertive phrasing do not encode that missing context — weigh
+  the finding against what the reviewer could see.
 
 Sort each into: **fix now** / **defer to the tracker** / **decline with a stated reason**.
 

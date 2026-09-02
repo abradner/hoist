@@ -1,6 +1,6 @@
 ---
 name: batch-review
-description: Batch PR shipping workflow - fan out a body of work as a stack of small atomic single-commit PRs (interstitials, from base to cap), let CI and automated reviewers run immediately but treat all feedback as write-only until the whole batch is in, then synthesise the feedback in aggregate, ship all reactive work as ONE followup PR stacked on the cap, resolve interstitial comments as "fixed in the followup" or "not relevant", then land the train — one atomic `gh stack merge` on GitHub stacked PRs, or bottom-up merges in the manual fallback flavour. Use this whenever the user wants to review open PRs holistically or in aggregate, process accumulated bot/agent review comments across several PRs, ship a "review feedback batch" or followup PR, or mentions their overnight/fired-off batch of work - even if they don't say "batch review" explicitly. ALSO use at fan-out time, when the user asks to build a planned body of work as small/carefully-factored/stacked PRs. This is a deliberately different, opt-in mode for a genuine multi-PR fan-out, not this repo's default single-PR flow.
+description: Batch PR shipping workflow - fan out a body of work as a stack of small atomic single-commit PRs (interstitials, from base to cap), let CI and automated reviewers run immediately but treat all feedback as write-only until the whole batch is in, then synthesise the feedback in aggregate, ship all reactive work as ONE followup PR stacked on the cap, resolve interstitial comments as "fixed in the followup" or "not relevant", then land the train — one atomic `gh stack merge` on GitHub stacked PRs (two steps when the followup stayed loose on the cap), or bottom-up merges in the manual fallback flavour. Use this whenever the user wants to review open PRs holistically or in aggregate, process accumulated bot/agent review comments across several PRs, ship a "review feedback batch" or followup PR, or mentions their overnight/fired-off batch of work - even if they don't say "batch review" explicitly. ALSO use at fan-out time, when the user asks to build a planned body of work as small/carefully-factored/stacked PRs. This is a deliberately different, opt-in mode for a genuine multi-PR fan-out, not this repo's default single-PR flow.
 ---
 
 # Batch review
@@ -47,6 +47,13 @@ when green) remains correct for one PR at a time; this skill exists for the mult
   the cap), not per interstitial.
 - **Merge strategy**: **squash**, for interstitials and the followup alike — one `merge_method`
   covers the whole train. Only the `[SQUASH]` variants of the strategy-flagged rules below are kept.
+  *Why the distinction bites:* squash-merging a parent can break its children. The squash writes a
+  **new** commit duplicating the parent's payload while the child's merge base stays pre-batch. Git
+  still recognises identical changes on both sides, so a child carrying *only* the parent's payload
+  merges cleanly — the conflict comes from **divergence**, where the child also modified the same
+  hunks and git has two different versions from an ancestor with neither. Predict conflicts per
+  overlapping-and-modified *hunk*, not per shared file. Merge-commit interstitials avoid this
+  because child history stays a true ancestor.
 - **Deferral convention**: non-blocking findings go to GitHub issues on `abradner/hoist`, with the
   review link in the issue body. Never a PR-body table.
 
@@ -55,9 +62,18 @@ when green) remains correct for one PR at a time; this skill exists for the mult
 Stacked PRs are GA. **If the remote is GitHub, assume stacked flavour** and probe only to confirm
 the tooling is present and the repo is enabled:
 
+```bash
+gh stack --version
+rc=0; gh stack view --json || rc=$?; echo "exit=$rc"
 ```
-gh stack --version; gh stack view --json; echo "exit=$?"
-```
+
+**Capture the code with `||`, not with a `;`-separated `rc=$?`.** A non-zero exit is the
+*expected* result here, so under `set -e` anything outside a condition context aborts the shell
+before it can report the very code the table below turns on — `cmd; rc=$?` then prints nothing at
+all, and the probe looks like it produced no answer rather than a meaningful one. Verified:
+`bash -c 'set -e; false; rc=$?; echo "exit=$rc"'` exits 1 silently, while
+`bash -c 'set -e; rc=0; false || rc=$?; echo "exit=$rc"'` prints `exit=1`. Without `set -e` both
+forms work, which is why the broken one survives casual testing.
 
 **Exit 2 is the expected answer before fan-out**, not a failure: it means "no local stack yet",
 which is exactly true of a branch you are about to build a batch from. Do not read it as
@@ -197,7 +213,7 @@ and it is a one-commit fix now versus published-history archaeology after fan-ou
   ## Batch
   Batch: <name> | Flavour: manual|stacked | Position: N of M
   Stacked on: #<parent> | Feedback: write-only until synthesis — see followup PR
-  Merge: <stacked: one atomic `gh stack merge` on the checked-out train | manual: bottom-up> after followup approval, operator-gated
+  Merge: <stacked: one atomic `gh stack merge` on the checked-out train | stacked, loose followup: stack merge, then the followup on the updated base — two steps | manual: bottom-up> after followup approval, operator-gated
   ```
 
 - Never guess PR numbers; never leave placeholder references live.
@@ -230,6 +246,11 @@ an unrecallable external side effect. Everything else waits.
   propagated into each child — squash does not preserve the ancestry that would reunify it. (Stacked flavour handles this case:
   its squash path uses `git rebase --onto` so commits that vanish in the squash don't resurface as
   artificial conflicts in the children.)
+
+**"No checks at all" satisfies the CI condition.** Where workflows are `paths`-filtered, a PR
+touching only docs, skills or CI config legitimately runs *nothing*. Check whether any workflow's
+filters match the PR's paths; if none do, that half of the gate is already met. A naive
+"wait until all checks conclude" gate waits forever on exactly the PRs a batch produces most of.
 
 **Driving phase transitions**: subscribe to PR/CI events and react when they arrive; pair the
 subscription with a bounded fallback timer (order of ~30 min for a full stack's reviews, ~10 min
@@ -269,9 +290,19 @@ polling elsewhere.
 - Open as a **draft targeting main** so its diff is the whole stack — spend one budgeted
   aggregate bot review there — then **retarget to the cap** before marking ready, so per-PR
   reviewers see only the reactive delta. Stacked flavour: do this *before* adding the followup to
-  the stack, then `gh stack link <stack-number> <followup>` to append it at the top. Hand-editing
-  a base with `gh pr edit` on a PR the stack already owns puts local tracking and GitHub out of
-  step, and the next `sync` reports a divergence instead of syncing.
+  the stack, then append it at the top. **Adopt from the cap; do not submit from the followup** —
+  the verified sequence is:
+
+  ```bash
+  git checkout <cap-branch>
+  gh stack add <followup-branch>   # "✓ Adopted existing branch ..."; the SHA is unchanged
+  gh stack submit --auto           # "PR #N ... is up to date" — no duplicate PR is opened
+  ```
+
+  Running `gh stack submit` from the followup's *own* branch fails with
+  `✗ current branch "<branch>" is not part of a stack`. And do not hand-edit the base with
+  `gh pr edit` on a PR the stack already owns: local tracking and GitHub go out of step, and the
+  next `sync` reports a divergence instead of syncing.
 - Maintain a `## Review focus` section in the body, restated each round.
 - **The three-round cap applies to the followup as a whole** (shared doc §4), not per interstitial:
   the followup is the batch's single reactive surface, so its third round is the batch's last —
@@ -301,8 +332,21 @@ polling elsewhere.
   without a followup and the merge control does not ask. Merge without one and every accepted
   finding silently becomes debt on trunk with nothing tracking it.
 
-  A followup is not mandatory; *accounting* for its absence is. If one exists, confirm it is in
-  the train and go on to the next check. If none exists, establish which case this is:
+  A followup is not mandatory; *accounting* for its absence is. If one exists, it is in one of two
+  legitimate positions — confirm which, then go on to the next check:
+
+  - **In the train** (the normal stacked case) — it merges with everything below it in one atomic
+    operation. Confirm it appears in `gh stack view --json`.
+  - **Loose, targeting the cap** — the documented degrade path when adoption misbehaves. This is
+    legitimate, *not* a failed pre-flight: merge the stack first, then merge the followup manually
+    on the now-updated base. Confirm its base is the cap, and say in the readiness report that the
+    train takes two steps rather than one.
+
+  Requiring every followup to be *in* the train would make that fallback unreachable, which is the
+  opposite of what this check is for — it exists to stop a train merging with its feedback
+  unanswered, not to mandate one mechanism for answering it.
+
+  If none exists, establish which case this is:
 
   - **Synthesis has not happened.** This phase is premature. Say so and stop.
   - **Synthesis happened and produced nothing to action.** Legitimate — proceed. But confirm it
@@ -314,7 +358,7 @@ polling elsewhere.
 - **Pre-flight, third: confirm the followup's base is the cap, not trunk.** The Phase 6
   draft-first opening deliberately targets trunk for the aggregate review; if the retarget was
   missed, merging the followup collapses the whole stack into one commit.
-- **Pre-flight, third: every accepted finding is dispositioned, and severity decides which
+- **Pre-flight, fourth: every accepted finding is dispositioned, and severity decides which
   dispositions are legal.** Walk the synthesis list:
   - **P1 / red: fixed, or declined in writing with the reason.** A ticket is *not* a valid
     disposition for a P1 — the shared doc's closing round says P1/red blocks, and a check that
@@ -322,10 +366,10 @@ polling elsewhere.
     a rule written to stop exactly that.
   - **P2 and below: fixed, ticketed with the review link, or declined in writing.**
 
-  This is the check that makes the followup's closing-round disposition real: the first pre-flight
-  proves a followup *exists*, not that the findings inside it were dispositioned, and a followup
-  carrying undispositioned findings passes the first two checks unchanged. Merging there is how
-  accepted work becomes untracked debt on trunk — the same failure the first pre-flight was
+  This is the check that makes the followup's closing-round disposition real: the *second*
+  pre-flight proves a followup exists, not that the findings inside it were dispositioned, and a
+  followup carrying undispositioned findings passes every earlier check unchanged. Merging there is how
+  accepted work becomes untracked debt on trunk — the same failure the second pre-flight was
   written for, arriving one level down.
 ### Merging — stacked flavour
 
@@ -422,7 +466,8 @@ work. Delegated implementation means delegated review — one fresh-eyes agent o
 spelled-out aggregate diff. Sweep neighbouring PRs at fan-out and readiness; comment, don't
 absorb. Three reactive rounds, then defer. Verify aggregate signals; never trust the rollup.
 Operator says "merge" — nothing else counts. Account for the followup before starting the train:
-in it, or a confirmed nothing-to-action — and every accepted finding dispositioned before the train
+in it, loose on the cap (stack first, then the followup — two steps, and the readiness report says
+so), or a confirmed nothing-to-action — and every accepted finding dispositioned before the train
 moves: P1 fixed or declined in writing (never merely ticketed), P2-and-below fixed, ticketed, or
 declined. Stacked: checkout the train by PR URL, then an
 argument-less `gh stack merge --yes --<method>` lands everything below the top atomically — one
