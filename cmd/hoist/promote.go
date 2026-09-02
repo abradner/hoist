@@ -14,14 +14,12 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/forge/github"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // newGit and newForge are variables so tests substitute fakes/local fixtures: no test in this
@@ -220,7 +218,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		defer cancel()
 	}
 
-	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, a, ro, argoApps)
+	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
@@ -285,24 +283,20 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 // no equivalent flags yet, so its own caller passes the same defaults ("main", false) runPromote
 // itself defaults to.
 //
-// a, ro and argoApps are M5's additions. argoApps is what this promotion's own state records
-// (engine.ArgoAppNames, computed by the caller from the same discovered repo BuildPlan read —
-// it needs a *gitops.Repo this function deliberately does not take). a and ro exist for the two
-// findInFlight scans below rather than for this promotion: those scans re-observe OTHER
-// promotions for the same target env with engine.AllSteps, which from M5 on includes the
-// Argo/rollout steps, and a promotion that has already merged is exactly the kind this check
-// most needs to see clearly. Both must therefore be real adaptors, never nil, even for a caller
-// that will not itself drive past Merged (the TUI — see wiring.go's buildStartPromotion, which
-// builds them for this reason alone): ArgoRefreshedStep/ArgoSyncedStep guard only on
-// s.MergeSHA == "", so a nil Argo would panic on precisely the already-merged state file this
-// scan exists to notice.
+// argoApps is M5's addition: the Argo Application names this promotion's own state records
+// (engine.ArgoAppNames), computed by the caller from the same discovered repo BuildPlan already
+// read — it needs a *gitops.Repo this function deliberately does not take. No Argo/rollout
+// adaptor is needed here despite that: the two findInFlight scans below are scoped to
+// engine.CoreSteps, never AllSteps, precisely so a merged-but-still-converging promotion does
+// not block a new one (see findInFlight's own doc comment), which also means they never reach
+// the steps that would need one.
 //
 // On success, release must be called by the caller exactly once the returned state's first
 // successful save lands (ClaimInFlight's own doc comment: the claim's job is done once a durable
 // state file exists for a future findInFlight/ObserveAll scan to see) — never held for the whole
 // promotion. On error, any claim this call acquired has already been released; release is nil
 // whenever err is non-nil.
-func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, argoApps []string) (*engine.PromotionState, func(), error) {
+func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge, argoApps []string) (*engine.PromotionState, func(), error) {
 	id := engine.DeriveID(eff.cfg.GitHub, plan)
 	branch := engine.BranchName(plan.TargetEnv, id)
 	worktreeDir, err := engine.WorktreeDir(id)
@@ -317,7 +311,7 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 	// Invariant 5: one in-flight promotion per target env. A different image set for the same
 	// target env gets a different id (§4.1), so this can only find *another* promotion's state
 	// file — re-observed fresh, never trusted from its own Phase (findInFlight/ObserveAll).
-	if conflict, status, ferr := findInFlight(ctx, g, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, g, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		return nil, nil, fmt.Errorf("checking whether another promotion is already in flight: %w", ferr)
 	} else if conflict != nil {
 		return nil, nil, inFlightConflictError(conflict, plan.TargetEnv, status)
@@ -357,7 +351,7 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 	// the state file this process just wrote. Re-running the same scan now, while still holding
 	// the claim, closes that window: nothing else can win the claim while this check runs, and
 	// anything that raced into existence on disk between the first scan and now is caught here.
-	if conflict, status, ferr := findInFlight(ctx, g, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, g, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		return nil, nil, fmt.Errorf("checking whether another promotion is already in flight: %w", ferr)
 	} else if conflict != nil {
 		return nil, nil, inFlightConflictError(conflict, plan.TargetEnv, status)

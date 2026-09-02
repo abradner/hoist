@@ -370,10 +370,21 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 // running", the same shape here for a rollout already in motion).
 func (RolledOutStep) Act(context.Context, *PromotionState) error { return nil }
 
-// AllSteps returns every step a promotion drives through, in order: Steps' four (branch,
-// commit, push, PR), CIGreen, Approved and Merged (M4), then ArgoRefreshed, ArgoSynced and
-// RolledOut (M5). `hoist promote` and `hoist resume` always drive AllSteps.
+// CoreSteps returns the seven steps a promotion drives through up to and including the merge:
+// Steps' four (branch, commit, push, PR) plus CIGreen, Approved and Merged. This is exactly the
+// step list (and signature) `AllSteps` had before M5 — see steps_m4.go's own trailing comment —
+// kept alive under a new name because M5 needed the name `AllSteps` for the ten-step list below.
+// It exists for one caller: `findInFlight` in cmd/hoist/drive.go, which deliberately observes
+// only through Merged when deciding whether a promotion still counts as "in flight" for AGENTS.md
+// invariant 5 — see that function's own doc comment for the reasoning. `hoist promote` and
+// `hoist resume` never call this directly; they always drive `AllSteps` to real completion.
+func CoreSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
+	return append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
+}
+
+// AllSteps returns every step a promotion drives through, in order: CoreSteps' seven (branch,
+// commit, push, PR, CIGreen, Approved, Merged) then ArgoRefreshed, ArgoSynced and RolledOut
+// (M5). `hoist promote` and `hoist resume` always drive AllSteps to completion.
 func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
-	steps := append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
-	return append(steps, ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a}, RolledOutStep{Rollout: ro})
+	return append(CoreSteps(g, f, onWaiting), ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a}, RolledOutStep{Rollout: ro})
 }

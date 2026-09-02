@@ -9,11 +9,9 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // pollInterval picks the poll interval for whichever step Drive most recently stopped at
@@ -101,7 +99,22 @@ func retryableStep(step engine.StepName) bool {
 // found is nil when no conflicting in-flight promotion exists. An error re-observing a
 // candidate is treated conservatively — reported rather than silently skipped — since a
 // promotion this call can't verify is done must not be treated as safely finished.
-func findInFlight(ctx context.Context, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
+//
+// Deliberately observes only engine.CoreSteps (through Merged), not the full engine.AllSteps —
+// this is a considered call, not an oversight. Invariant 5 exists to prevent exactly one thing:
+// two promotions racing to create separate branches/PRs/merges for the same target env (a real
+// git/forge conflict). That risk is fully retired the moment a merge lands — a second promotion
+// for the same env gets its own id, its own branch and its own PR (§4.1's deterministic id is
+// keyed on the image set, so a later promotion for the same env necessarily differs), so nothing
+// about this promotion's own Argo refresh/sync or rollout convergence can still collide with it.
+// Blocking a brand-new promotion until a prior one's rollout finishes converging would be a
+// tightening with no matching risk to justify it — Argo/rollout convergence can run long (a slow
+// or stuck Deployment), and there is no reason a legitimate follow-up promotion for the same env
+// (e.g. a hotfix) should have to wait on it. `hoist promote`/`hoist resume` still drive every
+// promotion through the full ten steps via AllSteps (below) — only this in-flight check stops
+// short. See TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending in inflight_test.go for the
+// scenario this guards.
+func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
 	states, err := engine.ListStates()
 	if err != nil {
 		return nil, engine.StepStatus{}, err
@@ -110,7 +123,7 @@ func findInFlight(ctx context.Context, g git.Git, f forge.Forge, a argo.Argo, ro
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.AllSteps(g, f, a, ro, nil), prev)
+		done, last, oerr := engine.ObserveAll(ctx, engine.CoreSteps(g, f, nil), prev)
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}

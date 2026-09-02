@@ -505,22 +505,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		githubRepo = eff.cfg.GitHub
 	}
 	f, forgeErr := newForge(githubRepo)
-	// The Argo/Deployment adaptors are built here for the same reason f is, and deferred the
-	// same way: buildPromotionForConfirm's one-in-flight scan re-observes OTHER promotions with
-	// engine.AllSteps, which from M5 on includes the Argo/rollout steps, so it needs real
-	// adaptors even though this screen never drives past Merged itself (see
-	// buildStartPromotion's own steps list, and buildPromotionForConfirm's doc comment for why
-	// nil would panic on an already-merged state file rather than degrade). kubeContext is
-	// resolved from the selected repo the same way resolutionOptions does it for the plan
-	// screen's own digest resolution.
-	kubeContext := ""
-	if eff.cfg != nil {
-		kubeContext = eff.cfg.Kube.Context
-	}
-	a, _, argoErr := newArgo(kubeContext)
-	ro, _, rolloutErr := newRollout(kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
+		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
