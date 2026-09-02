@@ -8,6 +8,7 @@ import (
 
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/gitops"
 )
 
 func TestBranchedStepCreatesThenObservesSatisfied(t *testing.T) {
@@ -74,6 +75,65 @@ func TestCommittedStepAppliesAndCommitsThenIsIdempotent(t *testing.T) {
 	}
 	if s.CommitSHA != firstSHA {
 		t.Fatalf("CommitSHA changed on re-observe: %s vs %s", s.CommitSHA, firstSHA)
+	}
+}
+
+// TestCommittedStepActResumesAfterApplyWithoutCommit reproduces a process killed after
+// gitops.Apply wrote the "after" bytes to the worktree but before git commit returned
+// (AGENTS.md §4.6: 1Password's SSH-sign approval can hang or the process can just die).
+// gitops.Apply is intentionally non-idempotent, so a naive resume that unconditionally
+// re-calls Apply fails with "the file changed after the plan was built" — this asserts the
+// resumed run instead recognises the file is already at its expected content and proceeds
+// straight to commit.
+func TestCommittedStepActResumesAfterApplyWithoutCommit(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	// The killed run: worktree created, Apply already ran directly against it (standing in
+	// for CommittedStep.Act having reached that point before dying), but nothing was ever
+	// committed.
+	killed := newState(fx, wt)
+	if err := (BranchedStep{Git: g}).Act(ctx(), killed); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := gitops.Apply(killed.WorktreeDir, killed.Edits)
+	if err != nil {
+		t.Fatalf("simulating the killed run's Apply: %v", err)
+	}
+	if len(changed) == 0 {
+		t.Fatal("fixture plan should produce a real edit for Apply to have made")
+	}
+	sha, ok, err := g.RevParse(ctx(), killed.WorktreeDir, "HEAD")
+	if err != nil || !ok {
+		t.Fatalf("worktree should still have its branched HEAD: ok=%v err=%v", ok, err)
+	}
+	_ = sha // no commit exists yet; this is just confirming the worktree itself is usable
+
+	// The resumed run: a brand-new PromotionState, exactly as a fresh `hoist promote`
+	// invocation would build it, driven through Committed's Observe then Act.
+	resumed := newState(fx, wt)
+	step := CommittedStep{Git: g}
+	obs, err := step.Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatal("should not be satisfied before any commit exists, even though Apply already ran")
+	}
+	if err := step.Act(ctx(), resumed); err != nil {
+		t.Fatalf("resume after Apply-without-commit must succeed, got: %v", err)
+	}
+	if resumed.CommitSHA == "" {
+		t.Fatal("Act did not set CommitSHA")
+	}
+
+	obs, err = step.Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected Committed satisfied after resume, got %+v", obs)
 	}
 }
 

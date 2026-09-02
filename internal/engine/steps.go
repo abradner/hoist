@@ -105,13 +105,61 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 		}
 		s.ExpectedBlobs = blobs
 	}
+
+	// A prior invocation of this very step may already have called gitops.Apply against this
+	// worktree and then been killed before git commit returned (§4.6: signing can hang for a
+	// 1Password approval that never arrives). gitops.Apply is intentionally non-idempotent —
+	// Verify requires the "before" bytes it re-parses to match what the plan recorded — so
+	// calling it again on a file that already holds the "after" bytes fails with "the file
+	// changed after the plan was built", which is this step's own prior success, not a real
+	// conflict. Partition the edits by file and only ask Apply to touch a file whose current
+	// on-disk content doesn't already hash to what ExpectedBlobs says Apply would produce for
+	// it; a file already there — this promotion's own earlier Apply, or an edit that was a
+	// per-occurrence no-op to begin with (gitops.Edit.NoOp) — goes straight to add+commit
+	// instead of through Apply a second time.
+	byFile := map[string][]gitops.Edit{}
+	var files []string
+	for _, e := range s.Edits {
+		if _, ok := byFile[e.File]; !ok {
+			files = append(files, e.File)
+		}
+		byFile[e.File] = append(byFile[e.File], e)
+	}
+	sort.Strings(files)
+
+	var toApply []gitops.Edit
+	var alreadyDone []string
+	for _, f := range files {
+		p, err := gitops.ResolvePath(s.WorktreeDir, f)
+		if err != nil {
+			return err
+		}
+		cur, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("reading %s from the worktree: %w", f, err)
+		}
+		blob, err := c.Git.HashObject(ctx, s.WorktreeDir, cur)
+		if err != nil {
+			return err
+		}
+		if blob == s.ExpectedBlobs[f] {
+			// Already at the content Apply would produce — nothing left to write for this
+			// file, whichever of the two reasons above explains it.
+			alreadyDone = append(alreadyDone, f)
+			continue
+		}
+		toApply = append(toApply, byFile[f]...)
+	}
+
 	// gitops.Apply re-verifies before it writes each file (AGENTS.md invariant 3) — this is
 	// the one call in this milestone that touches the worktree's manifest bytes, and it is
-	// exactly the function M1/M2's `hoist plan` already calls, unmodified.
-	changed, err := gitops.Apply(s.WorktreeDir, s.Edits)
+	// exactly the function M1/M2's `hoist plan` already calls, unmodified. It only sees the
+	// edits for files not already in their expected final state.
+	changed, err := gitops.Apply(s.WorktreeDir, toApply)
 	if err != nil {
 		return fmt.Errorf("applying the plan's edits: %w", err)
 	}
+	changed = append(changed, alreadyDone...)
 	if len(changed) == 0 {
 		return errors.New("no files changed; nothing to commit (the caller should have detected an all-no-op plan before starting the engine)")
 	}
