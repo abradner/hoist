@@ -39,7 +39,27 @@ type gate struct {
 	injectCode string            // once authenticated, answer 404 with this attacker-chosen "code"
 
 	mu       sync.Mutex
-	attempts map[string]int // per user, "" for anonymous
+	attempts map[string]int  // per user, "" for anonymous
+	revoked  map[string]bool // users whose otherwise-correct password now 401s — a token
+	// revoked or rescoped mid-run, simulating the case a Client's cached winner must
+	// notice and fall back from.
+}
+
+// revoke makes every later request from user 401, whatever its password, until the test
+// ends. Safe to call concurrently with ServeHTTP.
+func (g *gate) revoke(user string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.revoked == nil {
+		g.revoked = map[string]bool{}
+	}
+	g.revoked[user] = true
+}
+
+func (g *gate) isRevoked(user string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.revoked[user]
 }
 
 func (g *gate) count(user string) {
@@ -75,7 +95,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
-	if g.users[user] != pass {
+	if g.users[user] != pass || g.isRevoked(user) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "credential "+pass+" for "+user+" rejected")
 		return
 	}
@@ -676,5 +696,45 @@ func TestParseAuthOrder(t *testing.T) {
 		if _, err := ParseAuthOrder(bad); err == nil {
 			t.Errorf("ParseAuthOrder(%v) accepted", bad)
 		}
+	}
+}
+
+// Copilot suppressed comment (followup #29): Client.do's cached-winner fast path returns
+// whatever error the winner produces, with no fallback to the rest of the chain — but the
+// doc comment on do promises "a 401/403 moves to the next link" unconditionally. A token
+// that is revoked or rescoped mid-run (or was only ever scoped to some repos on a host,
+// not all of them) must still fall back to the next configured source, exactly as the
+// uncached first walk already does, not return the stale winner's failure for the rest
+// of the process.
+func TestCachedWinnerFallsBackWhenRevoked(t *testing.T) {
+	tr := newTestRegistry(t)
+	tr.gate.users["hoist"] = "pw-good" // AuthEnv's fixed username with no GHCR_USER set
+	d := tr.pushImage(t, "example/app:v1")
+	t.Setenv("HOIST_GHCR_TOKEN", "pw-good")
+	c := newClient(t, tr, AuthConfig{
+		Order:    []AuthSource{AuthEnv, AuthKeychain},
+		Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"},
+	})
+	ref := mustRef(t, "ghcr.io/example/app:v1")
+
+	got, err := c.Head(context.Background(), ref)
+	if err != nil || got != d.String() {
+		t.Fatalf("first Head = %q, %v; want %s, nil", got, err, d)
+	}
+	if used := c.AuthSourceUsed(); used != "env (HOIST_GHCR_TOKEN)" {
+		t.Fatalf("AuthSourceUsed after first Head = %q, want the env link cached as winner", used)
+	}
+
+	tr.gate.revoke("hoist") // the cached env credential now 401s on every request
+
+	got, err = c.Head(context.Background(), ref)
+	if err != nil || got != d.String() {
+		t.Fatalf("second Head after revocation = %q, %v; want a fallback to keychain, still succeeding", got, err)
+	}
+	if used := c.AuthSourceUsed(); used != "keychain" {
+		t.Fatalf("AuthSourceUsed after fallback = %q, want keychain", used)
+	}
+	if n := tr.gate.tries("good"); n == 0 {
+		t.Error("keychain credential was never attempted on the second request — the stale winner's error was returned without re-walking the chain")
 	}
 }

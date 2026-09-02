@@ -289,10 +289,14 @@ func (c *Client) Tags(ctx context.Context, repo string) ([]string, error) {
 
 // do runs op with the remembered credential for reg, or walks the chain until one link's
 // request succeeds. A 401/403 moves to the next link; any other failure is reported at
-// once, since the credential was not what was wrong. Client.mu is held only long enough
-// to read or write winners/consulted — never across op itself, which does the network
-// request — so a slow request against one host never blocks a concurrent request
-// against another.
+// once, since the credential was not what was wrong. That holds for the cached winner
+// too: it is a memo of what worked last time, not a promise it still does — a token can
+// be revoked or rescoped mid-run, or never have covered every repo on the host in the
+// first place — so an auth failure from the winner forgets it and re-walks the chain
+// exactly as an uncached host would, rather than returning the same failure for the rest
+// of the process. Client.mu is held only long enough to read or write
+// winners/consulted/the cache — never across op itself, which does the network request —
+// so a slow request against one host never blocks a concurrent request against another.
 func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authenticator) error) error {
 	host := reg.RegistryStr()
 
@@ -302,10 +306,16 @@ func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authen
 	c.mu.Unlock()
 
 	if hasWinner {
-		if err := op(w.auth); err != nil {
+		err := op(w.auth)
+		if err == nil {
+			return nil
+		}
+		if !authFailure(err) {
 			return errors.New(describe(err, w.hide))
 		}
-		return nil
+		c.mu.Lock()
+		delete(c.winners, host)
+		c.mu.Unlock()
 	}
 	var outcomes []string
 	var hide []string
