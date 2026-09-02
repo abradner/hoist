@@ -1,6 +1,7 @@
 // Package ui holds what every hoist screen shares: one Styles palette built from a
-// light/dark flag, and the status-bar line helper. It imports Lip Gloss only — no Bubbles
-// components, no screen state — so any screen package can depend on it without a cycle.
+// light/dark flag, and the status-bar line helper. It imports Lip Gloss and x/ansi (cell
+// width and ANSI stripping for the status bar) — no Bubbles components, no screen state — so
+// any screen package can depend on it without a cycle.
 package ui
 
 import "charm.land/lipgloss/v2"

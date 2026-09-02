@@ -39,11 +39,12 @@ when green) remains correct for one PR at a time; this skill exists for the mult
   ```
 
   `-count=1` defeats the test cache; the run count in the output is the gate, not the colour.
-- **Bot roster** (mechanics in `docs/pr-review-machinery.md` §1; provisional until the first PR
-  confirms it): **Copilot** fires on a PR opened ready or promoted draft→ready, and on an explicit
-  re-review request — unrationed. **Codex** fires only on an `@codex <prompt>` comment, never on its
-  own — budget **2–3 invocations per batch**, spent on aggregate diffs (the followup draft against
-  main, and the cap), not per interstitial.
+- **Bot roster** (mechanics in `docs/pr-review-machinery.md` §1; confirmed on PRs #8–#10):
+  **Copilot** fires on a PR opened ready or promoted draft→ready, and on an explicit re-review
+  request — unrationed. **Codex** fires only on an `@codex <prompt>` comment, never on its own
+  (its help text claims open/ready triggers; two ready-opened PRs here got nothing) — budget
+  **2–3 invocations per batch**, spent on aggregate diffs (the followup draft against main, and
+  the cap), not per interstitial.
 - **Merge strategy**: **squash**, for interstitials and the followup alike — one `merge_method`
   covers the whole train. Only the `[SQUASH]` variants of the strategy-flagged rules below are kept.
 - **Deferral convention**: non-blocking findings go to GitHub issues on `abradner/hoist`, with the

@@ -99,23 +99,69 @@ func Discover(root, appsRoot string) (*Repo, error) {
 	return r, nil
 }
 
+// checkRelative is the lexical half of staying inside the repo: after cleaning, p must be
+// relative and must not climb out. Cleaning first is what catches a/../../victim.yaml, which
+// begins innocently and only resolves upward once joined to a root.
 func checkRelative(p string) error {
-	if path.IsAbs(p) || p == "." || p == ".." || strings.HasPrefix(p, "../") {
+	c := path.Clean(p)
+	if path.IsAbs(c) || filepath.IsAbs(filepath.FromSlash(c)) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
 		return fmt.Errorf("%q must be a relative path inside the repo", p)
 	}
 	return nil
 }
 
+// ResolvePath joins rel (slash-separated, relative) to root, proves the result stays inside
+// root — lexically (checkRelative) and physically: a symlink inside the repo that points
+// outside it is refused — and returns the symlink-free path, so the caller's ReadDir,
+// ReadFile or WriteFile opens the file that was checked rather than re-following the link
+// (a second traversal, and a window in which the link could be repointed). When the path
+// does not exist yet (a write target), the deepest existing ancestor is resolved and checked
+// and the missing tail is appended, so the caller's own read reports the missing file. Every
+// join of a repo-relative path to a root goes through here: the apps root, each family
+// directory and each YAML file on the read side (Discover), and each Edit.File on the write
+// side (Apply). A checkout is attacker-shaped on both sides — a symlink committed in a PR is
+// followed by git, and a manifest read through it would supply the reference a later plan
+// writes into an in-repo target.
+func ResolvePath(root, rel string) (string, error) {
+	if err := checkRelative(rel); err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	existing := filepath.Join(root, filepath.FromSlash(rel))
+	missing := ""
+	var resolved string
+	for {
+		r, err := filepath.EvalSymlinks(existing)
+		if err == nil {
+			resolved = r
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) || existing == root {
+			return "", err
+		}
+		missing = filepath.Join(filepath.Base(existing), missing)
+		existing = filepath.Dir(existing)
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	inside, err := filepath.Rel(realRoot, resolved)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) || filepath.IsAbs(inside) {
+		return "", fmt.Errorf("%q resolves to %s, outside the repo", rel, resolved)
+	}
+	return filepath.Join(resolved, missing), nil
+}
+
 func readApps(root, appsRoot string) ([]ArgoApp, error) {
-	dir := filepath.Join(root, filepath.FromSlash(appsRoot))
-	files, err := yamlFiles(dir)
+	files, err := yamlFilesIn(root, appsRoot)
 	if err != nil {
 		return nil, fmt.Errorf("apps root %s: %w", appsRoot, err)
 	}
 	var apps []ArgoApp
 	for _, f := range files {
 		rel := path.Join(appsRoot, f)
-		docs, err := parseFile(filepath.Join(dir, f))
+		docs, err := parseFile(root, rel)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", rel, err)
 		}
@@ -149,7 +195,20 @@ func readApps(root, appsRoot string) ([]ArgoApp, error) {
 	return apps, nil
 }
 
-// yamlFiles lists the *.yaml and *.yml regular files directly inside dir, sorted by name.
+// yamlFilesIn is yamlFiles for the repo-relative directory rel, contained by ResolvePath so
+// a family or apps directory that is a symlink out of the checkout is refused before it is
+// listed.
+func yamlFilesIn(root, rel string) ([]string, error) {
+	dir, err := ResolvePath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	return yamlFiles(dir)
+}
+
+// yamlFiles lists the *.yaml and *.yml non-directory entries directly inside dir, sorted by
+// name. A symlink is listed (it is not a directory entry to ReadDir), so every caller that
+// reads one goes through parseFile's ResolvePath; findUnmanaged only counts.
 func yamlFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -168,8 +227,17 @@ func yamlFiles(dir string) ([]string, error) {
 	return out, nil
 }
 
-func parseFile(p string) ([]*yaml.Node, error) {
-	b, err := os.ReadFile(p)
+// readFile reads the repo-relative file rel, refusing one that resolves outside root.
+func readFile(root, rel string) ([]byte, error) {
+	p, err := ResolvePath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(p)
+}
+
+func parseFile(root, rel string) ([]*yaml.Node, error) {
+	b, err := readFile(root, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -240,20 +308,67 @@ func childPath(p, key string) string {
 
 func indexPath(p string, i int) string { return p + "[" + strconv.Itoa(i) + "]" }
 
+// cursor is where a walk is inside one document: the dotted path of the current node plus
+// the facts that decide whether an image: scalar there is an occurrence. Discovery
+// (scanDoc) and Verify (walkPair) both walk with it, so the eligibility test exists once
+// (imageOfContainer) and a planned edit can only ever match a scalar discovery would have
+// recorded — never, say, a ConfigMap's data.image.
+type cursor struct {
+	path string
+	// key is the mapping key this node is the value of; "" for a key, a sequence item or the
+	// root.
+	key string
+	// seqKey is, when this node is a sequence item, the mapping key that sequence is the
+	// value of; "" otherwise.
+	seqKey string
+	// container is the enclosing container item when this node is a direct value of a
+	// mapping that is itself an item of a containers/initContainers/ephemeralContainers
+	// sequence; nil otherwise.
+	container *yaml.Node
+}
+
+// child positions the cursor on parent.Content[i].
+func (c cursor) child(parent *yaml.Node, i int) cursor {
+	switch parent.Kind {
+	case yaml.MappingNode:
+		if i%2 == 0 {
+			return cursor{path: c.path} // a key carries its parent's path and is never a value
+		}
+		key := parent.Content[i-1].Value
+		next := cursor{path: childPath(c.path, key), key: key}
+		if containerKeys[c.seqKey] {
+			next.container = parent
+		}
+		return next
+	case yaml.SequenceNode:
+		return cursor{path: indexPath(c.path, i), seqKey: c.key}
+	default:
+		return cursor{path: c.path}
+	}
+}
+
+// imageOfContainer reports whether the node under the cursor is the image: value of a
+// container item — the one shape of scalar hoist records and rewrites.
+func (c cursor) imageOfContainer() bool { return c.key == "image" && c.container != nil }
+
 func scanFamily(root string, fam *Family) error {
-	dir := filepath.Join(root, filepath.FromSlash(fam.Dir))
-	files, err := yamlFiles(dir)
+	files, err := yamlFilesIn(root, fam.Dir)
 	if err != nil {
 		return fmt.Errorf("family %q: %w", fam.Name, err)
 	}
 	for _, f := range files {
 		rel := path.Join(fam.Dir, f)
-		docs, err := parseFile(filepath.Join(dir, f))
+		b, err := readFile(root, rel)
 		if err != nil {
 			return fmt.Errorf("%s: %w", rel, err)
 		}
+		docs, err := parseDocs(b)
+		if err != nil {
+			return fmt.Errorf("%s: %w", rel, err)
+		}
+		lines := bytes.Split(b, []byte{'\n'})
 		for i, doc := range docs {
-			occ, err := scanDoc(rel, i, doc)
+			occ, err := scanDoc(rel, i, doc, lines)
 			if err != nil {
 				return err
 			}
@@ -264,8 +379,10 @@ func scanFamily(root string, fam *Family) error {
 }
 
 // scanDoc walks one document and records every image: scalar that is a direct field of an
-// item in a containers/initContainers/ephemeralContainers sequence.
-func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
+// item in a containers/initContainers/ephemeralContainers sequence (cursor.imageOfContainer).
+// lines are the file's bytes split on '\n', the way ApplyBytes splits them, so each
+// occurrence's position is checked against the same line Apply would rewrite.
+func scanDoc(file string, idx int, doc *yaml.Node, lines [][]byte) ([]Occurrence, error) {
 	body := unwrap(doc)
 	if body == nil {
 		return nil, nil
@@ -273,51 +390,30 @@ func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
 	kind := scalarAt(doc, "kind")
 	name := scalarAt(doc, "metadata", "name")
 	var out []Occurrence
-	var walk func(n *yaml.Node, p string) error
-	walk = func(n *yaml.Node, p string) error {
-		switch n.Kind {
-		case yaml.MappingNode:
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				k, v := n.Content[i], n.Content[i+1]
-				cp := childPath(p, k.Value)
-				if containerKeys[k.Value] && v.Kind == yaml.SequenceNode {
-					for j, item := range v.Content {
-						if item.Kind != yaml.MappingNode {
-							continue
-						}
-						img := lookup(item, "image")
-						if img == nil {
-							continue
-						}
-						ip := childPath(indexPath(cp, j), "image")
-						occ, err := occurrenceAt(file, idx, kind, name, scalarAt(item, "name"), ip, img)
-						if err != nil {
-							return err
-						}
-						out = append(out, occ)
-					}
-				}
-				if err := walk(v, cp); err != nil {
-					return err
-				}
+	var walk func(n *yaml.Node, c cursor) error
+	walk = func(n *yaml.Node, c cursor) error {
+		if c.imageOfContainer() {
+			occ, err := occurrenceAt(file, idx, kind, name, scalarAt(c.container, "name"), c.path, n, lines)
+			if err != nil {
+				return err
 			}
-		case yaml.SequenceNode:
-			for j, item := range n.Content {
-				if err := walk(item, indexPath(p, j)); err != nil {
-					return err
-				}
+			out = append(out, occ)
+			return nil
+		}
+		for i := range n.Content {
+			if err := walk(n.Content[i], c.child(n, i)); err != nil {
+				return err
 			}
-		default:
 		}
 		return nil
 	}
-	if err := walk(body, ""); err != nil {
+	if err := walk(body, cursor{}); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func occurrenceAt(file string, idx int, kind, name, container, p string, img *yaml.Node) (Occurrence, error) {
+func occurrenceAt(file string, idx int, kind, name, container, p string, img *yaml.Node, lines [][]byte) (Occurrence, error) {
 	switch img.Kind {
 	case yaml.ScalarNode:
 	case yaml.AliasNode:
@@ -335,10 +431,20 @@ func occurrenceAt(file string, idx int, kind, name, container, p string, img *ya
 	if err != nil {
 		return Occurrence{}, fmt.Errorf("%s:%d: %s: %w", file, img.Line, p, err)
 	}
-	return Occurrence{
+	occ := Occurrence{
 		File: file, Doc: idx, Line: img.Line, Col: img.Column, Style: img.Style,
 		Kind: kind, Name: name, Container: container, Path: p, Raw: img.Value, Ref: ref,
-	}, nil
+	}
+	// The same predicate replaceInLine applies before writing: a value not on one line with
+	// its key ("? image" / ": ref", or the value on the line after "image:") is refused here,
+	// naming the file and line, instead of being planned and refused at write time.
+	if occ.Line < 1 || occ.Line > len(lines) {
+		return Occurrence{}, fmt.Errorf("%s:%d: %s: line is outside the file (%d lines)", file, occ.Line, p, len(lines))
+	}
+	if _, err := checkScalarStart(lines[occ.Line-1], &occ); err != nil {
+		return Occurrence{}, fmt.Errorf("%s:%d: %s: %w", file, occ.Line, p, err)
+	}
+	return occ, nil
 }
 
 func commonParent(env *Env) string {

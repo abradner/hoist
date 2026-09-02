@@ -16,10 +16,14 @@ Status: greenfield, pre-alpha; milestones M0–M7 are tracked in issues.
 
 Domain nouns, as this repo uses them:
 
-- **Env** — one environment, identified by a directory under the apps root (`cluster/apps/<env>/`)
-  which is also the Kubernetes namespace. Not "environment variable".
-- **Family** — one deployable unit inside an env (`<env>/<family>/*.yaml`), backed by exactly one
-  Argo CD `Application`. A family may hold several containers on the same image.
+- **Env** — one environment: the `spec.destination.namespace` of an Argo CD `Application`
+  wrapper under the apps root. In the target layout that namespace also names the directory
+  (`cluster/apps/<env>/`), but the directory is derived from the wrappers, never the source of
+  truth — `gitops.Discover` keys envs by namespace and would not notice a directory named
+  otherwise (`TestDiscoverEnvIsNamespaceNotDirectoryName`). Not "environment variable".
+- **Family** — one deployable unit inside an env: the `spec.source.path` of exactly one Argo CD
+  `Application`, named by that path's last element (`<env>/<family>/*.yaml` in the target
+  layout). A family may hold several containers on the same image.
 - **Occurrence** — one `image:` scalar in one manifest (file, document, YAML path). Promotion
   rewrites occurrences, grouped by image repo.
 - **Image repo** — the registry path without tag or digest (`ghcr.io/org/app`). "Repo" alone means
@@ -166,6 +170,22 @@ instead — Apache-2), Temporal SDK or server, go-git, kustomize `api`/`kyaml`, 
 libraries, cobra (arrives for free if `abradner/workflow`'s `cli` is adopted later). Argo CD is
 driven through the Kubernetes API alone: refresh = the `argocd.argoproj.io/refresh` annotation on
 the `Application`, status = its `status` subresource. No Argo API server, no Argo token.
+
+### 4.8 TUI structure
+
+`internal/app` holds the one root `tea.Model`: the screen stack, the window size, the theme
+(built once from `tea.BackgroundColorMsg`) and the global keys. Every screen is a value-typed
+model in its own package `internal/app/<screen>` with a `New(...)` constructor, a pure `Update`
+that returns the screen's concrete type, `View() string`, and `SetSize`/`SetStyles` setters the
+root calls on resize and theme change; the root adapts each one through its `Screen` interface
+(`internal/app/screen.go`), so a screen never imports `app`. A screen's derived data — what it
+shows, before any styling — lives in a file with no terminal dependency (`matrix/cells.go`) so it
+is unit-testable as plain values; the model file only lays that data out. `internal/ui` holds the
+shared palette and small shared widgets (the status bar), nothing screen-specific. No layout
+library (§4.7): screens compose strings with `strings.Join` and the Bubbles components they
+embed. *Why:* the first UI PR (#10) had no stated convention and adopted this shape as a proposal
+in `internal/app/doc.go` (§8, "building structure where no convention is stated is a decision");
+stating it here once means the next screen follows it instead of re-litigating shape per PR.
 
 ## 5. Repository Map
 
@@ -497,7 +517,40 @@ be cited from code comments and PR descriptions.
 Entry shape: **what happened → the actual root cause → the general rule → where the regression
 test lives** (if one exists).
 
-*No entries yet.*
+1. **`yaml.v3` `Node.Column` on a quoted scalar points at the opening quote, not the first
+   character of the value.** What happened: the M1 brief described the recorded column as "after
+   any quote"; for `image: "ghcr.io/…"` yaml.v3 reports the column of the `"`, one before the
+   value, and code written to the brief's description would match `Raw` one character early.
+   Root cause: `Column` is the start of the scalar *token*, quote included (verified against
+   yaml.v3 v3.0.1; the docs are silent). Rule: `Occurrence.Col` records
+   yaml.v3's value unchanged and is opaque to callers; `gitops.Apply` and `gitops.Verify` step past
+   the opening quote for `DoubleQuotedStyle`/`SingleQuotedStyle` before matching `Raw`, and any
+   new consumer of `Col` must do the same rather than "fix" the recorded value. Regression tests:
+   `TestApplyBytesDoubleQuotedByteExact` and `TestApplyBytesSingleQuotedByteExact` in
+   `pkg/gitops/apply_test.go`; `TestDiscoverPositionsMatchFileBytes` and
+   `TestDiscoverInitContainersAndQuotingStyles` in `pkg/gitops/discover_test.go`.
+2. **Path containment on the write side alone leaves the read side to supply the value.** What
+   happened: `ResolvePath` (lexical `Rel` + `EvalSymlinks` under the resolved root) guarded
+   `Apply`'s `Edit.File`, but `Discover` still joined the apps root, each `spec.source.path` and
+   each YAML file directly, and `os.ReadDir` lists a symlink as a non-directory entry that
+   `os.ReadFile` then follows — so a symlink committed in a PR could feed an external manifest's
+   reference into a plan that writes an in-repo target. Root cause: the containment was added
+   where the bytes leave the process, not at every join of a repo-relative path to the root.
+   Rule: every join goes through `ResolvePath`, read and write; a new reader of a repo-relative
+   path calls it before `ReadDir`/`ReadFile`. Regression tests: `TestDiscoverRefusesSymlinkOutsideRepo`
+   and `TestDiscoverFollowsSymlinkInsideRepo` in `pkg/gitops/discover_test.go`.
+3. **`yaml.v3` accepts more key layouts than `image: value` on one line.** What happened: the
+   start-of-scalar check in `ApplyBytes` matched the literal `image:`, but yaml.v3 also parses
+   `image : ref` (blanks before the colon), `-   image:` (more than one blank after the item
+   marker), the explicit-key form `? image` / `: ref`, and `image:` with the value on the next
+   line — all discovered and planned, then refused only at write time. Root cause: discovery
+   recorded what the parser accepted; the write path recognised a narrower grammar, and the two
+   were separate code. Rule: one predicate, `checkScalarStart`, is called by `occurrenceAt` at
+   discovery and by `replaceInLine` at write; one-line variants are accepted, and a value that
+   does not share a line with its key is refused at discovery, naming file and line. The
+   discovery call is politeness (§8, layered checks) — deleting it moves the refusal, never the
+   write. Regression tests: `TestApplyBytesKeyColonSpacingByteExact` in `pkg/gitops/apply_test.go`;
+   `TestDiscoverRefusesKeyAndValueOnDifferentLines` in `pkg/gitops/discover_test.go`.
 
 ## 10. Maintaining This Document
 

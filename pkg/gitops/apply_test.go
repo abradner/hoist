@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -54,6 +55,40 @@ func TestApplyBytesInlineCommentByteExact(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// yaml.v3 also accepts blanks between the key and its colon (image : ref) and more than one
+// blank after a "-" item marker; both are still one key: value pair on one line, so the
+// scalar is rewritten byte-minimally like any other. Refusing them at write time — after the
+// occurrence was discovered and planned — was the late failure Codex P2 named.
+func TestApplyBytesKeyColonSpacingByteExact(t *testing.T) {
+	for _, tc := range []struct{ before, want string }{
+		{
+			"spec:\n  containers:\n    - name: web\n      image : ghcr.io/x/y:v1\n",
+			"spec:\n  containers:\n    - name: web\n      image : ghcr.io/x/y:v1@" + digestA + "\n",
+		},
+		{
+			"spec:\n  containers:\n    - name: web\n      image  :\t\"ghcr.io/x/y:v1\"  # note\n",
+			"spec:\n  containers:\n    - name: web\n      image  :\t\"ghcr.io/x/y:v1@" + digestA + "\"  # note\n",
+		},
+		{
+			"spec:\n  containers:\n    -   name: web\n        image: ghcr.io/x/y:v1\n",
+			"spec:\n  containers:\n    -   name: web\n        image: ghcr.io/x/y:v1@" + digestA + "\n",
+		},
+		{
+			"spec:\n  containers:\n    -   image: ghcr.io/x/y:v1\n        name: web\n",
+			"spec:\n  containers:\n    -   image: ghcr.io/x/y:v1@" + digestA + "\n        name: web\n",
+		},
+	} {
+		got, err := ApplyBytes([]byte(tc.before), []Edit{singleEdit(t, tc.before, 0, "ghcr.io/x/y:v1@"+digestA)})
+		if err != nil {
+			t.Errorf("%q: %v", tc.before, err)
+			continue
+		}
+		if string(got) != tc.want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, tc.want)
+		}
 	}
 }
 
@@ -184,6 +219,36 @@ func TestApplyBytesRefusals(t *testing.T) {
 	})
 }
 
+// An Edit whose Col and Raw name a suffix of the scalar passes the text match on its own:
+// the bytes at Col really are the planned Raw. ApplyBytes must still refuse it, or the write
+// keeps whatever preceded Col and produces image: junk@ghcr.io/x/y:v2@sha256:….
+func TestApplyBytesRefusesColumnInsideScalar(t *testing.T) {
+	before := "spec:\n  containers:\n    - name: a\n      image: junk@ghcr.io/x/y:v1\n"
+	line := "      image: junk@ghcr.io/x/y:v1"
+	e := Edit{Occurrence: Occurrence{
+		File: "f.yaml", Line: 4, Col: strings.Index(line, "ghcr.io") + 1,
+		Path: "spec.containers[0].image", Raw: "ghcr.io/x/y:v1", Ref: mustRef(t, "ghcr.io/x/y:v1"),
+	}, New: mustRef(t, "ghcr.io/x/y:v2@"+digestA)}
+	got, err := ApplyBytes([]byte(before), []Edit{e})
+	if err == nil {
+		t.Fatalf("edit inside the scalar applied:\n%s", got)
+	}
+	if !strings.Contains(err.Error(), `not the start of a "image: value" pair`) {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// Positive control: the same edit with Col at the scalar's start is applied.
+	ok := "spec:\n  containers:\n    - name: a\n      image: ghcr.io/x/y:v1\n"
+	if _, err := ApplyBytes([]byte(ok), []Edit{singleEdit(t, ok, 0, "ghcr.io/x/y:v2@"+digestA)}); err != nil {
+		t.Errorf("edit at the scalar's start refused: %v", err)
+	}
+	// And the key is taken from the path, so a path that names another key is refused too.
+	wrongKey := singleEdit(t, ok, 0, "ghcr.io/x/y:v2@"+digestA)
+	wrongKey.Path = "spec.containers[0].imag"
+	if _, err := ApplyBytes([]byte(ok), []Edit{wrongKey}); err == nil {
+		t.Error("edit whose path names a different key than the line applied")
+	}
+}
+
 func TestApplyWritesOnlyPlannedFiles(t *testing.T) {
 	p := planFixture(t)
 	tmp := copyDir(t, fixtureRoot)
@@ -251,11 +316,223 @@ func TestApplyWritesOnlyPlannedFiles(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesPathEscape names the attacker: an Edit whose File leaves the repo. The
+// victim is a real, applicable copy of the edited fixture file placed one level above the
+// root, so a containment check that only looked at the first path element would read it,
+// verify it and write it.
 func TestApplyRefusesPathEscape(t *testing.T) {
 	p := planFixture(t)
 	e := p.Edits[0]
-	e.File = "../" + e.File
-	if _, err := Apply(t.TempDir(), []Edit{e}); err == nil {
-		t.Error("edit outside root accepted")
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(parent, "victim.yaml")
+	orig := readFixture(t, e.File)
+	if err := os.WriteFile(victim, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.yaml")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: the same edit against the victim's bytes really does apply, so an
+	// accepted escape below would have written.
+	if _, err := ApplyBytes(orig, []Edit{e}); err != nil {
+		t.Fatalf("control: edit does not apply to the victim file: %v", err)
+	}
+	for _, file := range []string{"../victim.yaml", "a/../../victim.yaml", "link.yaml", "/" + victim} {
+		esc := e
+		esc.File = file
+		changed, err := Apply(root, []Edit{esc})
+		if err == nil {
+			t.Errorf("%s: edit outside root accepted (changed %v)", file, changed)
+		}
+		got, readErr := os.ReadFile(victim)
+		if readErr != nil || !bytes.Equal(got, orig) {
+			t.Fatalf("%s: victim file was modified (read err %v)", file, readErr)
+		}
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"dir/in.yaml", "top.yaml"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(parent, "out.yaml"), []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(parent, "out.yaml"), filepath.Join(root, "dir", "escape.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "top.yaml"), filepath.Join(root, "dir", "stay.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ok := range []string{"dir/in.yaml", "top.yaml", "dir/../top.yaml", "dir/stay.yaml", "dir/missing.yaml"} {
+		if _, err := ResolvePath(root, ok); err != nil {
+			t.Errorf("%s: refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"../out.yaml", "dir/../../out.yaml", "dir/escape.yaml", ".", "..", "/etc/passwd", filepath.Join(parent, "out.yaml")} {
+		if p, err := ResolvePath(root, bad); err == nil {
+			t.Errorf("%s: accepted as %s", bad, p)
+		}
+	}
+}
+
+// ResolvePath hands back the path it checked, symlinks resolved, so the caller's open does
+// not follow the link a second time; a target that does not exist yet gets its deepest
+// existing ancestor resolved and the missing tail appended. Discover keeps recording the
+// repo-relative link path in Occurrence.File (TestDiscoverFollowsSymlinkInsideRepo) — that
+// is the file the operator committed; this is the file the process opens.
+func TestResolvePathReturnsResolvedPath(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"dir/in.yaml", "top.yaml"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		"dir/stay.yaml": filepath.Join(root, "top.yaml"),
+		"linkdir":       filepath.Join(root, "dir"),
+		"escapedir":     parent,
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// t.TempDir is itself under a symlink on macOS (/var -> /private/var), so the expected
+	// paths are built on the resolved root, not root.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, want := range map[string]string{
+		"dir/in.yaml":          "dir/in.yaml",
+		"dir/stay.yaml":        "top.yaml",
+		"linkdir/in.yaml":      "dir/in.yaml",
+		"dir/missing.yaml":     "dir/missing.yaml",
+		"linkdir/missing.yaml": "dir/missing.yaml",
+		"a/b/missing.yaml":     "a/b/missing.yaml",
+	} {
+		got, err := ResolvePath(root, rel)
+		if err != nil {
+			t.Errorf("%s: %v", rel, err)
+			continue
+		}
+		if want := filepath.Join(realRoot, filepath.FromSlash(want)); got != want {
+			t.Errorf("%s: resolved to %s, want %s", rel, got, want)
+		}
+	}
+	// A file that does not exist yet under a directory link that leaves the repo is refused:
+	// its parent is what gets resolved, and that parent is outside.
+	if p, err := ResolvePath(root, "escapedir/new.yaml"); err == nil {
+		t.Errorf("escapedir/new.yaml: accepted as %s", p)
+	}
+}
+
+// keyBeforeRegex is the regex keyBefore replaced, kept here as the oracle: the byte scanner
+// must accept and reject exactly the prefixes this pattern does. Compiled once per key only
+// so the exhaustive table below runs in a second, not twenty.
+var keyBeforeOracles = map[string]*regexp.Regexp{}
+
+func keyBeforeRegex(prefix []byte, key string) bool {
+	re := keyBeforeOracles[key]
+	if re == nil {
+		re = regexp.MustCompile(`(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `[ \t]*:[ \t]+$`)
+		keyBeforeOracles[key] = re
+	}
+	return re.Match(prefix)
+}
+
+// TestKeyBeforeMatchesRegex is the proof for the scanner: a named table of the shapes the
+// grammar is about, then every prefix built from a small alphabet on each side of the key,
+// all compared against the regex. Both accepted and rejected counts are asserted non-zero so
+// an oracle that answered one thing for everything could not pass.
+func TestKeyBeforeMatchesRegex(t *testing.T) {
+	named := []string{
+		"", " ", "image", "image:", "image: ", "image:\t", "  image: ", "\timage:  ", "image : ", "image\t:\t",
+		"- image: ", "-   image: ", "-\timage: ", "  - image: ", "-image: ", "- - image: ", "-- image: ",
+		"{image: ", "{ image: ", "[image: ", "[ image: ", "a: {b: 1, image: ", "x,image: ", ", - image: ", "[ - image: ",
+		"ximage: ", "images: ", "imag: ", "image: ghcr.io/x/y:v1 ", "name: a image: ", "  image:x ", "- image :",
+		"# image: ", "image:: ", "image: image: ", "\"image\": ", "'image': ", "image\r: ", "\rimage: ", "image: \r",
+		"- {image: ", "-, image: ", "- [ image: ", "[[image: ", "{,image: ", " \t image \t : \t ",
+	}
+	var accepted, rejected int
+	check := func(prefix, key string) {
+		got, want := keyBefore([]byte(prefix), key), keyBeforeRegex([]byte(prefix), key)
+		if got != want {
+			t.Errorf("key %q prefix %q: keyBefore = %v, regex = %v", key, prefix, got, want)
+		}
+		if want {
+			accepted++
+		} else {
+			rejected++
+		}
+	}
+	for _, p := range named {
+		check(p, "image")
+	}
+	check("image: ", "images")
+	check("images: ", "image")
+	check("a.b: ", "a.b")
+	check("axb: ", "a.b") // QuoteMeta: the key is literal
+	// Exhaustive: lead (before the key) up to 3 bytes, mid (key..colon) and tail (after the
+	// colon) up to 2 bytes each, over the bytes the grammar distinguishes plus one it does not.
+	lead := []byte{' ', '\t', '-', ',', '{', '[', 'x'}
+	side := []byte{' ', '\t', 'x'}
+	var leads, sides []string
+	for n := 0; n <= 3; n++ {
+		leads = append(leads, combos(lead, n)...)
+	}
+	for n := 0; n <= 2; n++ {
+		sides = append(sides, combos(side, n)...)
+	}
+	for _, l := range leads {
+		for _, m := range sides {
+			for _, r := range sides {
+				check(l+"image"+m+":"+r, "image")
+			}
+		}
+	}
+	if accepted == 0 || rejected == 0 {
+		t.Fatalf("table is one-sided: %d accepted, %d rejected", accepted, rejected)
+	}
+	t.Logf("%d accepted, %d rejected, identical to the regex", accepted, rejected)
+}
+
+// combos returns every string of length n over alphabet, in order.
+func combos(alphabet []byte, n int) []string {
+	if n == 0 {
+		return []string{""}
+	}
+	var out []string
+	for _, s := range combos(alphabet, n-1) {
+		for _, b := range alphabet {
+			out = append(out, s+string(b))
+		}
+	}
+	return out
+}
+
+func BenchmarkCheckScalarStart(b *testing.B) {
+	line := []byte(`          image: "ghcr.io/example/web:v1"`)
+	o := &Occurrence{Path: "spec.template.spec.containers[0].image", Col: 18}
+	for i := 0; i < b.N; i++ {
+		if _, err := checkScalarStart(line, o); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

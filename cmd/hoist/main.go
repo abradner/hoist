@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -69,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
-		return runPlan(fs.Args()[1:], stdout, stderr)
+		return runPlan(fs.Args()[1:], rootFlags{repo: *repo, appsRoot: *appsRoot, promotable: *promotable}, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "hoist: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -113,14 +112,21 @@ func (d digestFlag) Set(s string) error {
 	return nil
 }
 
-func runPlan(args []string, stdout, stderr io.Writer) int {
+// rootFlags carries the values of the flags the root flagset shares with a command, so that
+// hoist --repo X plan … and hoist plan --repo X … mean the same thing. A command re-parses
+// its own flagset with these as the defaults; a flag given at the command level still wins.
+type rootFlags struct {
+	repo, appsRoot, promotable string
+}
+
+func runPlan(args []string, root rootFlags, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	repo := fs.String("repo", "", "path to the GitOps repo checkout (required)")
-	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo")
+	repo := fs.String("repo", root.repo, "path to the GitOps repo checkout (required; may also be given before the command)")
+	appsRoot := fs.String("apps-root", root.appsRoot, "directory of Argo Application wrappers, relative to --repo")
 	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
-	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder until config files are read (a later milestone) — set it to your registry path. An empty list is an error, not \"everything\"")
+	promotable := fs.String("promotable", root.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder until config files are read (a later milestone) — set it to your registry path. An empty list is an error, not \"everything\"")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
@@ -142,7 +148,7 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	if err := checkOverridesExist(r, *from, digests); err != nil {
+	if err := checkOverrides(r, *from, prefixes, digests); err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
@@ -162,14 +168,30 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// checkOverridesExist refuses a --digest override for a repo that has no occurrence in the
-// source env. BuildPlan only consults digests for repos it found there, so such an override
-// would otherwise be silently ignored while -h promises it is planned — a typo in the repo
-// name would plan the source env's ref instead of the caller's. An unknown source env is
-// left for BuildPlan to report.
-func checkOverridesExist(r *gitops.Repo, from string, digests digestFlag) error {
+// checkOverrides refuses a --digest override BuildPlan would never consult: one for a repo
+// outside the promotable prefixes (BuildPlan iterates promotable repos only, so an override
+// for a third-party image would be accepted and change nothing), or one for a repo that has
+// no occurrence in the source env (a typo in the repo name would plan the source env's ref
+// instead of the caller's). Either way -h promises the override is planned, so silence is
+// wrong. An unknown source env and an empty prefix list are left for BuildPlan to report.
+func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests digestFlag) error {
+	if len(digests) == 0 {
+		return nil
+	}
+	if len(prefixes) > 0 {
+		var outside []string
+		for repo := range digests {
+			if !isPromotable(repo, prefixes) {
+				outside = append(outside, repo)
+			}
+		}
+		if len(outside) > 0 {
+			sort.Strings(outside)
+			return fmt.Errorf("override for %s is not a promotable repo; prefixes: %s", strings.Join(outside, ", "), strings.Join(prefixes, ", "))
+		}
+	}
 	env, ok := r.Envs[from]
-	if !ok || len(digests) == 0 {
+	if !ok {
 		return nil
 	}
 	present := map[string]bool{}
@@ -216,7 +238,11 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	sort.Strings(files)
 	fmt.Fprintf(w, "hoist plan: %s -> %s (%d edits in %d files)\n\n", plan.SourceEnv, plan.TargetEnv, changes, len(files))
 	for _, f := range files {
-		before, err := os.ReadFile(filepath.Join(r.Root, filepath.FromSlash(f)))
+		p, err := gitops.ResolvePath(r.Root, f)
+		if err != nil {
+			return err
+		}
+		before, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
@@ -256,12 +282,20 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 }
 
 func untouchedReason(ref image.Ref, src string, prefixes []string) string {
-	for _, p := range prefixes {
-		if strings.HasPrefix(ref.Repo, p) {
-			return "not running in " + src
-		}
+	if isPromotable(ref.Repo, prefixes) {
+		return "not running in " + src
 	}
 	return "third-party: outside " + strings.Join(prefixes, ",")
+}
+
+// isPromotable mirrors BuildPlan's prefix test so the CLI's messages agree with its plan.
+func isPromotable(repo string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(repo, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func splitList(s string) []string {

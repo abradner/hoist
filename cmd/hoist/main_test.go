@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/abradner/hoist/pkg/gitops"
 )
 
 const fixture = "../../testdata/repo"
@@ -99,6 +101,44 @@ func TestPlanDryRunPrintsOneChangedLinePerOccurrence(t *testing.T) {
 	}
 	if strings.Contains(s, "temporalio") && strings.Contains(s, "+      image: docker.io") {
 		t.Error("third-party image appears in the diff")
+	}
+}
+
+// The root flagset advertises --repo/--apps-root/--promotable; given there, they must reach
+// the plan command as its defaults, and a plan-level flag must still win.
+func TestPlanTakesRootFlagsAsDefaults(t *testing.T) {
+	var out, errOut bytes.Buffer
+	args := []string{"--repo", fixture, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	plus := 0
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++ ") {
+			plus++
+		}
+	}
+	if plus != 6 {
+		t.Errorf("diff has %d added lines, want 6:\n%s", plus, out.String())
+	}
+	// The other shared flags travel the same way: a root --promotable that excludes
+	// everything is BuildPlan's "no promotable" error, not the default prefix.
+	errOut.Reset()
+	if got := run([]string{"--repo", fixture, "--promotable", " ", "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != exitFailure || !strings.Contains(errOut.String(), "no promotable") {
+		t.Errorf("root --promotable not passed through: exit %d, stderr: %s", got, errOut.String())
+	}
+	errOut.Reset()
+	if got := run([]string{"--repo", fixture, "--apps-root", "nowhere", "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != exitFailure || !strings.Contains(errOut.String(), "apps root nowhere") {
+		t.Errorf("root --apps-root not passed through: exit %d, stderr: %s", got, errOut.String())
+	}
+	// A plan-level flag overrides the root value.
+	errOut.Reset()
+	if got := run([]string{"--repo", t.TempDir(), "plan", "--repo", fixture, "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); got != 0 {
+		t.Errorf("plan-level --repo did not override the root value: exit %d, stderr: %s", got, errOut.String())
+	}
+	// Positive control: the unchanged form still works.
+	if got := run(planArgs("--dry-run"), io.Discard, io.Discard); got != 0 {
+		t.Errorf("plan --repo form: exit %d, want 0", got)
 	}
 }
 
@@ -226,6 +266,37 @@ func TestPlanDigestOverrideForUnknownRepoIsAnError(t *testing.T) {
 	}
 }
 
+// A --digest override for a repo outside the promotable prefixes must be an error: BuildPlan
+// iterates promotable repos only, so the override would pass the source-env check (the
+// fixture runs temporal in both envs) and then change nothing.
+func TestPlanDigestOverrideForThirdPartyRepoIsAnError(t *testing.T) {
+	before := treeHash(t)
+	var out, errOut bytes.Buffer
+	args := planArgs("--dry-run", "--digest", "docker.io/temporalio/server=docker.io/temporalio/server:1.31.2@"+digestC)
+	if got := run(args, &out, &errOut); got != exitFailure {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitFailure, errOut.String())
+	}
+	if after := treeHash(t); after != before {
+		t.Fatal("refused --digest modified the fixture")
+	}
+	if want := "override for docker.io/temporalio/server is not a promotable repo; prefixes: ghcr.io/"; !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr lacks %q: %s", want, errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a plan was printed anyway:\n%s", out.String())
+	}
+	// Positive control: the same override is planned once its repo is inside the prefixes.
+	out.Reset()
+	errOut.Reset()
+	args = planArgs("--dry-run", "--promotable", "ghcr.io/,docker.io/temporalio/server", "--digest", "docker.io/temporalio/server=docker.io/temporalio/server:1.31.2@"+digestC)
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("override inside the prefixes: exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if n := strings.Count(out.String(), "+          image: docker.io/temporalio/server:1.31.2@"+digestC); n != 1 {
+		t.Errorf("override should land on the one production temporal server container, got %d:\n%s", n, out.String())
+	}
+}
+
 // An empty --promotable must be refused, not read as "everything is promotable": a plan
 // that silently promoted third-party images would be the worst possible reading.
 func TestPlanEmptyPromotableIsAnError(t *testing.T) {
@@ -254,6 +325,31 @@ func TestPlanFailsCleanlyOnBadRepo(t *testing.T) {
 	}
 	if got := run(planArgs("--dry-run", "--to", "nope"), io.Discard, &errOut); got != exitFailure {
 		t.Fatalf("unknown env: exit %d, want %d", got, exitFailure)
+	}
+}
+
+// printPlan reads every edited file from disk; a plan whose Edit.File escapes the repo
+// must be refused there too, not only in Apply.
+func TestPrintPlanRefusesFileOutsideRepo(t *testing.T) {
+	r, err := gitops.Discover(fixture, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: the unmodified plan prints.
+	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	for _, file := range []string{"../" + plan.Edits[0].File, "x/../../" + plan.Edits[0].File} {
+		esc := plan
+		esc.Edits = append([]gitops.Edit(nil), plan.Edits...)
+		esc.Edits[0].File = file
+		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
+			t.Errorf("%s: printPlan err = %v, want a containment refusal", file, err)
+		}
 	}
 }
 

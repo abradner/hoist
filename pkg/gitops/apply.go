@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,18 +23,21 @@ var plainSafe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]*$`)
 func Apply(root string, edits []Edit) (changed []string, err error) {
 	byFile := map[string][]Edit{}
 	var files []string
+	paths := map[string]string{}
 	for _, e := range edits {
-		if err := checkRelative(e.File); err != nil {
-			return nil, fmt.Errorf("edit file: %w", err)
-		}
 		if _, ok := byFile[e.File]; !ok {
+			p, err := ResolvePath(root, e.File)
+			if err != nil {
+				return nil, fmt.Errorf("edit file: %w", err)
+			}
+			paths[e.File] = p
 			files = append(files, e.File)
 		}
 		byFile[e.File] = append(byFile[e.File], e)
 	}
 	sort.Strings(files)
 	for _, f := range files {
-		p := filepath.Join(root, filepath.FromSlash(f))
+		p := paths[f]
 		info, err := os.Stat(p)
 		if err != nil {
 			return changed, err
@@ -127,9 +129,9 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 		return nil, err
 	}
 	where := fmt.Sprintf("%s:%d:%d", e.File, e.Line, e.Col)
-	off, ok := byteOffset(line, e.Col)
-	if !ok {
-		return nil, fmt.Errorf("%s: column is beyond the end of the line", where)
+	off, err := checkScalarStart(line, &e.Occurrence)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", where, err)
 	}
 	var quote byte
 	switch e.Style {
@@ -177,6 +179,69 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 	out = append(out, repl...)
 	out = append(out, line[end:]...)
 	return out, nil
+}
+
+// checkScalarStart is the one test of whether an occurrence's recorded line and column are
+// somewhere hoist can rewrite: the bytes before Col on line must be the scalar's own key —
+// the last element of Path — then optional blanks, a colon and at least one blank, after
+// either indentation with an optional "-" item marker (block style) or flow punctuation. It
+// returns the byte offset of Col. Two things fail it. An Edit whose Col and Raw name a suffix
+// of the scalar (image: junk@ghcr.io/x/y:v1 with Col at the g) would otherwise pass the
+// prefix match and the write would keep the junk. And a layout whose key and value are on
+// different lines — the explicit-key form "? image" / ": ref", or "image:" with the value on
+// the next line — has no key before Col at all; yaml.v3 parses both, so discovery
+// (occurrenceAt) refuses them here, up front and in the same words, rather than planning an
+// occurrence that ApplyBytes (replaceInLine) would refuse at write time. Deleting the
+// discovery call changes only when the refusal is heard, never whether the bytes are written.
+// The opening quote, when Style has one, sits at Col itself and is checked by the caller.
+func checkScalarStart(line []byte, o *Occurrence) (int, error) {
+	key := o.Path[strings.LastIndex(o.Path, ".")+1:]
+	if key == "" || strings.HasSuffix(key, "]") {
+		return 0, fmt.Errorf("edit path %q does not end in a mapping key", o.Path)
+	}
+	off, ok := byteOffset(line, o.Col)
+	if !ok {
+		return 0, fmt.Errorf("column %d is beyond the end of the line", o.Col)
+	}
+	if !keyBefore(line[:off], key) {
+		return 0, fmt.Errorf("column %d is not the start of a \"%s: value\" pair on that line (before it: %q); hoist rewrites only an %s scalar that shares its line with its key", o.Col, key, truncate(line[:off]), key)
+	}
+	return off, nil
+}
+
+// keyBefore is checkScalarStart's grammar as a right-to-left byte scan: prefix must be
+// `(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + key + `[ \t]*:[ \t]+$`. Read from the end: one or
+// more blanks, the colon, optional blanks, the key, and then either only indentation, an item
+// marker "-" preceded by indentation only and followed by at least one blank, or flow
+// punctuation with optional blanks after it. It is called once per occurrence at discovery and
+// once per edit at write time, so it must not compile anything. TestKeyBeforeMatchesRegex keeps
+// the regex above as the oracle it is checked against.
+func keyBefore(prefix []byte, key string) bool {
+	p := trimBlanks(prefix)
+	if len(p) == len(prefix) || len(p) == 0 || p[len(p)-1] != ':' {
+		return false
+	}
+	p = trimBlanks(p[:len(p)-1])
+	if !bytes.HasSuffix(p, []byte(key)) {
+		return false
+	}
+	rest := p[:len(p)-len(key)]
+	p = trimBlanks(rest)
+	if len(p) == 0 {
+		return true
+	}
+	switch p[len(p)-1] {
+	case ',', '{', '[':
+		return true
+	case '-':
+		return len(p) < len(rest) && len(trimBlanks(p[:len(p)-1])) == 0
+	}
+	return false
+}
+
+// trimBlanks drops trailing spaces and tabs — the regex's [ \t], not unicode.IsSpace.
+func trimBlanks(b []byte) []byte {
+	return bytes.TrimRight(b, " \t")
 }
 
 // byteOffset converts yaml.v3's 1-based character column into a byte offset.

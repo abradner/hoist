@@ -2,6 +2,8 @@ package gitops
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -347,5 +349,152 @@ func TestDiscoverErrors(t *testing.T) {
 	}
 	if _, err := Discover(fixtureRoot, "/abs"); err == nil {
 		t.Error("absolute apps root accepted")
+	}
+}
+
+// yaml.v3 parses the explicit-key form ("? image" / ": ref") and a plain value on the line
+// after "image:" as the same mapping as image: ref, but nothing precedes the value on its own
+// line, so Apply could never rewrite it. Discover refuses those layouts up front, through the
+// predicate Apply uses, naming the file and the value's line — instead of recording an
+// occurrence that is planned and only refused at write time. A blank before the colon is a
+// one-line layout and stays discoverable (the positive control).
+func TestDiscoverRefusesKeyAndValueOnDifferentLines(t *testing.T) {
+	head := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n" // 9 lines
+	ref := "ghcr.io/example/api:v1@" + digestA
+	for name, item := range map[string]string{
+		"explicit key":       "          ? image\n          : " + ref + "\n",
+		"value on next line": "          image:\n            " + ref + "\n",
+	} {
+		root := writeRepo(t, map[string]string{
+			"cluster/apps/a.yaml":         wrapper("one", "cluster/apps/x/api", "env"),
+			"cluster/apps/x/api/app.yaml": head + item,
+		})
+		r, err := Discover(root, "")
+		if err == nil {
+			t.Errorf("%s: discovered as %+v", name, r.Envs["env"].Families["api"].Occurrences)
+			continue
+		}
+		for _, want := range []string{"cluster/apps/x/api/app.yaml:11", "spec.template.spec.containers[0].image", "shares its line with its key"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error lacks %q: %v", name, want, err)
+			}
+		}
+	}
+	root := writeRepo(t, map[string]string{
+		"cluster/apps/a.yaml":         wrapper("one", "cluster/apps/x/api", "env"),
+		"cluster/apps/x/api/app.yaml": head + "          image : " + ref + "\n",
+	})
+	r, err := Discover(root, "")
+	if err != nil {
+		t.Fatalf("image : ref refused: %v", err)
+	}
+	occ := r.Envs["env"].Families["api"].Occurrences
+	if len(occ) != 1 || occ[0].Line != 10 || occ[0].Col != 19 || occ[0].Raw != ref {
+		t.Errorf("occurrences = %+v", occ)
+	}
+}
+
+// symlinkRepo lays out parent/repo (the checkout: files, slash paths → contents) beside
+// parent/outside (an attacker-chosen location the checkout must never read): outside/apps
+// holds a valid wrapper naming the in-repo family families/api, and outside/api/app.yaml and
+// outside/app.yaml hold a Deployment whose reference exists nowhere in the repo, so a read
+// that escaped would be visible as a successful Discover or in the occurrences. Callers add
+// the symlink under test with symlink.
+func symlinkRepo(t *testing.T, files map[string]string) (root, outside string) {
+	t.Helper()
+	parent := t.TempDir()
+	root = filepath.Join(parent, "repo")
+	outside = filepath.Join(parent, "outside")
+	external := deployment("api", "api", "ghcr.io/example/external:v9@"+digestC)
+	for p, c := range map[string]string{
+		"apps/api.yaml": wrapper("api", "families/api", "staging"),
+		"api/app.yaml":  external,
+		"app.yaml":      external,
+	} {
+		full := filepath.Join(outside, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, c := range files {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, outside
+}
+
+// symlink creates link (slash path under root) pointing at target (an absolute path).
+func symlink(t *testing.T, root, link, target string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(link))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, full); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDiscoverRefusesSymlinkOutsideRepo names the attacker: a PR author who commits a symlink
+// (git checks one out as a symlink) so that hoist, run against the branch, reads a manifest —
+// or the wrapper set — from somewhere on the operator's machine instead of the checkout, and
+// plans that external reference into an in-repo target. Each of the three joins Discover
+// performs (apps root, family directory, YAML file) gets its own escape.
+func TestDiscoverRefusesSymlinkOutsideRepo(t *testing.T) {
+	staging := map[string]string{"cluster/apps/api.yaml": wrapper("api", "cluster/apps/staging/api", "staging")}
+	cases := map[string]struct {
+		files        map[string]string
+		link, target string // link is repo-relative; target is under outside
+	}{
+		// The in-repo family the external wrapper names exists, so an escape here would be a
+		// clean Discover from wrappers hoist never should have read.
+		"apps root":        {map[string]string{"families/api/app.yaml": deployment("api", "api", "ghcr.io/example/api:v1@"+digestA)}, "cluster/apps", "apps"},
+		"family directory": {staging, "cluster/apps/staging/api", "api"},
+		"yaml file":        {staging, "cluster/apps/staging/api/app.yaml", "app.yaml"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root, outside := symlinkRepo(t, tc.files)
+			symlink(t, root, tc.link, filepath.Join(outside, tc.target))
+			r, err := Discover(root, "")
+			if err == nil {
+				t.Fatalf("Discover followed %s out of the repo: %+v", tc.link, r)
+			}
+			if !strings.Contains(err.Error(), tc.link) || !strings.Contains(err.Error(), "outside the repo") {
+				t.Errorf("error does not name %q as outside the repo: %v", tc.link, err)
+			}
+		})
+	}
+}
+
+// A symlink that stays inside the checkout is an ordinary layout choice and still works, as
+// a directory and as a file — the positive control for the refusal above.
+func TestDiscoverFollowsSymlinkInsideRepo(t *testing.T) {
+	for name, link := range map[string]string{"directory": "cluster/apps/staging/api", "file": "cluster/apps/staging/api/app.yaml"} {
+		root, _ := symlinkRepo(t, map[string]string{
+			"cluster/apps/api.yaml": wrapper("api", "cluster/apps/staging/api", "staging"),
+			"shared/app.yaml":       deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+		})
+		target := filepath.Join(root, "shared")
+		if name == "file" {
+			target = filepath.Join(target, "app.yaml")
+		}
+		symlink(t, root, link, target)
+		r, err := Discover(root, "")
+		if err != nil {
+			t.Fatalf("%s symlink inside the repo refused: %v", name, err)
+		}
+		occ := r.Envs["staging"].Families["api"].Occurrences
+		if len(occ) != 1 || occ[0].Ref.Repo != "ghcr.io/example/api" || occ[0].File != "cluster/apps/staging/api/app.yaml" {
+			t.Errorf("%s: occurrences = %+v", name, occ)
+		}
 	}
 }
