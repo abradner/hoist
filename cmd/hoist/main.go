@@ -1,7 +1,8 @@
 // Command hoist is a terminal UI that promotes container images between environments
 // in an Argo CD GitOps repository and follows the change through PR, merge and rollout.
 //
-// Subcommands land milestone by milestone (see AGENTS.md §1). Today: plan --dry-run.
+// Subcommands land milestone by milestone (see AGENTS.md §1). Today: the matrix screen
+// (no command) and plan --dry-run.
 package main
 
 import (
@@ -14,6 +15,9 @@ import (
 	"sort"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 )
@@ -36,8 +40,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	repo := fs.String("repo", "", "path to the GitOps repo checkout; with no command, opens the env/family matrix")
+	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo")
+	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: hoist [flags] <command> [command flags]\n\n")
+		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
+		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
 		fmt.Fprintf(stderr, "commands:\n  plan    build a promotion plan for one env pair; --dry-run prints it and touches nothing\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
@@ -53,8 +61,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if fs.NArg() == 0 {
-		fs.Usage()
-		return exitUsage
+		if *repo == "" {
+			fs.Usage()
+			return exitUsage
+		}
+		return tuiRunner(*repo, *appsRoot, splitList(*promotable), stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
@@ -261,4 +272,22 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// tuiRunner is what a bare `hoist --repo` dispatches to. It is a variable so the dispatch
+// can be tested without starting a terminal program.
+var tuiRunner = runTUI
+
+// runTUI discovers the repo and runs the matrix screen until the user quits.
+func runTUI(repo, appsRoot string, promotable []string, stdout, stderr io.Writer) int {
+	r, err := gitops.Discover(repo, appsRoot)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitFailure
+	}
+	if _, err := tea.NewProgram(app.New(r, promotable), tea.WithOutput(stdout)).Run(); err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitFailure
+	}
+	return 0
 }
