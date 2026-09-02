@@ -179,11 +179,20 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse decodes data as the file named file (for messages), then Normalize and Validate.
+// Only one YAML document is accepted: a second `---` document in the file is a mistake
+// (the rest of the file is silently ignored by a decoder that only reads the first), not
+// an alternate config, so it is rejected rather than dropped.
 func Parse(data []byte, file string) (*Config, error) {
 	c := &Config{File: file}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) { // io.EOF: an empty file is an empty config
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("%s: multiple YAML documents", file)
+	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
 	if err := c.Normalize(); err != nil {

@@ -294,6 +294,25 @@ func TestValidationErrorsNamePath(t *testing.T) {
 	}
 }
 
+// F2 regression: a decoder that only calls Decode once silently ignores every document
+// after the first `---`, so a second document (accidental or a leftover template) never
+// takes effect and never errors either. Parse must reject it.
+func TestMultipleYAMLDocumentsRejected(t *testing.T) {
+	p := write(t, "repos:\n  - path: /x\n---\nrepos:\n  - path: /y\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("accepted a file with two YAML documents")
+	}
+	if !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Errorf("error = %v, want it to name the multiple-documents problem", err)
+	}
+	// Positive control: a single document, with trailing blank lines and a comment, still
+	// loads — the rejection is specific to an actual second document.
+	if _, err := Load(write(t, "repos:\n  - path: /x\n\n# trailing comment\n\n")); err != nil {
+		t.Errorf("a single document with trailing noise: %v", err)
+	}
+}
+
 func TestTildeExpansion(t *testing.T) {
 	t.Setenv("HOME", "/home/me")
 	c, err := Load(write(t, "repos:\n  - path: ~/src/a\n  - path: '~'\n  - path: /abs/b\n  - path: rel/c\n  - path: ~user/d\n"))
