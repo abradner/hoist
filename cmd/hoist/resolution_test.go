@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
@@ -265,6 +267,39 @@ registries:
 
 // A scaled-to-zero repo with a bare tag goes to the registry, and the section reports
 // which credential source authenticated — by name.
+// F9 regression: buildResolveFunc's own comment claims "resolutionOptions runs once here
+// since it does not depend on the source env", but the closure it returned called
+// resolutionOptions(cfg, rc, ...) fresh on every invocation — reading rc, a pointer,
+// however it stood at call time. Prove it now runs exactly once by mutating rc's
+// kube.context after building the closure: with resolutionOptions computed once at build
+// time, that later mutation must have no effect on the context runResolution actually
+// requests.
+func TestBuildResolveFuncComputesOptionsOnce(t *testing.T) {
+	contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
+	rc := &config.RepoConfig{DigestSources: []string{"pods"}, Kube: config.KubeConfig{Context: "first-context"}}
+	fn := buildResolveFunc(&config.Config{}, rc, []string{"ghcr.io/"})
+
+	// Mutate rc after the closure is built. A per-call resolutionOptions would pick this
+	// up on the next invocation; a once-computed opts must not.
+	rc.Kube.Context = "second-context"
+
+	repo := &gitops.Repo{Root: "x", Envs: map[string]*gitops.Env{"app-staging": {Name: "app-staging"}}}
+	if _, err := fn(context.Background(), repo, "app-staging"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fn(context.Background(), repo, "app-staging"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range *contexts {
+		if c != "first-context" {
+			t.Errorf("kube context requested = %q, want first-context on every call (resolutionOptions must run once): %v", c, *contexts)
+		}
+	}
+	if len(*contexts) != 2 {
+		t.Fatalf("expected 2 calls (one per fn invocation), got %d: %v", len(*contexts), *contexts)
+	}
+}
+
 func TestPlanFallsBackToRegistryAndReportsAuthSource(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))

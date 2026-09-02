@@ -510,10 +510,10 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 // the error per call and degrades to "digest sources: none" with a warning line (AGENTS.md
 // principle 5), rather than this function failing to open the TUI at all.
 func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
+	opts, optsErr := resolutionOptions(cfg, rc, resolveFlags{})
 	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
-		opts, err := resolutionOptions(cfg, rc, resolveFlags{})
-		if err != nil {
-			return plan.ResolveOutcome{}, err
+		if optsErr != nil {
+			return plan.ResolveOutcome{}, optsErr
 		}
 		if len(opts.order) == 0 {
 			return plan.ResolveOutcome{}, nil // digest sources: none
