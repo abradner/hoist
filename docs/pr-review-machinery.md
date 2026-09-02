@@ -76,6 +76,24 @@ gh api repos/{owner}/{repo}/pulls/<n>/reviews      # review bodies
 gh api repos/{owner}/{repo}/pulls/<n>/comments     # INLINE — usually where the findings are
 ```
 
+**The REST inline-comments route can silently return fewer rows than the review body's own
+count.** A Copilot review on this repo's PR #32 said "Comments generated: 2" and named a third
+finding as a "previously missed" suppressed comment in the body, but `gh api
+repos/{owner}/{repo}/pulls/<n>/comments` — even unfiltered — returned zero rows for two of the
+three. The GraphQL `reviewThreads` query found both immediately. Separately, Codex's four P1s and
+two P2s on that same PR were real inline comments the REST route did return, but a first pass
+filtered by `original_commit_id` matching the *current* head silently dropped every one, because
+they were anchored to an earlier commit and the pagination/filter combination never surfaced them
+— they were read only once a full re-fetch checked every comment against every commit_id the PR
+had ever held. **When a review body's stated count disagrees with what the REST route returns, or
+whenever a review predates the current head, cross-check with:**
+
+```bash
+gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(number:<n>){reviewThreads(first:50){nodes{isResolved comments(first:1){nodes{databaseId author{login} path line body}}}}}}}'
+```
+
+before concluding a reviewer found nothing.
+
 Codex posts its findings as **inline comments** while its review *body* is a boilerplate template
 with no content. Copilot additionally hides real findings inside a collapsed
 `<details>Suppressed comments</details>` block.
