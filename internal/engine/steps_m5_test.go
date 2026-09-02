@@ -412,6 +412,14 @@ func TestArgoAndRolloutFullPipelineConverges(t *testing.T) {
 	if s.MergeSHA == "" {
 		t.Fatal("expected MergedStep to have completed before Argo steps run")
 	}
+	// forge.Fake's merge never touches real git, but the *second* Drive below builds a fresh
+	// PromotionState (driveNewStateThroughMerged's own doc comment) that reaches MergedStep's
+	// Observe for the first time in this process — and since s and s2 share the same
+	// deterministic id/branch/marker, it finds the same already-merged PR pr.Merged==true and
+	// revalidates it against s.Base's live tip (M4 hardening, finding #1) before trusting it.
+	// Simulate what a real GitHub squash-merge would have done to the base branch so that
+	// revalidation finds what it expects, exactly like steps_m4_test.go's own convergence tests.
+	mergeToBase(t, s)
 	if calls := strings.Join(a.Calls, ","); !strings.Contains(calls, "Refresh "+app.String()) {
 		t.Fatalf("expected ArgoRefreshedStep's Act to have issued a Refresh: %v", a.Calls)
 	}
