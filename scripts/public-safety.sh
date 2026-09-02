@@ -15,11 +15,15 @@ patterns=(
   'admin@athena'
 )
 # Known-benign matches (file names, XDG paths). Keep this list short and specific.
-# `\.local"[[:space:]]*,[[:space:]]*"state` matches the split filepath.Join(home, ".local",
-# "state", ...) shape internal/engine/state.go and its test use for the real XDG state-dir
-# default ($XDG_STATE_HOME, else ~/.local/state) — not a bare ".local"-terminated string, so
-# it does not also swallow a genuine internal .local hostname written some other way.
-allow='settings\.local\.json|\.local/share|\.local/bin|\.local/state|\.local"[[:space:]]*,[[:space:]]*"state'
+# The real occurrences of "state" following ".local" are: the split
+# filepath.Join(home, ".local", "state", ...) Go-literal form in internal/engine/state.go,
+# and the prose/joined form "~/.local/state" or ".local/state/hoist" in that file's comment
+# and its test (state_test.go). `(^|[^A-Za-z0-9_])\.local/state\b` requires the character
+# immediately before ".local/state" to be a non-word character (or start of line) — never a
+# bare `\.local/state` — so it matches those real occurrences but does NOT also swallow a
+# genuine internal hostname shaped like "foo.local/state", where the ".local" is preceded by
+# a word character and is not this XDG path at all.
+allow='settings\.local\.json|\.local/share|\.local/bin|(^|[^A-Za-z0-9_])\.local/state\b|\.local"[[:space:]]*,[[:space:]]*"state'
 status=0
 for p in "${patterns[@]}"; do
   if hits=$(git ls-files -z | xargs -0 grep -nE -- "$p" 2>/dev/null | grep -v '^scripts/public-safety.sh:' | grep -vE -- "$allow"); then
