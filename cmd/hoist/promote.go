@@ -1,0 +1,253 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/forge"
+	"github.com/abradner/hoist/pkg/forge/github"
+	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
+)
+
+// newGit and newForge are variables so tests substitute fakes/local fixtures: no test in this
+// repo points promote at a real GitHub repo or lets it touch a checkout other than a fixture
+// it created itself.
+var (
+	newGit   git.Git = git.Exec{}
+	newForge         = func(ownerRepo string) (forge.Forge, error) { return github.New(ownerRepo) }
+)
+
+// runPromote is `hoist promote`: builds the same gitops.Plan `hoist plan --dry-run` would
+// print, then drives internal/engine's four steps to actually commit it, push it and open a
+// PR. Named "promote" rather than "push": the command's whole point is the promotion — commit
+// + push + PR together — and "push" would read as only the git step, one of four this command
+// actually performs.
+// checkNoOpAgainstBase guards the all-NoOp fast path: it re-derives, for every distinct file
+// the plan's edits reference, whether the clone (cloneDir, no worktree exists yet at this
+// point) is dirty relative to base for that file — the clone's current on-disk blob (computed
+// with the same HashObject the engine uses for ExpectedBlobs) must match the blob committed
+// at base (read with the same LsTreeBlob the engine uses to Observe HEAD). A mismatch means an
+// uncommitted local change to a file this promotion cares about, which makes "all no-op"
+// unverifiable — refuse by naming the file(s) rather than reporting a false success.
+func checkNoOpAgainstBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
+	seen := map[string]bool{}
+	var files []string
+	for _, e := range edits {
+		if !seen[e.File] {
+			seen[e.File] = true
+			files = append(files, e.File)
+		}
+	}
+	sort.Strings(files)
+
+	var dirty []string
+	for _, f := range files {
+		p, err := gitops.ResolvePath(cloneDir, f)
+		if err != nil {
+			return err
+		}
+		cur, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("reading %s from %s: %w", f, cloneDir, err)
+		}
+		curBlob, err := g.HashObject(ctx, cloneDir, cur)
+		if err != nil {
+			return err
+		}
+		baseBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, base, f)
+		if err != nil {
+			return err
+		}
+		if !ok || baseBlob != curBlob {
+			dirty = append(dirty, f)
+		}
+	}
+	if len(dirty) > 0 {
+		return fmt.Errorf("the plan looks already current, but %s has uncommitted local changes not yet in %q for: %s — a no-op computed against dirty content can't be trusted; commit, stash or discard the local changes and re-run", cloneDir, base, strings.Join(dirty, ", "))
+	}
+	return nil
+}
+
+func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("hoist promote", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
+	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
+	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
+	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
+	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
+	base := fs.String("base", "main", "the GitOps repo's default branch: what the promotion branch is created from and the PR targets")
+	digests := digestFlag{}
+	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
+	var rf resolveFlags
+	fs.StringVar(&rf.kubeContext, "kube-context", "", "kubeconfig context whose pods supply digests (see hoist plan -h)")
+	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins (see hoist plan -h)")
+	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order (see hoist plan -h)")
+	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a pull secret for the cluster credential source (see hoist plan -h)")
+	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source (see hoist plan -h)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return exitUsage
+	}
+	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
+	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
+	eff, err := selectRepo(cfg, sel)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	if eff.repo == "" || *from == "" || *to == "" {
+		fmt.Fprintln(stderr, "hoist promote: --repo, --from and --to are required")
+		fs.Usage()
+		return exitUsage
+	}
+	if eff.cfg == nil || eff.cfg.GitHub == "" {
+		fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file")
+		return exitUsage
+	}
+	prefixes := eff.promotable
+
+	opts, err := resolutionOptions(cfg, eff.cfg, rf)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitUsage
+	}
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	if err := checkOverrides(r, *from, prefixes, digests); err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	planDigests := map[string]image.Ref(digests)
+	if len(opts.order) > 0 {
+		rep, err := runResolution(context.Background(), r, *from, prefixes, opts, digests)
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+			return exitFailure
+		}
+		planDigests = rep.digests(digests)
+	}
+	plan, err := gitops.BuildPlan(r, *from, *to, prefixes, planDigests)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+
+	changed := false
+	for _, e := range plan.Edits {
+		if !e.NoOp() {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		// An all-NoOp plan means "the target already carries the planned ref" — but Edit.NoOp
+		// only knows about the bytes gitops.Discover already read from the clone. Nothing
+		// downstream of here calls gitops.Apply/Verify (there is no worktree yet on this
+		// path), so this is the one place a dirty clone can otherwise slip through: if the
+		// user has an uncommitted local edit to a file the plan touches, the plan can compute
+		// all-NoOp against that dirty content while it would NOT be all-NoOp against what's
+		// actually committed at --base. Confirm the clone isn't dirty for those paths before
+		// trusting the conclusion (AGENTS.md §4.2, "Verify runs before git add, always").
+		if err := checkNoOpAgainstBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
+			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "hoist promote: %s -> %s is already current; nothing to promote.\n", plan.SourceEnv, plan.TargetEnv)
+		return 0
+	}
+
+	id := engine.DeriveID(eff.cfg.GitHub, plan)
+	branch := engine.BranchName(plan.TargetEnv, id)
+	worktreeDir, err := engine.WorktreeDir(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	statePath, err := engine.StatePath(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  eff.cfg.GitHub,
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        branch,
+		CloneDir:      eff.repo,
+		WorktreeDir:   worktreeDir,
+		Base:          *base,
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+		PRTitle:       engine.PRTitle(plan),
+		PRBody:        engine.RenderPRBody(id, plan),
+	}
+	// The state file is an index of what to look at, never evidence of what happened
+	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the
+	// remote regardless of what's loaded here. Carrying History forward is purely so
+	// `hoist promote`'s own output can show it; a missing or unreadable file never blocks
+	// the run.
+	if prev, err := engine.LoadState(statePath); err == nil && prev != nil && prev.ID == id {
+		s.History = prev.History
+	}
+
+	f, err := newForge(eff.cfg.GitHub)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+
+	waited := false
+	onWaiting := func() {
+		if !waited {
+			waited = true
+			fmt.Fprintln(stderr, "hoist promote: waiting for signing approval...")
+		}
+	}
+	steps := engine.Steps(newGit, f, onWaiting)
+	save := func(st *engine.PromotionState) error { return engine.SaveState(statePath, st) }
+
+	err = engine.Drive(context.Background(), steps, s, save)
+	switch {
+	case err == nil:
+		fmt.Fprintf(stdout, "hoist promote: %s -> %s\n", plan.SourceEnv, plan.TargetEnv)
+		fmt.Fprintf(stdout, "  branch: %s\n", s.Branch)
+		fmt.Fprintf(stdout, "  commit: %s\n", s.CommitSHA)
+		if s.PR != nil {
+			fmt.Fprintf(stdout, "  PR: %s\n", s.PR.URL)
+		}
+		return 0
+	case errors.Is(err, engine.ErrWaiting):
+		fmt.Fprintln(stderr, "hoist promote: still waiting for signing approval; re-run to resume")
+		return exitFailure
+	default:
+		// Final boundary before a step/driver error reaches the terminal: a failed git
+		// command's wrapped stderr (a hook or the signing helper echoing a registered
+		// credential) could otherwise bypass every earlier redact.Strings call.
+		var blocked *engine.BlockedError
+		if errors.As(err, &blocked) {
+			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(blocked.Error()))
+			return exitFailure
+		}
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+}
