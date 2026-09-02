@@ -89,10 +89,16 @@ had ever held. **When a review body's stated count disagrees with what the REST 
 whenever a review predates the current head, cross-check with:**
 
 ```bash
-gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(number:<n>){reviewThreads(first:50){nodes{isResolved comments(first:1){nodes{databaseId author{login} path line body}}}}}}}'
+gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(number:<n>){reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{databaseId author{login} path line body}}}}}}}'
 ```
 
-before concluding a reviewer found nothing.
+before concluding a reviewer found nothing. `first:100` covers the overwhelming majority of PRs
+outright; check `pageInfo.hasNextPage` and re-run with `after:"<endCursor>"` before trusting an
+empty or suspiciously-short result on a PR with a long review history — a capped page looks
+identical to "nothing more to find" until you check for one. `comments(first:1)` is deliberate,
+not a second instance of the same bug: it exists only to identify each thread's originating
+comment (path/line/author/body), and threads are already distinct nodes — a thread with a long
+reply chain still shows up as one node regardless of how many replies it carries.
 
 Codex posts its findings as **inline comments** while its review *body* is a boilerplate template
 with no content. Copilot additionally hides real findings inside a collapsed
