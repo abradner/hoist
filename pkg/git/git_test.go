@@ -435,6 +435,36 @@ func TestCommitTimeoutKillsWholeProcessTree(t *testing.T) {
 	}
 }
 
+// TestDeleteRemoteBranchIsIdempotent is MergedStep's own resume property at the git layer
+// (M4): deleting a branch that was already pushed succeeds, and deleting it again — a resumed
+// process re-attempting cleanup after a kill between merge and delete — must also succeed
+// rather than error on "already gone".
+func TestDeleteRemoteBranchIsIdempotent(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	branch := "hoist/app-production/cleanup"
+	var g Exec
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Push(ctx(), wt, "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || !ok {
+		t.Fatalf("sanity check: branch should exist before deletion: ok=%v err=%v", ok, err)
+	}
+
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || ok {
+		t.Fatalf("branch should be gone: ok=%v err=%v", ok, err)
+	}
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil {
+		t.Fatalf("DeleteRemoteBranch (already gone) should be idempotent: %v", err)
+	}
+}
+
 func TestRemoveWorktreeIdempotent(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")

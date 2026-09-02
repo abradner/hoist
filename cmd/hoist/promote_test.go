@@ -84,7 +84,13 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	runGitHost(t, "", "clone", "-q", origin, clone)
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	yaml := fmt.Sprintf("repos:\n  - name: gitops\n    path: %s\n    github: example/gitops\n    apps_root: cluster/apps\n    promotable: [ghcr.io/example/]\n", clone)
+	// ci.grace and poll.* are cut to a few milliseconds so a test exercising the full M4
+	// pipeline (CIGreen -> Approved -> Merged) against the fake forge's default "no checks
+	// reported" converges in-process instead of waiting out the real 3-minute/20-second
+	// production defaults; app-production isn't listed under envs.production here, so
+	// RepoConfig.Approval defaults it to "auto" and no approval comment is needed either.
+	yaml := fmt.Sprintf("repos:\n  - name: gitops\n    path: %s\n    github: example/gitops\n    apps_root: cluster/apps\n    promotable: [ghcr.io/example/]\n    ci:\n      none: green\n      grace: 5ms\n"+
+		"poll:\n  ci: 5ms\n  approval: 5ms\n  argo: 5ms\n  rollout: 5ms\n  deadline: 10s\n", clone)
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +104,21 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	return cfgPath, clone, fakeForge
 }
 
+// commitLine pulls the "  commit: <sha>" line runPromote/runResume print on success.
+func commitLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "  commit: "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// TestPromoteEndToEndThenResumeIsIdempotent drives a promotion all the way through the M4
+// pipeline (CIGreen -> Approved -> Merged, both auto-satisfied by this fixture's config: see
+// newPromoteFixture) in one `hoist promote` call, then re-runs the identical command — standing
+// in for a resumed/re-invoked process — and confirms it converges on the same commit and PR
+// rather than creating a second one of either (AGENTS.md invariant 4).
 func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
@@ -106,35 +127,40 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	if got := run(args, &out, &errOut); got != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(out.String(), "branch: hoist/app-production/") || !strings.Contains(out.String(), "PR: ") {
+	if !strings.Contains(out.String(), "branch: hoist/app-production/") || !strings.Contains(out.String(), "PR: ") || !strings.Contains(out.String(), "merged: ") {
 		t.Fatalf("stdout missing expected fields:\n%s", out.String())
 	}
 	if len(f.PRs()) != 1 {
 		t.Fatalf("expected exactly one PR, got %d", len(f.PRs()))
 	}
-	firstPR := f.PRs()[0].Number
+	firstPR := f.PRs()[0]
+	if !firstPR.Merged {
+		t.Fatalf("PR should be merged: %+v", firstPR)
+	}
+	firstCommit := commitLine(out.String())
+	if firstCommit == "" {
+		t.Fatalf("stdout missing a commit line:\n%s", out.String())
+	}
 
 	var g git.Exec
 	branchLine := strings.Split(out.String(), "\n")[1]
 	branch := strings.TrimSpace(strings.TrimPrefix(branchLine, "  branch:"))
-	sha1, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch)
-	if err != nil || !ok {
-		t.Fatalf("origin should have the branch: ok=%v err=%v", ok, err)
+	if _, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch); err != nil || ok {
+		t.Fatalf("origin should no longer have the merged branch: ok=%v err=%v", ok, err)
 	}
 
 	// Re-running the exact same command (simulating a resumed/re-invoked process) must not
-	// create a second branch, commit or PR.
+	// create a second commit or a second PR.
 	out.Reset()
 	errOut.Reset()
 	if got := run(args, &out, &errOut); got != 0 {
 		t.Fatalf("second run exit %d, want 0; stderr: %s", got, errOut.String())
 	}
-	if len(f.PRs()) != 1 || f.PRs()[0].Number != firstPR {
-		t.Fatalf("second run should reuse PR #%d, got %+v", firstPR, f.PRs())
+	if len(f.PRs()) != 1 || f.PRs()[0].Number != firstPR.Number {
+		t.Fatalf("second run should reuse PR #%d, got %+v", firstPR.Number, f.PRs())
 	}
-	sha2, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch)
-	if err != nil || !ok || sha2 != sha1 {
-		t.Fatalf("second run should not move the branch: %s -> %s (ok=%v err=%v)", sha1, sha2, ok, err)
+	if second := commitLine(out.String()); second != firstCommit {
+		t.Fatalf("second run produced a different commit: first %s, second %s", firstCommit, second)
 	}
 }
 

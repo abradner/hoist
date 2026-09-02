@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/abradner/hoist/pkg/forge"
@@ -53,6 +55,35 @@ type PromotionState struct {
 	// the caller to keep the whole gitops.Plan around only to re-render text.
 	CommitMessage   string
 	PRTitle, PRBody string
+
+	// The M4 fields below are policy, read once from internal/config by the CLI when this
+	// PromotionState is built (a step's Observe must not import internal/config — see
+	// steps_m4.go) and carried here exactly like CommitMessage/PRTitle/PRBody above: none of
+	// them is secret or unbounded (AGENTS.md §4.3), and a resumed run re-reading the config
+	// file could in principle see a changed policy — carrying the value used when the
+	// promotion started is deliberate, not an oversight, so a promotion never straddles two
+	// different policies mid-flight.
+
+	// CINone and CIGrace are RepoConfig.CI as of when this promotion started: none|prompt|block
+	// and the grace duration CIGreenStep waits before applying none's policy to a PR reporting
+	// zero checks.
+	CINone  string
+	CIGrace time.Duration
+	// CINoneOverride, once set (via `hoist resume --override-ci-none`), lets CIGreenStep treat
+	// a still-empty check-run set as satisfied under ci.none: prompt after the grace period —
+	// the explicit override invariant 1 requires. ci.none: block never consults this field: it
+	// has no override path through this flag at all (see CIGreenStep's doc comment for why).
+	CINoneOverride bool
+
+	// Approval is RepoConfig.Approval(TargetEnv) as of when this promotion started: "auto" or
+	// "comment". Approvers and Collaborators are RepoConfig.Approvers and .Collaborators.
+	Approval      string
+	Approvers     []string
+	Collaborators bool
+
+	// MergeSHA is the squash-merge commit sha, once MergedStep's Act (or a re-observed
+	// already-merged PR) reports one.
+	MergeSHA string
 }
 
 // StateDir is $XDG_STATE_HOME/hoist, else ~/.local/state/hoist — the XDG rule on every
@@ -160,4 +191,42 @@ func LoadState(path string) (*PromotionState, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &s, nil
+}
+
+// ListStates reads every promotion state file under $XDG_STATE_HOME/hoist/promotions/, sorted
+// by ID for a stable listing. A missing promotions directory is not an error: it returns (nil,
+// nil), the same as "no promotions started yet". Reading it is purely informational — the
+// caller (hoist resume, and the one-in-flight-per-env check at the start of hoist promote)
+// still re-observes each promotion's steps against the remote before trusting anything about
+// its current phase; this only recovers the set of IDs and the CloneDir/TargetEnv/Branch
+// needed to rebuild each one's Steps and re-observe it (AGENTS.md §4.1 — Phase itself is never
+// trusted).
+func ListStates() ([]*PromotionState, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "promotions"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []*PromotionState
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(dir, "promotions", e.Name())
+		s, err := LoadState(p)
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }

@@ -43,11 +43,16 @@ it reads private state and writes to systems that deploy software.
 ## Trust boundaries
 
 - **Approval comment → production merge.** Caller: whoever can comment on the PR (anyone, on a
-  public repo). Identity: the GitHub login on the comment, checked against the configured
-  `approvers` list and/or write-collaborator permission via the API; bots (`type != "User"`) are
-  ignored; the comment must post-date the PR's head commit. If they lie: they cannot — the login
-  comes from GitHub, not the comment body. The residual risk is a misconfigured approver list
-  (R-001).
+  public repo). Identity: the GitHub login on the comment (`ApprovedStep`, `internal/engine`),
+  checked against the configured `approvers` list and/or write-collaborator permission via
+  `Forge.IsAllowedAuthor` when `RepoConfig.Collaborators` opts a repo into that; only
+  `AuthorType == "Bot"` is excluded — `Organization` is a real, non-bot account type and is not
+  filtered (corrected from an earlier, stricter statement here that would have silently dropped
+  a legitimate org-owned commenter); the comment must post-date the PR's head commit (anchored
+  to the PR's own `CreatedAt`, since this promotion's branch is exclusively its own — see
+  `steps_m4.go`'s package doc for why that anchor is safe here specifically). If they lie: they
+  cannot — the login comes from GitHub, not the comment body. The residual risk is a
+  misconfigured approver list (R-001).
 - **Registry credential chain.** Caller: hoist, on the user's behalf. The cluster-secret source
   reads a pull secret out of a namespace the kubeconfig can reach; that is a deliberate
   convenience and is opt-in per config (`registries[].cluster`, `--cluster-secret`). Credentials
@@ -66,8 +71,15 @@ it reads private state and writes to systems that deploy software.
   digest read from the wrong cluster is visible, and `--digest-sources none` plans without one.
 - **The gitops repo's own CI.** hoist treats a green check-run set as a fact it observed, not a
   property it verified. With `ci.none: green` (the default) a PR with *no* reported checks is
-  treated as passing after the grace period — that is a stated policy, not a gap, and it is
-  configurable to `prompt` or `block` (R-003).
+  treated as passing after the grace period — that is a stated, enforced policy (`CIGreenStep`),
+  not a gap, and it is configurable to `prompt` (Blocked until an explicit
+  `hoist resume --override-ci-none`) or `block` (Blocked, no override at all) per repo (R-003).
+- **Merge-time stale head.** `MergedStep` refuses to merge if the PR's current head sha
+  disagrees with what this promotion last observed pushed (`PromotionState.PushedSHA`), using
+  the forge's own atomic "merge iff head is X" (`Forge.MergePR`'s `expectedHeadSHA`) rather than
+  a client-side check-then-merge race. A process killed mid-merge-call is handled by re-asking
+  the forge (`FindPR`) before ever treating a lost response as a failure worth retrying with a
+  second merge call.
 - **PR bodies, commit messages, logs.** These leave the machine. Nothing internal (cluster
   addresses, context names, hostnames) may be written into them; enforced by `scripts/public-safety.sh`
   over the repo's own tracked files and by template tests over rendered output (R-004).
@@ -97,8 +109,8 @@ it reads private state and writes to systems that deploy software.
 
 | ID | Risk | Where it lives | Mitigation / status |
 |---|---|---|---|
-| R-001 | A misconfigured `approvers` list (or `collaborators: true` on a repo with broad write access) lets an unintended login trigger a production merge | `internal/engine/steps` (Approved), `internal/config` | Author check is login-based via API, never body-based; bots excluded; config validation warns when `collaborators: true` and the repo has more than a handful of write collaborators. Stated; enforcement lands with M4. |
+| R-001 | A misconfigured `approvers` list (or `collaborators: true` on a repo with broad write access) lets an unintended login trigger a production merge | `internal/engine` (`ApprovedStep`, `steps_m4.go`), `pkg/forge` (`IsAllowedAuthor`), `internal/config` | **Enforced (M4).** Author check is login-based via `Forge.IsAllowedAuthor`/`Comment.Author`, never the comment body; only `AuthorType == "Bot"` is excluded (an `Organization` account is real, per the precedent in `pkg/forge/github`'s `Comments` doc comment); a comment predating the PR's head commit never satisfies (the "re-anchor" trap); a correctly-typed reject after a correctly-typed approve wins, by comment time. `RepoConfig.Collaborators` opts a repo into the write-permission check at all — still no warning when a repo has many write collaborators (that mitigation from the original plan is not built; flagged for a follow-up). |
 | R-002 | Registry or GitHub credentials leak into state files, logs, or PR bodies | `pkg/registry`, `pkg/forge`, `internal/engine` state file | Adaptor inputs/outputs are secret-free by construction (§4 activity shape); state file schema has no credential fields; template tests grep rendered output. |
-| R-003 | `ci.none: green` treats an untested PR as passing when CI silently failed to trigger | `internal/engine/steps` (CIGreen) | Grace period before deciding; flight pane says "no CI reported" explicitly; `prompt`/`block` available per repo. Accepted default for a repo with no branch protection. |
+| R-003 | `ci.none: green` treats an untested PR as passing when CI silently failed to trigger | `internal/engine` (`CIGreenStep`, `steps_m4.go`) | **Enforced (M4).** `total==0` is `Waiting` for `ci.grace` (default 3m) after the PR opens, then the configured policy: `green` (default) satisfies, `prompt` Blocks until `hoist resume --override-ci-none`, `block` Blocks with no override at all. `failure>0` always Blocks, naming the failed check by name when the forge can give one. The flight pane itself (a rendered step list) is a separate, later piece — not built in this milestone. |
 | R-004 | Internal cluster identifiers land in this public repo or in the public gitops repo's PRs | everywhere text is rendered; `testdata/` | `scripts/public-safety.sh` in CI over tracked files; placeholder-only example config; rendered-template tests. |
 | R-005 | An image promotion is also a schema migration (the app's entrypoint runs `db:prepare`), so a merge can migrate production as a side effect | `pkg/migrate`, plan screen warnings | Migration delta is surfaced as a warning with the file list; never blocks. The gitops repo's runbook owns the "never bundle a promotion with a manual migration" rule; hoist makes the delta visible, it does not enforce the runbook. |

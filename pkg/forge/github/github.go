@@ -160,12 +160,18 @@ func (c *Client) listPRs(ctx context.Context, state string, maxPages int) ([]prR
 
 type checkRunsResponse struct {
 	CheckRuns []struct {
+		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 	} `json:"check_runs"`
 }
 
-// Checks implements forge.Forge: a minimal rollup over check-runs. M4 turns this into a gate.
+// Checks implements forge.Forge: the check-run rollup CIGreenStep gates on (M4). FailedNames
+// names every check-run that concluded in something other than success/neutral/skipped, so a
+// blocked promotion can say which check failed rather than just a count; a run's own name is
+// upstream text nothing here wrote (a CI system can name a job anything), so it goes through
+// redact.Strings at this adaptor boundary the same way translateErr already does for GitHub's
+// own free-form error messages (AGENTS.md invariant 6).
 func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, error) {
 	var resp checkRunsResponse
 	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100", c.owner, c.repo, sha)
@@ -182,6 +188,11 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 			s.Success++
 		default:
 			s.Failure++
+			name := r.Name
+			if name == "" {
+				name = "(unnamed check)"
+			}
+			s.FailedNames = append(s.FailedNames, redact.Strings(name))
 		}
 	}
 	return s, nil
@@ -198,13 +209,16 @@ type commentResponse struct {
 }
 
 // Comments implements forge.Forge: PR conversation comments (GitHub models these as issue
-// comments), newer than since. Bots (Type == "Bot") are excluded here as informational
-// filtering only — R-001's actual author check is M4's job, done against the API's own login
-// field, never the comment body. This deliberately excludes only "Bot", not "anything other
-// than User": GitHub's account "type" field also has legitimate non-"User" values such as
-// "Organization" (an org-owned account, not a bot), and the set of values isn't closed, so
-// filtering on Type != "User" would silently drop a real, non-bot commenter along with actual
-// bots.
+// comments), newer than since, with AuthorType carrying the API's own account "type" through
+// (M4: internal/engine.ApprovedStep is what actually enforces R-001's author check against it,
+// against the API's login field, never the comment body — see that package's doc comment for
+// why enforcement lives there and not here). Bots (Type == "Bot") are additionally excluded
+// here too, as a politeness layer only (AGENTS.md §8 "layered checks": deleting this filter
+// would not change what a correctly-written ApprovedStep accepts, only which layer reports it).
+// This deliberately excludes only "Bot", not "anything other than User": GitHub's account
+// "type" field also has legitimate non-"User" values such as "Organization" (an org-owned
+// account, not a bot), and the set of values isn't closed, so filtering on Type != "User" would
+// silently drop a real, non-bot commenter along with actual bots.
 func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([]forge.Comment, error) {
 	q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}}
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
@@ -217,9 +231,81 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 		if r.User.Type == "Bot" {
 			continue
 		}
-		out = append(out, forge.Comment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt})
+		out = append(out, forge.Comment{ID: r.ID, Author: r.User.Login, AuthorType: r.User.Type, Body: r.Body, CreatedAt: r.CreatedAt})
 	}
 	return out, nil
+}
+
+// permissionResponse is GET .../collaborators/{username}/permission's body: the caller's own
+// effective permission on the repo (admin, write, maintain, triage, read, or none), always 200
+// for a real collaborator or not, so a 404/403 here means the login or the repo itself
+// couldn't be resolved (translateErr's "gh token may be missing the repo scope this needs"
+// message applies unchanged).
+type permissionResponse struct {
+	Permission string `json:"permission"`
+}
+
+// IsAllowedAuthor implements forge.Forge: true only for "admin" or "write" — R-001's stated bar
+// is "collaborator with write permission", so "maintain"/"triage"/"read" do not qualify even
+// though GitHub itself ranks maintain above triage/read.
+func (c *Client) IsAllowedAuthor(ctx context.Context, login string) (bool, error) {
+	var resp permissionResponse
+	path := fmt.Sprintf("repos/%s/%s/collaborators/%s/permission", c.owner, c.repo, url.PathEscape(login))
+	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return false, translateErr("checking collaborator permission for "+login, err)
+	}
+	return resp.Permission == "admin" || resp.Permission == "write", nil
+}
+
+// mergeResponse is PUT .../pulls/{n}/merge's body on success; its fields aren't otherwise
+// trusted — MergePR re-fetches the PR fresh via getPR immediately after, so the returned
+// forge.PR reflects the API's own current state rather than this response's own snapshot.
+type mergeResponse struct {
+	Merged bool `json:"merged"`
+}
+
+type mergePayload struct {
+	SHA         string `json:"sha,omitempty"`
+	MergeMethod string `json:"merge_method"`
+}
+
+// MergePR implements forge.Forge: a squash merge, gated atomically on the server's own "sha"
+// parameter (Known bug classes: "don't roll your own check-then-merge race") — a head that has
+// moved since expectedHeadSHA was observed is refused with a 409, translated to
+// forge.ErrStaleHead. Squash is always used, so a multi-commit branch's title would normally
+// concatenate every commit subject; this promotion is guaranteed exactly one commit (M3), so
+// that default composes to that one commit's own message, never a leak of unrelated history
+// (Known bug classes, confirmed here rather than assumed).
+func (c *Client) MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (forge.PR, error) {
+	body, err := json.Marshal(mergePayload{SHA: expectedHeadSHA, MergeMethod: "squash"})
+	if err != nil {
+		return forge.PR{}, err
+	}
+	var mr mergeResponse
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/merge", c.owner, c.repo, prNumber)
+	if err := c.rest.DoWithContext(ctx, http.MethodPut, path, bytes.NewReader(body), &mr); err != nil {
+		var herr *ghapi.HTTPError
+		if errors.As(err, &herr) && herr.StatusCode == http.StatusConflict {
+			return forge.PR{}, fmt.Errorf("github: merging PR #%d: HTTP 409 %s: %w", prNumber, redact.Strings(herr.Message), forge.ErrStaleHead)
+		}
+		return forge.PR{}, translateErr(fmt.Sprintf("merging PR #%d", prNumber), err)
+	}
+	// The merge response itself carries no head/base/branch info — re-fetch the PR so the
+	// returned forge.PR is the API's current, complete state (Known bug classes: "did the merge
+	// actually happen server-side" is answered by asking the forge, never by trusting a call
+	// that may itself have been the one whose response got lost).
+	return c.getPR(ctx, prNumber)
+}
+
+// getPR fetches prNumber fresh: used by MergePR (whose own response is minimal) and available
+// for a caller re-checking "did this already merge" after a call whose response never arrived.
+func (c *Client) getPR(ctx context.Context, prNumber int) (forge.PR, error) {
+	var resp prResponse
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, prNumber)
+	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return forge.PR{}, translateErr(fmt.Sprintf("getting PR #%d", prNumber), err)
+	}
+	return toPR(resp), nil
 }
 
 // translateErr turns a go-gh HTTPError into a message actionable for AGENTS.md §6.1's "gh

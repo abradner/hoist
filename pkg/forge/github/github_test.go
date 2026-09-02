@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -206,6 +207,79 @@ func TestCommentsExcludesBots(t *testing.T) {
 	}
 	if comments[0].Author != "alex" || comments[1].Author != "some-org" {
 		t.Fatalf("Comments = %+v, want alex then some-org", comments)
+	}
+}
+
+func TestIsAllowedAuthorAcceptsWriteAndAdminOnly(t *testing.T) {
+	for _, tc := range []struct {
+		permission string
+		want       bool
+	}{
+		{"admin", true},
+		{"write", true},
+		{"maintain", false},
+		{"triage", false},
+		{"read", false},
+		{"none", false},
+	} {
+		c := newTestClient(t, map[string]func(*http.Request) (int, string){
+			"GET /repos/example/gitops/collaborators/alice/permission": static(200, `{"permission":"`+tc.permission+`"}`),
+		})
+		got, err := c.IsAllowedAuthor(context.Background(), "alice")
+		if err != nil {
+			t.Fatalf("permission=%s: %v", tc.permission, err)
+		}
+		if got != tc.want {
+			t.Errorf("permission=%s: IsAllowedAuthor = %v, want %v", tc.permission, got, tc.want)
+		}
+	}
+}
+
+func TestIsAllowedAuthorSurfacesScopeGap(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/collaborators/mallory/permission": static(403, `{"message":"Must have push access"}`),
+	})
+	_, err := c.IsAllowedAuthor(context.Background(), "mallory")
+	if err == nil {
+		t.Fatal("expected the 403 to surface as an error, not fold into false")
+	}
+	if !strings.Contains(err.Error(), "repo scope") {
+		t.Fatalf("error %q does not name the likely scope gap", err.Error())
+	}
+}
+
+func TestMergePRSquashesAndReturnsFreshPR(t *testing.T) {
+	var gotBody string
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"PUT /repos/example/gitops/pulls/7/merge": func(r *http.Request) (int, string) {
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			return 200, `{"merged": true, "sha": "merge123"}`
+		},
+		"GET /repos/example/gitops/pulls/7": static(200, `{"number": 7, "merged": true, "merge_commit_sha": "merge123", "head": {"ref": "hoist/env/abc", "sha": "deadbeef"}}`),
+	})
+	pr, err := c.MergePR(context.Background(), 7, "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pr.Merged || pr.MergeSHA != "merge123" {
+		t.Fatalf("MergePR result = %+v", pr)
+	}
+	if !strings.Contains(gotBody, `"sha":"deadbeef"`) || !strings.Contains(gotBody, `"merge_method":"squash"`) {
+		t.Fatalf("merge request body = %s, want the expected head sha and squash method", gotBody)
+	}
+}
+
+// TestMergePRRefusesStaleHead is the named adversary, at the wire level: GitHub's own atomic
+// "merge iff head is X" answers a mismatched sha with 409, which must translate to
+// forge.ErrStaleHead — never a generic error a caller might mistake for something retryable.
+func TestMergePRRefusesStaleHead(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"PUT /repos/example/gitops/pulls/7/merge": static(409, `{"message":"Head branch was modified. Review and try the merge again."}`),
+	})
+	_, err := c.MergePR(context.Background(), 7, "stale-sha")
+	if err == nil || !errors.Is(err, forge.ErrStaleHead) {
+		t.Fatalf("expected forge.ErrStaleHead, got %v", err)
 	}
 }
 

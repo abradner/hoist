@@ -72,6 +72,15 @@ type Git interface {
 	// (something else moved the branch) is reported as an error distinguishable by the
 	// caller re-querying LsRemoteBranch — Push itself never retries with --force.
 	Push(ctx context.Context, worktreeDir, remote, branch string) error
+	// DeleteRemoteBranch deletes branch on remote (M4: MergedStep's cleanup after a successful
+	// merge). Deleting a branch that is already gone is not an error — idempotent the same way
+	// RemoveWorktree is, so a resumed MergedStep that already deleted the branch on an earlier,
+	// killed run can call this again safely. Added beyond the brief's listed shape (§4.7: a
+	// small, justified addition) rather than a new pkg/forge method, since branch deletion is
+	// exactly the same remote-ref operation Push already performs through the user's own git
+	// remote and SSH config — routing it through pkg/forge instead would need a GitHub API
+	// scope this repo does not otherwise require merging to need.
+	DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error
 	// HashObject returns the git blob hash content would have, without requiring it to be
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
@@ -99,6 +108,14 @@ type Git interface {
 	// promotion produced exactly one commit: a ref only ever has one tip, so LsRemoteBranch
 	// alone cannot distinguish one commit behind it from several.
 	Log(ctx context.Context, worktreeDir, revRange string) (shas []string, err error)
+	// CommitTime reports sha's real committer date, read from local git object data in dir
+	// (either cloneDir or a worktree sharing its object store — the object need only be
+	// reachable, not checked out). Added in M4 so ApprovedStep can anchor "was this comment
+	// posted after the code it approves" on the commit's own timestamp rather than the PR's
+	// CreatedAt: PR.CreatedAt is only a safe stand-in for that while other steps' checks
+	// happen to make an earlier PR on stale content unreachable (see steps_m4.go's doc
+	// comment); CommitTime lets Approved state that fact directly instead of leaning on it.
+	CommitTime(ctx context.Context, dir, sha string) (time.Time, error)
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -504,6 +521,21 @@ func (e Exec) Push(ctx context.Context, worktreeDir, remote, branch string) erro
 	return err
 }
 
+// DeleteRemoteBranch implements Git. It runs against cloneDir (not a worktree — this promotion
+// may have already removed its own worktree by the time cleanup runs; cloneDir always exists
+// and shares the same remotes). "Already gone" (git reports "remote ref does not exist" or
+// similar) is treated as success, matching RemoveWorktree's own idempotency rule.
+func (e Exec) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error {
+	_, err := e.run(ctx, cloneDir, "push", remote, "--delete", branch)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "remote ref does not exist") {
+		return nil
+	}
+	return err
+}
+
 // HashObject implements Git.
 func (e Exec) HashObject(ctx context.Context, worktreeDir string, content []byte) (string, error) {
 	cmd := exec.CommandContext(ctx, e.bin(), "-C", worktreeDir, "hash-object", "--stdin")
@@ -560,4 +592,19 @@ func (e Exec) WorktreeBranch(ctx context.Context, cloneDir, worktreeDir string) 
 		return "", false, nil
 	}
 	return entry.branch, true, nil
+}
+
+// CommitTime implements Git: sha's committer date (`%cI`, strict ISO 8601 — always includes
+// a UTC offset, so time.Parse(time.RFC3339, ...) is exact, never a local-timezone guess).
+func (e Exec) CommitTime(ctx context.Context, dir, sha string) (time.Time, error) {
+	out, err := e.run(ctx, dir, "show", "-s", "--format=%cI", sha)
+	if err != nil {
+		return time.Time{}, err
+	}
+	out = strings.TrimSpace(out)
+	t, err := time.Parse(time.RFC3339, out)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("git show --format=%%cI %s: unparseable committer date %q: %w", sha, out, err)
+	}
+	return t, nil
 }
