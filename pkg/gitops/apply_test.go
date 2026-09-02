@@ -388,6 +388,61 @@ func TestResolvePath(t *testing.T) {
 	}
 }
 
+// ResolvePath hands back the path it checked, symlinks resolved, so the caller's open does
+// not follow the link a second time; a target that does not exist yet gets its deepest
+// existing ancestor resolved and the missing tail appended. Discover keeps recording the
+// repo-relative link path in Occurrence.File (TestDiscoverFollowsSymlinkInsideRepo) — that
+// is the file the operator committed; this is the file the process opens.
+func TestResolvePathReturnsResolvedPath(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"dir/in.yaml", "top.yaml"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("a: 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		"dir/stay.yaml": filepath.Join(root, "top.yaml"),
+		"linkdir":       filepath.Join(root, "dir"),
+		"escapedir":     parent,
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// t.TempDir is itself under a symlink on macOS (/var -> /private/var), so the expected
+	// paths are built on the resolved root, not root.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, want := range map[string]string{
+		"dir/in.yaml":          "dir/in.yaml",
+		"dir/stay.yaml":        "top.yaml",
+		"linkdir/in.yaml":      "dir/in.yaml",
+		"dir/missing.yaml":     "dir/missing.yaml",
+		"linkdir/missing.yaml": "dir/missing.yaml",
+		"a/b/missing.yaml":     "a/b/missing.yaml",
+	} {
+		got, err := ResolvePath(root, rel)
+		if err != nil {
+			t.Errorf("%s: %v", rel, err)
+			continue
+		}
+		if want := filepath.Join(realRoot, filepath.FromSlash(want)); got != want {
+			t.Errorf("%s: resolved to %s, want %s", rel, got, want)
+		}
+	}
+	// A file that does not exist yet under a directory link that leaves the repo is refused:
+	// its parent is what gets resolved, and that parent is outside.
+	if p, err := ResolvePath(root, "escapedir/new.yaml"); err == nil {
+		t.Errorf("escapedir/new.yaml: accepted as %s", p)
+	}
+}
+
 // keyBeforeRegex is the regex keyBefore replaced, kept here as the oracle: the byte scanner
 // must accept and reject exactly the prefixes this pattern does. Compiled once per key only
 // so the exhaustive table below runs in a second, not twenty.

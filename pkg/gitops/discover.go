@@ -110,25 +110,37 @@ func checkRelative(p string) error {
 	return nil
 }
 
-// ResolvePath joins rel (slash-separated, relative) to root and proves the result stays
-// inside root — lexically (checkRelative) and, when the path exists, physically: a symlink
-// inside the repo that points outside it is refused, so nothing hoist reads or writes can
-// land outside the checkout. Every join of a repo-relative path to a root goes through here:
-// the apps root, each family directory and each YAML file on the read side (Discover), and
-// each Edit.File on the write side (Apply). A checkout is attacker-shaped on both sides — a
-// symlink committed in a PR is followed by git, and a manifest read through it would supply
-// the reference a later plan writes into an in-repo target.
+// ResolvePath joins rel (slash-separated, relative) to root, proves the result stays inside
+// root — lexically (checkRelative) and physically: a symlink inside the repo that points
+// outside it is refused — and returns the symlink-free path, so the caller's ReadDir,
+// ReadFile or WriteFile opens the file that was checked rather than re-following the link
+// (a second traversal, and a window in which the link could be repointed). When the path
+// does not exist yet (a write target), the deepest existing ancestor is resolved and checked
+// and the missing tail is appended, so the caller's own read reports the missing file. Every
+// join of a repo-relative path to a root goes through here: the apps root, each family
+// directory and each YAML file on the read side (Discover), and each Edit.File on the write
+// side (Apply). A checkout is attacker-shaped on both sides — a symlink committed in a PR is
+// followed by git, and a manifest read through it would supply the reference a later plan
+// writes into an in-repo target.
 func ResolvePath(root, rel string) (string, error) {
 	if err := checkRelative(rel); err != nil {
 		return "", err
 	}
-	joined := filepath.Join(root, filepath.FromSlash(rel))
-	resolved, err := filepath.EvalSymlinks(joined)
-	if errors.Is(err, fs.ErrNotExist) {
-		return joined, nil // the caller's own read reports the missing file
-	}
-	if err != nil {
-		return "", err
+	root = filepath.Clean(root)
+	existing := filepath.Join(root, filepath.FromSlash(rel))
+	missing := ""
+	var resolved string
+	for {
+		r, err := filepath.EvalSymlinks(existing)
+		if err == nil {
+			resolved = r
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) || existing == root {
+			return "", err
+		}
+		missing = filepath.Join(filepath.Base(existing), missing)
+		existing = filepath.Dir(existing)
 	}
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -138,7 +150,7 @@ func ResolvePath(root, rel string) (string, error) {
 	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) || filepath.IsAbs(inside) {
 		return "", fmt.Errorf("%q resolves to %s, outside the repo", rel, resolved)
 	}
-	return joined, nil
+	return filepath.Join(resolved, missing), nil
 }
 
 func readApps(root, appsRoot string) ([]ArgoApp, error) {
