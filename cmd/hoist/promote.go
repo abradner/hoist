@@ -227,7 +227,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// Invariant 5: one in-flight promotion per target env. A different image set for the same
 	// target env gets a different id (§4.1), so this can only find *another* promotion's state
 	// file — re-observed fresh, never trusted from its own Phase (findInFlight/ObserveAll).
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
 		return exitFailure
 	} else if conflict != nil {

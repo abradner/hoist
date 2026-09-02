@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-different-id")
+	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-different-id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	}
 
 	// A distinct id for a *different* target env must never conflict, in-flight or not.
-	if conflict, _, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-staging", "a-different-id"); err != nil {
+	if conflict, _, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-staging", "a-different-id"); err != nil {
 		t.Fatal(err)
 	} else if conflict != nil {
 		t.Fatalf("a different target env must never conflict: %+v", conflict)
@@ -125,7 +126,7 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	if err := engine.SaveState(statePath, s); err != nil {
 		t.Fatal(err)
 	}
-	if conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-different-id"); err != nil {
+	if conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-different-id"); err != nil {
 		t.Fatal(err)
 	} else if conflict != nil {
 		t.Fatalf("a fully done (merged, branch deleted) promotion must no longer conflict: stuck at %s: %+v", status.Step, status.Observation)
@@ -198,11 +199,90 @@ func TestFindInFlightDoesNotBlockNewPromotionAfterPriorOneFullyMerged(t *testing
 
 	// A brand-new promotion id targeting the same env must not be refused: the completed one
 	// re-observes as done, not as an in-flight conflict.
-	conflict, status, err := findInFlight(context.Background(), newGit, f, nil, ro, "example/gitops", "app-production", "a-brand-new-id")
+	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-brand-new-id")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if conflict != nil {
 		t.Fatalf("a fully completed (merged, branch deleted) promotion must not block a new one for the same env: reported stuck at %s: %+v", status.Step, status.Observation)
+	}
+}
+
+// TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending is the disputed scenario named in
+// findInFlight's own doc comment: a promotion driven to Merged, but whose Argo sync/rollout has
+// not converged yet, must not be treated as still "in flight" for AGENTS.md invariant 5 — that
+// invariant exists to stop two promotions racing to create separate branches/PRs/merges for the
+// same target env, a risk fully retired the instant a merge lands. Unlike
+// TestFindInFlightDoesNotBlockNewPromotionAfterPriorOneFullyMerged above (which uses
+// satisfiedRollout so the *whole* ten-step AllSteps reaches done, exercising ObserveAll's
+// last-step short-circuit instead), this test deliberately leaves the rollout fake unconfigured
+// so RolledOutStep never reports Satisfied — proving findInFlight's own CoreSteps scoping is
+// what makes this promotion stop conflicting, not incidental full completion.
+func TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending(t *testing.T) {
+	_, clone, f := newPromoteFixture(t)
+
+	r, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, id),
+		CloneDir:      clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+		PRTitle:       engine.PRTitle(plan),
+		PRBody:        engine.RenderPRBody(id, plan),
+		Approval:      "auto",
+		CINone:        "green",
+	}
+
+	// Deliberately unconfigured: no Deployment status is ever set, so RolledOutStep's Observe
+	// never finds a matching live image and never reports Satisfied — the rollout "never
+	// converges", standing in for a slow or stuck Deployment.
+	ro := &rollout.Fake{}
+
+	err = engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil, ro, nil), s, nil)
+	if !errors.Is(err, engine.ErrWaiting) {
+		t.Fatalf("expected Drive to stop waiting on the rollout, got %v", err)
+	}
+	if s.MergeSHA == "" {
+		t.Fatal("expected the promotion to have actually merged before Drive stopped at the rollout")
+	}
+	if s.Phase != engine.StepRolledOut {
+		t.Fatalf("expected Drive to be stuck at %s, got %s", engine.StepRolledOut, s.Phase)
+	}
+	if err := engine.SaveState(statePath, s); err != nil {
+		t.Fatal(err)
+	}
+
+	// The disputed question: does a brand-new promotion for the same target env conflict with
+	// this one? Design choice (see findInFlight's doc comment): no — Merged already retired the
+	// only conflict invariant 5 protects against.
+	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("a merged promotion must not block a new one for the same env just because its Argo/rollout convergence is still pending: reported stuck at %s: %+v", status.Step, status.Observation)
 	}
 }
