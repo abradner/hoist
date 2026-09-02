@@ -17,6 +17,11 @@ const (
 	// WarnMissingInTarget: a promotable repo runs in the source env but has no occurrence in
 	// the target env, so there is nothing to move.
 	WarnMissingInTarget = "missing-in-target"
+	// WarnSourceOnlyUnwritable: a promotable repo runs in the source env as a ref hoist could
+	// never write (a bare tag, or a digest with no tag) and has no occurrence in the target
+	// env. Nothing would be written, so the refusal is reported rather than failing the plan
+	// (AGENTS.md principle 5); a digest override for the repo turns it into missing-in-target.
+	WarnSourceOnlyUnwritable = "source-only-unwritable"
 )
 
 // BuildPlan plans the promotion of every promotable image repo from env src to env dst.
@@ -25,8 +30,10 @@ const (
 // third-party and only reported. digests overrides the reference chosen for a repo and
 // always wins; the override must be well-formed, pinned and tagged. The plan fails — rather
 // than the later write — if the chosen ref is a bare tag (AGENTS.md §4.2) or a tagless
-// digest (the pod imageID form; the written form is <repo>:<tag>@sha256:<digest>), or if any
-// edit would touch a block scalar.
+// digest (the pod imageID form; the written form is <repo>:<tag>@sha256:<digest>) and the
+// target env has an occurrence to write; with no target occurrence the same ref is a
+// WarnSourceOnlyUnwritable warning, since invariant 1 forbids writing a bare tag, not reading
+// one. The plan also fails if any edit would touch a block scalar.
 func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string]image.Ref) (Plan, error) {
 	if r == nil {
 		return Plan{}, errors.New("nil repo")
@@ -78,8 +85,11 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 			if err := ov.Validate(); err != nil {
 				return Plan{}, fmt.Errorf("digest override for %s is malformed: %w", repo, err)
 			}
-			if !ov.Pinned() {
-				return Plan{}, fmt.Errorf("digest override for %s is not pinned: %s", repo, ov)
+			// An override is caller input and fails fast on its own shape, whatever the
+			// target holds: the source-only relaxation below is for refs read from manifests,
+			// never for a ref the caller asked hoist to write.
+			if why := unwritable(ov); why != "" {
+				return Plan{}, fmt.Errorf("digest override for %s is %s", repo, why)
 			}
 			chosen, reason = ov, "caller-supplied digest"
 		}
@@ -90,29 +100,35 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 				Occurrences: occ,
 			})
 		}
-		if !chosen.Pinned() {
-			return Plan{}, fmt.Errorf("%s: %s runs as %s in %s, a bare tag with no digest; nothing hoist writes is a bare tag (AGENTS.md §4.2) — supply a digest for this repo", repo, chosen, occ[0].Container, src)
-		}
-		// A pod imageID (repo@sha256:…) is pinned but tagless, and hoist writes
-		// <repo>:<tag>@sha256:<digest> only. The target's existing tag is not borrowed: it
-		// would then claim to describe a digest it never pointed at.
-		if chosen.Tag == "" {
-			return Plan{}, fmt.Errorf("%s: %s runs as %s in %s, a digest with no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required — supply a digest override for this repo carrying both the tag and the digest", repo, chosen, occ[0].Container, src)
-		}
-		planned[repo] = true
-		n := 0
+		var targets []Occurrence
 		for _, t := range dstOcc {
-			if t.Ref.Repo != repo {
+			if t.Ref.Repo == repo {
+				targets = append(targets, t)
+			}
+		}
+		if why := unwritable(chosen); why != "" {
+			// The refusal guards what hoist writes (invariant 1). With nothing in the target
+			// to write, a repo that exists only in the source env must not abort the plan for
+			// every other repo — it is reported and skipped (issue #13).
+			if len(targets) == 0 {
+				plan.Warnings = append(plan.Warnings, Warning{
+					Code:        WarnSourceOnlyUnwritable,
+					Message:     sourceOnlyMessage(src, dst, repo, occ, chosen, why),
+					Occurrences: occ,
+				})
 				continue
 			}
+			return Plan{}, fmt.Errorf("%s: %s runs as %s in %s, %s", repo, chosen, occ[0].Container, src, why)
+		}
+		planned[repo] = true
+		for _, t := range targets {
 			e := Edit{Occurrence: t, New: chosen}
 			if err := checkEditable(&e); err != nil {
 				return Plan{}, err
 			}
 			plan.Edits = append(plan.Edits, e)
-			n++
 		}
-		if n == 0 {
+		if len(targets) == 0 {
 			plan.Warnings = append(plan.Warnings, Warning{
 				Code:        WarnMissingInTarget,
 				Message:     fmt.Sprintf("%s runs in %s but has no occurrence in %s; nothing to move", repo, src, dst),
@@ -174,13 +190,38 @@ func chooseRef(occ []Occurrence) (chosen image.Ref, reason string, disagree bool
 	return refs[best], "first in path order", true
 }
 
+// unwritable says why ref can never be written as an image scalar, or "" when it can: a bare
+// tag has no digest (AGENTS.md §4.2), and a pod imageID (repo@sha256:…) is pinned but
+// tagless where hoist writes <repo>:<tag>@sha256:<digest> only. The target's existing tag is
+// not borrowed for the latter: it would then claim to describe a digest it never pointed at.
+func unwritable(ref image.Ref) string {
+	if !ref.Pinned() {
+		return "a bare tag with no digest; nothing hoist writes is a bare tag (AGENTS.md §4.2) — supply a digest for this repo"
+	}
+	if ref.Tag == "" {
+		return "a digest with no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required — supply a digest override for this repo carrying both the tag and the digest"
+	}
+	return ""
+}
+
 func disagreeMessage(env, repo string, occ []Occurrence, chosen image.Ref, reason string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %d occurrences of %s carry different refs; planning %s (%s):", env, len(occ), repo, chosen, reason)
-	for _, o := range occ {
-		fmt.Fprintf(&b, "\n  %s:%d %s/%s container=%s %s", o.File, o.Line, o.Kind, o.Name, o.Container, o.Ref)
-	}
+	listOccurrences(&b, occ)
 	return b.String()
+}
+
+func sourceOnlyMessage(src, dst, repo string, occ []Occurrence, chosen image.Ref, why string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s runs in %s as %s, %s; it has no occurrence in %s, so nothing would be written and the plan goes on without it:", repo, src, chosen, why, dst)
+	listOccurrences(&b, occ)
+	return b.String()
+}
+
+func listOccurrences(b *strings.Builder, occ []Occurrence) {
+	for _, o := range occ {
+		fmt.Fprintf(b, "\n  %s:%d %s/%s container=%s %s", o.File, o.Line, o.Kind, o.Name, o.Container, o.Ref)
+	}
 }
 
 func isPromotable(repo string, prefixes []string) bool {
