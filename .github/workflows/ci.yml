@@ -40,3 +40,4 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: ./scripts/public-safety.sh
+      - run: ./scripts/public-safety_test.sh
