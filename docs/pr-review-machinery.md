@@ -76,19 +76,26 @@ gh api repos/{owner}/{repo}/pulls/<n>/reviews      # review bodies
 gh api repos/{owner}/{repo}/pulls/<n>/comments     # INLINE — usually where the findings are
 ```
 
-**The REST inline-comments route can silently return fewer rows than the review body's own
-count.** A Copilot review on this repo's PR #32 said "Comments generated: 2" and named a third
-finding as a "previously missed" suppressed comment in the body, but `gh api
-repos/{owner}/{repo}/pulls/<n>/comments` — even unfiltered — returned zero rows for two of the
-three. The GraphQL `reviewThreads` query found both immediately. Separately, Codex's four P1s and
-two P2s on that same PR were real inline comments the REST route did return, but a first pass that
-filtered them by a commit-id field matching the *current* head silently dropped every one, because
-they were anchored to an earlier commit — the exact `commit_id`/`original_commit_id` re-anchoring
-trap this section covers in detail further down (this paragraph doesn't restate which field means
-what; read that explanation for the mechanics, not this one). They were read only once a full
-re-fetch checked every comment with no commit filter at all. **When a review body's stated count
-disagrees with what the REST route returns, or whenever a review predates the current head,
-cross-check with:**
+**Two different failure modes hide behind the same symptom — a review that looks emptier than
+it is — and only one of them has a query that fixes it.** A suppressed comment (§2 above, the
+`<details>Suppressed comments</details>` block) is text embedded *inside the review body itself*,
+never a separate comment object: no REST route and no GraphQL query will ever surface it, because
+there is nothing to page through — the only fix is reading the raw body, `<details>` blocks
+included, every time. That is a different problem from the one below, and confusing the two is
+exactly the mistake this paragraph originally made.
+
+The other failure mode is a real inline comment your own query missed. On this repo's PR #32, a
+Copilot review said "Comments generated: 2," and `gh api repos/{owner}/{repo}/pulls/<n>/comments`
+— even unfiltered — returned zero rows for both; the GraphQL `reviewThreads` query below found
+them immediately, proving they were genuine separate comment objects, not suppressed-body text.
+Separately, on the same PR, Codex's four P1s and two P2s were real inline comments the REST route
+did return, but a first pass that filtered them by a commit-id field matching the *current* head
+silently dropped every one, because they were anchored to an earlier commit — the exact
+`commit_id`/`original_commit_id` re-anchoring trap this section covers in detail further down
+(this paragraph doesn't restate which field means what; read that explanation for the mechanics,
+not this one). They were read only once a full re-fetch checked every comment with no commit
+filter at all. **When a REST inline-comments query returns suspiciously few rows for what a review
+claims to have posted, or whenever a review predates the current head, cross-check with:**
 
 ```bash
 gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(number:<n>){reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{databaseId author{login} path line body}}}}}}}'
