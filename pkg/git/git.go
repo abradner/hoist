@@ -52,16 +52,21 @@ type Git interface {
 	// exist there. This is the one source of truth Observe uses for "has this been pushed"
 	// — never a locally cached belief.
 	LsRemoteBranch(ctx context.Context, cloneDir, remote, branch string) (sha string, ok bool, err error)
-	// FetchBranch fetches remote's current tip of branch into dir's local object database,
-	// without touching any local ref (never a checkout, never a fast-forward of a local
-	// branch), and reports the sha it fetched. ok=false when the ref does not exist on remote.
-	// Added in M4 for MergedStep's Observe: LsRemoteBranch alone reports a live sha over the
-	// network, but a subsequent LsTreeBlob needs the sha's commit and tree objects actually
+	// FetchBranch fetches remote's current tip of branch into dir's local object database. It
+	// never touches dir's own checked-out branch, working tree or index (never a checkout,
+	// never a fast-forward of a local branch) — that is the guarantee callers actually depend
+	// on. It does update dir's remote-tracking ref for branch (refs/remotes/<remote>/<branch>),
+	// exactly as a plain `git fetch <remote> <branch>` always does; that is ordinary fetch
+	// behavior, not something this method avoids, and is not itself a problem for anything in
+	// this repo, which never trusts a remote-tracking ref as evidence without re-fetching it
+	// first. Reports the sha it fetched; ok=false when the ref does not exist on remote. Added
+	// in M4 for MergedStep's Observe: LsRemoteBranch alone reports a live sha over the network,
+	// but a subsequent LsTreeBlob needs the sha's commit and tree objects actually
 	// present locally, which only a fetch (not ls-remote) provides — this repo otherwise never
 	// fetches at all (the worktree is branched from the clone's own local ref, on the stated
 	// assumption the clone already matches Base for the files a promotion touches; see doc.go).
-	// Verifying the base branch's *current* content against a historical merge record is the
-	// one place that assumption isn't good enough, because the whole point is to catch the base
+	// Verifying the base branch's *current* state against a historical merge record is the one
+	// place that assumption isn't good enough, because the whole point is to catch the base
 	// having moved on origin without the clone's local ref ever being told.
 	FetchBranch(ctx context.Context, dir, remote, branch string) (sha string, ok bool, err error)
 	// LsTreeBlob reports the blob hash of path in rev's tree, ok=false when rev cannot be
@@ -370,11 +375,16 @@ func (e Exec) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch strin
 	return fields[0], true, nil
 }
 
-// FetchBranch implements Git: fetches remote's branch straight to FETCH_HEAD (never a local
-// branch ref, so a worktree's or the clone's own checkout is never touched), then resolves
-// FETCH_HEAD to the sha it just fetched. "couldn't find remote ref" (the branch does not exist
-// on remote at all) is reported as ok=false, not an error — the same "not found, not broken"
-// shape LsRemoteBranch and RevParse use.
+// FetchBranch implements Git: fetches remote's branch and resolves FETCH_HEAD to the sha it
+// just fetched. dir's own checked-out branch, working tree and index are never touched — that
+// is the property callers actually rely on — but this is an ordinary `git fetch <remote>
+// <branch>`, and git's own default fetch refspec (`+refs/heads/*:refs/remotes/<remote>/*`)
+// opportunistically updates dir's remote-tracking ref for branch as a side effect, the same as
+// it would for any other fetch; that update is harmless here since nothing in this package ever
+// trusts a remote-tracking ref as evidence without fetching it fresh first, but it is real and
+// should not be described as "no local ref changes at all". "couldn't find remote ref" (the
+// branch does not exist on remote at all) is reported as ok=false, not an error — the same "not
+// found, not broken" shape LsRemoteBranch and RevParse use.
 func (e Exec) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
 	if _, err := e.run(ctx, dir, "fetch", "--no-tags", "--quiet", remote, branch); err != nil {
 		if strings.Contains(err.Error(), "couldn't find remote ref") {
