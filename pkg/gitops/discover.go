@@ -111,10 +111,13 @@ func checkRelative(p string) error {
 }
 
 // ResolvePath joins rel (slash-separated, relative) to root and proves the result stays
-// inside root — lexically (checkRelative) and, when the file exists, physically: a symlink
-// inside the repo that points outside it is refused, so nothing hoist reads or writes through
-// an Edit.File can land outside the checkout. Every place an Edit.File is joined to a root
-// goes through here.
+// inside root — lexically (checkRelative) and, when the path exists, physically: a symlink
+// inside the repo that points outside it is refused, so nothing hoist reads or writes can
+// land outside the checkout. Every join of a repo-relative path to a root goes through here:
+// the apps root, each family directory and each YAML file on the read side (Discover), and
+// each Edit.File on the write side (Apply). A checkout is attacker-shaped on both sides — a
+// symlink committed in a PR is followed by git, and a manifest read through it would supply
+// the reference a later plan writes into an in-repo target.
 func ResolvePath(root, rel string) (string, error) {
 	if err := checkRelative(rel); err != nil {
 		return "", err
@@ -139,15 +142,14 @@ func ResolvePath(root, rel string) (string, error) {
 }
 
 func readApps(root, appsRoot string) ([]ArgoApp, error) {
-	dir := filepath.Join(root, filepath.FromSlash(appsRoot))
-	files, err := yamlFiles(dir)
+	files, err := yamlFilesIn(root, appsRoot)
 	if err != nil {
 		return nil, fmt.Errorf("apps root %s: %w", appsRoot, err)
 	}
 	var apps []ArgoApp
 	for _, f := range files {
 		rel := path.Join(appsRoot, f)
-		docs, err := parseFile(filepath.Join(dir, f))
+		docs, err := parseFile(root, rel)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", rel, err)
 		}
@@ -181,7 +183,20 @@ func readApps(root, appsRoot string) ([]ArgoApp, error) {
 	return apps, nil
 }
 
-// yamlFiles lists the *.yaml and *.yml regular files directly inside dir, sorted by name.
+// yamlFilesIn is yamlFiles for the repo-relative directory rel, contained by ResolvePath so
+// a family or apps directory that is a symlink out of the checkout is refused before it is
+// listed.
+func yamlFilesIn(root, rel string) ([]string, error) {
+	dir, err := ResolvePath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	return yamlFiles(dir)
+}
+
+// yamlFiles lists the *.yaml and *.yml non-directory entries directly inside dir, sorted by
+// name. A symlink is listed (it is not a directory entry to ReadDir), so every caller that
+// reads one goes through parseFile's ResolvePath; findUnmanaged only counts.
 func yamlFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -200,7 +215,13 @@ func yamlFiles(dir string) ([]string, error) {
 	return out, nil
 }
 
-func parseFile(p string) ([]*yaml.Node, error) {
+// parseFile reads and parses the repo-relative file rel, refusing one that resolves outside
+// root.
+func parseFile(root, rel string) ([]*yaml.Node, error) {
+	p, err := ResolvePath(root, rel)
+	if err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
@@ -316,14 +337,13 @@ func (c cursor) child(parent *yaml.Node, i int) cursor {
 func (c cursor) imageOfContainer() bool { return c.key == "image" && c.container != nil }
 
 func scanFamily(root string, fam *Family) error {
-	dir := filepath.Join(root, filepath.FromSlash(fam.Dir))
-	files, err := yamlFiles(dir)
+	files, err := yamlFilesIn(root, fam.Dir)
 	if err != nil {
 		return fmt.Errorf("family %q: %w", fam.Name, err)
 	}
 	for _, f := range files {
 		rel := path.Join(fam.Dir, f)
-		docs, err := parseFile(filepath.Join(dir, f))
+		docs, err := parseFile(root, rel)
 		if err != nil {
 			return fmt.Errorf("%s: %w", rel, err)
 		}

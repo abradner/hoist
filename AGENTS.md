@@ -529,6 +529,16 @@ test lives** (if one exists).
    `TestApplyBytesDoubleQuotedByteExact` and `TestApplyBytesSingleQuotedByteExact` in
    `pkg/gitops/apply_test.go`; `TestDiscoverPositionsMatchFileBytes` and
    `TestDiscoverInitContainersAndQuotingStyles` in `pkg/gitops/discover_test.go`.
+2. **Path containment on the write side alone leaves the read side to supply the value.** What
+   happened: `ResolvePath` (lexical `Rel` + `EvalSymlinks` under the resolved root) guarded
+   `Apply`'s `Edit.File`, but `Discover` still joined the apps root, each `spec.source.path` and
+   each YAML file directly, and `os.ReadDir` lists a symlink as a non-directory entry that
+   `os.ReadFile` then follows — so a symlink committed in a PR could feed an external manifest's
+   reference into a plan that writes an in-repo target. Root cause: the containment was added
+   where the bytes leave the process, not at every join of a repo-relative path to the root.
+   Rule: every join goes through `ResolvePath`, read and write; a new reader of a repo-relative
+   path calls it before `ReadDir`/`ReadFile`. Regression tests: `TestDiscoverRefusesSymlinkOutsideRepo`
+   and `TestDiscoverFollowsSymlinkInsideRepo` in `pkg/gitops/discover_test.go`.
 
 ## 10. Maintaining This Document
 
