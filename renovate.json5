@@ -1,0 +1,17 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended", ":semanticCommitsDisabled"],
+  // Dependency currency is a scheduled concern, never a PR gate (AGENTS.md §7).
+  schedule: ["before 6am on monday"],
+  timezone: "Australia/Melbourne",
+  prConcurrentLimit: 5,
+  postUpdateOptions: ["gomodTidy"],
+  packageRules: [
+    { matchManagers: ["gomod"], matchUpdateTypes: ["minor", "patch"], groupName: "go modules (non-major)" },
+    { matchManagers: ["github-actions"], groupName: "github actions" },
+    // k8s.io modules move in lockstep; a partial bump does not build.
+    { matchManagers: ["gomod"], matchPackageNames: ["/^k8s\\.io\\//"], groupName: "kubernetes modules" },
+    // Charm v2 modules also move together (bubbletea, bubbles, lipgloss, huh).
+    { matchManagers: ["gomod"], matchPackageNames: ["/^charm\\.land\\//"], groupName: "charm modules" },
+  ],
+}

@@ -32,3 +32,6 @@ coverage.out
 # hoist local state never belongs in the repo (XDG dirs are the real home;
 # these guard against a misconfigured HOIST_STATE_DIR pointing inside the tree)
 /.hoist/
+
+# go build ./... drops the single main binary in the tree root
+/hoist

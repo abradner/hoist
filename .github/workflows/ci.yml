@@ -1,0 +1,42 @@
+name: ci
+
+# No path filters on purpose: a skipped job is not a passing job (AGENTS.md §7).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go build ./...
+      # -count=1 defeats the test cache; the run count in the log is the gate, not the colour.
+      - run: go test -count=1 -race ./...
+
+  lint:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.5
+
+  public-safety:
+    # This repo is public. Nothing that identifies a real cluster may land in it:
+    # LAN addresses, internal hostnames, kube context names. Fixtures and docs use placeholders.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./scripts/public-safety.sh
