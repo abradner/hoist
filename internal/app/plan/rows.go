@@ -9,6 +9,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -225,7 +226,7 @@ func Summary(o ResolveOutcome) []string {
 			lines = append(lines, fmt.Sprintf("  %s  unresolved", repo))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  %s  [%s] %s", r.Ref, r.Source, r.Detail))
+		lines = append(lines, fmt.Sprintf("  %s  [%s] %s", r.Ref, r.Source, redact.Strings(r.Detail)))
 	}
 	return lines
 }

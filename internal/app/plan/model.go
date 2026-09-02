@@ -23,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -542,7 +543,7 @@ func (m Model) leftBody() string {
 			if len(r.Warnings) > 0 {
 				marker = "! "
 			}
-			fmt.Fprintf(&b, "%s%s  (%s)\n", marker, r.Repo, r.Reason)
+			fmt.Fprintf(&b, "%s%s  (%s)\n", marker, r.Repo, redact.Strings(r.Reason))
 		}
 	}
 	return b.String()
@@ -561,7 +562,7 @@ func (m Model) rightBody() string {
 	}
 	fmt.Fprintf(&b, "\nWarnings (%d):\n", len(m.plan.Warnings))
 	for _, w := range m.plan.Warnings {
-		fmt.Fprintf(&b, "  [%s] %s\n", w.Code, strings.ReplaceAll(w.Message, "\n", "\n  "))
+		fmt.Fprintf(&b, "  [%s] %s\n", w.Code, redact.Strings(strings.ReplaceAll(w.Message, "\n", "\n  ")))
 	}
 	b.WriteString("\nResolution:\n")
 	for _, line := range Summary(m.outcome) {

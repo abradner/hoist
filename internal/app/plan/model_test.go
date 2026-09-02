@@ -15,6 +15,9 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
@@ -152,6 +155,68 @@ func TestResolveErrorDegradesToWarning(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("warnings missing the resolve error: %+v", m.plan.Warnings)
+	}
+}
+
+// F10 regression: the CLI printer redacts every rendered field with pkg/redact
+// (cmd/hoist's resolutionReport.print and printPlan), but the plan screen's own render
+// points — Summary's per-repo Detail, leftBody's disabled-row Reason, rightBody's warning
+// Message — did not. A value registered anywhere in the process must be scrubbed
+// wherever it later surfaces, the same guarantee TestPlanScrubsARegisteredSecretFromRegistryAndKubeErrors
+// proves for the CLI.
+func TestViewRedactsRegisteredSecrets(t *testing.T) {
+	const secret = "SECRET-TOKEN-XYZ"
+	redact.Register(secret)
+
+	r := discoverFixture(t)
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+		return ResolveOutcome{
+			KubeContext:  "test-context",
+			RegistryAuth: "env",
+			Resolutions: map[string]resolve.Resolution{
+				// Resolved, so its Detail lands in Summary's per-repo line.
+				"ghcr.io/example/web": {
+					Repo:   "ghcr.io/example/web",
+					Ref:    image.Ref{Repo: "ghcr.io/example/web", Tag: "v202602150930", Digest: "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"},
+					Source: resolve.SourceRegistry,
+					Detail: "registry said: token " + secret + " rejected",
+				},
+				// Unresolved, so its warning becomes the disabled row's Reason (leftBody)
+				// as well as a plan warning (rightBody).
+				"ghcr.io/example/marketing": {
+					Repo:   "ghcr.io/example/marketing",
+					Detail: "token " + secret + " rejected",
+					Warnings: []gitops.Warning{{
+						Code:    resolve.WarnUnresolved,
+						Message: "app-staging: no digest for ghcr.io/example/marketing (token " + secret + " rejected)",
+					}},
+				},
+			},
+		}, nil
+	})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m = runInit(t, m)
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady", m.state)
+	}
+	m = m.SetSize(120, 40)
+	m = m.SetStyles(ui.NewStyles(true))
+
+	// leftBody (disabled-row Reason) and rightBody (the warnings list and the Resolution
+	// summary, which embeds Summary's per-repo Detail) are checked directly rather than
+	// through View(): the viewport View() renders through can clip content out of the
+	// visible window at a fixed terminal size, which would make this test pass for the
+	// wrong reason (viewport height, not redaction) on a body long enough to scroll.
+	for name, body := range map[string]string{"leftBody": m.leftBody(), "rightBody": m.rightBody()} {
+		if strings.Contains(body, secret) {
+			t.Errorf("registered secret leaked into %s:\n%s", name, body)
+		}
+	}
+	if !strings.Contains(m.leftBody(), "token <redacted> rejected") {
+		t.Errorf("leftBody: expected <redacted> in place of the secret:\n%s", m.leftBody())
+	}
+	if !strings.Contains(m.rightBody(), "token <redacted> rejected") {
+		t.Errorf("rightBody: expected <redacted> in place of the secret:\n%s", m.rightBody())
 	}
 }
 
