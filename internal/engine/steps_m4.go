@@ -56,6 +56,13 @@ const (
 // silently skipping approval.
 const approvalAuto = "auto"
 
+// sinceSlop is subtracted from ApprovedStep's own anchor before it is passed to
+// Forge.Comments' since parameter (M4 hardening, see ApprovedStep.Observe) — a small,
+// deliberately cheap safety margin against "since" turning out to be an exclusive lower bound
+// server-side, never load-bearing for correctness (the local re-check enforces the exact
+// anchor regardless of what this buys).
+const sinceSlop = time.Second
+
 // approveRe and rejectRe match AGENTS.md's magic comment, verbatim: an optional leading "/", the
 // literal command and this promotion's id, optional surrounding whitespace, case-insensitive,
 // and nothing else on the line — matched against each line of a comment's body independently
@@ -228,7 +235,17 @@ func (a ApprovedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 	if err != nil {
 		return Observation{}, fmt.Errorf("reading commit time for %s: %w", s.CommitSHA, err)
 	}
-	comments, err := a.Forge.Comments(ctx, s.PR.Number, time.Time{})
+	// Bounding Comments' own fetch to since-sinceSlop (rather than time.Time{}, "everything")
+	// cuts API/pagination load on a long-lived, noisy PR (M4 hardening) — but it is purely an
+	// efficiency narrowing, never the actual enforcement: every comment returned is still
+	// re-checked against the exact anchor (since, unslopped) in the loop below. sinceSlop exists
+	// because GitHub's own docs describe "since" as "last updated after the given time" — read
+	// literally that is exclusive (>), which would let the API itself silently drop a comment
+	// posted in the same instant as since, before this step ever saw it at all; the local
+	// re-check can't recover a comment the API never returned. Padding the query backward by a
+	// second costs a little extra fetch on an old PR and loses nothing, since the local filter
+	// still enforces the true boundary exactly.
+	comments, err := a.Forge.Comments(ctx, s.PR.Number, since.Add(-sinceSlop))
 	if err != nil {
 		return Observation{}, fmt.Errorf("listing PR #%d comments: %w", s.PR.Number, err)
 	}
