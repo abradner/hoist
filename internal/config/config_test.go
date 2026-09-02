@@ -313,6 +313,37 @@ func TestMultipleYAMLDocumentsRejected(t *testing.T) {
 	}
 }
 
+// F3 regression: yaml.v3 never trims a scalar, so a stray leading/trailing space in an
+// env name, a pairs key/value, an approval key, or a registry prefix loads without error
+// and then silently never matches anything compared against it by ==. Reject instead of
+// accepting a value that would sabotage its own comparison.
+func TestSurroundingWhitespaceRejected(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"production padded", "repos:\n  - path: /x\n    envs: { production: [' prod'] }\n", "repos[0].envs.production[0]: \" prod\" has surrounding whitespace"},
+		{"pairs key padded", "repos:\n  - path: /x\n    envs: { pairs: { 'staging ': production } }\n", "repos[0].envs.pairs[staging ] (key): \"staging \" has surrounding whitespace"},
+		{"pairs value padded", "repos:\n  - path: /x\n    envs: { pairs: { staging: ' production' } }\n", "repos[0].envs.pairs.staging: \" production\" has surrounding whitespace"},
+		{"approval key padded", "repos:\n  - path: /x\n    envs: { approval: { ' prod': comment } }\n", "repos[0].envs.approval[ prod] (key): \" prod\" has surrounding whitespace"},
+		{"registry prefix padded", "registries:\n  - prefix: ' ghcr.io/'\n", "registries[0].prefix: \" ghcr.io/\" has surrounding whitespace"},
+	}
+	for _, tc := range cases {
+		p := write(t, tc.body)
+		_, err := Load(p)
+		if err == nil {
+			t.Errorf("%s: accepted", tc.name)
+			continue
+		}
+		if s := err.Error(); !strings.Contains(s, tc.want) {
+			t.Errorf("%s: error %q lacks %q", tc.name, s, tc.want)
+		}
+	}
+	// Positive control: the same shapes with no surrounding whitespace load cleanly.
+	if _, err := Load(write(t, "repos:\n  - path: /x\n    envs: { production: [prod], pairs: { staging: prod }, approval: { prod: comment } }\nregistries:\n  - prefix: ghcr.io/\n")); err != nil {
+		t.Errorf("clean values rejected: %v", err)
+	}
+}
+
 func TestTildeExpansion(t *testing.T) {
 	t.Setenv("HOME", "/home/me")
 	c, err := Load(write(t, "repos:\n  - path: ~/src/a\n  - path: '~'\n  - path: /abs/b\n  - path: rel/c\n  - path: ~user/d\n"))
