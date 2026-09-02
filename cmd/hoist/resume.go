@@ -167,15 +167,16 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		return exitFailure
 	}
 
-	// A later --override-ci-none always wins over what a previous run persisted (the operator
-	// just asked for it again); the CI/approval policy fields themselves are re-read from the
-	// current config, same as a fresh `hoist promote` would compute them, in case the config
-	// changed since this promotion started (AGENTS.md §4.9: Normalize's defaults, read once).
-	s.CINone = rc.CI.None
-	s.CIGrace = time.Duration(rc.CI.Grace)
-	s.Approval = rc.Approval(s.TargetEnv)
-	s.Approvers = rc.Approvers
-	s.Collaborators = rc.Collaborators
+	// s.CINone/CIGrace/Approval/Approvers/Collaborators are deliberately NOT re-read from rc
+	// here: PromotionState's own doc comment (internal/engine/state.go) states the invariant
+	// that these are policy "as of when this promotion started", carried forward so "a promotion
+	// never straddles two different policies mid-flight" — re-reading them from the current
+	// config file on every resume would let an operator's mid-flight config edit do exactly that
+	// (change what CI/approval policy this specific promotion enforces after it has already
+	// started), which is the bug this comment replaces a fix for. The persisted state file's
+	// values (loaded by engine.ListStates/LoadState above) are trusted as-is. Only
+	// --override-ci-none is an explicit, one-shot operator instruction for *this* invocation, so
+	// it still always wins over whatever was persisted.
 	if *overrideCINone {
 		s.CINoneOverride = true
 	}

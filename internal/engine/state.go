@@ -62,7 +62,10 @@ type PromotionState struct {
 	// them is secret or unbounded (AGENTS.md §4.3), and a resumed run re-reading the config
 	// file could in principle see a changed policy — carrying the value used when the
 	// promotion started is deliberate, not an oversight, so a promotion never straddles two
-	// different policies mid-flight.
+	// different policies mid-flight. `cmd/hoist/resume.go`'s runResume enforces this by loading
+	// these fields from the persisted state file only, never re-assigning them from the current
+	// RepoConfig — a fix landed after that invariant was found violated in an earlier draft;
+	// don't reintroduce a re-read here without updating this comment and the invariant it states.
 
 	// CINone and CIGrace are RepoConfig.CI as of when this promotion started: none|prompt|block
 	// and the grace duration CIGreenStep waits before applying none's policy to a PR reporting
