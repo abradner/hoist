@@ -512,10 +512,21 @@ func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []stri
 		if err != nil {
 			return plan.ResolveOutcome{}, err
 		}
-		used := ""
+		var used string
+		var consulted bool
 		if ar, ok := rep.registry.(registry.AuthReporter); ok && rep.registry != nil {
-			used = ar.AuthSourceUsed()
+			used, consulted = ar.AuthSourceUsed(), ar.Consulted()
 		}
-		return plan.ResolveOutcome{Resolutions: rep.res, KubeContext: rep.kubeContext, RegistryAuth: used}, nil
+		authTried := make([]string, 0, len(rep.auth))
+		for _, a := range rep.auth {
+			authTried = append(authTried, string(a))
+		}
+		return plan.ResolveOutcome{
+			Resolutions:       rep.res,
+			KubeContext:       rep.kubeContext,
+			RegistryAuth:      used,
+			RegistryConsulted: consulted,
+			RegistryAuthTried: authTried,
+		}, nil
 	}
 }

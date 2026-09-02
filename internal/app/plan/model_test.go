@@ -344,3 +344,26 @@ func TestViewGolden(t *testing.T) {
 		t.Errorf("plan.txt differs from golden (-want +got):\n%s", diff)
 	}
 }
+
+// Codex P2 (draft #29 pass): viewReady renders m.err.Error() directly with no per-call
+// redact.Strings — the one render point TestViewRedactsRegisteredSecrets's per-field
+// cases don't reach, since they all exercise the success path. A registered secret
+// embedded in a fatal resolveFn error must still be scrubbed by View()'s own final-
+// boundary call, not only by whichever nested renderer remembers to redact itself.
+func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
+	const secret = "SECRET-TOKEN-XYZ"
+	redact.Register(secret)
+
+	r := discoverFixture(t)
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+		return ResolveOutcome{}, sentinelErr("cluster unreachable: token " + secret + " rejected")
+	})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m = runInit(t, m)
+	if m.err == nil {
+		t.Fatal("want the resolve error to have failed the screen")
+	}
+	if got := m.View(); strings.Contains(got, secret) {
+		t.Errorf("View() leaked the registered secret in the fatal-error render:\n%s", got)
+	}
+}

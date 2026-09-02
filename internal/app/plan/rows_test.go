@@ -218,3 +218,32 @@ func TestTargetsFor(t *testing.T) {
 		t.Errorf("TargetsFor(app-staging) = %v, want [app-production]", got)
 	}
 }
+
+// Codex P2 (draft #29 pass): the CLI distinguishes "registry not consulted" from
+// "consulted; every auth source failed" (cmd/hoist's resolutionReport.print); the TUI's
+// Summary must make the same distinction rather than reporting both as "not consulted",
+// which reads as "the registry was never asked" when it was asked and simply failed.
+func TestSummaryDistinguishesNotConsultedFromAllFailed(t *testing.T) {
+	notConsulted := Summary(ResolveOutcome{})
+	if !containsLine(notConsulted, "registry not consulted") {
+		t.Errorf("no attempt at all: got %v, want a \"registry not consulted\" line", notConsulted)
+	}
+	allFailed := Summary(ResolveOutcome{RegistryConsulted: true, RegistryAuthTried: []string{"env", "keychain"}})
+	want := "registry: consulted; all auth sources failed (env, keychain)"
+	if !containsLine(allFailed, want) {
+		t.Errorf("consulted, all failed: got %v, want a line %q", allFailed, want)
+	}
+	won := Summary(ResolveOutcome{RegistryConsulted: true, RegistryAuth: "cluster"})
+	if !containsLine(won, "registry auth: cluster") {
+		t.Errorf("consulted, cluster won: got %v, want \"registry auth: cluster\"", won)
+	}
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, l := range lines {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}

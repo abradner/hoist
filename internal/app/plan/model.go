@@ -39,9 +39,19 @@ const (
 // value is "digest sources: none": BuildPlan then plans from the manifests alone, exactly
 // as M1 did.
 type ResolveOutcome struct {
-	Resolutions  map[string]resolve.Resolution
-	KubeContext  string
+	Resolutions map[string]resolve.Resolution
+	KubeContext string
+	// RegistryAuth names the credential source that authenticated, "" when none did.
 	RegistryAuth string
+	// RegistryConsulted is true when the registry was asked at all (win or lose) —
+	// distinct from RegistryAuth == "", which is also true when the registry was never
+	// consulted in the first place. Summary uses the two together so "not consulted" and
+	// "consulted, every source failed" are never confused, the same distinction
+	// cmd/hoist's own resolutionReport.print makes (AGENTS.md §4.10).
+	RegistryConsulted bool
+	// RegistryAuthTried names the configured credential chain, for the "all failed"
+	// wording when RegistryConsulted is true and RegistryAuth is "".
+	RegistryAuthTried []string
 }
 
 // ResolveFunc resolves the source env's promotable occurrences to digests. cmd/hoist
@@ -455,16 +465,23 @@ func (m Model) SetStyles(s ui.Styles) Model {
 	return m
 }
 
-// View renders the current state.
+// View renders the current state. Every rendered string passes through redact.Strings
+// once more here, at the output boundary, in addition to each render point that already
+// calls it (Summary's per-repo Detail, the disabled-row Reason, warning messages,
+// viewReady's own fatal-error line) — so a display field that forgets to redact itself,
+// or a credential registered after an earlier call already built its string, is still
+// caught before it reaches the terminal (AGENTS.md §4.4/§4.10, R-002).
 func (m Model) View() string {
+	var out string
 	switch m.state {
 	case stateSelectEnv:
-		return m.viewSelectEnv()
+		out = m.viewSelectEnv()
 	case stateLoading:
-		return m.viewLoading()
+		out = m.viewLoading()
 	default:
-		return m.viewReady()
+		out = m.viewReady()
 	}
+	return redact.Strings(out)
 }
 
 func (m Model) header() string {
