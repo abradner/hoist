@@ -34,6 +34,7 @@ it reads private state and writes to systems that deploy software.
 | Surface | Path / entry point | Auth mechanism | Notes |
 |---|---|---|---|
 | TUI / CLI | `cmd/hoist` | Local user; whoever runs the binary | The only human input. Keypresses in the plan/confirm and flight screens are the authorisation for everything below. |
+| Config file | `internal/config` (`$XDG_CONFIG_HOME/hoist/config.yaml`, `--config`) | Local user's file | Read once, never exec'd, no network. Names repos, envs, approvers, credential *sources* (env, keychain, cluster secret, `op` ref) — never credential values. `config show` redacts the `op` refs. |
 | GitOps repo (read + edit) | `pkg/gitops`, `pkg/git` | The user's git checkout and SSH/signing config, via `exec git` | Edits are byte-minimal image-scalar rewrites on a worktree, never the user's checkout. |
 | GitHub API | `pkg/forge/github` | `gh` auth token via go-gh | Creates branches/PRs, reads checks/reviews/comments, **merges**. Merge = deploy on an auto-sync repo. |
 | Container registry | `pkg/registry` | Credential chain: env token → docker keychain → cluster pull secret → `op` | Read-only (tags, manifests, config blobs). Credentials never leave the adaptor. |
