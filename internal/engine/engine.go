@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // StepName identifies one of the four steps a promotion drives through, in order.
@@ -131,8 +133,16 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 	return nil
 }
 
+// appendHistory is the one place a HistoryEntry.Detail is ever written, and therefore the
+// last boundary before it is persisted to the state file on disk (SaveState marshals History
+// verbatim). A step's Act error can embed a registered credential verbatim — pkg/git's own
+// error wrapping folds a failed command's stderr in, and a git hook or the signing helper
+// could echo one there — so detail passes through redact.Strings here even though pkg/git
+// already does its own best-effort scrubbing where it can (the same belt-and-suspenders
+// pattern as internal/app/plan/model.go's View(), which redacts its assembled output once at
+// the final boundary in addition to per-field calls).
 func appendHistory(s *PromotionState, name StepName, detail string) {
-	s.History = append(s.History, HistoryEntry{Step: name, At: time.Now(), Detail: detail})
+	s.History = append(s.History, HistoryEntry{Step: name, At: time.Now(), Detail: redact.Strings(detail)})
 }
 
 // saveIfSet is best-effort: a save failure on a terminal (blocked/waiting) path is logged into

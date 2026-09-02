@@ -13,6 +13,7 @@ import (
 
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runGitHost runs git directly for fixture setup that is not itself part of what's under
@@ -222,5 +223,42 @@ func TestPromoteRequiresGitHubConfig(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "github") {
 		t.Errorf("stderr should mention the missing github config: %s", errOut.String())
+	}
+}
+
+// secretLeakGit wraps a real git.Git, failing Worktree with an error that embeds a value the
+// caller has registered with pkg/redact — standing in for a git hook or the 1Password signing
+// helper echoing a registered credential to stderr, which pkg/git's own error wrapping folds
+// into the error text verbatim.
+type secretLeakGit struct {
+	git.Git
+	secret string
+}
+
+func (g secretLeakGit) Worktree(_ context.Context, _, _, _, _ string) error {
+	return fmt.Errorf("git worktree add: exit status 1: hook printed %s to stderr", g.secret)
+}
+
+// TestPromoteRedactsRegisteredSecretInDriverError is Finding B's CLI-side sink: a step's Act
+// error that embeds a value already registered with pkg/redact must never reach the terminal
+// unscrubbed, even though pkg/git already does its own best-effort scrubbing where it can (this
+// is the final boundary, same pattern as internal/app/plan/model.go's View()).
+func TestPromoteRedactsRegisteredSecretInDriverError(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	const secret = "sekrit-finding-b-cli-token-value"
+	redact.Register(secret)
+	newGit = secretLeakGit{Git: git.Exec{}, secret: secret}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit for a failing driver step, got 0; stdout: %s", out.String())
+	}
+	if strings.Contains(errOut.String(), secret) {
+		t.Fatalf("stderr leaked the registered secret verbatim: %s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), redact.Redacted) {
+		t.Fatalf("stderr should carry the redaction marker, got: %s", errOut.String())
 	}
 }

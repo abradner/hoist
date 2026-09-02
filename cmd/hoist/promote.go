@@ -239,12 +239,15 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintln(stderr, "hoist promote: still waiting for signing approval; re-run to resume")
 		return exitFailure
 	default:
+		// Final boundary before a step/driver error reaches the terminal: a failed git
+		// command's wrapped stderr (a hook or the signing helper echoing a registered
+		// credential) could otherwise bypass every earlier redact.Strings call.
 		var blocked *engine.BlockedError
 		if errors.As(err, &blocked) {
-			fmt.Fprintf(stderr, "hoist promote: %v\n", blocked)
+			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(blocked.Error()))
 			return exitFailure
 		}
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
 	}
 }
