@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
@@ -169,6 +170,84 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	}
 	if second := commitLine(out.String()); second != firstCommit {
 		t.Fatalf("second run produced a different commit: first %s, second %s", firstCommit, second)
+	}
+}
+
+// TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits is the sibling regression to
+// resume_test.go's TestResumeNeverStraddlesPolicyAcrossConfigEdits, at runPromote's OWN
+// in-place-retry path (re-invoking `hoist promote` for an id that already has a state file on
+// disk): that path restores History and the CI override from the existing state, but used to
+// populate CINone/CIGrace/Approval/Approvers/Collaborators fresh from CURRENT config every time
+// — the exact bug runResume was already fixed for, just at a sibling call site that was missed.
+// This starts a promotion under `approval: comment`, lets it sit waiting (no comment posted
+// yet), edits the config to `approval: auto` for the same env, then re-invokes `hoist promote`
+// with the identical --from/--to (same digests, so the same deterministic id, so the same state
+// file) and confirms it still enforces the ORIGINAL `comment` policy: without any approval
+// comment ever posted, the retry must NOT merge just because current config now says `auto`.
+func TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	withApprovers = strings.Replace(withApprovers, "deadline: 10s", "deadline: 2s", 1)
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval (no comment posted yet), got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	s := states[0]
+	if s.PR == nil {
+		t.Fatalf("expected a PR to already be open: %+v", s)
+	}
+	if s.Approval != "comment" || len(s.Approvers) != 1 || s.Approvers[0] != "alice" {
+		t.Fatalf("expected the original comment/alice policy persisted, got Approval=%q Approvers=%v", s.Approval, s.Approvers)
+	}
+
+	// The operator edits the config to a WEAKER policy (auto, no comment needed at all) while
+	// the promotion is still in flight.
+	changedApproval := strings.Replace(withApprovers, "app-production: comment", "app-production: auto", 1)
+	if changedApproval == withApprovers {
+		t.Fatal("approval replacement point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(changedApproval), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-invoke the EXACT SAME `hoist promote` command — same --from/--to, same digests, so the
+	// same deterministic id and the same existing state file — never `hoist resume`. This is
+	// runPromote's own retry path, not runResume's.
+	out.Reset()
+	errOut.Reset()
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("retry should still be waiting on alice's comment (never posted) under the ORIGINAL comment policy, got success: %s", out.String())
+	}
+	if strings.Contains(out.String(), "merged:") {
+		t.Fatalf("retry must not merge without a comment just because config now says auto: %s", out.String())
+	}
+	if len(f.PRs()) != 1 || f.PRs()[0].Merged {
+		t.Fatalf("the PR must still be unmerged: %+v", f.PRs())
 	}
 }
 

@@ -395,12 +395,15 @@ func (e Exec) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch strin
 // opportunistically updates dir's remote-tracking ref for branch as a side effect, the same as
 // it would for any other fetch; that update is harmless here since nothing in this package ever
 // trusts a remote-tracking ref as evidence without fetching it fresh first, but it is real and
-// should not be described as "no local ref changes at all". "couldn't find remote ref" (the
-// branch does not exist on remote at all) is reported as ok=false, not an error — the same "not
-// found, not broken" shape LsRemoteBranch and RevParse use.
+// should not be described as "no local ref changes at all". "branch does not exist on remote at
+// all" is reported as ok=false, not an error — the same "not found, not broken" shape
+// LsRemoteBranch and RevParse use. That classification is decided by an authoritative
+// LsRemoteBranch re-check against the remote, never by matching text in git's stderr: git's
+// wording for "no such ref" varies across versions and locales, and pattern-matching it can
+// silently misclassify a real failure as "branch missing" (or the reverse).
 func (e Exec) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
 	if _, err := e.run(ctx, dir, "fetch", "--no-tags", "--quiet", remote, branch); err != nil {
-		if strings.Contains(err.Error(), "couldn't find remote ref") {
+		if _, exists, lsErr := e.LsRemoteBranch(ctx, dir, remote, branch); lsErr == nil && !exists {
 			return "", false, nil
 		}
 		return "", false, err
@@ -597,14 +600,17 @@ func (e Exec) Push(ctx context.Context, worktreeDir, remote, branch string) erro
 
 // DeleteRemoteBranch implements Git. It runs against cloneDir (not a worktree — this promotion
 // may have already removed its own worktree by the time cleanup runs; cloneDir always exists
-// and shares the same remotes). "Already gone" (git reports "remote ref does not exist" or
-// similar) is treated as success, matching RemoveWorktree's own idempotency rule.
+// and shares the same remotes). "Already gone" is treated as success, matching RemoveWorktree's
+// own idempotency rule — decided by an authoritative LsRemoteBranch re-check against the remote
+// after the delete errors, never by matching text in git's stderr (the same reasoning
+// FetchBranch's own doc comment gives: git's wording varies across versions and locales, and
+// string-matching it can silently misclassify a real failure as "already gone", or the reverse).
 func (e Exec) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error {
 	_, err := e.run(ctx, cloneDir, "push", remote, "--delete", branch)
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "remote ref does not exist") {
+	if _, exists, lsErr := e.LsRemoteBranch(ctx, cloneDir, remote, branch); lsErr == nil && !exists {
 		return nil
 	}
 	return err

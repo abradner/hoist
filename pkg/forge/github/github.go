@@ -212,9 +212,16 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 		// happens to be completely full" — the latter is not truncation at all, and erroring on
 		// it would falsely block a promotion on an unusually large but entirely finite CI
 		// matrix. Resolve it with one more request for the page immediately past the bound, at
-		// per_page=1 (only whether ANY row exists there, not how many) — this is still a single
-		// bounded extra call, never a further unbounded scan.
-		sentinelPath := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=1&page=%d", c.owner, c.repo, sha, maxCheckRunPages+1)
+		// per_page=100 — the SAME page size every other page in the loop above used — for page
+		// maxCheckRunPages+1: this is still a single bounded extra call, never a further
+		// unbounded scan. per_page must match, not shrink to 1: GitHub's pagination offset is
+		// (page-1)*per_page, so a smaller per_page on this one request would ask for a
+		// different, earlier slice of items than "the 100-item batch right after what's already
+		// fetched" — page=maxCheckRunPages+1 at per_page=1 asks for the single item at offset
+		// maxCheckRunPages*1, not maxCheckRunPages*100, and almost always finds something,
+		// falsely reporting truncation for any commit with more than ~maxCheckRunPages check-runs
+		// (a real regression from an earlier round of this exact fix).
+		sentinelPath := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", c.owner, c.repo, sha, maxCheckRunPages+1)
 		var sentinel checkRunsResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, sentinelPath, nil, &sentinel); err != nil {
 			return forge.CheckSummary{}, translateErr("listing checks", err)
@@ -306,9 +313,13 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 		// the bound" from "this PR has exactly maxCommentPages*100 comments and the last page
 		// just happens to be completely full" — the latter isn't truncation, and erroring on it
 		// would falsely block a promotion on a long-but-finite PR conversation. One more
-		// per_page=1 request for the page past the bound resolves it without any further
-		// unbounded scanning.
-		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"1"}, "page": {fmt.Sprint(maxCommentPages + 1)}}
+		// per_page=100 request (the SAME page size as every other page above) for the page past
+		// the bound resolves it without any further unbounded scanning. per_page must match, not
+		// shrink to 1, for the same reason Checks' own sentinel does (see its comment): GitHub's
+		// offset is (page-1)*per_page, so a smaller per_page here would ask for a different,
+		// earlier slice than "the next 100-item batch" and almost always find something, falsely
+		// reporting truncation.
+		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(maxCommentPages + 1)}}
 		sentinelPath := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
 		var sentinel []commentResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, sentinelPath, nil, &sentinel); err != nil {

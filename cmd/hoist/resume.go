@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
@@ -120,6 +121,12 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		}
 	} else {
 		var matches []*engine.PromotionState
+		// obsErrs collects a re-observation failure per candidate instead of silently filtering
+		// it out of consideration (a transient GitHub/git error must never be indistinguishable
+		// from "this candidate simply isn't in flight" — that could misleadingly report "no
+		// in-flight promotion" with one candidate, or silently resolve to a different one with
+		// several, without ever confirming the choice was actually unambiguous).
+		var obsErrs []string
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		for _, st := range states {
 			if st.TargetEnv != *env {
@@ -131,14 +138,24 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 			}
 			f, ferr := newForge(rc.GitHub)
 			if ferr != nil {
+				obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
 				continue
 			}
 			done, _, oerr := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, nil), st)
-			if oerr == nil && !done {
+			if oerr != nil {
+				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
+				continue
+			}
+			if !done {
 				matches = append(matches, st)
 			}
 		}
 		stop()
+		if len(obsErrs) > 0 {
+			sort.Strings(obsErrs)
+			fmt.Fprintf(stderr, "hoist resume: could not confirm whether %d candidate(s) for %s are in flight (never silently excluded): %s\n", len(obsErrs), *env, strings.Join(obsErrs, "; "))
+			return exitFailure
+		}
 		switch len(matches) {
 		case 0:
 			fmt.Fprintf(stderr, "hoist resume: no in-flight promotion targets %s\n", *env)

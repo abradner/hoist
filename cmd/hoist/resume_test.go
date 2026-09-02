@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,5 +138,73 @@ func TestResumeNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "merged:") {
 		t.Fatalf("expected the promotion to merge once alice (the ORIGINAL approver) approved, got: %s", out.String())
+	}
+}
+
+// TestResumeEnvSurfacesObservationErrorInsteadOfSilentlyExcluding is the regression for finding
+// #7: runResume's --env matching used to discard a re-observation error and treat the affected
+// candidate as simply "not matching" (as absent as one that had genuinely already finished) —
+// which can misleadingly report "no in-flight promotion" when a transient GitHub/git failure,
+// not the promotion's actual state, was the real reason nothing matched. This starts a
+// promotion that sits waiting on an approval comment (never posted, so it's genuinely still in
+// flight and the only candidate for its env), then makes the fake forge's FindPR (which
+// MergedStep.Observe calls first) return a transient error and confirms `hoist resume --env`
+// surfaces THAT error rather than silently reporting "no in-flight promotion targets ...".
+func TestResumeEnvSurfacesObservationErrorInsteadOfSilentlyExcluding(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+
+	// Gate app-production on a comment so the first promote call sits waiting rather than
+	// completing end-to-end (the fixture's default approval is auto) — this promotion must
+	// still genuinely be in flight for --env to have a real candidate to observe.
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	withApprovers = strings.Replace(withApprovers, "deadline: 10s", "deadline: 2s", 1)
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval (no comment posted yet), got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	id := states[0].ID
+
+	// A transient forge failure — nothing to do with this promotion's actual state — hits every
+	// candidate's re-observation from here on.
+	f.FindErr = errors.New("transient: GitHub API returned 502")
+
+	out.Reset()
+	errOut.Reset()
+	got := run([]string{"--config", cfgPath, "resume", "--env", "app-production"}, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected failure while the only candidate's observation errors, got success: %s", out.String())
+	}
+	if strings.Contains(errOut.String(), "no in-flight promotion targets") {
+		t.Fatalf("must not report 'no in-flight promotion' when the real reason is an observation error, got: %s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "transient: GitHub API returned 502") {
+		t.Fatalf("expected the underlying observation error to be surfaced, got: %s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), id) {
+		t.Fatalf("expected the affected candidate's id to be named, got: %s", errOut.String())
 	}
 }

@@ -312,6 +312,142 @@ func TestIsAncestor(t *testing.T) {
 	}
 }
 
+// TestFetchBranchMissingBranchReturnsNotOK is FetchBranch's real-git regression for classifying
+// a branch that plain does not exist on the remote: ok=false, err=nil, not a stderr-text match.
+// This exercises the real fix (an authoritative LsRemoteBranch re-check after the fetch errors)
+// end to end against genuine git, not a canned error string.
+func TestFetchBranchMissingBranchReturnsNotOK(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	sha, ok, err := g.FetchBranch(ctx(), cloneDir, "origin", "no-such-branch-ever-pushed")
+	if err != nil {
+		t.Fatalf("a genuinely missing branch should not be an error, got: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false for a missing branch, got sha=%q", sha)
+	}
+}
+
+// TestFetchBranchRealFailureIsNotMisclassifiedAsMissing is the discriminating half of that
+// regression: a fetch failure for a reason OTHER than "branch missing" (here, a remote name that
+// isn't configured at all, so both the fetch and the authoritative LsRemoteBranch re-check fail
+// the same way) must still surface as a real error — proving the fix classifies by asking the
+// remote, not by treating every fetch failure as "not found". A stderr-text match keyed on
+// git's specific "couldn't find remote ref" wording could not tell these two failures apart if
+// git's phrasing for "no such remote" ever happened to overlap; asking the remote directly can.
+func TestFetchBranchRealFailureIsNotMisclassifiedAsMissing(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	_, ok, err := g.FetchBranch(ctx(), cloneDir, "no-such-remote-configured", "main")
+	if err == nil {
+		t.Fatalf("a nonexistent remote should be a real error, not silently ok=false (ok=%v)", ok)
+	}
+	if ok {
+		t.Fatal("should never report ok=true alongside an error")
+	}
+}
+
+// TestDeleteRemoteBranchRealFailureIsNotMisclassifiedAsGone is DeleteRemoteBranch's counterpart
+// to TestFetchBranchRealFailureIsNotMisclassifiedAsMissing: a delete failure for a reason other
+// than "branch already gone" (a remote name that isn't configured, so the authoritative
+// LsRemoteBranch re-check also fails) must surface as a real error, not be silently swallowed as
+// idempotent success.
+func TestDeleteRemoteBranchRealFailureIsNotMisclassifiedAsGone(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	err := g.DeleteRemoteBranch(ctx(), cloneDir, "no-such-remote-configured", "some-branch")
+	if err == nil {
+		t.Fatal("a nonexistent remote should be a real error, not silently treated as already-gone")
+	}
+}
+
+// fakeGitTrapping writes a wrapper script at Exec.Bin that intercepts exactly one subcommand
+// for one branch name (emitting the fixed stderr text a stderr-string-matching implementation
+// used to key off) and delegates every other invocation — including the authoritative
+// LsRemoteBranch re-check the fix now performs — straight to the real git binary found on
+// PATH. This is what makes the two tests below actually discriminating: a real branch that
+// genuinely exists on origin, with git's OWN historical error text asserting the opposite,
+// proves the fix trusts LsRemoteBranch over the message rather than merely exercising a case
+// where both approaches happen to agree (a bad remote name fails identically either way, which
+// is not a discriminating test by itself).
+func fakeGitTrapping(t *testing.T, subcommand, branch, stderrMsg string) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
+	fake := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"" + subcommand + "\" ]; then\n" +
+		"  for a in \"$@\"; do\n" +
+		"    if [ \"$a\" = \"" + branch + "\" ]; then\n" +
+		"      echo \"" + stderrMsg + "\" >&2\n" +
+		"      exit 128\n" +
+		"    fi\n" +
+		"  done\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return fake
+}
+
+// TestFetchBranchTrustsLsRemoteOverMisleadingStderrText is the discriminating regression for
+// the string-matching fix: a branch that GENUINELY exists on origin, fetched through a git
+// wrapper that emits git's own historical "couldn't find remote ref" wording anyway (standing in
+// for a different git version/locale producing that same text for an unrelated reason), must
+// NOT be silently reported as missing. The pre-fix code matched that exact substring and would
+// have returned ok=false, err=nil here — truthfully wrong, since LsRemoteBranch (delegated to
+// real git by the wrapper) can see the branch is really there.
+func TestFetchBranchTrustsLsRemoteOverMisleadingStderrText(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	const branch = "genuinely-exists"
+	if err := runHost(t, cloneDir, "checkout", "-q", "-b", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "push", "-q", "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := fakeGitTrapping(t, "fetch", branch, "fatal: couldn't find remote ref refs/heads/"+branch)
+	g := Exec{Bin: fake}
+	_, ok, err := g.FetchBranch(ctx(), cloneDir, "origin", branch)
+	if err == nil {
+		t.Fatalf("a branch that genuinely exists must not be reported as missing just because git's stderr text says so (ok=%v)", ok)
+	}
+}
+
+// TestDeleteRemoteBranchTrustsLsRemoteOverMisleadingStderrText is DeleteRemoteBranch's
+// counterpart: a branch that is genuinely STILL on origin (the delete didn't really happen),
+// deleted through a wrapper that emits git's own historical "remote ref does not exist" wording
+// anyway, must not be silently reported as successfully deleted.
+func TestDeleteRemoteBranchTrustsLsRemoteOverMisleadingStderrText(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	const branch = "still-there"
+	if err := runHost(t, cloneDir, "checkout", "-q", "-b", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "push", "-q", "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := fakeGitTrapping(t, "push", branch, "error: unable to delete 'refs/heads/"+branch+"': remote ref does not exist")
+	g := Exec{Bin: fake}
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err == nil {
+		t.Fatal("a branch that genuinely still exists must not be reported as already-gone just because git's stderr text says so")
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || !ok {
+		t.Fatalf("sanity check: the branch should genuinely still be on origin, untouched: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestLsTreeBlobBeforeAnyCommit(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")

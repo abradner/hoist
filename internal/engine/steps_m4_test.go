@@ -732,6 +732,47 @@ func TestMergedResumesAfterKilledMergeCall(t *testing.T) {
 	}
 }
 
+// TestMergedRecoveryRejectsMergedPRWithUnexpectedHead is finding #5's regression: Act's
+// lost-response recovery path (MergePR errors, but a fresh FindPR shows the PR merged anyway)
+// must not accept ANY observed-as-merged PR as this promotion's own success — only one whose
+// HeadSHA still matches what this promotion expected. This simulates another actor changing the
+// PR's head and merging something else in the gap between this promotion's own Observe and its
+// own MergePR call: the fake's real merge lands against a DIFFERENT head sha than this
+// promotion ever pushed, so Act's recovery must surface a genuine error, never silently accept
+// that unrelated merge as its own.
+func TestMergedRecoveryRejectsMergedPRWithUnexpectedHead(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+
+	expected := s.PushedSHA
+	if expected == "" {
+		expected = s.CommitSHA
+	}
+	if expected == "" {
+		t.Fatal("fixture should have set PushedSHA or CommitSHA")
+	}
+
+	// Simulate a different actor moving the PR's head and merging THAT, not what this promotion
+	// pushed — the fake has no expectedHeadSHA check to bypass since this direct call passes "".
+	f.SetHeadSHA(s.PR.Number, "impostor-head-sha-not-this-promotions")
+	if _, err := f.MergePR(ctx(), s.PR.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// s.PR (this process's own copy) still thinks it's unmerged and still expects its own head,
+	// so Act's own MergePR call fails (the fake's PR is already merged) and falls into the
+	// lost-response recovery path — which must now refuse to adopt the impostor merge.
+	step := MergedStep{Forge: f, Git: git.Exec{}}
+	err := step.Act(ctx(), s)
+	if err == nil {
+		t.Fatal("Act must not silently accept a merged PR whose head does not match what this promotion expected")
+	}
+	if s.PR.Merged {
+		t.Fatalf("s.PR must not have been overwritten with the impostor merge: %+v", s.PR)
+	}
+}
+
 func TestMergedDeletesBranchAndResumesIfKilledBeforeDelete(t *testing.T) {
 	fx := newFixture(t)
 	f := &forge.Fake{}

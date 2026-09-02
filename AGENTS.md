@@ -307,7 +307,13 @@ file under `$XDG_STATE_HOME/hoist/promotions/<id>.json` is kept purely as a huma
 (History), never consulted to decide what already happened. A plan whose edits are all no-ops
 prints "already current" and exits 0 without touching git or the forge. `promote` refuses to start
 a second promotion for a target env that already has a non-terminal one in flight (re-observed,
-not read from the state file's own recorded phase); `hoist promotions` lists every promotion state
+not read from the state file's own recorded phase). Before that state file exists, a short-lived
+claim file (`engine.ClaimInFlight`) closes the race between two concurrent `promote` invocations
+that both start before either has written state; a claim conflict is never auto-resolved (an
+earlier, more automatic design kept reintroducing the same reclaim race — see `claim.go`'s package
+doc) — the error names the claimant's age and the claim file's path, and recovery from a genuinely
+abandoned one (the owning process was killed) is deleting that file by hand. `hoist promotions`
+lists every promotion state
 file with its phase re-observed the same way, and `hoist resume <id>` (or `hoist resume --env
 <target-env>`) re-drives one from wherever `Observe` actually finds it — the CLI's own poll loop
 (`internal/config`'s `poll` section) is what does the actual waiting on CI/approval, never a

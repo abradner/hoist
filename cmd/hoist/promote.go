@@ -263,6 +263,21 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// persisted, since the operator just asked for it again.
 	if prev, err := engine.LoadState(statePath); err == nil && prev != nil && prev.ID == id {
 		s.History = prev.History
+		// Policy fields (CINone/CIGrace/Approval/Approvers/Collaborators), set above from
+		// eff.cfg, are overwritten here with what the existing state file already persisted —
+		// mirroring runResume's own fix (cmd/hoist/resume.go, commit f3b1c53) for the identical
+		// bug at this sibling call site: PromotionState's doc comment (internal/engine/state.go)
+		// states these are policy "as of when this promotion started", carried forward so a
+		// promotion never straddles two different policies mid-flight. Re-invoking `hoist
+		// promote` for an id that already has a state file is still a resume of THAT promotion,
+		// not a new one — leaving these fresh from current config would let an operator's
+		// mid-flight config edit retroactively change what policy an already-started promotion
+		// enforces, exactly the bug runResume was fixed for.
+		s.CINone = prev.CINone
+		s.CIGrace = prev.CIGrace
+		s.Approval = prev.Approval
+		s.Approvers = prev.Approvers
+		s.Collaborators = prev.Collaborators
 		if !*overrideCINone {
 			s.CINoneOverride = prev.CINoneOverride
 		}

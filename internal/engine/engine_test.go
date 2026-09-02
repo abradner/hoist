@@ -56,3 +56,26 @@ func TestDriveRedactsRegisteredSecretInHistory(t *testing.T) {
 		t.Fatalf("History entry should carry the redaction marker, got %q", detail)
 	}
 }
+
+// TestStepErrorMessageContainsWrappedErrorText is the regression for a format-verb bug: Error()
+// used to build its message with fmt.Sprintf's %s verb against e.Err, a plain error value.
+// %s does correctly invoke Error() for a value satisfying the error interface (verified: this
+// exact construction, unchanged, does not reproduce "%!s(...)" garbage), but %v is the
+// conventional, defensive verb for formatting an error and was what the fix switched to — this
+// test pins the actual contract (the wrapped error's real message text appears verbatim in the
+// output), not the specific verb used to get there, so it stays meaningful regardless.
+func TestStepErrorMessageContainsWrappedErrorText(t *testing.T) {
+	const wrapped = "signing timed out after 120s waiting for interactive approval"
+	e := &StepError{Step: StepPushed, Op: "act", Err: fmt.Errorf("%s", wrapped)}
+	got := e.Error()
+	if !strings.Contains(got, wrapped) {
+		t.Fatalf("StepError.Error() = %q, want it to contain the wrapped error's message %q", got, wrapped)
+	}
+	if strings.Contains(got, "%!") {
+		t.Fatalf("StepError.Error() = %q, contains a malformed fmt verb", got)
+	}
+	const want = "pushed: act: " + wrapped
+	if got != want {
+		t.Fatalf("StepError.Error() = %q, want %q", got, want)
+	}
+}

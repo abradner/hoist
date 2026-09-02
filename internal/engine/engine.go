@@ -90,7 +90,7 @@ type StepError struct {
 	Err  error
 }
 
-func (e *StepError) Error() string { return fmt.Sprintf("%s: %s: %s", e.Step, e.Op, e.Err) }
+func (e *StepError) Error() string { return fmt.Sprintf("%s: %s: %v", e.Step, e.Op, e.Err) }
 func (e *StepError) Unwrap() error { return e.Err }
 
 // HistoryEntry is one line of a promotion's audit trail: what Observe/Act found, and when.

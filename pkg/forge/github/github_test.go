@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,28 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
 )
+
+// paginate mimics GitHub's own pagination arithmetic against a fixed-size virtual dataset:
+// offset (page-1)*perPage, perPage items, clamped to items' bounds. Real tests for the
+// exact-at-bound sentinel request MUST route through this rather than keying a canned response
+// off the page number alone — a mock that ignores per_page and only special-cases "page ==
+// bound+1" cannot tell a correct per_page=100 sentinel from the broken per_page=1 one a prior
+// round shipped (both would get the same canned "empty" response), which is exactly how that
+// regression passed its own test once already (AGENTS.md §8 "watch the setup").
+func paginate(items []string, page, perPage int) []string {
+	start := (page - 1) * perPage
+	if start < 0 {
+		start = 0
+	}
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
+}
 
 // fakeTransport answers every request from a table keyed by "METHOD path", so these tests
 // never touch a real GitHub host — go-gh's own auth/keyring resolution is bypassed entirely
@@ -278,34 +301,32 @@ func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
 // TestChecksMoreThanBoundFailsClosed's own fix: a commit with EXACTLY maxCheckRunPages*100
 // check-runs also has its last allowed page come back completely full — the same signal a
 // truncated result gives — but there is no page 11, so this must NOT error. Checks resolves the
-// ambiguity with one extra per_page=1 sentinel request for page maxCheckRunPages+1; this test
-// makes that request come back empty, exactly as it genuinely would for a commit with no more
-// check-runs beyond the bound.
+// ambiguity with one extra sentinel request for page maxCheckRunPages+1, at the SAME per_page=100
+// every other page uses; this test backs the mock with a real, fixed-size virtual dataset and
+// computes each response via paginate's genuine GitHub-style (page-1)*per_page arithmetic — a
+// mock that instead special-cased "page == bound+1 => empty" regardless of per_page would not
+// have caught the round-4 regression this test is also guarding (a per_page=1 sentinel asks for
+// a different, earlier item and almost always finds something).
 func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
-	fullPage := func(name string) string {
-		runs := make([]string, 100)
-		for i := range runs {
-			runs[i] = fmt.Sprintf(`{"name": "%s-%d", "status": "completed", "conclusion": "success"}`, name, i)
-		}
-		return `{"check_runs": [` + strings.Join(runs, ",") + `]}`
+	total := maxCheckRunPages * 100
+	items := make([]string, total)
+	for i := range items {
+		items[i] = fmt.Sprintf(`{"name": "run-%d", "status": "completed", "conclusion": "success"}`, i)
 	}
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
-			page := r.URL.Query().Get("page")
-			if page == fmt.Sprint(maxCheckRunPages+1) {
-				// The sentinel request for the page just past the bound: nothing there, since
-				// this commit has EXACTLY maxCheckRunPages*100 check-runs, not more.
-				return 200, `{"check_runs": []}`
-			}
-			return 200, fullPage("page-" + page)
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			slice := paginate(items, page, perPage)
+			return 200, `{"check_runs": [` + strings.Join(slice, ",") + `]}`
 		},
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
-		t.Fatalf("a commit with exactly %d check-runs must not be treated as truncated: %v", maxCheckRunPages*100, err)
+		t.Fatalf("a commit with exactly %d check-runs must not be treated as truncated: %v", total, err)
 	}
-	if sum.Total != maxCheckRunPages*100 {
-		t.Fatalf("Total = %d, want exactly %d", sum.Total, maxCheckRunPages*100)
+	if sum.Total != total {
+		t.Fatalf("Total = %d, want exactly %d", sum.Total, total)
 	}
 }
 
@@ -396,31 +417,32 @@ func TestCommentsMoreThanBoundFailsClosed(t *testing.T) {
 // TestCommentsExactlyAtBoundIsNotAnError is Comments' half of the false-positive regression (see
 // TestChecksExactlyAtBoundIsNotAnError): a PR with EXACTLY maxCommentPages*100 comments must not
 // be treated as truncated just because its last allowed page came back full — Comments' own
-// per_page=1 sentinel request for the page past the bound resolves it, and this test makes that
-// request come back empty, exactly as it genuinely would here.
+// sentinel request for the page past the bound, at the SAME per_page=100 every other page uses,
+// resolves it. As in the Checks test above, the mock is backed by a real, fixed-size virtual
+// dataset and computed via paginate's genuine (page-1)*per_page arithmetic, so a regression back
+// to a smaller per_page on just the sentinel request (round 4's actual bug: it asks for a
+// different, earlier item and almost always finds something) makes this fail rather than pass by
+// accident.
 func TestCommentsExactlyAtBoundIsNotAnError(t *testing.T) {
-	fullPage := func(page string) string {
-		items := make([]string, 100)
-		for i := range items {
-			items[i] = fmt.Sprintf(`{"id": %s%02d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, page, i)
-		}
-		return `[` + strings.Join(items, ",") + `]`
+	total := maxCommentPages * 100
+	items := make([]string, total)
+	for i := range items {
+		items[i] = fmt.Sprintf(`{"id": %d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, i)
 	}
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
-			page := r.URL.Query().Get("page")
-			if page == fmt.Sprint(maxCommentPages+1) {
-				return 200, "[]"
-			}
-			return 200, fullPage(page)
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			slice := paginate(items, page, perPage)
+			return 200, `[` + strings.Join(slice, ",") + `]`
 		},
 	})
 	comments, err := c.Comments(context.Background(), 7, time.Time{})
 	if err != nil {
-		t.Fatalf("a PR with exactly %d comments must not be treated as truncated: %v", maxCommentPages*100, err)
+		t.Fatalf("a PR with exactly %d comments must not be treated as truncated: %v", total, err)
 	}
-	if len(comments) != maxCommentPages*100 {
-		t.Fatalf("Comments returned %d, want exactly %d", len(comments), maxCommentPages*100)
+	if len(comments) != total {
+		t.Fatalf("Comments returned %d, want exactly %d", len(comments), total)
 	}
 }
 

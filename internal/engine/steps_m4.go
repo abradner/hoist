@@ -469,8 +469,20 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 		}
 		pr, err := m.Forge.MergePR(ctx, s.PR.Number, expected)
 		if err != nil {
+			// Lost-response recovery (kill-and-resume idempotency): the client never saw
+			// MergePR's response, but the merge may have gone through server-side anyway. A
+			// fresh FindPR reporting Merged is not enough on its own to accept as THIS
+			// promotion's own success — only if its base still matches s.Base (same check
+			// PROpenedStep/Observe above already apply before ever adopting a PR) and its head
+			// still matches what this promotion expected to have pushed. Otherwise something
+			// else merged instead (or moved the branch and merged that) between this
+			// promotion's own Observe and this Act call, which is a genuine, different failure,
+			// not a silent success. As elsewhere (Observe's own stale-head pre-check above), an
+			// empty head on either side means "unknown, not a basis to refuse" — only an
+			// actual, known mismatch is treated as impostor content.
 			fresh, ok, ferr := m.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
-			if ferr == nil && ok && fresh.Merged {
+			headOK := fresh.HeadSHA == "" || expected == "" || fresh.HeadSHA == expected
+			if ferr == nil && ok && fresh.Merged && fresh.Base == s.Base && headOK {
 				s.PR = &fresh
 			} else {
 				return fmt.Errorf("merging PR #%d: %w", s.PR.Number, err)
