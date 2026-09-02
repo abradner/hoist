@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,9 +126,10 @@ func occurrencesOf(t *testing.T, file, content string) []Occurrence {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lines := bytes.Split([]byte(content), []byte{'\n'})
 	var out []Occurrence
 	for i, d := range docs {
-		occ, err := scanDoc(file, i, d)
+		occ, err := scanDoc(file, i, d, lines)
 		if err != nil {
 			t.Fatal(err)
 		}

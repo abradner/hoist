@@ -215,14 +215,17 @@ func yamlFiles(dir string) ([]string, error) {
 	return out, nil
 }
 
-// parseFile reads and parses the repo-relative file rel, refusing one that resolves outside
-// root.
-func parseFile(root, rel string) ([]*yaml.Node, error) {
+// readFile reads the repo-relative file rel, refusing one that resolves outside root.
+func readFile(root, rel string) ([]byte, error) {
 	p, err := ResolvePath(root, rel)
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(p)
+	return os.ReadFile(p)
+}
+
+func parseFile(root, rel string) ([]*yaml.Node, error) {
+	b, err := readFile(root, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -343,12 +346,17 @@ func scanFamily(root string, fam *Family) error {
 	}
 	for _, f := range files {
 		rel := path.Join(fam.Dir, f)
-		docs, err := parseFile(root, rel)
+		b, err := readFile(root, rel)
 		if err != nil {
 			return fmt.Errorf("%s: %w", rel, err)
 		}
+		docs, err := parseDocs(b)
+		if err != nil {
+			return fmt.Errorf("%s: %w", rel, err)
+		}
+		lines := bytes.Split(b, []byte{'\n'})
 		for i, doc := range docs {
-			occ, err := scanDoc(rel, i, doc)
+			occ, err := scanDoc(rel, i, doc, lines)
 			if err != nil {
 				return err
 			}
@@ -360,7 +368,9 @@ func scanFamily(root string, fam *Family) error {
 
 // scanDoc walks one document and records every image: scalar that is a direct field of an
 // item in a containers/initContainers/ephemeralContainers sequence (cursor.imageOfContainer).
-func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
+// lines are the file's bytes split on '\n', the way ApplyBytes splits them, so each
+// occurrence's position is checked against the same line Apply would rewrite.
+func scanDoc(file string, idx int, doc *yaml.Node, lines [][]byte) ([]Occurrence, error) {
 	body := unwrap(doc)
 	if body == nil {
 		return nil, nil
@@ -371,7 +381,7 @@ func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
 	var walk func(n *yaml.Node, c cursor) error
 	walk = func(n *yaml.Node, c cursor) error {
 		if c.imageOfContainer() {
-			occ, err := occurrenceAt(file, idx, kind, name, scalarAt(c.container, "name"), c.path, n)
+			occ, err := occurrenceAt(file, idx, kind, name, scalarAt(c.container, "name"), c.path, n, lines)
 			if err != nil {
 				return err
 			}
@@ -391,7 +401,7 @@ func scanDoc(file string, idx int, doc *yaml.Node) ([]Occurrence, error) {
 	return out, nil
 }
 
-func occurrenceAt(file string, idx int, kind, name, container, p string, img *yaml.Node) (Occurrence, error) {
+func occurrenceAt(file string, idx int, kind, name, container, p string, img *yaml.Node, lines [][]byte) (Occurrence, error) {
 	switch img.Kind {
 	case yaml.ScalarNode:
 	case yaml.AliasNode:
@@ -409,10 +419,20 @@ func occurrenceAt(file string, idx int, kind, name, container, p string, img *ya
 	if err != nil {
 		return Occurrence{}, fmt.Errorf("%s:%d: %s: %w", file, img.Line, p, err)
 	}
-	return Occurrence{
+	occ := Occurrence{
 		File: file, Doc: idx, Line: img.Line, Col: img.Column, Style: img.Style,
 		Kind: kind, Name: name, Container: container, Path: p, Raw: img.Value, Ref: ref,
-	}, nil
+	}
+	// The same predicate replaceInLine applies before writing: a value not on one line with
+	// its key ("? image" / ": ref", or the value on the line after "image:") is refused here,
+	// naming the file and line, instead of being planned and refused at write time.
+	if occ.Line < 1 || occ.Line > len(lines) {
+		return Occurrence{}, fmt.Errorf("%s:%d: %s: line is outside the file (%d lines)", file, occ.Line, p, len(lines))
+	}
+	if _, err := checkScalarStart(lines[occ.Line-1], &occ); err != nil {
+		return Occurrence{}, fmt.Errorf("%s:%d: %s: %w", file, occ.Line, p, err)
+	}
+	return occ, nil
 }
 
 func commonParent(env *Env) string {

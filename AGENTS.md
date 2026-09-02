@@ -539,6 +539,18 @@ test lives** (if one exists).
    Rule: every join goes through `ResolvePath`, read and write; a new reader of a repo-relative
    path calls it before `ReadDir`/`ReadFile`. Regression tests: `TestDiscoverRefusesSymlinkOutsideRepo`
    and `TestDiscoverFollowsSymlinkInsideRepo` in `pkg/gitops/discover_test.go`.
+3. **`yaml.v3` accepts more key layouts than `image: value` on one line.** What happened: the
+   start-of-scalar check in `ApplyBytes` matched the literal `image:`, but yaml.v3 also parses
+   `image : ref` (blanks before the colon), `-   image:` (more than one blank after the item
+   marker), the explicit-key form `? image` / `: ref`, and `image:` with the value on the next
+   line — all discovered and planned, then refused only at write time. Root cause: discovery
+   recorded what the parser accepted; the write path recognised a narrower grammar, and the two
+   were separate code. Rule: one predicate, `checkScalarStart`, is called by `occurrenceAt` at
+   discovery and by `replaceInLine` at write; one-line variants are accepted, and a value that
+   does not share a line with its key is refused at discovery, naming file and line. The
+   discovery call is politeness (§8, layered checks) — deleting it moves the refusal, never the
+   write. Regression tests: `TestApplyBytesKeyColonSpacingByteExact` in `pkg/gitops/apply_test.go`;
+   `TestDiscoverRefusesKeyAndValueOnDifferentLines` in `pkg/gitops/discover_test.go`.
 
 ## 10. Maintaining This Document
 

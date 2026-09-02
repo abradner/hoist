@@ -352,6 +352,48 @@ func TestDiscoverErrors(t *testing.T) {
 	}
 }
 
+// yaml.v3 parses the explicit-key form ("? image" / ": ref") and a plain value on the line
+// after "image:" as the same mapping as image: ref, but nothing precedes the value on its own
+// line, so Apply could never rewrite it. Discover refuses those layouts up front, through the
+// predicate Apply uses, naming the file and the value's line — instead of recording an
+// occurrence that is planned and only refused at write time. A blank before the colon is a
+// one-line layout and stays discoverable (the positive control).
+func TestDiscoverRefusesKeyAndValueOnDifferentLines(t *testing.T) {
+	head := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n" // 9 lines
+	ref := "ghcr.io/example/api:v1@" + digestA
+	for name, item := range map[string]string{
+		"explicit key":       "          ? image\n          : " + ref + "\n",
+		"value on next line": "          image:\n            " + ref + "\n",
+	} {
+		root := writeRepo(t, map[string]string{
+			"cluster/apps/a.yaml":         wrapper("one", "cluster/apps/x/api", "env"),
+			"cluster/apps/x/api/app.yaml": head + item,
+		})
+		r, err := Discover(root, "")
+		if err == nil {
+			t.Errorf("%s: discovered as %+v", name, r.Envs["env"].Families["api"].Occurrences)
+			continue
+		}
+		for _, want := range []string{"cluster/apps/x/api/app.yaml:11", "spec.template.spec.containers[0].image", "shares its line with its key"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error lacks %q: %v", name, want, err)
+			}
+		}
+	}
+	root := writeRepo(t, map[string]string{
+		"cluster/apps/a.yaml":         wrapper("one", "cluster/apps/x/api", "env"),
+		"cluster/apps/x/api/app.yaml": head + "          image : " + ref + "\n",
+	})
+	r, err := Discover(root, "")
+	if err != nil {
+		t.Fatalf("image : ref refused: %v", err)
+	}
+	occ := r.Envs["env"].Families["api"].Occurrences
+	if len(occ) != 1 || occ[0].Line != 10 || occ[0].Col != 19 || occ[0].Raw != ref {
+		t.Errorf("occurrences = %+v", occ)
+	}
+}
+
 // symlinkRepo lays out parent/repo (the checkout: files, slash paths → contents) beside
 // parent/outside (an attacker-chosen location the checkout must never read): outside/apps
 // holds a valid wrapper naming the in-repo family families/api, and outside/api/app.yaml and

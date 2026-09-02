@@ -129,11 +129,8 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 		return nil, err
 	}
 	where := fmt.Sprintf("%s:%d:%d", e.File, e.Line, e.Col)
-	off, ok := byteOffset(line, e.Col)
-	if !ok {
-		return nil, fmt.Errorf("%s: column is beyond the end of the line", where)
-	}
-	if err := checkScalarStart(line[:off], e.Path); err != nil {
+	off, err := checkScalarStart(line, &e.Occurrence)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", where, err)
 	}
 	var quote byte
@@ -184,23 +181,33 @@ func replaceInLine(line []byte, e *Edit) ([]byte, error) {
 	return out, nil
 }
 
-// checkScalarStart proves the recorded column is where the scalar starts, not somewhere
-// inside it: the bytes before it on the line must be the scalar's own key — the last element
-// of path — followed by a colon and blanks, after either indentation with an optional "- "
-// item marker (block style) or flow punctuation. Without this an Edit whose Col and Raw name a
-// suffix of the scalar (image: junk@ghcr.io/x/y:v1 with Col at the g) passes the prefix match
-// and the write keeps the junk. The opening quote, when Style has one, sits at Col itself and
-// is checked by the caller.
-func checkScalarStart(before []byte, path string) error {
-	key := path[strings.LastIndex(path, ".")+1:]
+// checkScalarStart is the one test of whether an occurrence's recorded line and column are
+// somewhere hoist can rewrite: the bytes before Col on line must be the scalar's own key —
+// the last element of Path — then optional blanks, a colon and at least one blank, after
+// either indentation with an optional "-" item marker (block style) or flow punctuation. It
+// returns the byte offset of Col. Two things fail it. An Edit whose Col and Raw name a suffix
+// of the scalar (image: junk@ghcr.io/x/y:v1 with Col at the g) would otherwise pass the
+// prefix match and the write would keep the junk. And a layout whose key and value are on
+// different lines — the explicit-key form "? image" / ": ref", or "image:" with the value on
+// the next line — has no key before Col at all; yaml.v3 parses both, so discovery
+// (occurrenceAt) refuses them here, up front and in the same words, rather than planning an
+// occurrence that ApplyBytes (replaceInLine) would refuse at write time. Deleting the
+// discovery call changes only when the refusal is heard, never whether the bytes are written.
+// The opening quote, when Style has one, sits at Col itself and is checked by the caller.
+func checkScalarStart(line []byte, o *Occurrence) (int, error) {
+	key := o.Path[strings.LastIndex(o.Path, ".")+1:]
 	if key == "" || strings.HasSuffix(key, "]") {
-		return fmt.Errorf("edit path %q does not end in a mapping key", path)
+		return 0, fmt.Errorf("edit path %q does not end in a mapping key", o.Path)
 	}
-	re := regexp.MustCompile(`(?:^[ \t]*(?:- )?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `:[ \t]+$`)
-	if !re.Match(before) {
-		return fmt.Errorf("edit column is not at the start of the %s scalar (line begins %q)", key, truncate(before))
+	off, ok := byteOffset(line, o.Col)
+	if !ok {
+		return 0, fmt.Errorf("column %d is beyond the end of the line", o.Col)
 	}
-	return nil
+	re := regexp.MustCompile(`(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `[ \t]*:[ \t]+$`)
+	if !re.Match(line[:off]) {
+		return 0, fmt.Errorf("column %d is not the start of a \"%s: value\" pair on that line (before it: %q); hoist rewrites only an %s scalar that shares its line with its key", o.Col, key, truncate(line[:off]), key)
+	}
+	return off, nil
 }
 
 // byteOffset converts yaml.v3's 1-based character column into a byte offset.

@@ -57,6 +57,40 @@ func TestApplyBytesInlineCommentByteExact(t *testing.T) {
 	}
 }
 
+// yaml.v3 also accepts blanks between the key and its colon (image : ref) and more than one
+// blank after a "-" item marker; both are still one key: value pair on one line, so the
+// scalar is rewritten byte-minimally like any other. Refusing them at write time — after the
+// occurrence was discovered and planned — was the late failure Codex P2 named.
+func TestApplyBytesKeyColonSpacingByteExact(t *testing.T) {
+	for _, tc := range []struct{ before, want string }{
+		{
+			"spec:\n  containers:\n    - name: web\n      image : ghcr.io/x/y:v1\n",
+			"spec:\n  containers:\n    - name: web\n      image : ghcr.io/x/y:v1@" + digestA + "\n",
+		},
+		{
+			"spec:\n  containers:\n    - name: web\n      image  :\t\"ghcr.io/x/y:v1\"  # note\n",
+			"spec:\n  containers:\n    - name: web\n      image  :\t\"ghcr.io/x/y:v1@" + digestA + "\"  # note\n",
+		},
+		{
+			"spec:\n  containers:\n    -   name: web\n        image: ghcr.io/x/y:v1\n",
+			"spec:\n  containers:\n    -   name: web\n        image: ghcr.io/x/y:v1@" + digestA + "\n",
+		},
+		{
+			"spec:\n  containers:\n    -   image: ghcr.io/x/y:v1\n        name: web\n",
+			"spec:\n  containers:\n    -   image: ghcr.io/x/y:v1@" + digestA + "\n        name: web\n",
+		},
+	} {
+		got, err := ApplyBytes([]byte(tc.before), []Edit{singleEdit(t, tc.before, 0, "ghcr.io/x/y:v1@"+digestA)})
+		if err != nil {
+			t.Errorf("%q: %v", tc.before, err)
+			continue
+		}
+		if string(got) != tc.want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, tc.want)
+		}
+	}
+}
+
 // Two byte-identical image lines: only the recorded one may change. A whole-file text
 // replacement would rewrite the first (or both).
 func TestApplyBytesIdenticalLinesOnlyRecordedOneChanges(t *testing.T) {
@@ -198,7 +232,7 @@ func TestApplyBytesRefusesColumnInsideScalar(t *testing.T) {
 	if err == nil {
 		t.Fatalf("edit inside the scalar applied:\n%s", got)
 	}
-	if !strings.Contains(err.Error(), "not at the start of the image scalar") {
+	if !strings.Contains(err.Error(), `not the start of a "image: value" pair`) {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
 	// Positive control: the same edit with Col at the scalar's start is applied.
