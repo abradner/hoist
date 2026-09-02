@@ -142,7 +142,7 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	if err := checkOverridesExist(r, *from, digests); err != nil {
+	if err := checkOverrides(r, *from, prefixes, digests); err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
@@ -162,14 +162,30 @@ func runPlan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// checkOverridesExist refuses a --digest override for a repo that has no occurrence in the
-// source env. BuildPlan only consults digests for repos it found there, so such an override
-// would otherwise be silently ignored while -h promises it is planned — a typo in the repo
-// name would plan the source env's ref instead of the caller's. An unknown source env is
-// left for BuildPlan to report.
-func checkOverridesExist(r *gitops.Repo, from string, digests digestFlag) error {
+// checkOverrides refuses a --digest override BuildPlan would never consult: one for a repo
+// outside the promotable prefixes (BuildPlan iterates promotable repos only, so an override
+// for a third-party image would be accepted and change nothing), or one for a repo that has
+// no occurrence in the source env (a typo in the repo name would plan the source env's ref
+// instead of the caller's). Either way -h promises the override is planned, so silence is
+// wrong. An unknown source env and an empty prefix list are left for BuildPlan to report.
+func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests digestFlag) error {
+	if len(digests) == 0 {
+		return nil
+	}
+	if len(prefixes) > 0 {
+		var outside []string
+		for repo := range digests {
+			if !isPromotable(repo, prefixes) {
+				outside = append(outside, repo)
+			}
+		}
+		if len(outside) > 0 {
+			sort.Strings(outside)
+			return fmt.Errorf("override for %s is not a promotable repo; prefixes: %s", strings.Join(outside, ", "), strings.Join(prefixes, ", "))
+		}
+	}
 	env, ok := r.Envs[from]
-	if !ok || len(digests) == 0 {
+	if !ok {
 		return nil
 	}
 	present := map[string]bool{}
@@ -256,12 +272,20 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 }
 
 func untouchedReason(ref image.Ref, src string, prefixes []string) string {
-	for _, p := range prefixes {
-		if strings.HasPrefix(ref.Repo, p) {
-			return "not running in " + src
-		}
+	if isPromotable(ref.Repo, prefixes) {
+		return "not running in " + src
 	}
 	return "third-party: outside " + strings.Join(prefixes, ",")
+}
+
+// isPromotable mirrors BuildPlan's prefix test so the CLI's messages agree with its plan.
+func isPromotable(repo string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(repo, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func splitList(s string) []string {

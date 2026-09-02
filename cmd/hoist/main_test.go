@@ -226,6 +226,37 @@ func TestPlanDigestOverrideForUnknownRepoIsAnError(t *testing.T) {
 	}
 }
 
+// A --digest override for a repo outside the promotable prefixes must be an error: BuildPlan
+// iterates promotable repos only, so the override would pass the source-env check (the
+// fixture runs temporal in both envs) and then change nothing.
+func TestPlanDigestOverrideForThirdPartyRepoIsAnError(t *testing.T) {
+	before := treeHash(t)
+	var out, errOut bytes.Buffer
+	args := planArgs("--dry-run", "--digest", "docker.io/temporalio/server=docker.io/temporalio/server:1.31.2@"+digestC)
+	if got := run(args, &out, &errOut); got != exitFailure {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitFailure, errOut.String())
+	}
+	if after := treeHash(t); after != before {
+		t.Fatal("refused --digest modified the fixture")
+	}
+	if want := "override for docker.io/temporalio/server is not a promotable repo; prefixes: ghcr.io/"; !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr lacks %q: %s", want, errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a plan was printed anyway:\n%s", out.String())
+	}
+	// Positive control: the same override is planned once its repo is inside the prefixes.
+	out.Reset()
+	errOut.Reset()
+	args = planArgs("--dry-run", "--promotable", "ghcr.io/,docker.io/temporalio/server", "--digest", "docker.io/temporalio/server=docker.io/temporalio/server:1.31.2@"+digestC)
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("override inside the prefixes: exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if n := strings.Count(out.String(), "+          image: docker.io/temporalio/server:1.31.2@"+digestC); n != 1 {
+		t.Errorf("override should land on the one production temporal server container, got %d:\n%s", n, out.String())
+	}
+}
+
 // An empty --promotable must be refused, not read as "everything is promotable": a plan
 // that silently promoted third-party images would be the worst possible reading.
 func TestPlanEmptyPromotableIsAnError(t *testing.T) {
