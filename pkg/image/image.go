@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 // PullablePrefix is the scheme some container runtimes prepend to
@@ -143,4 +145,17 @@ func PromotionID(repoFullName, targetEnv string, refs []Ref) string {
 	sum := sha256.Sum256([]byte("hoist/v1\n" + repoFullName + "\n" + targetEnv + "\n" + strings.Join(lines, "\n")))
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
 	return strings.ToLower(enc)[:10]
+}
+
+// Canonical returns the repo in the registry's own spelling, so that the repo a manifest
+// names and the repo a pod's imageID names can be compared: docker.io/library/nginx,
+// docker.io/nginx and nginx all become index.docker.io/library/nginx, while
+// ghcr.io/example/app is already canonical. It is go-containerregistry's name parsing;
+// a repo it cannot parse is returned unchanged rather than failing a comparison.
+func Canonical(repo string) string {
+	r, err := name.NewRepository(repo)
+	if err != nil {
+		return repo
+	}
+	return r.Name()
 }

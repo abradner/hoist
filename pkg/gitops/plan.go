@@ -72,7 +72,7 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 	planned := map[string]bool{}
 	for _, repo := range repos {
 		occ := bySrc[repo]
-		chosen, reason, disagree := chooseRef(occ)
+		chosen, reason, disagree := ChooseRef(occ)
 		if ov, ok := digests[repo]; ok {
 			if ov.Repo == "" {
 				ov.Repo = repo
@@ -150,11 +150,13 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 	return plan, nil
 }
 
-// chooseRef picks the reference to promote from one repo's source occurrences: the only
+// ChooseRef picks the reference to promote from one repo's source occurrences: the only
 // reference when they agree; otherwise the unique pinned reference if exactly one distinct
 // pinned reference exists; otherwise the most frequent, ties broken by first occurrence in
 // path order. reason names the rule that decided; disagree is true when a choice was needed.
-func chooseRef(occ []Occurrence) (chosen image.Ref, reason string, disagree bool) {
+// It is exported so that pkg/resolve reads the manifest's own pin by the same rule
+// BuildPlan plans by, rather than a second copy of it.
+func ChooseRef(occ []Occurrence) (chosen image.Ref, reason string, disagree bool) {
 	var order []string
 	counts := map[string]int{}
 	refs := map[string]image.Ref{}

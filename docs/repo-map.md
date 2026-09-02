@@ -37,8 +37,8 @@ it reads private state and writes to systems that deploy software.
 | Config file | `internal/config` (`$XDG_CONFIG_HOME/hoist/config.yaml`, `--config`) | Local user's file | Read once, never exec'd, no network. Names repos, envs, approvers, credential *sources* (env, keychain, cluster secret, `op` ref) — never credential values. `config show` redacts the `op` refs. |
 | GitOps repo (read + edit) | `pkg/gitops`, `pkg/git` | The user's git checkout and SSH/signing config, via `exec git` | Edits are byte-minimal image-scalar rewrites on a worktree, never the user's checkout. |
 | GitHub API | `pkg/forge/github` | `gh` auth token via go-gh | Creates branches/PRs, reads checks/reviews/comments, **merges**. Merge = deploy on an auto-sync repo. |
-| Container registry | `pkg/registry` | Credential chain: env token → docker keychain → cluster pull secret → `op` | Read-only (tags, manifests, config blobs). Credentials never leave the adaptor. |
-| Kubernetes API | `pkg/k8s`, `pkg/argo`, `pkg/rollout` | kubeconfig context named in hoist config | Reads pods/secrets/Deployments, watches Argo `Application` CRs, writes exactly one thing: the refresh annotation. |
+| Container registry | `pkg/registry` | Credential chain, in the caller's order: env token → docker keychain → cluster pull secret → `op`, then anonymous | Read-only (manifest HEAD, tag list). Credentials never leave the adaptor; errors carry status and error codes, never the response body; the winning link is reported by name (`AuthSourceUsed`). `op` is executed only when an `op` ref is configured. |
+| Kubernetes API | `pkg/k8s`, `pkg/argo`, `pkg/rollout` | kubeconfig context named in hoist config or `--kube-context` | Reads pods in exactly the source namespace and one named pull secret (`pkg/k8s`, M2); later: Deployments, Argo `Application` CRs, and exactly one write, the refresh annotation. Every client error goes through `pkg/redact` and the API server address is scrubbed from it; only the context name may reach output. |
 
 ## Trust boundaries
 
@@ -50,10 +50,16 @@ it reads private state and writes to systems that deploy software.
   (R-001).
 - **Registry credential chain.** Caller: hoist, on the user's behalf. The cluster-secret source
   reads a pull secret out of a namespace the kubeconfig can reach; that is a deliberate
-  convenience and is opt-in per config. Credentials are used inside `pkg/registry` and never
-  appear in inputs, outputs, state files, or logs (R-002).
+  convenience and is opt-in per config (`registries[].cluster`, `--cluster-secret`). Credentials
+  are used inside `pkg/registry` and never appear in inputs, outputs, state files, or logs
+  (R-002): the secret leaves `pkg/k8s` only as an `authn.Keychain`, every credential value the
+  chain has seen is scrubbed from every message, and a failed link is reported by source name
+  ("keychain: status 403 Forbidden: DENIED"). The env token is sent to `ghcr.io` only, never to
+  another host a manifest happens to name.
 - **kubeconfig.** hoist trusts the context it is pointed at. It never writes anything to the
   cluster except the Argo refresh annotation; the deploy itself is Argo acting on a merged commit.
+  A wrong context is the operator's risk: the context name in use is printed on every plan so a
+  digest read from the wrong cluster is visible, and `--digest-sources none` plans without one.
 - **The gitops repo's own CI.** hoist treats a green check-run set as a fact it observed, not a
   property it verified. With `ci.none: green` (the default) a PR with *no* reported checks is
   treated as passing after the grace period — that is a stated policy, not a gap, and it is
@@ -75,7 +81,10 @@ it reads private state and writes to systems that deploy software.
   Changing the image set changes the id — which is correct: a different digest set is a different
   promotion and must not reuse an in-flight PR.
 - **Digest normalisation.** Bare tags and `sha-` tags in the source env are pinned to a digest before
-  they are written to the target. Invariant: nothing hoist writes to a manifest is ever a bare tag.
+  they are written to the target: `pkg/resolve` asks the source namespace's pods, then the
+  manifest's pin, then the registry, and every disagreement between them is a warning with a
+  stated choice. Invariant: nothing hoist writes to a manifest is ever a bare tag — an image no
+  source can pin stays unresolved and `gitops.BuildPlan` refuses it as before.
 - **Production gate.** `envs.production` decides three things at once: PR-only (direct mode refused),
   approval comment required by default, and the "deploying straight to production" warning on the
   registry-pick path. Invariant: a production env can never be set to direct mode by config default.

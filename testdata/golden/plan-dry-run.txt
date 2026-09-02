@@ -1,0 +1,74 @@
+hoist plan: app-staging -> app-production (6 edits in 4 files)
+
+--- a/cluster/apps/app-production/counta/app.yaml
++++ b/cluster/apps/app-production/counta/app.yaml
+@@ -19,7 +19,7 @@
+           command: ["dbwait", "--timeout=60s"]
+       containers:
+         - name: counta
+-          image: 'ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea'
++          image: 'ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123'
+           envFrom:
+             - configMapRef:
+                 name: counta-config
+
+--- a/cluster/apps/app-production/counta/purge-cronjob.yaml
++++ b/cluster/apps/app-production/counta/purge-cronjob.yaml
+@@ -13,5 +13,5 @@
+           restartPolicy: OnFailure
+           containers:
+             - name: purge
+-              image: ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea # keep in step with app.yaml
++              image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123 # keep in step with app.yaml
+               command: ["bin/rails", "counta:purge"]
+
+--- a/cluster/apps/app-production/marketing/app.yaml
++++ b/cluster/apps/app-production/marketing/app.yaml
+@@ -15,6 +15,6 @@
+     spec:
+       containers:
+         - name: marketing
+-          image: "ghcr.io/example/marketing:sha-0000111122223333444455556666777788889999@sha256:beef1234beef1234beef1234beef1234beef1234beef1234beef1234beef1234"
++          image: "ghcr.io/example/marketing:sha-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d@sha256:77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee77c0ffee"
+           ports:
+             - containerPort: 8080
+
+--- a/cluster/apps/app-production/web/app.yaml
++++ b/cluster/apps/app-production/web/app.yaml
+@@ -20,7 +20,7 @@
+       # Production runs three processes from the one image; staging folds queue into worker.
+       containers:
+         - name: web
+-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9
++          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+           imagePullPolicy: IfNotPresent
+           ports:
+             - containerPort: 3000
+@@ -28,11 +28,11 @@
+             - name: RAILS_ENV
+               value: production
+         - name: worker
+-          image: ghcr.io/example/web:v202601010101
++          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+           imagePullPolicy: IfNotPresent
+           command: ["bundle", "exec", "good_job", "start"]
+         - name: queue
+-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9
++          image: ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+           imagePullPolicy: IfNotPresent
+           command: ["bundle", "exec", "good_job", "start", "--queues=mail"]
+ ---
+
+Untouched (3):
+  docker.io/temporalio/server:1.31.2  (third-party: outside ghcr.io/)
+  docker.io/temporalio/ui:2.34.0  (third-party: outside ghcr.io/)
+  ghcr.io/example/dbwait:v202601010101@sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01  (not running in app-staging)
+
+Warnings (1):
+  [source-disagrees] app-staging: 2 occurrences of ghcr.io/example/web carry different refs; planning ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f (the only pinned ref):
+    cluster/apps/app-staging/web/app.yaml:22 Deployment/web container=web ghcr.io/example/web:v202602150930@sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f
+    cluster/apps/app-staging/web/app.yaml:30 Deployment/web container=worker ghcr.io/example/web:v202601010101
+
+Unmanaged (2): directories with manifests but no Application wrapper; not scanned:
+  cluster/apps/app-production/hello-world
+  cluster/apps/app-staging/hello-world

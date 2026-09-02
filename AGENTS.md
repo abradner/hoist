@@ -223,7 +223,17 @@ redacted; `hoist config path` prints where it looked. `mise exec -- go run ./cmd
 prints the unified diff, the untouched images and the warnings, and touches no git state
 (`--repo`, `--apps-root` and `--promotable` fall back to the selected `repos[]` entry — the only
 one, or the one `--repo` names — then to `cluster/apps` and the `ghcr.io/` placeholder). Without
-`--dry-run` it prints the same and exits 3 — writing lands in a later milestone. `mise exec -- go
+`--dry-run` it prints the same and exits 3 — writing lands in a later milestone. Before planning,
+`plan` resolves every promotable source-env image to a digest (`pkg/resolve` over `pkg/k8s` and
+`pkg/registry`): the source namespace's running pods first, then the manifest's own pin, then a
+registry HEAD of the tag, in the order of `--digest-sources` (default `pods,manifest,registry`;
+`none` plans from the manifests alone, exactly as M1 did). `--kube-context` names the kubeconfig
+context (default the repo's `kube.context`, else the current context; the name in use is
+printed, its address never). The registry credential chain is `--registry-auth` (default
+`env,keychain,cluster,op`), with `--cluster-secret ns/name` and `--op-ref op://…` opting the last
+two links in; the dry run's "Resolution" section names each repo's digest and source, every
+alternative and disagreement, and which credential source authenticated — by name only. A
+`--digest` override still wins over every source. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
 `q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app -update`; the fixture repo is `testdata/repo`
