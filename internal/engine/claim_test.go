@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -129,6 +130,86 @@ func TestClaimInFlightStaleClaimIsReclaimed(t *testing.T) {
 		t.Fatalf("a stale claim should be reclaimable, got %v", err)
 	}
 	release()
+}
+
+// TestClaimInFlightStaleReclaimRaceNeverDoubleWins is the P2 regression for finding #3: two
+// concurrent callers that both examine the exact same genuinely-stale claim must not both end
+// up believing they hold the sole live claim. The bug this proves fixed: examineExisting's
+// classification and a later remove are two separate syscalls with a window between them, and a
+// bare os.Remove(path) in that window removes whatever is CURRENTLY at path by name — which, if
+// a second racer's own remove-then-reclaim cycle has already completed, is that racer's
+// brand-new LIVE claim, not the stale one this call examined. Run under -race (per AGENTS.md
+// §6, every `go test` invocation in this repo's gate is): both "racers" are real goroutines,
+// with a channel barrier forcing the exact interleaving the naive unconditional-remove code
+// could not tell apart from "still the same stale claim I looked at" — racer A completes a full
+// remove-and-reclaim cycle strictly before racer B's own removeIfUnchanged call runs.
+func TestClaimInFlightStaleReclaimRaceNeverDoubleWins(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	path, err := ClaimPath("example/gitops", "app-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"ID":"dead-process","RepoFullName":"example/gitops","TargetEnv":"app-production","ClaimedAt":"` +
+		time.Now().Add(-2*claimStaleAfter).Format(time.RFC3339Nano) + `"}`
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both racers independently examine the exact same stale claim before either reclaims it —
+	// exactly what two concurrent ClaimInFlight callers hitting the same failed tryClaim would
+	// each do.
+	stateA, rawA := examineExisting(path)
+	stateB, rawB := examineExisting(path)
+	if stateA != existingStale || stateB != existingStale {
+		t.Fatalf("setup: expected both racers to observe existingStale, got A=%v B=%v", stateA, stateB)
+	}
+
+	aDone := make(chan struct{})
+	var aRemoved, aClaimed, bRemoved bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer close(aDone)
+		aRemoved = removeIfUnchanged(path, rawA)
+		if aRemoved {
+			fresh := `{"ID":"A-fresh-live-claim","RepoFullName":"example/gitops","TargetEnv":"app-production","ClaimedAt":"` +
+				time.Now().Format(time.RFC3339Nano) + `"}`
+			aClaimed = tryClaim(path, []byte(fresh)) == nil
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-aDone // force B's compare-and-remove to run only once A's full cycle has completed
+		bRemoved = removeIfUnchanged(path, rawB)
+	}()
+	wg.Wait()
+
+	if !aRemoved || !aClaimed {
+		t.Fatalf("racer A should have won the remove and installed its own fresh live claim: aRemoved=%v aClaimed=%v", aRemoved, aClaimed)
+	}
+	if bRemoved {
+		t.Fatal("racer B must not remove a claim that changed since it examined it — this is the exact double-winner race finding #3 describes")
+	}
+
+	// The surviving claim on disk must be A's fresh one, untouched by B.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("A's claim should still be on disk: %v", err)
+	}
+	if !strings.Contains(string(data), "A-fresh-live-claim") {
+		t.Fatalf("expected A's fresh claim content, got %s", data)
+	}
+
+	// Integration-level confirmation: the full public ClaimInFlight loop, run against this same
+	// now-live claim, correctly reports a real conflict rather than a second win.
+	if _, err := ClaimInFlight("example/gitops", "app-production", "a-third-caller"); err == nil {
+		t.Fatal("a third caller must see A's surviving live claim as a genuine conflict")
+	}
 }
 
 // TestClaimInFlightFreshClaimIsNotReclaimed is TestClaimInFlightStaleClaimIsReclaimed's

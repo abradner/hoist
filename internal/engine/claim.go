@@ -18,6 +18,7 @@ package engine
 // kill -9 — before ever writing state) is recovered by age: claimStaleAfter names the bound past
 // which a claim is treated as abandoned and reclaimed rather than blocking forever.
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -106,17 +107,25 @@ func ClaimInFlight(repoFullName, targetEnv, id string) (release func(), err erro
 		if !errors.Is(cerr, os.ErrExist) {
 			return nil, fmt.Errorf("claiming %s/%s: %w", repoFullName, targetEnv, cerr)
 		}
-		switch examineExisting(path) {
+		state, raw := examineExisting(path)
+		switch state {
 		case existingVanished:
 			// Released (or reclaimed by someone else) between our failed create and now — the
 			// slot may be free again; loop back and try the create once more.
 			continue
 		case existingStale:
 			// The owning process almost certainly died before ever writing real state (kill -9
-			// between claiming and the first save). Remove and retry — if a third caller does
-			// the same thing at the same instant, exactly one of the retries wins the create
-			// below and the rest report an accurate conflict, never a double win.
-			_ = os.Remove(path)
+			// between claiming and the first save) — remove and retry. removeIfUnchanged (not a
+			// bare os.Remove) closes the reclaim-from-stale race this comment used to describe
+			// as already closed but wasn't: two concurrent callers can both classify the same
+			// claim as stale, and a bare os.Remove(path) here removes whatever is CURRENTLY at
+			// path by name — which, if the other caller's own remove-then-tryClaim cycle already
+			// completed, is that caller's brand-new LIVE claim, not the stale one this call
+			// examined. removeIfUnchanged only removes path if its content still byte-for-byte
+			// matches what examineExisting just read; if it doesn't (someone else already
+			// changed it), this call removes nothing and simply loops back to re-examine fresh
+			// state on the next iteration — never a second, uninformed delete.
+			removeIfUnchanged(path, raw)
 			continue
 		case existingLive:
 			return nil, fmt.Errorf(
@@ -191,20 +200,46 @@ const (
 	existingUnknown
 )
 
-func examineExisting(path string) existingClaimState {
+// examineExisting inspects path when a create attempt against it failed with os.ErrExist,
+// returning both the classification and the exact raw bytes read (nil unless state is
+// existingStale, since that is the only case a caller needs them for — see
+// removeIfUnchanged). A second, later call against the same path is not guaranteed to see the
+// same content: that gap is exactly what removeIfUnchanged closes for the stale-reclaim path.
+func examineExisting(path string) (state existingClaimState, raw []byte) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return existingVanished
+			return existingVanished, nil
 		}
-		return existingUnknown
+		return existingUnknown, nil
 	}
 	var rec claimRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return existingUnknown
+		return existingUnknown, nil
 	}
 	if time.Since(rec.ClaimedAt) > claimStaleAfter {
-		return existingStale
+		return existingStale, data
 	}
-	return existingLive
+	return existingLive, nil
+}
+
+// removeIfUnchanged removes path only if its content still byte-for-byte matches expected —
+// the compare half of a compare-and-remove for ClaimInFlight's stale-reclaim path. Without
+// this, two concurrent callers that both examined the same stale claim and both decided to
+// remove it could interleave as: caller A removes the stale file and installs its own fresh
+// live claim at path; caller B, still acting on its own earlier (now outdated) examination,
+// then calls a bare os.Remove(path) — which deletes A's brand-new live claim by name alone,
+// with no idea it is no longer the file B looked at. Reading path again immediately before
+// removing and comparing byte-for-byte against what was read when the caller decided "stale"
+// ensures a caller only ever removes the exact claim it examined: if the content changed (or
+// the file is already gone), this is a no-op and the caller must loop back to re-examine fresh
+// state rather than assume its remove succeeded. Reports whether it actually removed anything
+// — ClaimInFlight's own loop doesn't need the answer (it re-examines fresh either way), but
+// the race test that proves this closes the reclaim-from-stale race does.
+func removeIfUnchanged(path string, expected []byte) bool {
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, expected) {
+		return false
+	}
+	return os.Remove(path) == nil
 }
