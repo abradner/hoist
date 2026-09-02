@@ -12,7 +12,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
+	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -158,6 +160,49 @@ func TestPromotePushesPlanScreen(t *testing.T) {
 	m, _ = m.Update(backCmd())
 	if n := len(m.(Model).stack); n != 1 {
 		t.Errorf("esc did not pop back to the matrix: stack has %d screens", n)
+	}
+}
+
+// TestStartMsgPushesFlightScreen: plan.StartMsg (emitted when the operator confirms a plan)
+// pushes internal/app/flight on top of whatever screen sent it. internal/app has no
+// repoFullName, CI/approval policy, or git.Git/forge.Forge adaptor to build a real
+// engine.PromotionState or flight.DriveFunc from yet (see app.go's own comment on this
+// handler) — this only proves the navigation wiring: the flight screen renders read-only
+// (every step not-yet-reached, R shows the read-only notice) and esc (flight.BackMsg) pops
+// it back.
+func TestStartMsgPushesFlightScreen(t *testing.T) {
+	m := sized(t)
+	msg := plan.StartMsg{Source: "app-staging", Target: "app-production"}
+	tm, cmd := m.Update(msg)
+	m = tm
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after StartMsg, want 2", n)
+	}
+	if cmd == nil {
+		t.Fatal("StartMsg's push produced no Init command")
+	}
+	if v := plain(m); !strings.Contains(v, "app-staging -> app-production") {
+		t.Errorf("flight screen view missing the envs:\n%s", v)
+	}
+
+	m, rCmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if rCmd != nil {
+		t.Error("R on a read-only (nil driveFn) flight screen produced a command")
+	}
+	if v := plain(m); !strings.Contains(v, "nothing to re-observe") {
+		t.Errorf("flight screen missing the read-only notice after R:\n%s", v)
+	}
+
+	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd == nil {
+		t.Fatal("esc on the flight screen produced no command")
+	}
+	if _, ok := backCmd().(flight.BackMsg); !ok {
+		t.Fatalf("esc's command yields %T, want flight.BackMsg", backCmd())
+	}
+	m, _ = m.Update(backCmd())
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("esc did not pop the flight screen: stack has %d screens", n)
 	}
 }
 

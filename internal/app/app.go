@@ -3,9 +3,11 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -76,6 +78,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.push(ps)
 		return m, ps.Init()
 	case plan.BackMsg:
+		return m.pop(), nil
+	case plan.StartMsg:
+		// internal/app has no repoFullName (RepoConfig.GitHub), CI/approval policy,
+		// CloneDir/WorktreeDir/Base, or concrete git.Git/forge.Forge adaptor to build a
+		// real engine.PromotionState or flight.DriveFunc from here — cmd/hoist owns wiring
+		// that in (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule; see
+		// internal/engine/identity.go's DeriveID, template.go's RenderPRBody/
+		// RenderCommitMessage, and cmd/hoist/promote.go for what building the real thing
+		// actually takes). This pushes the flight screen with only what StartMsg carries
+		// and a nil DriveFunc, so it renders read-only (every step "not yet reached", no
+		// ticking) until that wiring lands — proving the navigation shape without
+		// fabricating an ID or branch name this package cannot derive correctly.
+		fs := flightScreen{flight.New(engine.PromotionState{
+			SourceEnv: msg.Source,
+			TargetEnv: msg.Target,
+		}, config.PollConfig{}, nil)}
+		m = m.push(fs)
+		return m, fs.Init()
+	case flight.BackMsg:
 		return m.pop(), nil
 	}
 	if len(m.stack) == 0 {
