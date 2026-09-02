@@ -83,9 +83,8 @@ repos/{owner}/{repo}/pulls/<n>/comments` — even unfiltered — returned zero r
 three. The GraphQL `reviewThreads` query found both immediately. Separately, Codex's four P1s and two P2s on that same PR were real inline comments the
 REST route did return, but a first pass that filtered them by a commit-id field matching the
 *current* head silently dropped every one, because they were anchored to an earlier commit — the
-exact `commit_id`/`original_commit_id` re-anchoring trap this file already covers below (this
-section doesn't restate which field means what; read that explanation, not this one, for the
-mechanics). They were read only once a full re-fetch checked every comment with no commit filter
+exact `commit_id`/`original_commit_id` re-anchoring trap this section covers in detail further down (this paragraph doesn't
+restate which field means what; read that explanation for the mechanics, not this one). They were read only once a full re-fetch checked every comment with no commit filter
 at all. **When a review body's stated count disagrees with what the REST route returns, or
 whenever a review predates the current head, cross-check with:**
 
