@@ -396,3 +396,204 @@ func TestRunTUIFailsBeforeStartingOnBadRepo(t *testing.T) {
 		t.Errorf("stderr: %s", s)
 	}
 }
+
+// TestMain points the default config location at an empty directory so the developer's
+// own ~/.config/hoist/config.yaml cannot leak into the M1 behaviour the tests above pin.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "hoist-test-xdg")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir) // best effort; the OS reaps its temp dir anyway
+	os.Exit(code)
+}
+
+// writeConfig writes body to a temp config file and returns its path.
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// captureTUI swaps the TUI runner for one that records its arguments.
+func captureTUI(t *testing.T) *struct {
+	repo, appsRoot string
+	promotable     []string
+} {
+	t.Helper()
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	got := &struct {
+		repo, appsRoot string
+		promotable     []string
+	}{}
+	tuiRunner = func(repo, appsRoot string, promotable []string, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = repo, appsRoot, promotable
+		return 42
+	}
+	return got
+}
+
+func absFixture(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// With no flags and exactly one configured repo, both the matrix and plan pick it, with
+// its apps_root and promotable; a flag given on the command line still wins.
+func TestConfigSingleRepoIsPickedWithNoFlags(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    promotable: [ghcr.io/example/]\n")
+	got := captureTUI(t)
+	if code := run([]string{"--config", cfgPath}, io.Discard, io.Discard); code != 42 {
+		t.Fatalf("no flags: exit %d, want the runner's 42", code)
+	}
+	if got.repo != absFixture(t) || got.appsRoot != "cluster/apps" || strings.Join(got.promotable, ",") != "ghcr.io/example/" {
+		t.Errorf("runner got %+v", *got)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("plan without --repo: exit %d; stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "(6 edits in 4 files)") || !strings.Contains(out.String(), "third-party: outside ghcr.io/example/") {
+		t.Errorf("plan did not use the configured repo and prefixes:\n%s", out.String())
+	}
+	// Command-line flags beat the file at either level.
+	if code := run([]string{"--config", cfgPath, "--apps-root", "x", "--promotable", "a/"}, io.Discard, io.Discard); code != 42 || got.appsRoot != "x" || strings.Join(got.promotable, ",") != "a/" {
+		t.Errorf("root flags did not override the config: exit %d, %+v", code, *got)
+	}
+	errOut.Reset()
+	if code := run([]string{"--config", cfgPath, "plan", "--apps-root", "nowhere", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), "apps root nowhere") {
+		t.Errorf("plan-level --apps-root did not override the config: exit %d, stderr: %s", code, errOut.String())
+	}
+	// Positive control for the mutant: without the file, no flags is still a usage error.
+	if code := run(nil, io.Discard, io.Discard); code != exitUsage {
+		t.Errorf("no config, no flags: exit %d, want %d", code, exitUsage)
+	}
+}
+
+// --repo on the command line beats the config: a path that matches no entry is used as
+// given with the flag defaults, even when the file's only repo is somewhere else.
+func TestConfigRepoFlagBeatsConfig(t *testing.T) {
+	elsewhere := t.TempDir()
+	cfgPath := writeConfig(t, "repos:\n  - name: other\n    path: "+elsewhere+"\n    apps_root: nowhere\n    promotable: [example.test/]\n")
+	got := captureTUI(t)
+	if code := run([]string{"--config", cfgPath, "--repo", fixture}, io.Discard, io.Discard); code != 42 {
+		t.Fatalf("exit %d, want 42", code)
+	}
+	if got.repo != fixture || got.appsRoot != "cluster/apps" || strings.Join(got.promotable, ",") != "ghcr.io/" {
+		t.Errorf("config leaked onto an explicit --repo: %+v", *got)
+	}
+	if code := run([]string{"--config", cfgPath, "plan", "--repo", fixture, "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, io.Discard); code != 0 {
+		t.Errorf("plan --repo with a config pointing elsewhere: exit %d, want 0", code)
+	}
+	// Positive control: with no --repo the configured (non-repo) path is used and fails.
+	var errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), elsewhere) {
+		t.Errorf("configured repo not used without --repo: exit %d, stderr: %s", code, errOut.String())
+	}
+	// --repo <name> selects the entry and uses its path.
+	if code := run([]string{"--config", cfgPath, "--repo", "other"}, io.Discard, io.Discard); code != 42 || got.repo != elsewhere || got.appsRoot != "nowhere" {
+		t.Errorf("--repo by name: exit %d, %+v", code, *got)
+	}
+}
+
+func TestConfigSelectionErrors(t *testing.T) {
+	captureTUI(t)
+	two := writeConfig(t, "repos:\n  - name: a\n    path: /src/a\n  - name: b\n    path: /src/b\n")
+	var errOut bytes.Buffer
+	if code := run([]string{"--config", two}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), "choose one with --repo <name|path>: a, b") {
+		t.Errorf("ambiguous: exit %d, stderr: %s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := run([]string{"--config", two, "plan", "--from", "x", "--to", "y", "--dry-run"}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), "choose one") {
+		t.Errorf("ambiguous plan: exit %d, stderr: %s", code, errOut.String())
+	}
+	// A repo without a path is fine to list, but not to open without --repo.
+	noPath := writeConfig(t, "repos:\n  - name: a\n    github: me/a\n")
+	errOut.Reset()
+	if code := run([]string{"--config", noPath}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), noPath+": repos[0].path is required") {
+		t.Errorf("pathless repo: exit %d, stderr: %s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := run([]string{"--config", noPath, "--repo", "a"}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), "repos[0].path is required") {
+		t.Errorf("pathless repo by name: exit %d, stderr: %s", code, errOut.String())
+	}
+	// An explicit --config that does not exist is an error; the default may be missing.
+	errOut.Reset()
+	if code := run([]string{"--config", filepath.Join(t.TempDir(), "nope.yaml"), "--repo", fixture}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), "no such file") {
+		t.Errorf("missing --config: exit %d, stderr: %s", code, errOut.String())
+	}
+	if code := run([]string{"--repo", fixture}, io.Discard, io.Discard); code != 42 {
+		t.Errorf("missing default config: exit %d, want 42", code)
+	}
+}
+
+// A broken file at the default location stops every command, never a silent fall-back
+// to flags — the lesson AGENTS.md §11 records for a sibling repo's .env.
+func TestConfigBrokenDefaultFileIsAnError(t *testing.T) {
+	captureTUI(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.MkdirAll(filepath.Join(xdg, "hoist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(xdg, "hoist", "config.yaml")
+	if err := os.WriteFile(file, []byte("repos:\n  - path: /x\n    apps_roots: y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var errOut bytes.Buffer
+	if code := run([]string{"--repo", fixture}, io.Discard, &errOut); code != exitFailure || !strings.Contains(errOut.String(), file) || !strings.Contains(errOut.String(), "apps_roots") {
+		t.Errorf("exit %d, stderr: %s", code, errOut.String())
+	}
+	if code := run([]string{"config", "path"}, io.Discard, io.Discard); code != exitFailure {
+		t.Errorf("config path on a broken file: exit %d, want %d", code, exitFailure)
+	}
+}
+
+func TestConfigShowAndPath(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: ~/src/my-gitops\nregistries:\n  - prefix: ghcr.io/me/\n    op: op://vault/item/field\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "config", "path"}, &out, &errOut); code != 0 || out.String() != cfgPath+"\n" || errOut.Len() != 0 {
+		t.Errorf("config path: exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := run([]string{"--config", cfgPath, "config", "show"}, &out, &errOut); code != 0 {
+		t.Fatalf("config show: exit %d, stderr: %s", code, errOut.String())
+	}
+	s := out.String()
+	for _, want := range []string{"# " + cfgPath + "\n", "path: ~/src/my-gitops", "name: my-gitops", "apps_root: cluster/apps", "op: <redacted>", "ci: 20s", "deadline: 4h0m0s"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("show lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "op://") || strings.Contains(s, os.Getenv("HOME")+"/src") {
+		t.Errorf("show leaked a secret or resolved ~:\n%s", s)
+	}
+	// With no file, path still says where it looked and show prints the defaults.
+	out.Reset()
+	errOut.Reset()
+	missing := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "hoist", "config.yaml")
+	if code := run([]string{"config", "path"}, &out, &errOut); code != 0 || out.String() != missing+"\n" || !strings.Contains(errOut.String(), "no file there") {
+		t.Errorf("config path without a file: exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	if code := run([]string{"config", "show"}, &out, io.Discard); code != 0 || !strings.Contains(out.String(), "ci: 20s") {
+		t.Errorf("config show without a file: exit %d:\n%s", code, out.String())
+	}
+	for _, args := range [][]string{{"config"}, {"config", "bogus"}, {"config", "show", "extra"}} {
+		if code := run(args, io.Discard, io.Discard); code != exitUsage {
+			t.Errorf("run(%q) exit %d, want %d", args, code, exitUsage)
+		}
+	}
+}

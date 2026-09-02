@@ -1,0 +1,38 @@
+# hoist config — $XDG_CONFIG_HOME/hoist/config.yaml (else ~/.config/hoist/config.yaml),
+# or wherever --config points. Placeholders only: this file is public (AGENTS.md §4.4).
+#
+# Unknown keys are errors, not ignored. Durations use Go syntax (30s, 3m, 4h) and must
+# be quoted-or-plain strings, never bare numbers. `hoist config show` prints the
+# effective result with every default filled in; `hoist config path` prints the location.
+#
+# Env names below (production, pairs, approval) are not checked against the repo when
+# the file loads — hoist has not read the repo yet — so a typo there surfaces when the
+# env is used, not here.
+
+repos:
+  - name: my-gitops              # optional label; defaults to the basename of path
+    path: ~/src/my-gitops         # required to open the repo without --repo; ~ is expanded
+    github: me/my-gitops          # owner/name; used from M3 (PRs, CI, approval)
+    apps_root: cluster/apps       # default cluster/apps
+    promotable: [ghcr.io/me/]     # image repo prefixes hoist may promote; replaces the
+                                  # ghcr.io/ placeholder. An empty list is an error.
+    envs:
+      production: [app-production]              # always a PR + approval (AGENTS.md §4.5)
+      pairs: { app-staging: app-production }    # source env -> target env
+      approval: { app-production: comment }     # comment|auto; production defaults to
+                                                # comment, everything else to auto (M4)
+    approvers: [me]               # GitHub logins whose `hoist approve <id>` counts (M4)
+    ci: { none: green, grace: 3m }              # a PR with no checks: green|prompt|block
+                                                # after grace (M4)
+    kube: { context: my-cluster }               # kubeconfig context for pod digests (M2)
+    digest_sources: [pods, manifest, registry]  # order tried; default as shown (M2)
+    apps: { ghcr.io/me/app: me/app }            # image repo -> app git repo (M7)
+
+registries:
+  - prefix: ghcr.io/me/
+    auth: [env, keychain, cluster, op]          # credential chain, in order; default as shown
+    cluster: { namespace: app-staging, secret: ghcr-pull }   # opt-in: read a pull secret
+    op: op://vault/item/field                   # opt-in: a 1Password reference (redacted by
+                                                # `config show`)
+
+poll: { ci: 20s, approval: 30s, argo: 5s, rollout: 3s, deadline: 4h }   # M4/M5

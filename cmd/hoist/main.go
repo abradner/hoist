@@ -2,7 +2,7 @@
 // in an Argo CD GitOps repository and follows the change through PR, merge and rollout.
 //
 // Subcommands land milestone by milestone (see AGENTS.md §1). Today: the matrix screen
-// (no command) and plan --dry-run.
+// (no command), plan --dry-run, and config show/path.
 package main
 
 import (
@@ -17,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/app"
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 )
@@ -39,13 +40,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print the version and exit")
-	repo := fs.String("repo", "", "path to the GitOps repo checkout; with no command, opens the env/family matrix")
-	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo")
-	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party")
+	configPath := fs.String("config", "", "config file (default $XDG_CONFIG_HOME/hoist/config.yaml, else ~/.config/hoist/config.yaml; a missing default is fine, a missing explicit path is not)")
+	repo := fs.String("repo", "", "path to the GitOps repo checkout, or the name or path of a repos[] entry in the config file; with no command, opens the env/family matrix. Optional when the config file lists exactly one repo")
+	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
+	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party (the selected repo's promotable when configured)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan    build a promotion plan for one env pair; --dry-run prints it and touches nothing\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
 	}
@@ -59,16 +61,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, version)
 		return 0
 	}
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitFailure
+	}
+	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, given: map[string]bool{}}
+	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	if fs.NArg() == 0 {
-		if *repo == "" {
+		eff, err := resolve(cfg, sel)
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist: %v\n", err)
+			return exitFailure
+		}
+		if eff.repo == "" {
 			fs.Usage()
 			return exitUsage
 		}
-		return tuiRunner(*repo, *appsRoot, splitList(*promotable), stdout, stderr)
+		return tuiRunner(eff.repo, eff.appsRoot, eff.promotable, stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
-		return runPlan(fs.Args()[1:], rootFlags{repo: *repo, appsRoot: *appsRoot, promotable: *promotable}, stdout, stderr)
+		return runPlan(fs.Args()[1:], cfg, sel, stdout, stderr)
+	case "config":
+		return runConfig(fs.Args()[1:], cfg, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "hoist: unknown command %q\n\n", cmd)
 		fs.Usage()
@@ -112,21 +128,80 @@ func (d digestFlag) Set(s string) error {
 	return nil
 }
 
-// rootFlags carries the values of the flags the root flagset shares with a command, so that
-// hoist --repo X plan … and hoist plan --repo X … mean the same thing. A command re-parses
-// its own flagset with these as the defaults; a flag given at the command level still wins.
-type rootFlags struct {
-	repo, appsRoot, promotable string
+// loadConfig reads the config file: the explicit --config path, which must exist, or the
+// default location, which may not (then the CLI runs on flags alone, as in M1).
+func loadConfig(path string) (*config.Config, error) {
+	explicit := path != ""
+	if !explicit {
+		var err error
+		if path, err = config.DefaultPath(); err != nil {
+			return nil, err
+		}
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if explicit && !cfg.Found {
+		return nil, fmt.Errorf("--config %s: no such file", path)
+	}
+	return cfg, nil
 }
 
-func runPlan(args []string, root rootFlags, stdout, stderr io.Writer) int {
+// selection carries the values of the flags the root flagset shares with a command, so
+// that hoist --repo X plan … and hoist plan --repo X … mean the same thing, plus which of
+// them were actually given: a command re-parses its own flagset with these as the
+// defaults, a flag given at the command level still wins, and only a flag nobody gave
+// falls back to the config file.
+type selection struct {
+	repo, appsRoot, promotable string
+	given                      map[string]bool
+}
+
+// effective is what the config file and the flags agree the run is about.
+type effective struct {
+	repo, appsRoot string
+	promotable     []string
+}
+
+// resolve applies the precedence: a flag given on the command line wins; otherwise the
+// selected repo's config value; otherwise the flag's M1 default. The repo is selected by
+// --repo (a repos[] name or path) or, with no --repo, as the only configured repo. A
+// --repo that matches no entry is a plain checkout path and takes the flag defaults, so
+// the config file never changes what an explicit command line means.
+func resolve(cfg *config.Config, sel selection) (effective, error) {
+	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable)}
+	if len(cfg.Repos) == 0 {
+		return eff, nil
+	}
+	rc, err := cfg.Repo(sel.repo)
+	if errors.Is(err, config.ErrUnknownRepo) && sel.given["repo"] {
+		return eff, nil
+	}
+	if err != nil {
+		return effective{}, err
+	}
+	if rc.Dir == "" {
+		return effective{}, fmt.Errorf("%s: %s.path is required to open %s; add it or pass --repo <path>", cfg.File, rc.Key, rc.Name)
+	}
+	eff.repo = rc.Dir
+	if !sel.given["apps-root"] {
+		eff.appsRoot = rc.AppsRoot
+	}
+	if !sel.given["promotable"] && rc.Promotable != nil {
+		eff.promotable = rc.Promotable
+	}
+	return eff, nil
+}
+
+func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	repo := fs.String("repo", root.repo, "path to the GitOps repo checkout (required; may also be given before the command)")
-	appsRoot := fs.String("apps-root", root.appsRoot, "directory of Argo Application wrappers, relative to --repo")
+	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
+	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
 	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
-	promotable := fs.String("promotable", root.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder until config files are read (a later milestone) — set it to your registry path. An empty list is an error, not \"everything\"")
+	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder — set repos[].promotable in the config file or pass this flag with your registry path. An empty list is an error, not \"everything\"")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
@@ -136,14 +211,21 @@ func runPlan(args []string, root rootFlags, stdout, stderr io.Writer) int {
 		}
 		return exitUsage
 	}
-	if *repo == "" || *from == "" || *to == "" {
+	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
+	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
+	eff, err := resolve(cfg, sel)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
+		return exitFailure
+	}
+	if eff.repo == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
 		fs.Usage()
 		return exitUsage
 	}
-	prefixes := splitList(*promotable)
+	prefixes := eff.promotable
 
-	r, err := gitops.Discover(*repo, *appsRoot)
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
@@ -166,6 +248,38 @@ func runPlan(args []string, root rootFlags, stdout, stderr io.Writer) int {
 		return exitNotImplemented
 	}
 	return 0
+}
+
+// runConfig is `hoist config show|path`. show prints the effective config — defaults
+// filled in, paths as written, secret-ish values redacted — so it can be pasted into an
+// issue; path prints where the file is read from, whether or not it exists.
+func runConfig(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch {
+	case sub == "path" && len(args) == 1:
+		fmt.Fprintln(stdout, cfg.File)
+		if !cfg.Found {
+			fmt.Fprintln(stderr, "hoist config path: no file there; running on flags and defaults")
+		}
+		return 0
+	case sub == "show" && len(args) == 1:
+		if !cfg.Found {
+			fmt.Fprintf(stderr, "hoist config show: no file at %s; showing defaults\n", cfg.File)
+		}
+		out, err := cfg.Redacted().Marshal()
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist config show: %v\n", err)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "# %s\n%s", cfg.File, out)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "usage: hoist config show | hoist config path\n")
+		return exitUsage
+	}
 }
 
 // checkOverrides refuses a --digest override BuildPlan would never consult: one for a repo

@@ -212,14 +212,20 @@ mise exec -- golangci-lint run
 mise exec -- go run ./cmd/hoist --help
 ```
 
-Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml`; state under `$XDG_STATE_HOME/hoist/`;
-caches under `$XDG_CACHE_HOME/hoist/`. `mise exec -- go run ./cmd/hoist plan --repo <path> --from
-<env> --to <env> --dry-run` is the read-only way to run against a real repo: it prints the unified
-diff, the untouched images and the warnings, and touches no git state (`--apps-root` defaults to
-`cluster/apps`, `--promotable` to `ghcr.io/`; config files are not read yet). Without `--dry-run` it
-prints the same and exits 3 — writing lands in a later milestone. `mise exec -- go run ./cmd/hoist
---repo <path>` with no command opens the env × family matrix screen (read-only; `q` quits, `?`
-help). Golden files under `testdata/golden/` regenerate with
+Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml` (`~/.config/hoist/config.yaml` when unset,
+on every platform — never `~/Library`), or wherever `--config <path>` points; state under
+`$XDG_STATE_HOME/hoist/`; caches under `$XDG_CACHE_HOME/hoist/`. `docs/config.example.yaml` is the
+annotated schema (`internal/config` loads it: typed struct, unknown keys are errors, defaults in one
+`Normalize` step, errors carry the YAML path). A missing file means flags only; a broken file stops
+every command. `hoist config show` prints the effective config with defaults filled and `op` refs
+redacted; `hoist config path` prints where it looked. `mise exec -- go run ./cmd/hoist plan --repo
+<path> --from <env> --to <env> --dry-run` is the read-only way to run against a real repo: it
+prints the unified diff, the untouched images and the warnings, and touches no git state
+(`--repo`, `--apps-root` and `--promotable` fall back to the selected `repos[]` entry — the only
+one, or the one `--repo` names — then to `cluster/apps` and the `ghcr.io/` placeholder). Without
+`--dry-run` it prints the same and exits 3 — writing lands in a later milestone. `mise exec -- go
+run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
+`q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app -update`; the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
