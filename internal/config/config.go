@@ -162,6 +162,9 @@ func Load(path string) (*Config, error) {
 		if err := c.Normalize(); err != nil {
 			return nil, err
 		}
+		if err := c.Validate(); err != nil {
+			return nil, err
+		}
 		return c, nil
 	}
 	if err != nil {

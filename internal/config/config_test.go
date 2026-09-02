@@ -169,6 +169,21 @@ func TestMissingFileIsEmptyConfigNotError(t *testing.T) {
 
 // A file that exists and does not parse is always an error naming the file — never a
 // silent fall-back to defaults.
+// The doc comment on Load says a missing file yields normalized, validated defaults; F1
+// regression: the missing-file branch used to return right after Normalize, skipping
+// Validate. Prove Validate actually runs on that path by making a default fail it, and
+// prove the ordinary missing-file path is still untouched (Found=false, no error).
+func TestMissingFileStillValidatesDefaults(t *testing.T) {
+	saved := defaultPoll.CI
+	defaultPoll.CI = 0 // an invalid default: poll durations must be positive
+	defer func() { defaultPoll.CI = saved }()
+
+	p := filepath.Join(t.TempDir(), "nope", "config.yaml")
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "poll.ci") {
+		t.Errorf("missing file with an invalid default: err = %v, want a poll.ci validation error", err)
+	}
+}
+
 func TestBadFileIsAnError(t *testing.T) {
 	for name, body := range map[string]string{
 		"not yaml":        "repos: [\n",
