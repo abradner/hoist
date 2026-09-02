@@ -17,11 +17,11 @@ const (
 	// WarnMissingInTarget: a promotable repo runs in the source env but has no occurrence in
 	// the target env, so there is nothing to move.
 	WarnMissingInTarget = "missing-in-target"
-	// WarnSourceOnlyUnpinned: a promotable repo runs in the source env as a ref hoist could
+	// WarnSourceOnlyUnwritable: a promotable repo runs in the source env as a ref hoist could
 	// never write (a bare tag, or a digest with no tag) and has no occurrence in the target
 	// env. Nothing would be written, so the refusal is reported rather than failing the plan
 	// (AGENTS.md principle 5); a digest override for the repo turns it into missing-in-target.
-	WarnSourceOnlyUnpinned = "source-only-unpinned"
+	WarnSourceOnlyUnwritable = "source-only-unwritable"
 )
 
 // BuildPlan plans the promotion of every promotable image repo from env src to env dst.
@@ -32,7 +32,7 @@ const (
 // than the later write — if the chosen ref is a bare tag (AGENTS.md §4.2) or a tagless
 // digest (the pod imageID form; the written form is <repo>:<tag>@sha256:<digest>) and the
 // target env has an occurrence to write; with no target occurrence the same ref is a
-// WarnSourceOnlyUnpinned warning, since invariant 1 forbids writing a bare tag, not reading
+// WarnSourceOnlyUnwritable warning, since invariant 1 forbids writing a bare tag, not reading
 // one. The plan also fails if any edit would touch a block scalar.
 func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string]image.Ref) (Plan, error) {
 	if r == nil {
@@ -85,8 +85,11 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 			if err := ov.Validate(); err != nil {
 				return Plan{}, fmt.Errorf("digest override for %s is malformed: %w", repo, err)
 			}
-			if !ov.Pinned() {
-				return Plan{}, fmt.Errorf("digest override for %s is not pinned: %s", repo, ov)
+			// An override is caller input and fails fast on its own shape, whatever the
+			// target holds: the source-only relaxation below is for refs read from manifests,
+			// never for a ref the caller asked hoist to write.
+			if why := unwritable(ov); why != "" {
+				return Plan{}, fmt.Errorf("digest override for %s is %s", repo, why)
 			}
 			chosen, reason = ov, "caller-supplied digest"
 		}
@@ -109,7 +112,7 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 			// every other repo — it is reported and skipped (issue #13).
 			if len(targets) == 0 {
 				plan.Warnings = append(plan.Warnings, Warning{
-					Code:        WarnSourceOnlyUnpinned,
+					Code:        WarnSourceOnlyUnwritable,
 					Message:     sourceOnlyMessage(src, dst, repo, occ, chosen, why),
 					Occurrences: occ,
 				})

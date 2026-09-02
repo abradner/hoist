@@ -186,7 +186,7 @@ func TestBuildPlanRefusesTaglessPinnedSource(t *testing.T) {
 // A promotable repo that runs only in the source env, as a ref hoist could never write,
 // must not abort the plan for every other repo: nothing would be written for it, so
 // invariant 1 is not at stake (issue #13; AGENTS.md principle 5). It is reported as
-// source-only-unpinned, naming the repo, why it could not be planned and its occurrences,
+// source-only-unwritable, naming the repo, why it could not be planned and its occurrences,
 // and the other repos' edits are unaffected.
 func TestBuildPlanSourceOnlyUnwritableWarns(t *testing.T) {
 	target := deployment("api", "api", "ghcr.io/example/api:v0@"+digestC)
@@ -210,8 +210,8 @@ func TestBuildPlanSourceOnlyUnwritableWarns(t *testing.T) {
 				t.Fatalf("warnings = %+v, want exactly one", p.Warnings)
 			}
 			w := p.Warnings[0]
-			if w.Code != WarnSourceOnlyUnpinned {
-				t.Errorf("warning code = %q, want %q", w.Code, WarnSourceOnlyUnpinned)
+			if w.Code != WarnSourceOnlyUnwritable {
+				t.Errorf("warning code = %q, want %q", w.Code, WarnSourceOnlyUnwritable)
 			}
 			if len(w.Occurrences) != 1 || w.Occurrences[0].Container != "side" || w.Occurrences[0].Ref.String() != mustRef(t, tc.ref).String() {
 				t.Errorf("warning occurrences = %+v, want side's one occurrence", w.Occurrences)
@@ -264,7 +264,7 @@ func TestBuildPlanSourceOnlyOverrideSilencesWarning(t *testing.T) {
 		t.Errorf("edits = %+v, want only the api edit", p.Edits)
 	}
 	if len(p.Warnings) != 1 || p.Warnings[0].Code != WarnMissingInTarget || !strings.Contains(p.Warnings[0].Message, "ghcr.io/example/side") {
-		t.Errorf("warnings = %+v, want one %s for side and no %s", p.Warnings, WarnMissingInTarget, WarnSourceOnlyUnpinned)
+		t.Errorf("warnings = %+v, want one %s for side and no %s", p.Warnings, WarnMissingInTarget, WarnSourceOnlyUnwritable)
 	}
 }
 
@@ -353,5 +353,22 @@ func TestEditNoOp(t *testing.T) {
 	after, err := ApplyBytes(before, p.Edits)
 	if err != nil || string(after) != string(before) {
 		t.Errorf("no-op edit changed bytes or failed: %v", err)
+	}
+}
+
+// A tagless or bare override is caller input and must fail fast even when the repo has no
+// target occurrence; only refs read from manifests get the source-only relaxation.
+func TestBuildPlanUnwritableOverrideFailsEvenWithoutTarget(t *testing.T) {
+	r := twoEnvRepo(t,
+		deployment("api", "api", "ghcr.io/example/api:v1@"+digestA, "side", "ghcr.io/example/side:v2"),
+		deployment("api", "api", "ghcr.io/example/api:v0@"+digestC))
+	for name, ov := range map[string]image.Ref{
+		"tagless": {Repo: "ghcr.io/example/side", Digest: digestB},
+		"bare":    {Repo: "ghcr.io/example/side", Tag: "v3"},
+	} {
+		_, err := BuildPlan(r, "staging", "production", promotable, map[string]image.Ref{"ghcr.io/example/side": ov})
+		if err == nil || !strings.Contains(err.Error(), "digest override for ghcr.io/example/side is") {
+			t.Fatalf("%s override: got err %v, want a fail-fast override error", name, err)
+		}
 	}
 }
