@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -10,13 +11,20 @@ import (
 
 // assertExactlyOne is the resume property's assertion, shared by every kill-point subtest and
 // the concurrency test: after however many partial and repeated Drive calls a scenario makes,
-// the fake origin must hold exactly one branch ref for this promotion and the fake forge
-// exactly one PR — never two, however many times Drive ran.
+// the fake origin must hold exactly one branch ref for this promotion, exactly one commit on
+// that branch past "main" and the fake forge exactly one PR — never two, however many times
+// Drive ran. A ref's tip alone cannot prove "exactly one commit": a regression that produced a
+// second commit on the branch (a double-Act race, or a bug reintroducing what Findings A/C
+// guard against) would still leave the ref with a single tip, so countCommits below walks the
+// actual range rather than trusting LsRemoteBranch's ok=true/sha alone.
 func assertExactlyOne(t *testing.T, cloneDir, branch string, g git.Git, f *forge.Fake) (commitSHA string, prNumber int) {
 	t.Helper()
 	sha, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch)
 	if err != nil || !ok {
 		t.Fatalf("origin should have exactly one branch %s: ok=%v err=%v", branch, ok, err)
+	}
+	if n := countCommits(t, cloneDir, "main", branch, g); n != 1 {
+		t.Fatalf("branch %s should hold exactly one commit past main, got %d", branch, n)
 	}
 	var matching []forge.PR
 	for _, pr := range f.PRs() {
@@ -28,6 +36,18 @@ func assertExactlyOne(t *testing.T, cloneDir, branch string, g git.Git, f *forge
 		t.Fatalf("forge should hold exactly one PR for %s, got %d: %+v", branch, len(matching), matching)
 	}
 	return sha, matching[0].Number
+}
+
+// countCommits reports how many commits are in base..branch. Factored out of assertExactlyOne
+// so TestCountCommitsCatchesADoubleCommit below can exercise it directly without needing
+// assertExactlyOne itself to fail (t.Fatalf can't be caught mid-test).
+func countCommits(t *testing.T, cloneDir, base, branch string, g git.Git) int {
+	t.Helper()
+	shas, err := g.Log(ctx(), cloneDir, base+".."+branch)
+	if err != nil {
+		t.Fatalf("git log %s..%s: %v", base, branch, err)
+	}
+	return len(shas)
 }
 
 // TestResumeAfterKillAtEachPoint is the central resume property (AGENTS.md §4.1, invariant 4,
@@ -160,4 +180,45 @@ func TestConcurrentInvocationConvergesOnOne(t *testing.T) {
 		t.Fatalf("A and B ended up with different PRs: %+v vs %+v", sa.PR, sb.PR)
 	}
 	assertExactlyOne(t, fx.cloneDir, sa.Branch, g, f)
+}
+
+// TestCountCommitsCatchesADoubleCommit is Finding E, made literal: the old assertion (the
+// branch's remote ref exists and has a tip) cannot see a regression that produces a second
+// commit on the promotion branch — a ref only ever has one tip regardless of how many commits
+// sit behind it. countCommits must actually discriminate one commit from two, not just report
+// "the ref resolves". This drives a promotion to completion (one real commit), then simulates
+// the shape of the regression Finding A/C guard against — a second commit landing on the same
+// branch outside Act's own idempotency checks entirely — and confirms countCommits's answer
+// changes from 1 to 2.
+func TestCountCommitsCatchesADoubleCommit(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+	f := &forge.Fake{}
+	steps := Steps(g, f, nil)
+
+	s := newState(fx, wt)
+	if err := Drive(ctx(), steps, s, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCommits(t, fx.cloneDir, "main", s.Branch, g); n != 1 {
+		t.Fatalf("a real, correct promotion should produce exactly one commit, got %d", n)
+	}
+
+	// Simulate the regression directly against the worktree (standing in for a double-Act
+	// race or any bug that reintroduces a second commit on the branch), then push it — the
+	// ref still has exactly one tip, which is exactly what the old ref-only assertion checked.
+	if err := os.WriteFile(filepath.Join(wt, "extra.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, wt, "add", "extra.txt")
+	runHost(t, wt, "commit", "-q", "-m", "second commit (simulated regression)")
+	runHost(t, wt, "push", "-q", "origin", s.Branch)
+
+	if _, ok, err := g.LsRemoteBranch(ctx(), fx.cloneDir, "origin", s.Branch); err != nil || !ok {
+		t.Fatalf("sanity check: branch ref should still resolve after the second commit: ok=%v err=%v", ok, err)
+	}
+	if n := countCommits(t, fx.cloneDir, "main", s.Branch, g); n != 2 {
+		t.Fatalf("countCommits should have caught the second commit (want 2, the old ref-only check would have missed this entirely), got %d", n)
+	}
 }

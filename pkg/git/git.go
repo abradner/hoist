@@ -92,6 +92,13 @@ type Git interface {
 	// branch it resolves to (a stale pointer from an unrelated prior state, or one that
 	// happens to resolve into cloneDir's own real git dir but on a different branch).
 	WorktreeBranch(ctx context.Context, cloneDir, worktreeDir string) (branch string, ok bool, err error)
+	// Log lists commit SHAs in revRange (e.g. "main..hoist/app-production/abc123"), in the
+	// order `git log --format=%H` reports them (most recent first). Not used by any
+	// production step — every step's own idempotency is proven structurally, by Observe
+	// re-deriving truth, never by counting — but exposed for tests that need to assert a
+	// promotion produced exactly one commit: a ref only ever has one tip, so LsRemoteBranch
+	// alone cannot distinguish one commit behind it from several.
+	Log(ctx context.Context, worktreeDir, revRange string) (shas []string, err error)
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -524,6 +531,22 @@ func (e Exec) DiffNameOnly(ctx context.Context, worktreeDir, fromRev, toRev stri
 		}
 	}
 	return paths, sc.Err()
+}
+
+// Log implements Git.
+func (e Exec) Log(ctx context.Context, worktreeDir, revRange string) ([]string, error) {
+	out, err := e.run(ctx, worktreeDir, "log", "--format=%H", revRange)
+	if err != nil {
+		return nil, err
+	}
+	var shas []string
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			shas = append(shas, line)
+		}
+	}
+	return shas, sc.Err()
 }
 
 // WorktreeBranch implements Git.
