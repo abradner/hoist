@@ -79,15 +79,18 @@ type Row struct {
 	Active bool
 	// Detail is the human string shown under an active row: Observation.Detail for a
 	// waiting or not-yet-acted step, Observation.Blocked for a blocked one. It is never
-	// invented here — always exactly what the engine step itself produced (AGENTS.md §4.1),
-	// and already redacted before it ever reaches this package: engine.go's appendHistory
-	// comment states that a step's own text passes through pkg/redact the moment it is
-	// written into History, and engine.Status's Observation values come from the very same
-	// Step.Observe calls Drive/appendHistory does — there is no second, unredacted copy of
-	// this text anywhere upstream of DeriveRows. model.go's View() still passes its whole
-	// assembled output through redact.Strings once more at the final boundary, matching
-	// plan.Model's own belt-and-suspenders convention, but that is defense in depth, not a
-	// second redaction layer this package is responsible for maintaining.
+	// invented here — always exactly what the engine step itself produced (AGENTS.md §4.1).
+	// It is NOT already redacted by the time it reaches this package: engine.Status calls
+	// each Step's own Observe directly and returns its Observation as-is (engine.go's
+	// doc comment on Status/ObserveAll) — it never goes through engine.go's appendHistory,
+	// which only wraps Drive's own history-writing path, a different call this package's
+	// data never travels through. No Step.Observe in internal/engine/steps*.go redacts its
+	// own Detail/Blocked text either. The actual guarantee here is model.go's View(), which
+	// passes its whole assembled output (this Detail included) through redact.Strings once
+	// at the final boundary before anything reaches the terminal — the same
+	// belt-and-suspenders convention as plan.Model's own View(). That is the one place, not
+	// two, where this package's data is scrubbed; DeriveRows and this struct carry it
+	// unredacted up to that point, same as engine.Status hands it over.
 	Detail string
 }
 

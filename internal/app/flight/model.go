@@ -126,12 +126,15 @@ func New(state engine.PromotionState, poll config.PollConfig, driveFn DriveFunc)
 	return m
 }
 
-// Init starts the spinner and, when there is something to drive, the first poll — run
-// immediately rather than waiting a full pollInterval, so the screen shows real status as
-// soon as it opens instead of a screenful of "not yet reached" dots.
+// Init starts the spinner and the first poll, but only when there is something to drive —
+// a read-only screen (driveFn nil) has nothing to animate or observe, so Init returns nil
+// rather than starting a spinner tick chain that would otherwise run forever with nothing
+// ever rendering it (PR #39 review finding #5). The first poll runs immediately rather than
+// waiting a full pollInterval, so the screen shows real status as soon as it opens instead
+// of a screenful of "not yet reached" dots.
 func (m Model) Init() tea.Cmd {
 	if m.driveFn == nil {
-		return m.spinner.Tick
+		return nil
 	}
 	return tea.Batch(m.spinner.Tick, m.driveCmd())
 }
@@ -160,8 +163,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, m.driveCmd()
+		return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
 	case spinner.TickMsg:
+		// Only keep the spinner's own tick chain alive while it is actually animating
+		// something: busy (a driveCmd is in flight, or Init just kicked one off) and not
+		// done and not read-only. Rescheduling unconditionally here ran a permanent,
+		// invisible tick loop for as long as the screen stayed open, done or read-only
+		// included (PR #39 review finding #5) — busy already implies driveFn != nil and
+		// !done (see onDriveResult and the tickMsg/Reobserve guards above), but the extra
+		// checks are cheap and keep this case as defensive as the tickMsg case it mirrors.
+		if !m.busy || m.done || m.driveFn == nil {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
@@ -220,8 +233,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		return m, m.driveCmd()
+		return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
 	case key.Matches(msg, m.keys.Abort):
+		// Nothing to abort when there is no real DriveFunc wired (read-only, the shape
+		// app.go's plan.StartMsg handler currently pushes) or the promotion has no real ID
+		// (the same stub state) — emitting AbortMsg here would hand a future handler
+		// nothing it could safely act on (PR #39 review finding #2: abort fired
+		// unconditionally, risking an empty-ID abort being mishandled downstream).
+		if m.driveFn == nil || m.state.ID == "" {
+			m.notice = "nothing to abort — this promotion isn't being driven yet"
+			return m, nil
+		}
 		id := m.state.ID
 		return m, func() tea.Msg { return AbortMsg{ID: id} }
 	case key.Matches(msg, m.keys.Log):
@@ -250,9 +272,11 @@ func (m Model) SetStyles(s ui.Styles) Model {
 
 // View renders the header (id, envs, stopwatch), the step list, the log when toggled, any
 // notice, and the status bar. The whole assembled string passes through redact.Strings once
-// here at the final boundary, matching plan.Model's own belt-and-suspenders convention —
-// defense in depth on top of the fact that every Detail already reaching this package via
-// engine.Status/appendHistory is redacted at its source (see rows.go's Row.Detail comment).
+// here at the final boundary, matching plan.Model's own belt-and-suspenders convention. This
+// is not defense in depth on top of an earlier redaction: engine.Status hands Row.Detail
+// over unredacted (see rows.go's Row.Detail comment for why appendHistory's redaction does
+// not apply to this path) — this call is the one place that text is actually scrubbed before
+// reaching the terminal.
 func (m Model) View() string {
 	parts := []string{m.header(), m.stepList()}
 	if m.showLog {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/config"
@@ -67,15 +68,16 @@ func (s *stubDrive) fn() DriveFunc {
 	}
 }
 
-// runInit drives Init()'s batched cmd (spinner tick, then the drive call) through Update
-// exactly once each, in order — mirrors internal/app's own root loop (each cmd's message is
-// delivered once, never re-run), matching plan.Model's own runInit test helper. Whatever new
-// tea.Cmd a message's own Update call returns (in particular scheduleTick's tea.Tick, which
+// runBatch drives one tea.Cmd through Update exactly once — mirrors internal/app's own root
+// loop (each cmd's message is delivered once, never re-run), matching plan.Model's own
+// runInit test helper. cmd may itself be a batch (tea.Batch, e.g. Init's spinner-tick-plus-
+// drive-call, or the Reobserve key's own spinner-tick-plus-drive-call after finding #5's
+// fix): every sub-command's own message is delivered to Update in order. Whatever new tea.Cmd
+// a delivered message's own Update call returns (in particular scheduleTick's tea.Tick, which
 // really sleeps for a poll interval) is deliberately never executed here — a test that needs
 // to inspect or run that follow-up command does so explicitly itself.
-func runInit(t *testing.T, m Model) Model {
+func runBatch(t *testing.T, m Model, cmd tea.Cmd) Model {
 	t.Helper()
-	cmd := m.Init()
 	if cmd == nil {
 		return m
 	}
@@ -92,6 +94,12 @@ func runInit(t *testing.T, m Model) Model {
 		m, _ = m.Update(c())
 	}
 	return m
+}
+
+// runInit runs Init()'s own command through runBatch.
+func runInit(t *testing.T, m Model) Model {
+	t.Helper()
+	return runBatch(t, m, m.Init())
 }
 
 // TestInitDrivesImmediately: New with a non-nil driveFn fires a drive call as part of
@@ -157,7 +165,10 @@ func TestReobserveBypassesTick(t *testing.T) {
 	if !m.busy {
 		t.Error("busy = false immediately after R")
 	}
-	m, _ = m.Update(cmd())
+	// R's command is now a batch (the drive call and a spinner.Tick to resume the spinner's
+	// own animation while busy — see finding #5's fix), so run it through runBatch rather
+	// than feeding cmd()'s tea.BatchMsg straight into Update.
+	m = runBatch(t, m, cmd)
 	if drv.calls != 2 {
 		t.Errorf("driveFn called %d times after R, want 2", drv.calls)
 	}
@@ -215,9 +226,43 @@ func TestOpenPRKey(t *testing.T) {
 	}
 }
 
-// TestAbortKey: x emits AbortMsg naming the promotion's own id.
-func TestAbortKey(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+// TestAbortKeyNoticeWhenNotDriving: x is a no-op-with-notice, never emitting AbortMsg, when
+// there is nothing real to abort — no DriveFunc wired (read-only, the shape app.go's
+// plan.StartMsg handler currently pushes) and/or an empty promotion ID (the same stub
+// state). PR #39 review finding #2: emitting AbortMsg unconditionally risked a future
+// handler mishandling an abort with an ID nothing downstream could safely act on.
+func TestAbortKeyNoticeWhenNotDriving(t *testing.T) {
+	cases := []struct {
+		name    string
+		state   engine.PromotionState
+		driveFn DriveFunc
+	}{
+		{"nil driveFn, non-empty ID (today's actual stub shape has driveFn nil)", fixtureState(), nil},
+		{"real driveFn, empty ID", engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"}, (&stubDrive{}).fn()},
+		{"nil driveFn, empty ID", engine.PromotionState{}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(tc.state, config.PollConfig{}, tc.driveFn)
+			m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+			m, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+			if cmd != nil {
+				t.Fatal("x produced a command when there is nothing to abort")
+			}
+			if !strings.Contains(m.View(), "nothing to abort") {
+				t.Errorf("view missing the not-driving notice:\n%s", m.View())
+			}
+		})
+	}
+}
+
+// TestAbortKeyEmitsWhenDriving: once the model has a real DriveFunc and a real, non-empty
+// promotion ID (constructed directly here — app.go's own wiring doesn't produce this shape
+// yet), x still emits AbortMsg exactly as before the finding #2 guard: the guard only blocks
+// the currently-always-true stub case, it does not change the general contract.
+func TestAbortKeyEmitsWhenDriving(t *testing.T) {
+	state := fixtureState() // ID: "abcd1234"
+	m := New(state, config.PollConfig{}, (&stubDrive{}).fn())
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if cmd == nil {
 		t.Fatal("x produced no command")
@@ -328,6 +373,57 @@ func TestDoneStopsTicking(t *testing.T) {
 	if cmd != nil {
 		t.Error("a stray tick after done produced a command")
 	}
+}
+
+// TestSpinnerStopsWhenNotBusy covers PR #39 review finding #5: the spinner's own tick chain
+// must not run forever in the background regardless of whether anything is actually
+// animating. Before the fix, Init always started the spinner (even read-only) and every
+// spinner.TickMsg unconditionally rescheduled another one (even once done) — a permanent,
+// invisible animation loop for as long as the screen stayed open.
+func TestSpinnerStopsWhenNotBusy(t *testing.T) {
+	t.Run("nil driveFn: Init never starts the spinner", func(t *testing.T) {
+		m := New(fixtureState(), config.PollConfig{}, nil)
+		if cmd := m.Init(); cmd != nil {
+			t.Errorf("Init on a read-only screen returned a command, want nil (got %#v)", cmd())
+		}
+	})
+
+	t.Run("busy: spinner.TickMsg reschedules", func(t *testing.T) {
+		drv := &stubDrive{}
+		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		if !m.busy {
+			t.Fatal("setup: expected busy = true (New sets it for a non-nil driveFn)")
+		}
+		_, cmd := m.Update(spinner.TickMsg{})
+		if cmd == nil {
+			t.Error("spinner.TickMsg while busy produced no command")
+		}
+	})
+
+	t.Run("not busy: spinner.TickMsg does not reschedule", func(t *testing.T) {
+		drv := &stubDrive{}
+		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		m.busy = false // simulate the gap between polls, waiting on scheduleTick's timer
+		_, cmd := m.Update(spinner.TickMsg{})
+		if cmd != nil {
+			t.Error("spinner.TickMsg while not busy produced a command")
+		}
+	})
+
+	t.Run("done: spinner.TickMsg does not reschedule", func(t *testing.T) {
+		drv := &stubDrive{done: true, statuses: []engine.StepStatus{
+			{Step: engine.StepMerged, Observation: engine.Observation{Satisfied: true, Detail: "merged"}},
+		}}
+		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		m = runInit(t, m)
+		if !m.done {
+			t.Fatal("setup: expected done = true")
+		}
+		_, cmd := m.Update(spinner.TickMsg{})
+		if cmd != nil {
+			t.Error("spinner.TickMsg after done produced a command")
+		}
+	})
 }
 
 // TestPollIntervalUsesConfig: scheduleTick's own pollInterval reads config.PollConfig for

@@ -198,6 +198,51 @@ func TestStatusPropagatesObserveError(t *testing.T) {
 	}
 }
 
+// observeCountingStub wraps a stepStub and counts how many times Observe is called on it —
+// used by TestStatusObservesFinalStepExactlyOnce to prove the final step's Observe is not
+// called a second time when the walk reaches it (PR #39 review finding #3), rather than only
+// checking the returned statuses happen to look right.
+type observeCountingStub struct {
+	stepStub
+	calls *int
+}
+
+func (o observeCountingStub) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
+	*o.calls++
+	return o.stepStub.Observe(ctx, s)
+}
+
+// TestStatusObservesFinalStepExactlyOnce: when the initial short-circuit probe on the final
+// step comes back not-satisfied, Status's own walk reaches that same step again in its
+// ordinary turn — the fix reuses the probe's own Observation there instead of calling Observe
+// a second time. Before the fix, every not-yet-done poll cost one extra, wasted remote call
+// on the final step (amplified every tick of the flight screen's own poll loop).
+func TestStatusObservesFinalStepExactlyOnce(t *testing.T) {
+	calls := 0
+	steps := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepCommitted, obs: Observation{Satisfied: true}},
+		observeCountingStub{stepStub{name: StepMerged, obs: Observation{Satisfied: false, Detail: "not yet merged"}}, &calls},
+	}
+	done, statuses, err := Status(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: the final step reported not satisfied")
+	}
+	if calls != 1 {
+		t.Fatalf("final step's Observe called %d times, want exactly 1", calls)
+	}
+	want := []StepName{StepBranched, StepCommitted, StepMerged}
+	if got := names(statuses); !namesEqual(got, want) {
+		t.Fatalf("statuses = %v, want %v", got, want)
+	}
+	if last := statuses[len(statuses)-1]; last.Detail != "not yet merged" {
+		t.Errorf("last status = %+v, want the final step's own (reused) observation", last)
+	}
+}
+
 // TestStatusEmptySteps: zero steps is vacuously done, with no statuses — Status must not
 // panic indexing steps[len(steps)-1].
 func TestStatusEmptySteps(t *testing.T) {

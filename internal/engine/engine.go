@@ -231,8 +231,15 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // Otherwise, statuses holds exactly the steps Status reached: every entry before the last is
 // Satisfied (the walk only continues past a step that cleanly is), and the last entry is
 // the one Status stopped at — Blocked, Waiting, or plainly not yet Satisfied. A step whose
-// name never appears in statuses has not been reached at all this call.
+// name never appears in statuses has not been reached at all this call. The short-circuit
+// probe above already called Observe once on the final step before the walk started
+// (needed to even know whether to short-circuit); when the walk isn't short-circuited it
+// reaches that same final step again in its own turn, but reuses the probe's Observation
+// there rather than calling Observe a second time — every poll that isn't yet fully done
+// would otherwise cost one extra, wasted remote call on the final step, every tick of the
+// flight screen's own poll loop (PR #39 review finding #3).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
+	var finalProbe *StepStatus
 	if n := len(steps); n > 0 {
 		final := steps[n-1]
 		obs, oerr := final.Observe(ctx, s)
@@ -242,17 +249,26 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 		if obs.Satisfied {
 			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
 		}
+		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for _, step := range steps {
+	for i, step := range steps {
 		if cerr := ctx.Err(); cerr != nil {
 			return false, statuses, cerr
 		}
-		obs, oerr := step.Observe(ctx, s)
-		if oerr != nil {
-			return false, statuses, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+		var st StepStatus
+		if finalProbe != nil && i == len(steps)-1 {
+			// Same step the short-circuit probe already observed above; reuse that
+			// Observation instead of calling Observe on it again.
+			st = *finalProbe
+		} else {
+			obs, oerr := step.Observe(ctx, s)
+			if oerr != nil {
+				return false, statuses, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+			}
+			st = StepStatus{Step: step.Name(), Observation: obs}
 		}
-		statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
-		if obs.Blocked != "" || obs.Waiting || !obs.Satisfied {
+		statuses = append(statuses, st)
+		if st.Blocked != "" || st.Waiting || !st.Satisfied {
 			return false, statuses, nil
 		}
 	}
