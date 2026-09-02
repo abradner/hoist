@@ -149,6 +149,14 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 		t.Fatalf("origin should no longer have the merged branch: ok=%v err=%v", ok, err)
 	}
 
+	// Simulate what a real GitHub squash-merge would actually do: fast-forward origin's base
+	// branch to hold the promoted content. forge.Fake has no access to real git and never
+	// touches origin on its own, but MergedStep's Observe now revalidates origin/main's live
+	// tip against this promotion's own edits before trusting a historical merge record (M4
+	// hardening, finding #1) — without this, the second run below would find the base still at
+	// its pre-promotion content and correctly refuse to report success on stale evidence.
+	runGitHost(t, clone, "push", "-q", "origin", firstCommit+":refs/heads/main")
+
 	// Re-running the exact same command (simulating a resumed/re-invoked process) must not
 	// create a second commit or a second PR.
 	out.Reset()

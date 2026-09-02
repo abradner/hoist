@@ -536,6 +536,90 @@ func TestMergedRefusesStaleHead(t *testing.T) {
 	}
 }
 
+// TestMergedRefusesPRWithWrongBase is MergedStep's own belt-and-suspenders half of finding #2's
+// regression (PROpenedStep's own check is TestPROpenedStepRefusesPRWithWrongBase in
+// steps_test.go): a PR found by head branch name that targets a different base than s.Base must
+// never be treated as this promotion's own, however it got here — simulated here by never
+// driving through PROpenedStep at all, so MergedStep's own check is exercised in isolation.
+func TestMergedRefusesPRWithWrongBase(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	f := &forge.Fake{}
+
+	if _, err := f.CreatePR(ctx(), forge.PRSpec{Title: "x", Body: "x", Head: s.Branch, Base: "not-" + s.Base}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := (MergedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected Blocked for a PR targeting a different base, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, s.Base) || !strings.Contains(obs.Blocked, "not-"+s.Base) {
+		t.Fatalf("Blocked reason should name both bases, got: %s", obs.Blocked)
+	}
+	if s.PR != nil {
+		t.Fatalf("a wrong-base PR must never be adopted onto s.PR, got %+v", s.PR)
+	}
+}
+
+// TestMergedDetectsBaseRevertedAfterMerge is the P1 regression for finding #1: a promotion
+// merges successfully (base advances to hold the promoted content, PR.Merged becomes true), but
+// later someone resets the base branch directly — outside hoist — back to its pre-promotion
+// content (e.g. env E's target content reverted by hand). The deterministic id/branch/PR marker
+// are unchanged, so a re-run of the identical promotion finds the exact same, already-merged PR.
+// Before this fix, MergedStep.Observe trusted pr.Merged alone and would report Satisfied on that
+// stale evidence — this proves it now revalidates s.Base's live tip and Blocks instead, naming
+// the base, rather than silently reporting success while nothing is actually re-applied.
+func TestMergedDetectsBaseRevertedAfterMerge(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	g := git.Exec{}
+	step := MergedStep{Forge: f, Git: g}
+
+	priorSHA, ok, err := g.LsRemoteBranch(ctx(), s.CloneDir, "origin", s.Base)
+	if err != nil || !ok {
+		t.Fatalf("expected origin's %s to exist before the merge: ok=%v err=%v", s.Base, ok, err)
+	}
+
+	// A real merge: the base actually advances to hold the promoted content (mergeToBase
+	// simulates what a real GitHub squash-merge does, since forge.Fake never touches real git),
+	// then hoist's own Act completes it (PR.Merged, branch deleted).
+	mergeToBase(t, s)
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("merging: %v", err)
+	}
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied right after a real merge with the base genuinely advanced: %+v", obs)
+	}
+
+	// Someone resets env E's target content directly, outside hoist, back to the old digest:
+	// force-move origin's base branch backward to its pre-promotion tip.
+	runHost(t, s.CloneDir, "push", "--force", "origin", priorSHA+":refs/heads/"+s.Base)
+
+	obs, err = step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("must not report satisfied once the base has been reset past this promotion's merge: %+v", obs)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected a clear Blocked signal, not a silent re-drive, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, s.Base) {
+		t.Fatalf("Blocked reason should name the reverted base, got: %s", obs.Blocked)
+	}
+}
+
 // TestMergedResumesAfterKilledMergeCall is the named adversary: MergePR errors (the client
 // never saw a response, but the merge may have landed server-side) — Act must re-check FindPR
 // before treating it as a real failure, never re-issue a second merge call blindly once it
@@ -578,6 +662,13 @@ func TestMergedDeletesBranchAndResumesIfKilledBeforeDelete(t *testing.T) {
 	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
 	g := git.Exec{}
 	step := MergedStep{Forge: f, Git: g}
+
+	// Simulate what a real GitHub squash-merge would actually do to the base branch: forge.Fake
+	// has no access to real git and never touches origin on its own, but MergedStep's Observe
+	// now revalidates origin/main's live tip against this promotion's own edits before trusting
+	// a historical merge record (M4 hardening, finding #1) — without this, every Observe call
+	// below would correctly refuse rather than report satisfied.
+	mergeToBase(t, s)
 
 	if err := step.Act(ctx(), s); err != nil {
 		t.Fatalf("merging: %v", err)

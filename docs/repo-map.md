@@ -85,7 +85,18 @@ it reads private state and writes to systems that deploy software.
   the forge's own atomic "merge iff head is X" (`Forge.MergePR`'s `expectedHeadSHA`) rather than
   a client-side check-then-merge race. A process killed mid-merge-call is handled by re-asking
   the forge (`FindPR`) before ever treating a lost response as a failure worth retrying with a
-  second merge call.
+  second merge call. A PR found by head branch name is also checked against `s.Base` before
+  being adopted, at both `PROpenedStep` and (belt-and-suspenders) `MergedStep` — a PR sharing
+  this promotion's exact branch name but targeting a different base is refused, never merged
+  blind (M4 hardening).
+- **Post-merge base drift.** `pr.Merged == true` is a historical forge record, not proof the
+  base branch still holds what this promotion produced: `MergedStep.Observe` additionally
+  fetches `s.Base`'s live tip from origin (`Git.FetchBranch`, never a locally cached ref) and
+  confirms every edited path still matches `s.ExpectedBlobs` there before ever reporting done.
+  Someone resetting the base directly outside hoist after a real merge is caught this way —
+  re-running the identical promotion (same deterministic id/branch/PR) Blocks, naming the base,
+  instead of silently reporting success (M4 hardening, closes a gap AGENTS.md invariant 2 exists
+  to prevent).
 - **PR bodies, commit messages, logs.** These leave the machine. Nothing internal (cluster
   addresses, context names, hostnames) may be written into them; enforced by `scripts/public-safety.sh`
   over the repo's own tracked files and by template tests over rendered output (R-004).

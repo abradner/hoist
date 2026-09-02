@@ -89,6 +89,12 @@ func TestFindInFlightRefusesWhenAnotherPromotionIsMidFlight(t *testing.T) {
 	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil), s, nil); err != nil {
 		t.Fatalf("driving to done: %v", err)
 	}
+	// Simulate what a real GitHub squash-merge would actually do to the base branch: forge.Fake
+	// never touches real git, but MergedStep's Observe now revalidates origin/main's live tip
+	// against this promotion's own edits before trusting a historical merge record (M4
+	// hardening, finding #1) — findInFlight's own ObserveAll call below would otherwise
+	// correctly refuse to call this promotion done.
+	runGitHost(t, clone, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Base)
 	if err := engine.SaveState(statePath, s); err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +157,12 @@ func TestFindInFlightDoesNotBlockNewPromotionAfterPriorOneFullyMerged(t *testing
 	if err := engine.Drive(context.Background(), engine.AllSteps(newGit, f, nil), s, nil); err != nil {
 		t.Fatalf("driving to done: %v", err)
 	}
+	// Simulate what a real GitHub squash-merge would actually do to the base branch: forge.Fake
+	// never touches real git, but MergedStep's Observe now revalidates origin/main's live tip
+	// against this promotion's own edits before trusting a historical merge record (M4
+	// hardening, finding #1) — findInFlight's own ObserveAll call below would otherwise
+	// correctly refuse to call this promotion done.
+	runGitHost(t, clone, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Base)
 	if err := engine.SaveState(statePath, s); err != nil {
 		t.Fatal(err)
 	}

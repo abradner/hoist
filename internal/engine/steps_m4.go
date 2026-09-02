@@ -338,7 +338,11 @@ type MergedStep struct {
 // Name implements Step.
 func (MergedStep) Name() StepName { return StepMerged }
 
-// Observe implements Step.
+// Observe implements Step. A merged PR record is historical evidence, not proof the promotion
+// still holds (M4 hardening, finding #1): baseWasReverted revalidates s.Base's live current tip
+// against s.ExpectedBlobs before pr.Merged is trusted at all, so a base reset outside hoist
+// after a real merge is caught rather than silently reported as success on a re-run of the same
+// promotion (same deterministic id/branch/marker, same already-merged PR).
 func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	pr, ok, err := m.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
 	if err != nil {
@@ -372,6 +376,18 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 		}
 		return Observation{Satisfied: false}, nil
 	}
+	// pr.Merged is a historical fact the forge is reporting from a merge that may have
+	// happened anywhere from seconds to weeks ago — it is not, by itself, proof that s.Base's
+	// *current* tip still holds what this promotion's Edits describe. Someone resetting the
+	// base branch directly (outside hoist, after a real merge) would leave pr.Merged == true
+	// forever while the actually deployed content reverted; re-running the identical promotion
+	// (same deterministic id, same branch, same already-merged PR) must not report success on
+	// that stale evidence alone (AGENTS.md invariant 2: "re-observe, never remember").
+	if reverted, detail, err := m.baseWasReverted(ctx, s); err != nil {
+		return Observation{}, err
+	} else if reverted {
+		return Observation{Blocked: detail}, nil
+	}
 	s.MergeSHA = pr.MergeSHA
 	_, branchStillThere, err := m.Git.LsRemoteBranch(ctx, s.CloneDir, "origin", s.Branch)
 	if err != nil {
@@ -381,6 +397,56 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 		return Observation{Satisfied: false, Detail: "merged as " + pr.MergeSHA + "; branch not yet deleted"}, nil
 	}
 	return Observation{Satisfied: true, Detail: "merged as " + pr.MergeSHA + "; branch deleted"}, nil
+}
+
+// baseWasReverted fetches s.Base's live current tip from origin (never a locally cached
+// belief — FetchBranch always asks the remote directly, which is the whole point: catching the
+// base having moved without the clone's local ref ever being told) and confirms every path this
+// promotion's Edits touch still matches s.ExpectedBlobs there — reusing the exact blob-hash
+// comparison CommittedStep's own Observe uses to confirm its commit, computed against s.Base's
+// tip instead of HEAD. ExpectedBlobs is computed here if a caller reaches MergedStep before
+// CommittedStep's own Observe/Act ever ran in this process — engine.go's ObserveAll deliberately
+// observes the last step first as a short-circuit, so a freshly loaded PromotionState can reach
+// here with ExpectedBlobs still unset; otherwise it is already the value CommittedStep computed
+// and persisted, unchanged.
+func (m MergedStep) baseWasReverted(ctx context.Context, s *PromotionState) (bool, string, error) {
+	blobs := s.ExpectedBlobs
+	if len(blobs) == 0 {
+		computed, err := expectedBlobsFromClone(ctx, m.Git, s.CloneDir, s.Edits)
+		if err != nil {
+			return false, "", fmt.Errorf("computing expected blobs to verify %s: %w", s.Base, err)
+		}
+		blobs = computed
+		s.ExpectedBlobs = computed
+	}
+	baseSHA, ok, err := m.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
+	if err != nil {
+		return false, "", fmt.Errorf("fetching origin/%s to verify the merge still holds: %w", s.Base, err)
+	}
+	if !ok {
+		return true, fmt.Sprintf(
+			"origin's %s branch no longer exists — this promotion's merge cannot be verified; a fresh promotion is needed",
+			s.Base,
+		), nil
+	}
+	paths := make([]string, 0, len(blobs))
+	for p := range blobs {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		blob, ok, err := m.Git.LsTreeBlob(ctx, s.CloneDir, baseSHA, p)
+		if err != nil {
+			return false, "", err
+		}
+		if !ok || blob != blobs[p] {
+			return true, fmt.Sprintf(
+				"this promotion's merge commit is no longer reflected in %s (origin is now at %s, and %s does not hold the promoted content) — the target may have been reset outside hoist; a fresh promotion is needed, not a retry of this one",
+				s.Base, baseSHA, p,
+			), nil
+		}
+	}
+	return false, "", nil
 }
 
 // Act implements Step.

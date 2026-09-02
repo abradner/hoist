@@ -247,9 +247,18 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 // promotion touches — see doc.go — and is stable across any number of calls, committed or
 // not, which is what lets this be computed once and trusted from then on.
 func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (map[string]string, error) {
+	return expectedBlobsFromClone(ctx, c.Git, s.CloneDir, s.Edits)
+}
+
+// expectedBlobsFromClone is CommittedStep.expectedBlobs' logic, pulled out to a free function
+// so MergedStep (steps_m4.go) can compute the same thing against s.Base's live tip when it
+// needs to revalidate a historical merge record rather than trust it blind (M4 hardening) —
+// nothing here is CommittedStep-specific: it is a pure function of edits and the byte content
+// they're planned against, read from whatever cloneDir the caller names.
+func expectedBlobsFromClone(ctx context.Context, g git.Git, cloneDir string, edits []gitops.Edit) (map[string]string, error) {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
-	for _, e := range s.Edits {
+	for _, e := range edits {
 		if _, ok := byFile[e.File]; !ok {
 			files = append(files, e.File)
 		}
@@ -264,7 +273,7 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 		// would try to re-apply the edit on top of its own result and fail. The clone's
 		// content is what BuildPlan actually planned against (see doc.go's assumption that it
 		// matches Base) and is stable across any number of Observe calls, committed or not.
-		p, err := gitops.ResolvePath(s.CloneDir, f)
+		p, err := gitops.ResolvePath(cloneDir, f)
 		if err != nil {
 			return nil, err
 		}
@@ -282,7 +291,7 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 		// hash-object is pure content hashing; any repository works as the exec context, and
 		// the clone always exists by the time this runs (unlike the worktree, which the
 		// Branched step may not have created yet when Committed's own Observe runs first).
-		blob, err := c.Git.HashObject(ctx, s.CloneDir, after)
+		blob, err := g.HashObject(ctx, cloneDir, after)
 		if err != nil {
 			return nil, err
 		}
