@@ -40,11 +40,20 @@ type PR struct {
 }
 
 // CheckSummary is the check-run rollup for one commit sha. FailedNames lists the check-run
-// names (not empty run titles) that concluded in something other than success/neutral/skipped,
-// so CIGreenStep can name which checks failed rather than just reporting a count (M4).
+// names (not empty run titles) that concluded in something other than
+// success/neutral/skipped/queued-as-not-run, so CIGreenStep can name which checks failed rather
+// than just reporting a count (M4).
+//
+// Skipped is its own bucket, not folded into Success: a `skipped` conclusion means the check
+// never actually ran (a path filter, a conditional job) — GitHub reports it the same way whether
+// the check was optional or required, and this type carries no required-vs-optional distinction
+// at all, so there is no way to tell "safely skipped" from "a required gate that silently never
+// ran" at this layer. CIGreenStep therefore treats any Skipped>0 as blocking, the same as
+// Failure>0 (AGENTS.md §2 principle 5: "warn, don't block, except where the runbook blocks" — a
+// required check that never ran is exactly that exception). SkippedNames mirrors FailedNames.
 type CheckSummary struct {
-	Total, Pending, Success, Failure int
-	FailedNames                      []string
+	Total, Pending, Success, Failure, Skipped int
+	FailedNames, SkippedNames                 []string
 }
 
 // Comment is one issue/PR comment. AuthorType is the GitHub account "type" of the commenter

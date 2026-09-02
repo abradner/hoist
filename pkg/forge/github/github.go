@@ -158,40 +158,61 @@ func (c *Client) listPRs(ctx context.Context, state string, maxPages int) ([]prR
 	return out, nil
 }
 
-type checkRunsResponse struct {
-	CheckRuns []struct {
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	} `json:"check_runs"`
+type checkRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
 }
 
-// Checks implements forge.Forge: the check-run rollup CIGreenStep gates on (M4). FailedNames
-// names every check-run that concluded in something other than success/neutral/skipped, so a
-// blocked promotion can say which check failed rather than just a count; a run's own name is
-// upstream text nothing here wrote (a CI system can name a job anything), so it goes through
-// redact.Strings at this adaptor boundary the same way translateErr already does for GitHub's
-// own free-form error messages (AGENTS.md invariant 6).
+type checkRunsResponse struct {
+	CheckRuns []checkRun `json:"check_runs"`
+}
+
+// maxCheckRunPages bounds Checks' pagination: 10 pages of 100 (1000 check runs) is far beyond
+// any real CI matrix this tool will ever gate on, while still keeping a pathological rollup from
+// paging forever — the same defensive-bound shape as maxSearchPages for FindPR's fallback scan.
+const maxCheckRunPages = 10
+
+// Checks implements forge.Forge: the check-run rollup CIGreenStep gates on (M4), paged through
+// every page of check-runs GitHub reports for sha (Known bug classes: "only page 1 of a
+// check-run set is fetched" — a commit with more than 100 check runs would otherwise silently
+// hide a pending or failed run past the first page, and CI could appear green when it isn't).
+// FailedNames names every check-run that concluded in something other than
+// success/neutral/skipped; SkippedNames separately names every run that concluded `skipped`,
+// which forge.CheckSummary's own doc comment explains is never folded into Success. A run's own
+// name is upstream text nothing here wrote (a CI system can name a job anything), so both name
+// lists go through redact.Strings at this adaptor boundary the same way translateErr already
+// does for GitHub's own free-form error messages (AGENTS.md invariant 6).
 func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, error) {
-	var resp checkRunsResponse
-	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100", c.owner, c.repo, sha)
-	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
-		return forge.CheckSummary{}, translateErr("listing checks", err)
+	var runs []checkRun
+	for page := 1; page <= maxCheckRunPages; page++ {
+		var resp checkRunsResponse
+		path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", c.owner, c.repo, sha, page)
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
+			return forge.CheckSummary{}, translateErr("listing checks", err)
+		}
+		runs = append(runs, resp.CheckRuns...)
+		if len(resp.CheckRuns) < 100 {
+			break
+		}
 	}
 	var s forge.CheckSummary
-	s.Total = len(resp.CheckRuns)
-	for _, r := range resp.CheckRuns {
+	s.Total = len(runs)
+	for _, r := range runs {
+		name := r.Name
+		if name == "" {
+			name = "(unnamed check)"
+		}
 		switch {
 		case r.Status != "completed":
 			s.Pending++
-		case r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped":
+		case r.Conclusion == "success" || r.Conclusion == "neutral":
 			s.Success++
+		case r.Conclusion == "skipped":
+			s.Skipped++
+			s.SkippedNames = append(s.SkippedNames, redact.Strings(name))
 		default:
 			s.Failure++
-			name := r.Name
-			if name == "" {
-				name = "(unnamed check)"
-			}
 			s.FailedNames = append(s.FailedNames, redact.Strings(name))
 		}
 	}
@@ -208,6 +229,11 @@ type commentResponse struct {
 	} `json:"user"`
 }
 
+// maxCommentPages bounds Comments' pagination: 10 pages of 100 (1000 comments) comfortably
+// covers a real promotion PR's conversation while keeping a pathological one from paging
+// forever — the same defensive-bound shape as maxCheckRunPages and maxSearchPages.
+const maxCommentPages = 10
+
 // Comments implements forge.Forge: PR conversation comments (GitHub models these as issue
 // comments), newer than since, with AuthorType carrying the API's own account "type" through
 // (M4: internal/engine.ApprovedStep is what actually enforces R-001's author check against it,
@@ -219,12 +245,23 @@ type commentResponse struct {
 // "type" field also has legitimate non-"User" values such as "Organization" (an org-owned
 // account, not a bot), and the set of values isn't closed, so filtering on Type != "User" would
 // silently drop a real, non-bot commenter along with actual bots.
+//
+// Paged through every page GitHub reports (Known bug classes: "only page 1 of a PR's comments
+// is fetched" — a PR with more than 100 comments could otherwise hide an approval or a later
+// reject past the first page, so ApprovedStep's newest-match scan would never see it).
 func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([]forge.Comment, error) {
-	q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}}
-	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
 	var resp []commentResponse
-	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
-		return nil, translateErr("listing comments", err)
+	for page := 1; page <= maxCommentPages; page++ {
+		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
+		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
+		var batch []commentResponse
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &batch); err != nil {
+			return nil, translateErr("listing comments", err)
+		}
+		resp = append(resp, batch...)
+		if len(batch) < 100 {
+			break
+		}
 	}
 	out := make([]forge.Comment, 0, len(resp))
 	for _, r := range resp {

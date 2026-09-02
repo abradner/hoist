@@ -89,6 +89,35 @@ func TestCIGreenBlockedOnFailureNamesCheck(t *testing.T) {
 	}
 }
 
+// TestCIGreenSkippedRequiredCheckNeverSatisfies is the P1 regression for "a skipped check-run
+// wrongly counts as green": forge.CheckSummary carries no required-vs-optional distinction, so a
+// path-filtered or otherwise-skipped check-run set alongside otherwise-green checks must Block,
+// never silently satisfy CIGreenStep — a required check that never ran is exactly the "the
+// runbook blocks" exception to AGENTS.md §2 principle 5, not a pass. Mutant-verified: reverting
+// CIGreenStep.Observe to fold Skipped into the old total>0&&pending==0&&failure==0 condition (as
+// it did before this fix, when Checks itself counted "skipped" conclusions as Success) makes this
+// test fail.
+func TestCIGreenSkippedRequiredCheckNeverSatisfies(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.SetChecks(s.PushedSHA, forge.CheckSummary{Total: 2, Success: 1, Skipped: 1, SkippedNames: []string{"required-integration-test"}})
+
+	obs, err := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("a skipped check-run alongside otherwise-green checks must never satisfy CIGreen, got %+v", obs)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("a skipped required check should Block (this repo's own runbook-blocks exception), got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, "required-integration-test") {
+		t.Fatalf("blocked reason should name the skipped check: %q", obs.Blocked)
+	}
+}
+
 func TestCIGreenNoneGraceThenGreen(t *testing.T) {
 	fx := newFixture(t)
 	f := &forge.Fake{}

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -186,6 +187,62 @@ func TestChecksSummarizesRollup(t *testing.T) {
 	}
 }
 
+// TestChecksTreatsSkippedAsItsOwnBucketNotSuccess is the P1 regression at the wire-parsing
+// layer: a "skipped" conclusion must land in Skipped, never folded into Success (the bug this
+// task fixes — see internal/engine's TestCIGreenSkippedRequiredCheckNeverSatisfies for the
+// gating-level regression).
+func TestChecksTreatsSkippedAsItsOwnBucketNotSuccess(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": [
+			{"name": "unit-tests", "status": "completed", "conclusion": "success"},
+			{"name": "integration-tests", "status": "completed", "conclusion": "skipped"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 2 || sum.Success != 1 || sum.Skipped != 1 || sum.Failure != 0 {
+		t.Fatalf("CheckSummary = %+v, want Total=2 Success=1 Skipped=1 Failure=0", sum)
+	}
+	if len(sum.SkippedNames) != 1 || sum.SkippedNames[0] != "integration-tests" {
+		t.Fatalf("SkippedNames = %v, want [integration-tests]", sum.SkippedNames)
+	}
+}
+
+// TestChecksPaginatesBeyondFirstPage is the P1 regression for "Checks doesn't paginate": a
+// commit with more than 100 check runs must have every page fetched, so a failure sitting only
+// on page 2 is still detected rather than silently invisible behind GitHub's per_page cap.
+func TestChecksPaginatesBeyondFirstPage(t *testing.T) {
+	page1 := make([]string, 100)
+	for i := range page1 {
+		page1[i] = `{"name": "job-` + fmt.Sprint(i) + `", "status": "completed", "conclusion": "success"}`
+	}
+	body1 := `{"check_runs": [` + strings.Join(page1, ",") + `]}`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			switch r.URL.Query().Get("page") {
+			case "1":
+				return 200, body1
+			case "2":
+				return 200, `{"check_runs": [{"name": "page-2-failure", "status": "completed", "conclusion": "failure"}]}`
+			default:
+				return 200, `{"check_runs": []}`
+			}
+		},
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 101 {
+		t.Fatalf("Total = %d, want 101 (100 on page 1 + 1 on page 2) — page 2 was never fetched", sum.Total)
+	}
+	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "page-2-failure" {
+		t.Fatalf("CheckSummary = %+v, want the page-2 failure detected", sum)
+	}
+}
+
 // TestCommentsExcludesBots checks the exact set the filter is supposed to draw: a "User"
 // comment and an "Organization" comment (a real GitHub account type for an org-owned account,
 // not a bot — M4's real approval-comment author check depends on this list not silently
@@ -207,6 +264,39 @@ func TestCommentsExcludesBots(t *testing.T) {
 	}
 	if comments[0].Author != "alex" || comments[1].Author != "some-org" {
 		t.Fatalf("Comments = %+v, want alex then some-org", comments)
+	}
+}
+
+// TestCommentsPaginatesBeyondFirstPage is the P1 regression for "Comments doesn't paginate": a
+// PR with more than 100 comments must have every page fetched, so an approve/reject sitting only
+// on page 2 is still found rather than silently invisible behind GitHub's per_page cap.
+func TestCommentsPaginatesBeyondFirstPage(t *testing.T) {
+	page1 := make([]string, 100)
+	for i := range page1 {
+		page1[i] = fmt.Sprintf(`{"id": %d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, i)
+	}
+	body1 := `[` + strings.Join(page1, ",") + `]`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			switch r.URL.Query().Get("page") {
+			case "1":
+				return 200, body1
+			case "2":
+				return 200, `[{"id": 999, "body": "hoist approve abc", "user": {"login": "bob", "type": "User"}}]`
+			default:
+				return 200, "[]"
+			}
+		},
+	})
+	comments, err := c.Comments(context.Background(), 7, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 101 {
+		t.Fatalf("Comments returned %d, want 101 (100 on page 1 + 1 on page 2) — page 2 was never fetched", len(comments))
+	}
+	if comments[100].Author != "bob" || comments[100].Body != "hoist approve abc" {
+		t.Fatalf("last comment = %+v, want bob's page-2 approval", comments[100])
 	}
 }
 

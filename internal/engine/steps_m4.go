@@ -97,13 +97,20 @@ func (c CIGreenStep) now() time.Time {
 	return time.Now()
 }
 
-// Observe implements Step. total>0 && pending==0 && failure==0 is satisfied (invariant 1,
-// verbatim); failure>0 is always Blocked, named by check-run name when the forge can give one;
-// total==0 is a grace-period Waiting, then the ci.none policy: green satisfies, prompt Blocks
-// with an override path (CINoneOverride, set by `hoist resume --override-ci-none`), block
-// Blocks with none at all — an operator who chose block gets no in-band bypass, only "wait for
-// real checks" or "change ci.none and resume", which is the entire point of choosing the
-// stricter of the two non-green policies over the milder one.
+// Observe implements Step. total>0 && pending==0 && failure==0 && skipped==0 is satisfied
+// (invariant 1's condition, extended: see below); failure>0 is always Blocked, named by
+// check-run name when the forge can give one; skipped>0 is likewise always Blocked — a `skipped`
+// conclusion means a check-run never actually ran at all (a path filter, a conditional job), and
+// forge.CheckSummary carries no required-vs-optional distinction that would let this step tell
+// "safely skipped" from "a required gate that silently never ran", so a skipped run is treated
+// as a hard gate, not silently folded into green (AGENTS.md §2 principle 5's own stated
+// exception: "warn, don't block, except where the runbook blocks" — a required check skipped out
+// from under a promotion is exactly that case). total==0 is a grace-period Waiting, then the
+// ci.none policy: green satisfies, prompt Blocks with an override path (CINoneOverride, set by
+// `hoist resume --override-ci-none`), block Blocks with none at all — an operator who chose
+// block gets no in-band bypass, only "wait for real checks" or "change ci.none and resume",
+// which is the entire point of choosing the stricter of the two non-green policies over the
+// milder one.
 func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	if s.PR == nil {
 		return Observation{Satisfied: false}, nil
@@ -120,14 +127,27 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		// retries transient Observe errors rather than treating them as authoritative absence.
 		return Observation{}, fmt.Errorf("checking CI status for %s: %w", sha, err)
 	}
-	if sum.Failure > 0 {
-		detail := fmt.Sprintf("%d of %d checks failed", sum.Failure, sum.Total)
-		if len(sum.FailedNames) > 0 {
-			names := append([]string(nil), sum.FailedNames...)
-			sort.Strings(names)
-			detail += ": " + strings.Join(names, ", ")
+	if sum.Failure > 0 || sum.Skipped > 0 {
+		var parts []string
+		if sum.Failure > 0 {
+			detail := fmt.Sprintf("%d of %d checks failed", sum.Failure, sum.Total)
+			if len(sum.FailedNames) > 0 {
+				names := append([]string(nil), sum.FailedNames...)
+				sort.Strings(names)
+				detail += ": " + strings.Join(names, ", ")
+			}
+			parts = append(parts, detail)
 		}
-		return Observation{Blocked: detail}, nil
+		if sum.Skipped > 0 {
+			detail := fmt.Sprintf("%d of %d checks were skipped (never ran)", sum.Skipped, sum.Total)
+			if len(sum.SkippedNames) > 0 {
+				names := append([]string(nil), sum.SkippedNames...)
+				sort.Strings(names)
+				detail += ": " + strings.Join(names, ", ")
+			}
+			parts = append(parts, detail)
+		}
+		return Observation{Blocked: strings.Join(parts, "; ")}, nil
 	}
 	if sum.Total > 0 {
 		if sum.Pending > 0 {
