@@ -19,10 +19,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/app"
+	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -82,7 +84,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fs.Usage()
 			return exitUsage
 		}
-		return tuiRunner(eff.repo, eff.appsRoot, eff.promotable, stdout, stderr)
+		return tuiRunner(eff, cfg, stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
@@ -475,16 +477,55 @@ func splitList(s string) []string {
 // can be tested without starting a terminal program.
 var tuiRunner = runTUI
 
-// runTUI discovers the repo and runs the matrix screen until the user quits.
-func runTUI(repo, appsRoot string, promotable []string, stdout, stderr io.Writer) int {
-	r, err := gitops.Discover(repo, appsRoot)
+// runTUI discovers the repo and runs the matrix (and, from it, the plan) screen until the
+// user quits. cfg is the whole loaded config file (buildResolveFunc needs it to find the
+// matching registries[] entry); eff.cfg is the selected repo's own entry, nil on flags
+// alone — the plan screen then runs in "digest sources: none" mode with default resolution
+// options and an empty envs config, matching what M1 offered before this milestone.
+func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
-	if _, err := tea.NewProgram(app.New(r, promotable), tea.WithOutput(stdout)).Run(); err != nil {
+	var envs config.EnvsConfig
+	if eff.cfg != nil {
+		envs = eff.cfg.Envs
+	}
+	resolveFn := buildResolveFunc(cfg, eff.cfg, eff.promotable)
+	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
 	return 0
+}
+
+// buildResolveFunc adapts the plan command's own resolution adaptors (resolution.go:
+// resolutionOptions, runResolution — kube context, registry credential chain) into a
+// plan.ResolveFunc the TUI can call without importing cmd itself (AGENTS.md §4.8). Each
+// call builds a fresh cluster/registry connection for the requested source env, exactly as
+// `hoist plan` does; resolutionOptions runs once here since it does not depend on the
+// source env. An unreachable cluster or misconfigured registry is not caught ahead of time —
+// there is no source env to try it against yet — so the plan screen's own tea.Cmd catches
+// the error per call and degrades to "digest sources: none" with a warning line (AGENTS.md
+// principle 5), rather than this function failing to open the TUI at all.
+func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
+	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
+		opts, err := resolutionOptions(cfg, rc, prefixes, resolveFlags{})
+		if err != nil {
+			return plan.ResolveOutcome{}, err
+		}
+		if len(opts.order) == 0 {
+			return plan.ResolveOutcome{}, nil // digest sources: none
+		}
+		rep, err := runResolution(ctx, r, source, prefixes, opts, nil)
+		if err != nil {
+			return plan.ResolveOutcome{}, err
+		}
+		used := ""
+		if ar, ok := rep.registry.(registry.AuthReporter); ok && rep.registry != nil {
+			used = ar.AuthSourceUsed()
+		}
+		return plan.ResolveOutcome{Resolutions: rep.res, KubeContext: rep.kubeContext, RegistryAuth: used}, nil
+	}
 }

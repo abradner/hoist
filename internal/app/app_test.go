@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/abradner/hoist/internal/app/matrix"
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
@@ -32,7 +34,7 @@ func sized(t *testing.T) tea.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(r, []string{"ghcr.io/"})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil)
 	_ = m.Init()
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -119,27 +121,43 @@ func TestHelpToggleKeepsHeight(t *testing.T) {
 	if n := len(strings.Split(v, "\n")); n != height {
 		t.Errorf("with help: %d lines, want %d", n, height)
 	}
-	if !strings.Contains(v, "promote (later milestone)") {
+	if !strings.Contains(v, "plan promotion") {
 		t.Errorf("help line missing:\n%s", v)
 	}
 	m, _ = press(t, m, tea.KeyPressMsg{Code: '?', Text: "?"})
-	if v := plain(m); strings.Contains(v, "promote (later milestone)") {
+	if v := plain(m); strings.Contains(v, "plan promotion") {
 		t.Error("help line still shown after second ?")
 	}
 }
 
-func TestPromoteShowsNoticeUntilNextKey(t *testing.T) {
+// TestPromotePushesPlanScreen is the second half of issue #2: p on the matrix screen opens
+// the plan screen (internal/app/plan) rather than M1's placeholder notice. The fixture repo
+// has no configured envs.pairs, so the plan screen starts in its env-select state, prompting
+// for a target among the repo's other envs.
+func TestPromotePushesPlanScreen(t *testing.T) {
 	m := sized(t)
 	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
-	if cmd != nil {
-		t.Error("p produced a command")
+	if cmd == nil {
+		t.Fatal("p produced no command")
 	}
-	if v := plain(m); !strings.Contains(v, "promotion lands in a later milestone") {
-		t.Errorf("notice missing:\n%s", v)
+	msg := cmd()
+	if _, ok := msg.(matrix.OpenPlanMsg); !ok {
+		t.Fatalf("p's command yields %T, want matrix.OpenPlanMsg", msg)
 	}
-	m, _ = press(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if v := plain(m); strings.Contains(v, "later milestone") || !strings.Contains(v, "envs 2") {
-		t.Errorf("notice did not clear:\n%s", v)
+	m, _ = m.Update(msg)
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after p, want 2", n)
+	}
+	if v := plain(m); !strings.Contains(v, "app-production") || !strings.Contains(v, "app-staging") {
+		t.Errorf("plan screen view missing the fixture's env names:\n%s", v)
+	}
+	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd == nil {
+		t.Fatal("esc on the plan screen produced no command")
+	}
+	m, _ = m.Update(backCmd())
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("esc did not pop back to the matrix: stack has %d screens", n)
 	}
 }
 
