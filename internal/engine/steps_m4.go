@@ -339,10 +339,13 @@ type MergedStep struct {
 func (MergedStep) Name() StepName { return StepMerged }
 
 // Observe implements Step. A merged PR record is historical evidence, not proof the promotion
-// still holds (M4 hardening, finding #1): baseWasReverted revalidates s.Base's live current tip
-// against s.ExpectedBlobs before pr.Merged is trusted at all, so a base reset outside hoist
-// after a real merge is caught rather than silently reported as success on a re-run of the same
-// promotion (same deterministic id/branch/marker, same already-merged PR).
+// still holds (M4 hardening, finding #1): mergeWasReverted revalidates that the merge commit
+// itself is still part of s.Base's live current history before pr.Merged is trusted at all, so a
+// base reset outside hoist after a real merge is caught rather than silently reported as success
+// on a re-run of the same promotion (same deterministic id/branch/marker, same already-merged
+// PR) — see mergeWasReverted's own doc comment for why ancestry, not blob content, is the
+// correct test (round 3, finding #2: a blob comparison would misclassify an ordinary later
+// re-promotion to the same env, which legitimately changes the same paths, as a revert).
 func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	pr, ok, err := m.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
 	if err != nil {
@@ -378,12 +381,12 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 	}
 	// pr.Merged is a historical fact the forge is reporting from a merge that may have
 	// happened anywhere from seconds to weeks ago — it is not, by itself, proof that s.Base's
-	// *current* tip still holds what this promotion's Edits describe. Someone resetting the
-	// base branch directly (outside hoist, after a real merge) would leave pr.Merged == true
-	// forever while the actually deployed content reverted; re-running the identical promotion
-	// (same deterministic id, same branch, same already-merged PR) must not report success on
-	// that stale evidence alone (AGENTS.md invariant 2: "re-observe, never remember").
-	if reverted, detail, err := m.baseWasReverted(ctx, s); err != nil {
+	// *current* history still contains that merge. Someone resetting the base branch directly
+	// (outside hoist, after a real merge) would leave pr.Merged == true forever while the
+	// actually deployed content reverted; re-running the identical promotion (same deterministic
+	// id, same branch, same already-merged PR) must not report success on that stale evidence
+	// alone (AGENTS.md invariant 2: "re-observe, never remember").
+	if reverted, detail, err := m.mergeWasReverted(ctx, s, pr.MergeSHA); err != nil {
 		return Observation{}, err
 	} else if reverted {
 		return Observation{Blocked: detail}, nil
@@ -399,25 +402,37 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 	return Observation{Satisfied: true, Detail: "merged as " + pr.MergeSHA + "; branch deleted"}, nil
 }
 
-// baseWasReverted fetches s.Base's live current tip from origin (never a locally cached
-// belief — FetchBranch always asks the remote directly, which is the whole point: catching the
-// base having moved without the clone's local ref ever being told) and confirms every path this
-// promotion's Edits touch still matches s.ExpectedBlobs there — reusing the exact blob-hash
-// comparison CommittedStep's own Observe uses to confirm its commit, computed against s.Base's
-// tip instead of HEAD. ExpectedBlobs is computed here if a caller reaches MergedStep before
-// CommittedStep's own Observe/Act ever ran in this process — engine.go's ObserveAll deliberately
-// observes the last step first as a short-circuit, so a freshly loaded PromotionState can reach
-// here with ExpectedBlobs still unset; otherwise it is already the value CommittedStep computed
-// and persisted, unchanged.
-func (m MergedStep) baseWasReverted(ctx context.Context, s *PromotionState) (bool, string, error) {
-	blobs := s.ExpectedBlobs
-	if len(blobs) == 0 {
-		computed, err := expectedBlobsFromClone(ctx, m.Git, s.CloneDir, s.Edits)
-		if err != nil {
-			return false, "", fmt.Errorf("computing expected blobs to verify %s: %w", s.Base, err)
-		}
-		blobs = computed
-		s.ExpectedBlobs = computed
+// mergeWasReverted fetches s.Base's live current tip from origin (never a locally cached belief
+// — FetchBranch always asks the remote directly, which is the whole point: catching the base
+// having moved without the clone's local ref ever being told) and checks whether mergeSHA — this
+// promotion's own merge commit, as reported by the forge's own pr.MergeSHA — is still an
+// ancestor of that tip (git.Git.IsAncestor, `git merge-base --is-ancestor`).
+//
+// This replaced an earlier (round 2) implementation that compared s.Base's tip content, path by
+// path, against s.ExpectedBlobs (the same blob-hash technique CommittedStep's own Observe uses
+// to confirm its commit). That was the wrong test: content equality cannot distinguish "the base
+// moved backward past my merge" from "the base moved forward past my merge via a later,
+// legitimate commit" — and the second case is not a corner case, it is the ordinary shape of
+// re-promoting to the same env more than once. Promotion A merges; later, promotion B correctly
+// promotes a newer image to the very same manifest paths; A's own ExpectedBlobs no longer match
+// the base's current content, not because anything was reverted, but because B superseded it —
+// yet a blob comparison reports exactly the same "reverted" verdict for that as for a genuine
+// revert, which would misclassify an ordinary operation as a stuck, permanently-Blocked
+// promotion (and, worse, could make findInFlight refuse every future promotion to that env,
+// since A would never resolve to a terminal state).
+//
+// Ancestry gets this right: if mergeSHA is still an ancestor of the base's current tip, this
+// promotion's merge is genuinely part of history — Satisfied, regardless of what later, forward
+// commits changed (the superseded case, correctly not reverted). If mergeSHA is NOT an ancestor
+// of the current tip, that is a real revert — a force-push or reset backward past it, or the
+// base branch rebuilt from an earlier point — and this correctly Blocks, exactly as round 2
+// intended for that case.
+func (m MergedStep) mergeWasReverted(ctx context.Context, s *PromotionState, mergeSHA string) (bool, string, error) {
+	if mergeSHA == "" {
+		return true, fmt.Sprintf(
+			"the forge reports this PR as merged but recorded no merge commit sha — %s's history cannot be verified against it; a fresh promotion is needed",
+			s.Base,
+		), nil
 	}
 	baseSHA, ok, err := m.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
 	if err != nil {
@@ -429,22 +444,15 @@ func (m MergedStep) baseWasReverted(ctx context.Context, s *PromotionState) (boo
 			s.Base,
 		), nil
 	}
-	paths := make([]string, 0, len(blobs))
-	for p := range blobs {
-		paths = append(paths, p)
+	isAncestor, err := m.Git.IsAncestor(ctx, s.CloneDir, mergeSHA, baseSHA)
+	if err != nil {
+		return false, "", fmt.Errorf("checking whether merge %s is still part of %s's history: %w", mergeSHA, s.Base, err)
 	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		blob, ok, err := m.Git.LsTreeBlob(ctx, s.CloneDir, baseSHA, p)
-		if err != nil {
-			return false, "", err
-		}
-		if !ok || blob != blobs[p] {
-			return true, fmt.Sprintf(
-				"this promotion's merge commit is no longer reflected in %s (origin is now at %s, and %s does not hold the promoted content) — the target may have been reset outside hoist; a fresh promotion is needed, not a retry of this one",
-				s.Base, baseSHA, p,
-			), nil
-		}
+	if !isAncestor {
+		return true, fmt.Sprintf(
+			"this promotion's merge commit %s is no longer part of %s's history (origin is now at %s) — the target may have been reset or rebuilt outside hoist; a fresh promotion is needed, not a retry of this one",
+			mergeSHA, s.Base, baseSHA,
+		), nil
 	}
 	return false, "", nil
 }

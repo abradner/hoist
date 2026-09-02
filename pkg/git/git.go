@@ -61,7 +61,7 @@ type Git interface {
 	// this repo, which never trusts a remote-tracking ref as evidence without re-fetching it
 	// first. Reports the sha it fetched; ok=false when the ref does not exist on remote. Added
 	// in M4 for MergedStep's Observe: LsRemoteBranch alone reports a live sha over the network,
-	// but a subsequent LsTreeBlob needs the sha's commit and tree objects actually
+	// but a subsequent LsTreeBlob/IsAncestor needs the sha's commit and tree objects actually
 	// present locally, which only a fetch (not ls-remote) provides — this repo otherwise never
 	// fetches at all (the worktree is branched from the clone's own local ref, on the stated
 	// assumption the clone already matches Base for the files a promotion touches; see doc.go).
@@ -72,6 +72,19 @@ type Git interface {
 	// LsTreeBlob reports the blob hash of path in rev's tree, ok=false when rev cannot be
 	// resolved (nothing committed yet) or path is not present in it.
 	LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (blob string, ok bool, err error)
+	// IsAncestor reports whether ancestor is an ancestor of (or identical to) descendant in
+	// dir's object graph — `git merge-base --is-ancestor`, which git itself defines as true for
+	// a commit and itself, not just for a strict ancestor. Both revs must already be resolvable
+	// locally (a caller verifying a remote branch's tip should FetchBranch it first, the same
+	// way LsTreeBlob callers do). Added in M4 for MergedStep's Observe (finding #2, round 3):
+	// whether a promotion's own merge commit is still reachable from the base's current tip is
+	// the correct test for "did something revert past this merge", not a content/blob
+	// comparison — a later, legitimate commit that changes the very same paths (an ordinary
+	// re-promotion to the same env) moves the tip forward without ever making the earlier merge
+	// unreachable, while a real revert (reset, force-push, or a base rebuilt from an earlier
+	// point) does. An error here means ancestor or descendant could not be resolved at all (e.g.
+	// a truly unknown sha), not "not an ancestor" — that is ok=false, err=nil.
+	IsAncestor(ctx context.Context, dir, ancestor, descendant string) (isAncestor bool, err error)
 	// RevParse resolves rev to a commit sha inside worktreeDir, ok=false when rev cannot be
 	// resolved (e.g. HEAD before any commit exists). Added beyond the brief's listed shape:
 	// Observe needs to read the worktree's current HEAD without creating a commit to find
@@ -425,6 +438,23 @@ func (e Exec) LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (st
 		return "", false, fmt.Errorf("git ls-tree: unparseable output %q", out)
 	}
 	return fields[2], true, nil
+}
+
+// IsAncestor implements Git: `git merge-base --is-ancestor`, which exits 0 when ancestor is an
+// ancestor of (or identical to) descendant, 1 when it is not, and anything else (most commonly
+// 128, "not a valid object name") when either rev could not even be resolved — that last case is
+// reported as a real error, never silently folded into "not an ancestor", since a caller that
+// asked about the wrong sha deserves to know rather than be told a false negative.
+func (e Exec) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, dir, "merge-base", "--is-ancestor", ancestor, descendant)
+	switch {
+	case err == nil:
+		return true, nil
+	case exitCode == 1:
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // RevParse implements Git.

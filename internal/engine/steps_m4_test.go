@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -568,12 +569,21 @@ func TestMergedRefusesPRWithWrongBase(t *testing.T) {
 
 // TestMergedDetectsBaseRevertedAfterMerge is the P1 regression for finding #1: a promotion
 // merges successfully (base advances to hold the promoted content, PR.Merged becomes true), but
-// later someone resets the base branch directly — outside hoist — back to its pre-promotion
-// content (e.g. env E's target content reverted by hand). The deterministic id/branch/PR marker
-// are unchanged, so a re-run of the identical promotion finds the exact same, already-merged PR.
-// Before this fix, MergedStep.Observe trusted pr.Merged alone and would report Satisfied on that
-// stale evidence — this proves it now revalidates s.Base's live tip and Blocks instead, naming
+// later someone resets the base branch directly — outside hoist — backward past this
+// promotion's own merge commit (e.g. env E's target content reverted by hand). The deterministic
+// id/branch/PR marker are unchanged, so a re-run of the identical promotion finds the exact same,
+// already-merged PR. Before this fix, MergedStep.Observe trusted pr.Merged alone and would report
+// Satisfied on that stale evidence — this proves it now revalidates that the merge commit is
+// still part of s.Base's live history (mergeWasReverted, an ancestry check — see its own doc
+// comment for why ancestry rather than content is the correct test) and Blocks instead, naming
 // the base, rather than silently reporting success while nothing is actually re-applied.
+//
+// The revert here is a genuine ref reset backward (force-pushing origin's base back to its exact
+// pre-merge tip), not merely a content change at the promoted path: priorSHA is captured before
+// the merge and is an ancestor of the merge commit, so resetting back to it makes the merge
+// commit itself unreachable from the new tip — precisely the condition mergeWasReverted checks
+// for, and precisely what distinguishes a real revert from TestMergedSupersededByLaterPromotionIsSatisfiedNotBlocked's
+// forward-superseding case right below.
 func TestMergedDetectsBaseRevertedAfterMerge(t *testing.T) {
 	fx := newFixture(t)
 	f := &forge.Fake{}
@@ -601,8 +611,9 @@ func TestMergedDetectsBaseRevertedAfterMerge(t *testing.T) {
 		t.Fatalf("expected satisfied right after a real merge with the base genuinely advanced: %+v", obs)
 	}
 
-	// Someone resets env E's target content directly, outside hoist, back to the old digest:
-	// force-move origin's base branch backward to its pre-promotion tip.
+	// Someone resets env E's target content directly, outside hoist: force-move origin's base
+	// branch backward past this promotion's own merge commit, all the way to its pre-promotion
+	// tip — a genuine history rewrite, not just a changed file.
 	runHost(t, s.CloneDir, "push", "--force", "origin", priorSHA+":refs/heads/"+s.Base)
 
 	obs, err = step.Observe(ctx(), s)
@@ -617,6 +628,71 @@ func TestMergedDetectsBaseRevertedAfterMerge(t *testing.T) {
 	}
 	if !strings.Contains(obs.Blocked, s.Base) {
 		t.Fatalf("Blocked reason should name the reverted base, got: %s", obs.Blocked)
+	}
+}
+
+// TestMergedSupersededByLaterPromotionIsSatisfiedNotBlocked is the new regression for finding #2
+// (round 3): a promotion (s) merges successfully, and then a second, later, entirely legitimate
+// promotion re-touches the very same manifest path — an ordinary "promote to this env again"
+// operation — advancing the base's tip *forward*, past s's own merge commit, never resetting it.
+// s's own merge commit is still genuinely part of the base's history; a re-observe of s must
+// report Satisfied, not Blocked. Under the old (round 2) blob-comparison implementation this
+// test fails: the base's current content at the promoted path no longer matches what s's own
+// merge wrote, and the old code read that as "reverted" even though nothing was ever reset —
+// exactly the regression this fix closes. See TestMergedDetectsBaseRevertedAfterMerge just above
+// for the genuine-revert case this must still Block on.
+func TestMergedSupersededByLaterPromotionIsSatisfiedNotBlocked(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	g := git.Exec{}
+	step := MergedStep{Forge: f, Git: g}
+
+	mergeToBase(t, s)
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("merging: %v", err)
+	}
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied right after a real merge with the base genuinely advanced: %+v", obs)
+	}
+	if len(s.Edits) == 0 {
+		t.Fatal("fixture should have at least one edit")
+	}
+
+	// A second, later, legitimate promotion: a fresh clone of the very same origin (exactly what
+	// an independent `hoist promote` worktree would have), re-touching the exact path s's own
+	// merge wrote, and pushing that as a new commit on top of the base's current tip — forward,
+	// never a reset. This is the ordinary shape of promoting to the same env more than once.
+	second := filepath.Join(t.TempDir(), "second-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, second)
+	runHost(t, second, "checkout", "-q", s.Base)
+	editedPath := s.Edits[0].File
+	full := filepath.Join(second, editedPath)
+	before, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := append(append([]byte{}, before...), []byte("\n# a later, legitimate promotion touched this file too\n")...)
+	if err := os.WriteFile(full, after, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, second, "add", "--", editedPath)
+	runHost(t, second, "commit", "-q", "-m", "a later, legitimate promotion of the same path")
+	runHost(t, second, "push", "-q", "origin", s.Base)
+
+	obs, err = step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked != "" {
+		t.Fatalf("a later, forward, legitimate re-promotion of the same path must not read as a revert: %+v", obs)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied: this promotion's own merge commit is still part of %s's history, just superseded by a later one: %+v", s.Base, obs)
 	}
 }
 

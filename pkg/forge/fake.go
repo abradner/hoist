@@ -203,7 +203,22 @@ func (f *Fake) MergePR(_ context.Context, prNumber int, expectedHeadSHA string) 
 		}
 		f.prs[i].Merged = true
 		if f.prs[i].MergeSHA == "" {
-			f.prs[i].MergeSHA = "merged-" + f.prs[i].HeadSHA
+			switch {
+			case expectedHeadSHA != "":
+				// expectedHeadSHA is the one real, resolvable git sha this call was actually
+				// given — in every test that drives a genuine merge (mergeToBase pushes exactly
+				// this sha onto the base, standing in for what a real GitHub squash-merge would
+				// have produced), it is what really lands in the base's history. Recording it as
+				// MergeSHA is what lets MergedStep.Observe's ancestry check
+				// (git.Git.IsAncestor, M4 hardening finding #2) resolve to something real,
+				// instead of the placeholder below, which no git object ever backs.
+				f.prs[i].MergeSHA = expectedHeadSHA
+			default:
+				// No real sha was given (a test pre-seeding a merge without ever intending to
+				// call Observe afterward) — fall back to a clearly-synthetic placeholder, same
+				// as before this fix.
+				f.prs[i].MergeSHA = "merged-" + f.prs[i].HeadSHA
+			}
 		}
 		return f.prs[i], nil
 	}

@@ -272,6 +272,46 @@ func TestLsTreeBlobAndHashObjectAgree(t *testing.T) {
 	}
 }
 
+// TestIsAncestor exercises git.Git.IsAncestor directly against a real repo: the ancestor/self
+// cases IsAncestor must report true for, the non-ancestor case it must report false for (never
+// an error — a sibling branch's tip is a perfectly resolvable rev that just isn't an ancestor),
+// and the genuinely-unresolvable case it must report as a real error, never silently folded into
+// false. Added for M4 hardening finding #2 (round 3): MergedStep.Observe's revert-vs-superseded
+// distinction is exactly this method, so it earns its own direct coverage independent of
+// MergedStep's own (necessarily more indirect) tests in internal/engine.
+func TestIsAncestor(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	var g Exec
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/ancestor", "main"); err != nil {
+		t.Fatal(err)
+	}
+	base, ok, err := g.RevParse(ctx(), wt, "HEAD")
+	if err != nil || !ok {
+		t.Fatalf("RevParse HEAD: ok=%v err=%v", ok, err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child, err := g.Commit(ctx(), wt, "child\n", []string{"child.txt"}, 30*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if isAncestor, err := g.IsAncestor(ctx(), wt, base, child); err != nil || !isAncestor {
+		t.Fatalf("base should be an ancestor of child: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if isAncestor, err := g.IsAncestor(ctx(), wt, child, child); err != nil || !isAncestor {
+		t.Fatalf("a commit should be its own ancestor per git's own definition: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if isAncestor, err := g.IsAncestor(ctx(), wt, child, base); err != nil || isAncestor {
+		t.Fatalf("child must not be reported as an ancestor of base: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if _, err := g.IsAncestor(ctx(), wt, "not-a-real-sha", child); err == nil {
+		t.Fatal("an unresolvable ancestor rev should be a real error, not a false negative")
+	}
+}
+
 func TestLsTreeBlobBeforeAnyCommit(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")
