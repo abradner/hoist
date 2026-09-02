@@ -92,3 +92,54 @@ func TestErrorHidesListedStrings(t *testing.T) {
 		t.Error("nil error should print as empty")
 	}
 }
+
+// The untyped-error case this package doc calls out: a hostname mismatch that reaches
+// describe by a route the type switch doesn't cover (a plain string, type information
+// already lost) still spells the bare host as plain text. A hide list built only from
+// host:port never matches that; Host must offer the bare host alone too.
+func TestHostScrubsFreeTextBareHost(t *testing.T) {
+	raw := "https://192.0.2.10:6443"
+	hide := Host(raw)
+	untyped := errors.New("x509: certificate is valid for kube.example.test, not 192.0.2.10")
+	got := Strings(untyped.Error(), hide...)
+	for _, leak := range []string{"192.0.2.10"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("Host(%q) = %v did not scrub the bare host from %q: got %q", raw, hide, untyped.Error(), got)
+		}
+	}
+	// Every spelling the caller could have configured is covered: with the scheme, the
+	// host:port alone, and the bare host with no port.
+	for _, want := range []string{raw, "192.0.2.10:6443", "192.0.2.10"} {
+		found := false
+		for _, h := range hide {
+			found = found || h == want
+		}
+		if !found {
+			t.Errorf("Host(%q) = %v lacks %q", raw, hide, want)
+		}
+	}
+	if got := Host(""); got != nil {
+		t.Errorf("Host(\"\") = %v, want nil", got)
+	}
+}
+
+// Register is the third guard: a value registered anywhere in the process is scrubbed by
+// every later Strings/Error call, even with no local hide argument — and Register("") must
+// never turn into "redact everything".
+func TestRegisterScrubsProcessWide(t *testing.T) {
+	const secret = "REGISTER-TEST-SECRET-4f8c2a"
+	Register(secret)
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(hidden, secret)
+		mu.Unlock()
+	})
+	got := Strings("the response carried " + secret + " in the clear")
+	if strings.Contains(got, secret) {
+		t.Errorf("registered secret survived with no local hide list: %q", got)
+	}
+	Register("")
+	if got := Strings("nothing registered lives here"); got != "nothing registered lives here" {
+		t.Errorf("Register(\"\") redacted something: %q", got)
+	}
+}

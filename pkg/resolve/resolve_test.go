@@ -101,17 +101,28 @@ func TestRunningDisagreementWarnsAndChoosesDeterministically(t *testing.T) {
 		"manifest pin among the running digests wins": {
 			manifest: web + ":v2@" + digestB,
 			pods:     []k8s.RunningImage{running("web-1", "web", web, digestA), running("web-2", "web", web, digestB), running("web-3", "web", web, digestA)},
-			want:     digestB, reason: "it matches the manifest pin", alts: []string{digestA},
+			want:     digestB, reason: "matches manifest pin", alts: []string{digestA},
 		},
-		"else the most frequent": {
+		"else the most frequent, no tie": {
 			manifest: web + ":v2",
 			pods:     []k8s.RunningImage{running("web-1", "web", web, digestC), running("web-2", "web", web, digestB), running("web-3", "web", web, digestC)},
-			want:     digestC, reason: "the most frequent, 2 of 3", alts: []string{digestB},
+			want:     digestC, reason: "most frequent, 2 of 3", alts: []string{digestB},
 		},
-		"else the lexically smallest": {
+		"else the lexically smallest, every digest runs once": {
 			manifest: web + ":v2@" + digestD,
 			pods:     []k8s.RunningImage{running("web-2", "web", web, digestC), running("web-1", "web", web, digestB)},
-			want:     digestB, reason: "the lexically smallest; every digest runs once", alts: []string{digestC},
+			want:     digestB, reason: "lexically smallest digest among equals", alts: []string{digestC},
+		},
+		// The bug this guards: a 2-vs-2 tie at the top has counts[digest] > 1, which the
+		// old code read as "most frequent" even though frequency never broke the tie —
+		// the lexical rule did, same as the all-1s case above.
+		"a real 2-vs-2 tie is lexical, not frequency": {
+			manifest: web + ":v2",
+			pods: []k8s.RunningImage{
+				running("web-1", "web", web, digestC), running("web-2", "web", web, digestB),
+				running("web-3", "web", web, digestC), running("web-4", "web", web, digestB),
+			},
+			want: digestB, reason: "lexically smallest digest among equals", alts: []string{digestC},
 		},
 	}
 	for label, tc := range cases {
@@ -421,7 +432,7 @@ func TestWarningsAreDeterministic(t *testing.T) {
 			t.Fatalf("run %d differs:\n%s\n%s", i, first, msg)
 		}
 	}
-	if !strings.Contains(first, "using "+digestA+" (the lexically smallest") {
+	if !strings.Contains(first, "using "+digestA+" (lexically smallest digest among equals") {
 		t.Errorf("choice: %s", first)
 	}
 }

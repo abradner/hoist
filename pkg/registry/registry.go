@@ -52,9 +52,13 @@ type Registry interface {
 }
 
 // AuthReporter is implemented by a Registry that can say which credential source
-// authenticated, by name only.
+// authenticated, by name only, and whether the registry was asked at all.
 type AuthReporter interface {
 	AuthSourceUsed() string
+	// Consulted reports whether at least one request was attempted — whether or not it
+	// succeeded. A caller that only checks AuthSourceUsed cannot tell "never asked" from
+	// "asked, every source failed" apart: both report "".
+	Consulted() bool
 }
 
 // AuthSource names one link of the credential chain.
@@ -116,10 +120,11 @@ type AuthConfig struct {
 type Client struct {
 	cfg AuthConfig
 
-	mu      sync.Mutex
-	winners map[string]link // registry host → the link that worked there
-	cluster *cached[authn.Keychain]
-	op      *cached[string]
+	mu        sync.Mutex
+	winners   map[string]link // registry host → the link that worked there
+	consulted bool            // at least one request was attempted, win or lose
+	cluster   *cached[authn.Keychain]
+	op        *cached[string]
 }
 
 // cached is a one-shot result: the cluster secret is read once, op is run once.
@@ -199,6 +204,13 @@ func (c *Client) AuthSourceUsed() string {
 	return strings.Join(parts, "; ")
 }
 
+// Consulted implements AuthReporter.
+func (c *Client) Consulted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.consulted
+}
+
 // Head implements Registry.
 func (c *Client) Head(ctx context.Context, ref image.Ref) (string, error) {
 	if err := ref.Validate(); err != nil {
@@ -255,6 +267,7 @@ func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authen
 	host := reg.RegistryStr()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.consulted = true
 	if w, ok := c.winners[host]; ok {
 		if err := op(w.auth); err != nil {
 			return errors.New(describe(err, w.hide))
@@ -352,27 +365,39 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 
 // tokenUser picks the username sent with a bare token: HOIST_GHCR_USER, GHCR_USER, else
 // fixedUser. It returns the strings to hide: the token, and the user when it came from
-// the environment.
+// the environment. Both are registered process-wide the moment they are read (R-002):
+// see pkg/redact.Register.
 func tokenUser(token string) (string, []string) {
+	redact.Register(token)
 	for _, v := range []string{"HOIST_GHCR_USER", "GHCR_USER"} {
 		if u := os.Getenv(v); u != "" {
+			// Not registered process-wide: a username is not a secret and, for GHCR, is the
+			// owner segment of every image path. It stays in this call's local hide list only.
 			return u, []string{token, u}
 		}
 	}
 	return fixedUser, []string{token}
 }
 
-// hideOf lists the credential values an authenticator would send.
+// hideOf lists the credential values an authenticator would send, registering each one
+// process-wide as it is read (R-002): a keychain entry or a cluster secret's password,
+// whichever way the caller resolved it.
 func hideOf(ctx context.Context, a authn.Authenticator) []string {
 	cfg, err := authn.Authorization(ctx, a)
 	if err != nil || cfg == nil {
 		return nil
 	}
 	var out []string
-	for _, v := range []string{cfg.Username, cfg.Password, cfg.Auth, cfg.IdentityToken, cfg.RegistryToken} {
-		if v != "" && v != fixedUser {
-			out = append(out, v)
+	for i, v := range []string{cfg.Username, cfg.Password, cfg.Auth, cfg.IdentityToken, cfg.RegistryToken} {
+		if v == "" || v == fixedUser {
+			continue
 		}
+		// Index 0 is the username: kept in the local hide list but never registered
+		// process-wide, because for GHCR it is the owner segment of every image path.
+		if i > 0 {
+			redact.Register(v)
+		}
+		out = append(out, v)
 	}
 	return out
 }

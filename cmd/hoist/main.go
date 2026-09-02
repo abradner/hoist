@@ -22,6 +22,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -264,7 +265,10 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if len(opts.order) > 0 {
 		rep, err = runResolution(context.Background(), r, *from, prefixes, opts, digests)
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist plan: %v\n", err)
+			// The CLI printer's own guard (R-002): a cluster or registry error is already
+			// redacted at its adaptor, but this is the last stop before stderr, so a value
+			// registered anywhere in the process is scrubbed here too.
+			fmt.Fprintf(stderr, "hoist plan: %s\n", redact.Strings(err.Error()))
 			return exitFailure
 		}
 		planDigests = rep.digests(digests)
@@ -426,7 +430,10 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	}
 	fmt.Fprintf(w, "Warnings (%d):\n", len(plan.Warnings))
 	for _, wn := range plan.Warnings {
-		fmt.Fprintf(w, "  [%s] %s\n", wn.Code, strings.ReplaceAll(wn.Message, "\n", "\n  "))
+		// Every warning is already redacted at its source package; this is the CLI
+		// printer's own guard (R-002) so a value registered anywhere in the process is
+		// still caught here even if some future warning path forgets to.
+		fmt.Fprintf(w, "  [%s] %s\n", wn.Code, redact.Strings(strings.ReplaceAll(wn.Message, "\n", "\n  ")))
 	}
 	if len(r.Unmanaged) > 0 {
 		fmt.Fprintf(w, "\nUnmanaged (%d): directories with manifests but no Application wrapper; not scanned:\n", len(r.Unmanaged))

@@ -24,6 +24,7 @@ import (
 
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // gate is the adversary's registry front door: Basic auth, a user that authenticates but
@@ -488,6 +489,47 @@ func TestDefaultKeychainReadsDockerConfig(t *testing.T) {
 	if got != want.String() || c.AuthSourceUsed() != "keychain" {
 		t.Errorf("Head = %s, used %q", got, c.AuthSourceUsed())
 	}
+}
+
+// Every credential the chain loads is registered with pkg/redact the moment it is read
+// (R-002), independent of whichever local hide list a particular error happens to carry —
+// so a value never appears in any later message even if some call site forgets to thread
+// it through. Unique per case so an earlier test's Register calls can't hide a wiring gap.
+func TestCredentialsAreRegisteredProcessWide(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+
+	t.Run("env token", func(t *testing.T) {
+		tr := newTestRegistry(t)
+		tr.pushImage(t, "example/app:v1")
+		c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}})
+		const token = "REGISTRY-ENV-TOKEN-9f3d2a"
+		t.Setenv("HOIST_GHCR_TOKEN", token)
+		// The fake registry's gate doesn't recognize this token, so the request 401s — but
+		// the credential is registered the moment the link is built, before it is ever
+		// tried, so that failure doesn't matter to what this test checks.
+		_, _ = c.Head(context.Background(), mustRef(t, "ghcr.io/example/app:v1"))
+		if got := redact.Strings("leaked " + token); strings.Contains(got, token) {
+			t.Errorf("env token not registered process-wide: %q", got)
+		}
+	})
+
+	t.Run("keychain password", func(t *testing.T) {
+		tr := newTestRegistry(t)
+		tr.pushImage(t, "example/app:v1")
+		const pass = "REGISTRY-KEYCHAIN-PW-9f3d2a"
+		// A StaticKeychain, not the real DefaultKeychain: TestDefaultKeychainReadsDockerConfig
+		// already owns exercising the real one (see AGENTS.md §9 on docker/cli's config.Dir()
+		// sync.Once — a second test pointing HOME somewhere else would just resolve against
+		// the first test's cached directory instead of proving anything new).
+		c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "robot", Password: pass}})
+		// The gate doesn't recognize "robot", so the request 401s, but hideOf registers the
+		// password before the request is ever tried.
+		_, _ = c.Head(context.Background(), mustRef(t, "ghcr.io/example/app:v1"))
+		if got := redact.Strings("leaked " + pass); strings.Contains(got, pass) {
+			t.Errorf("keychain password not registered process-wide: %q", got)
+		}
+	})
 }
 
 func basicAuth(user, pass string) string {

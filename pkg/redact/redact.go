@@ -14,6 +14,15 @@
 // the caller has in hand, is replaced wherever it appears in the final message. Both guards
 // are structural — a new error type that slips past the type switch still cannot carry a
 // listed secret, and the tests pin both.
+//
+// Register adds a third guard, process-wide: pkg/k8s and pkg/registry call it the moment
+// they load a credential value (an env token, a cluster secret's password, `op`'s output),
+// independent of whichever local hide list the call site that later errors remembers to
+// thread through. Every Error and Strings call scrubs the registered set in addition to
+// its own hide arguments, so a message built two or three calls away from where the
+// credential was read — a warning in pkg/resolve, the CLI's plan printer — is still caught
+// at the process boundary rather than only at the adaptor that happened to load it.
+// Register("") is a deliberate no-op: an empty string must never become "hide everything".
 package redact
 
 import (
@@ -25,13 +34,42 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 )
 
 // Redacted replaces every hidden string in a message.
 const Redacted = "<redacted>"
 
+var (
+	mu     sync.RWMutex
+	hidden = map[string]struct{}{}
+)
+
+// Register adds value to the process-wide set every subsequent Error and Strings call
+// scrubs. value == "" is a no-op — it must never make Strings redact everything.
+func Register(value string) {
+	if value == "" {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	hidden[value] = struct{}{}
+}
+
+// registered snapshots the process-wide set.
+func registered() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]string, 0, len(hidden))
+	for h := range hidden {
+		out = append(out, h)
+	}
+	return out
+}
+
 // Error returns a message for err with addresses, hostnames and URLs removed and every
-// non-empty string in hide replaced by Redacted. A nil err yields "".
+// non-empty string in hide, plus every value ever passed to Register, replaced by
+// Redacted. A nil err yields "".
 func Error(err error, hide ...string) string {
 	if err == nil {
 		return ""
@@ -39,14 +77,45 @@ func Error(err error, hide ...string) string {
 	return Strings(describe(err), hide...)
 }
 
-// Strings replaces every non-empty string in hide within s.
+// Strings replaces every non-empty string in hide, and every value ever passed to
+// Register, within s.
 func Strings(s string, hide ...string) string {
 	for _, h := range hide {
 		if h != "" {
 			s = strings.ReplaceAll(s, h, Redacted)
 		}
 	}
+	for _, h := range registered() {
+		s = strings.ReplaceAll(s, h, Redacted)
+	}
 	return s
+}
+
+// Host returns every spelling of a server address worth scrubbing from a message: the
+// string as given, its host[:port] with any "scheme://" prefix stripped, and the bare
+// host alone with the port removed too. The last form matters because a typed error
+// (x509.HostnameError and the like) is already rendered as static text by describe, but an
+// error that reaches this package by a route the type switch doesn't cover can still spell
+// the bare host as plain text — "x509: certificate is valid for …, not 192.0.2.10" — and a
+// hide list built only from host:port never matches that. raw == "" returns nil.
+func Host(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	out := []string{raw}
+	hostport := raw
+	if i := strings.Index(hostport, "://"); i >= 0 {
+		hostport = hostport[i+3:]
+		out = append(out, hostport)
+	}
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	if host != "" && host != hostport {
+		out = append(out, host)
+	}
+	return out
 }
 
 // describe peels the error down to a cause with no address in it.

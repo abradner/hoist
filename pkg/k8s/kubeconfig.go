@@ -2,10 +2,11 @@ package k8s
 
 import (
 	"fmt"
-	"strings"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // NewCluster builds a Cluster over the user's kubeconfig ($KUBECONFIG or ~/.kube/config)
@@ -35,15 +36,13 @@ func NewCluster(kubeconfigContext string) (Cluster, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("k8s: kube context %q: %w", name, err)
 	}
+	// Every spelling of the server a client error could echo: the URL as configured, the
+	// bare host[:port], and the host alone — an untyped error can name just the host
+	// ("x509: … not 192.0.2.10") with no port to strip.
+	hide := redact.Host(rest.Host)
 	cs, err := kubernetes.NewForConfig(rest)
 	if err != nil {
-		return nil, "", fmt.Errorf("k8s: kube context %q: %w", name, err)
-	}
-	// Every spelling of the server a client error could echo: the URL as configured, and
-	// the bare host[:port].
-	hide := []string{rest.Host}
-	if i := strings.Index(rest.Host, "://"); i >= 0 {
-		hide = append(hide, rest.Host[i+3:])
+		return nil, "", fmt.Errorf("k8s: kube context %q: %s", name, redact.Error(err, hide...))
 	}
 	return FromClientset(cs, hide...), name, nil
 }

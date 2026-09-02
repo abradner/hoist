@@ -10,6 +10,7 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 )
 
@@ -261,13 +262,13 @@ func resolveRepo(ctx context.Context, in Input, repo string, occ []gitops.Occurr
 		res.Source, res.Detail = "", ""
 		res.Warnings = append(res.Warnings, gitops.Warning{
 			Code:        WarnUnresolved,
-			Message:     fmt.Sprintf("%s: no digest for %s (%s); the plan falls back to the manifest's own reference", in.Namespace, repo, strings.Join(notes, "; ")),
+			Message:     redact.Strings(fmt.Sprintf("%s: no digest for %s (%s); the plan falls back to the manifest's own reference", in.Namespace, repo, strings.Join(notes, "; "))),
 			Occurrences: occ,
 		})
 	case tag == "":
 		res.Warnings = append(res.Warnings, gitops.Warning{
 			Code:        WarnUnresolved,
-			Message:     fmt.Sprintf("%s: %s resolved to %s from %s but its manifests carry no tag; hoist writes <repo>:<tag>@<digest> and never fabricates a tag", in.Namespace, repo, chosen, res.Source),
+			Message:     redact.Strings(fmt.Sprintf("%s: %s resolved to %s from %s but its manifests carry no tag; hoist writes <repo>:<tag>@<digest> and never fabricates a tag", in.Namespace, repo, chosen, res.Source)),
 			Occurrences: occ,
 		})
 		res.Detail += "; no tag to write"
@@ -299,7 +300,7 @@ func choosePods(namespace, repo string, occ []gitops.Occurrence, running []k8s.R
 
 	var reason string
 	if _, ok := counts[manifestDigest]; ok {
-		digest, reason = manifestDigest, "it matches the manifest pin"
+		digest, reason = manifestDigest, "matches manifest pin"
 	} else {
 		digest = digests[0]
 		for _, d := range digests[1:] {
@@ -307,10 +308,20 @@ func choosePods(namespace, repo string, occ []gitops.Occurrence, running []k8s.R
 				digest = d
 			}
 		}
-		if counts[digest] > 1 || len(running) > len(digests) {
-			reason = fmt.Sprintf("the most frequent, %d of %d", counts[digest], len(running))
+		// digest is now the highest count, digests[0] on ties (strict > never moved off
+		// it). Whether that was actually a frequency win or a tie the lexical order broke
+		// depends on how many digests share that top count — a 2-vs-2 (or an all-1s) tie
+		// is decided lexically, not by frequency, however high the shared count is.
+		tiedAtTop := 0
+		for _, d := range digests {
+			if counts[d] == counts[digest] {
+				tiedAtTop++
+			}
+		}
+		if tiedAtTop > 1 {
+			reason = "lexically smallest digest among equals"
 		} else {
-			reason = "the lexically smallest; every digest runs once"
+			reason = fmt.Sprintf("most frequent, %d of %d", counts[digest], len(running))
 		}
 	}
 	for _, d := range digests {
@@ -328,7 +339,7 @@ func choosePods(namespace, repo string, occ []gitops.Occurrence, running []k8s.R
 		fmt.Fprintf(&b, "\n  pod %s container %s%s %s", ri.Pod, ri.Container, init, ri.Ref.Digest)
 	}
 	detail = fmt.Sprintf("%s run %d digests; chose %s", containers(len(running)), len(digests), reason)
-	return digest, detail, alternatives, []gitops.Warning{{Code: WarnRunningDisagrees, Message: b.String(), Occurrences: occ}}
+	return digest, detail, alternatives, []gitops.Warning{{Code: WarnRunningDisagrees, Message: redact.Strings(b.String()), Occurrences: occ}}
 }
 
 func runningVsManifest(namespace, repo string, occ []gitops.Occurrence, manifestDigest, podsDigest string, chosen Source) gitops.Warning {
@@ -341,8 +352,8 @@ func runningVsManifest(namespace, repo string, occ []gitops.Occurrence, manifest
 	}
 	return gitops.Warning{
 		Code: WarnRunningVsManifest,
-		Message: fmt.Sprintf("%s: %s manifests pin %s but its pods run %s — a rollout may be incomplete, or a bump has not synced; %s",
-			namespace, repo, manifestDigest, podsDigest, using),
+		Message: redact.Strings(fmt.Sprintf("%s: %s manifests pin %s but its pods run %s — a rollout may be incomplete, or a bump has not synced; %s",
+			namespace, repo, manifestDigest, podsDigest, using)),
 		Occurrences: occ,
 	}
 }

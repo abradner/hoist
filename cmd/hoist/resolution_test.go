@@ -10,6 +10,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -193,6 +194,78 @@ func TestPlanUnresolvedRepoKeepsM1Refusal(t *testing.T) {
 	code, out, errOut := run3(t, "plan", "--repo", root, "--from", "app-staging", "--to", "app-production", "--dry-run")
 	if code != exitFailure || !strings.Contains(errOut, "a bare tag with no digest") {
 		t.Errorf("exit %d, stderr %q, stdout:\n%s", code, errOut, out)
+	}
+}
+
+// When every registry auth link fails for a repo with nothing to write in the target
+// (source-only, a warning rather than a refusal — issue #13), the resolution section must
+// still say the registry was actually asked. AuthSourceUsed() alone can't tell "never
+// asked" from "asked, every source failed" apart — both report "" — so the label needs
+// Consulted() too.
+func TestPlanReportsRegistryConsultedWhenEveryAuthLinkFails(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))
+	writeFile(t, root, "cluster/apps/marketing-app-production-app.yaml", argoApp("marketing-production", "cluster/apps/app-production/marketing", "app-production"))
+	writeFile(t, root, "cluster/apps/app-staging/web/app.yaml", deployment("ghcr.io/example/web:sha-abc123"))
+	writeFile(t, root, "cluster/apps/app-production/marketing/app.yaml", deployment("ghcr.io/example/marketing:sha-000000@"+digestB))
+	reg := &registry.Fake{Err: errors.New("registry: no credential source worked for ghcr.io: keychain: status 403 Forbidden: DENIED")}
+	installFakes(t, &k8s.Fake{}, reg)
+
+	code, out, errOut := run3(t, "plan", "--repo", root, "--from", "app-staging", "--to", "app-production", "--dry-run",
+		"--registry-auth", "env,keychain")
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "registry: consulted; all auth sources failed (env, keychain)") {
+		t.Errorf("resolution section does not say the registry was consulted:\n%s", out)
+	}
+	if strings.Contains(out, "registry not consulted") {
+		t.Errorf("resolution section falsely says the registry was not consulted:\n%s", out)
+	}
+	if len(reg.Calls) == 0 {
+		t.Fatal("test bug: the registry fake was never called")
+	}
+}
+
+// R-002's third guard end to end: a value registered anywhere in the process — not just
+// the local hide list a particular error happened to carry — is scrubbed wherever it later
+// surfaces: a warning built from a fake registry's error body, and a fake cluster's raw
+// error reaching stderr.
+func TestPlanScrubsARegisteredSecretFromRegistryAndKubeErrors(t *testing.T) {
+	const secret = "SECRET-TOKEN-XYZ"
+	redact.Register(secret)
+
+	// Registry body: the fake's error text embeds the secret, as a leaked response body
+	// would, and the repo is source-only so the plan completes instead of refusing.
+	root := t.TempDir()
+	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))
+	writeFile(t, root, "cluster/apps/marketing-app-production-app.yaml", argoApp("marketing-production", "cluster/apps/app-production/marketing", "app-production"))
+	writeFile(t, root, "cluster/apps/app-staging/web/app.yaml", deployment("ghcr.io/example/web:sha-abc123"))
+	writeFile(t, root, "cluster/apps/app-production/marketing/app.yaml", deployment("ghcr.io/example/marketing:sha-000000@"+digestB))
+	installFakes(t, &k8s.Fake{}, &registry.Fake{Err: errors.New("registry said: token " + secret + " rejected")})
+	code, out, errOut := run3(t, "plan", "--repo", root, "--from", "app-staging", "--to", "app-production", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut)
+	}
+	if strings.Contains(out, secret) || strings.Contains(errOut, secret) {
+		t.Errorf("registered secret leaked from a fake registry body:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(out, "registry said: token <redacted> rejected") {
+		t.Errorf("expected the warning to show <redacted> in place of the secret:\n%s", out)
+	}
+
+	// kube error: the fake cluster's raw error embeds the secret and surfaces through
+	// runResolution's failure path straight to stderr, with no local hide list at all.
+	installFakes(t, &k8s.Fake{Err: errors.New("k8s: dial failed, token=" + secret)}, &registry.Fake{})
+	code, out, errOut = run3(t, planArgs("--dry-run")...)
+	if code != exitFailure {
+		t.Fatalf("exit %d, want failure; stdout %q stderr %q", code, out, errOut)
+	}
+	if strings.Contains(out, secret) || strings.Contains(errOut, secret) {
+		t.Errorf("registered secret leaked from a fake kube error:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(errOut, "token=<redacted>") {
+		t.Errorf("expected stderr to show <redacted> in place of the secret: %q", errOut)
 	}
 }
 

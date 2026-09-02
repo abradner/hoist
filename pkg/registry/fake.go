@@ -55,3 +55,8 @@ func (f *Fake) AuthSourceUsed() string {
 	}
 	return f.Auth
 }
+
+// Consulted implements AuthReporter: whether Head or Tags was called at all, win or lose.
+func (f *Fake) Consulted() bool {
+	return len(f.Calls) > 0
+}

@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // dockerConfig is the subset of ~/.docker/config.json that a pull secret carries. It is
@@ -56,6 +58,12 @@ func parseDockerConfig(data []byte) (authn.Keychain, error) {
 		if user == "" && pass == "" {
 			continue
 		}
+		// The password is registered the moment it is read out of the secret (R-002): every
+		// later error or warning, however far from this package, gets it scrubbed too
+		// (pkg/redact). The username is deliberately NOT registered: it is not a secret, and
+		// for a GHCR pull secret it is the GitHub owner — the same string that appears in
+		// every image path (ghcr.io/<owner>/app), so scrubbing it would redact the plan.
+		redact.Register(pass)
 		kc.auths[normaliseHost(host)] = authn.AuthConfig{Username: user, Password: pass}
 	}
 	return kc, nil

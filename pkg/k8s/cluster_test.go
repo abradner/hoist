@@ -23,6 +23,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 const (
@@ -190,6 +191,16 @@ func TestDockerConfigSecretYieldsKeychainAndNothingElse(t *testing.T) {
 			t.Errorf("%s: got %s/%q, want %s/%q", host, got.Username, got.Password, want.Username, want.Password)
 		}
 	}
+	// The secret's credentials are registered process-wide the moment they are parsed
+	// (R-002), so any later error or warning anywhere in the process has them scrubbed —
+	// not just the ones the keychain's own consumer happens to thread through as a local
+	// hide list.
+	for _, secret := range []string{password, "hubpass"} {
+		if got := redact.Strings("leaked " + secret + " here"); strings.Contains(got, secret) {
+			t.Errorf("parseDockerConfig did not register %q process-wide: %q", secret, got)
+		}
+	}
+
 	// Scope: one get of the named secret in the named namespace.
 	actions := cs.Actions()
 	if len(actions) != 1 || actions[0].GetVerb() != "get" || actions[0].GetResource().Resource != "secrets" || actions[0].GetNamespace() != "app" {
@@ -333,5 +344,19 @@ contexts:
 	_, _, err := NewCluster("")
 	if err == nil || !strings.Contains(err.Error(), "--kube-context") {
 		t.Errorf("want an error asking for --kube-context, got %v", err)
+	}
+}
+
+// A pull secret's username is the GitHub owner for GHCR, i.e. the owner segment of every
+// image path. Registering it process-wide would redact "ghcr.io/example/app" to
+// "ghcr.io/<redacted>/app" in the plan output; only the password is registered.
+func TestDockerConfigRegistersPasswordNotUsername(t *testing.T) {
+	data := []byte(`{"auths":{"ghcr.io":{"username":"example","password":"pw-SECRET-4242"}}}`)
+	if _, err := parseDockerConfig(data); err != nil {
+		t.Fatal(err)
+	}
+	got := redact.Strings("ghcr.io/example/app pulled with pw-SECRET-4242")
+	if want := "ghcr.io/example/app pulled with " + redact.Redacted; got != want {
+		t.Fatalf("Strings = %q, want %q", got, want)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -122,7 +123,8 @@ func registryFor(cfg *config.Config, prefixes []string) *config.RegistryConfig {
 // resolutionReport is the resolution section of the plan output.
 type resolutionReport struct {
 	order       []resolve.Source
-	kubeContext string // "" when no cluster was opened
+	auth        []registry.AuthSource // the configured chain, for the "all failed" label
+	kubeContext string                // "" when no cluster was opened
 	registry    registry.Registry
 	res         map[string]resolve.Resolution
 }
@@ -140,7 +142,7 @@ func has[T comparable](xs []T, x T) bool {
 // are a source or the registry's cluster credential is configured, the registry when it
 // is a source — then resolves the source env's promotable occurrences.
 func runResolution(ctx context.Context, r *gitops.Repo, from string, prefixes []string, opts resolveOptions, overrides map[string]image.Ref) (*resolutionReport, error) {
-	rep := &resolutionReport{order: opts.order}
+	rep := &resolutionReport{order: opts.order, auth: opts.auth}
 	wantPods := has(opts.order, resolve.SourcePods)
 	wantRegistry := has(opts.order, resolve.SourceRegistry)
 	clusterAuth := wantRegistry && has(opts.auth, registry.AuthCluster) && opts.clusterSecret != ""
@@ -207,14 +209,26 @@ func (rep *resolutionReport) print(w io.Writer) {
 	} else {
 		parts = append(parts, "cluster not consulted")
 	}
-	used := ""
+	var used string
+	var consulted bool
 	if ar, ok := rep.registry.(registry.AuthReporter); ok && rep.registry != nil {
-		used = ar.AuthSourceUsed()
+		used, consulted = ar.AuthSourceUsed(), ar.Consulted()
 	}
-	if used == "" {
-		parts = append(parts, "registry not consulted")
-	} else {
+	switch {
+	case used != "":
 		parts = append(parts, "registry auth: "+used)
+	case consulted:
+		// The registry was asked — every link in the chain, including the anonymous
+		// fallback, failed. Distinct from "not consulted" (adaptor never built, or built
+		// but every repo resolved before reaching the registry in the order): a warning
+		// elsewhere already says the registry was asked, so this label must agree.
+		authNames := make([]string, 0, len(rep.auth))
+		for _, a := range rep.auth {
+			authNames = append(authNames, string(a))
+		}
+		parts = append(parts, "registry: consulted; all auth sources failed ("+strings.Join(authNames, ", ")+")")
+	default:
+		parts = append(parts, "registry not consulted")
 	}
 	fmt.Fprintf(w, "Resolution (%s):\n", strings.Join(parts, "; "))
 	for _, repo := range resolve.Repos(rep.res) {
@@ -223,7 +237,7 @@ func (rep *resolutionReport) print(w io.Writer) {
 			fmt.Fprintf(w, "  %s  unresolved; see warnings\n", repo)
 			continue
 		}
-		fmt.Fprintf(w, "  %s  [%s] %s\n", r.Ref, r.Source, r.Detail)
+		fmt.Fprintf(w, "  %s  [%s] %s\n", r.Ref, r.Source, redact.Strings(r.Detail))
 		for _, a := range r.Alternatives {
 			fmt.Fprintf(w, "    alternative: %s\n", a)
 		}
