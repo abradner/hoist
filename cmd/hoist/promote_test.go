@@ -139,18 +139,23 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 
 // TestPromoteNothingToDoIsANoOp exercises runPromote's own "every edit is already a no-op"
 // guard directly: after the first promotion's PR is merged conceptually (here: after the
-// content already matches), promoting the same pair again with the same source content must
-// report success without touching git or the forge at all.
+// content already matches, committed so the clone is clean relative to --base), promoting the
+// same pair again with the same source content must report success without touching git or
+// the forge at all.
 func TestPromoteNothingToDoIsANoOp(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	// Make app-production already match app-staging directly on the clone (simulating the PR
-	// having merged), bypassing the engine entirely.
+	// having merged), bypassing the engine entirely. Commit it — the honest no-op case is
+	// "already current AND the clone is clean", never an uncommitted local edit (that's
+	// TestPromoteNoOpRefusesDirtyClone below).
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
 	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
 	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
 
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
 	var out, errOut bytes.Buffer
@@ -162,6 +167,41 @@ func TestPromoteNothingToDoIsANoOp(t *testing.T) {
 	}
 	if len(f.PRs()) != 0 {
 		t.Fatalf("no PR should have been created for a no-op promotion: %+v", f.PRs())
+	}
+}
+
+// TestPromoteNoOpRefusesDirtyClone is the counterpart to TestPromoteNothingToDoIsANoOp: the
+// plan touches app-production's deployment.yaml, and the clone's on-disk copy is edited to
+// already carry the planned ref — but the edit is never committed, so what's actually
+// committed at --base (main) still has the old digest. Edit.NoOp is computed against the dirty
+// working-tree bytes gitops.Discover read, so the plan looks all-NoOp even though it would not
+// be relative to base's real committed content. Nothing on the all-NoOp path ever calls
+// gitops.Apply/Verify (no worktree exists yet), so this is the one place that must catch it:
+// runPromote must refuse with a clear "dirty" error naming the file, not report success.
+func TestPromoteNoOpRefusesDirtyClone(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
+	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately not committed: the clone is now dirty for this file relative to main.
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit refusing the dirty clone, got 0; stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must not report false success for a plan that is all-NoOp only against dirty content: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "uncommitted") || !strings.Contains(errOut.String(), "cluster/apps/app-production/app/deployment.yaml") {
+		t.Fatalf("stderr should name the dirty file: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
 	}
 }
 
