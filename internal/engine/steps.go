@@ -335,7 +335,15 @@ type PROpenedStep struct{ Forge forge.Forge }
 // Name implements Step.
 func (PROpenedStep) Name() StepName { return StepPROpened }
 
-// Observe implements Step.
+// Observe implements Step. A PR FindPR turns up by head branch name alone is only ever
+// adopted as this promotion's own once its base also matches s.Base (M4 hardening): the head
+// branch name is deterministic from the promotion id (BranchName), but nothing stops a second,
+// unrelated PR being opened from that exact same branch name onto a *different* base (someone
+// else's manual PR, or a stale one from a config change that moved TargetEnv's base) — adopting
+// that PR here would go on to have MergedStep squash-merge it into the wrong target while still
+// reporting success. Refusing to adopt is a Blocked, not a silent skip, so the operator sees
+// the conflict named rather than hoist quietly trying to open a second PR for the same branch
+// (which the forge would then itself refuse).
 func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	pr, ok, err := p.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
 	if err != nil {
@@ -343,6 +351,12 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 	}
 	if !ok {
 		return Observation{Satisfied: false}, nil
+	}
+	if pr.Base != s.Base {
+		return Observation{Blocked: fmt.Sprintf(
+			"found PR #%d for branch %s, but it targets base %q, not %q — refusing to adopt a PR aimed at a different base; resolve the conflicting PR manually",
+			pr.Number, s.Branch, pr.Base, s.Base,
+		)}, nil
 	}
 	s.PR = &pr
 	return Observation{Satisfied: true, Detail: fmt.Sprintf("PR #%d already exists (%s)", pr.Number, pr.URL)}, nil

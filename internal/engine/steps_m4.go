@@ -330,6 +330,17 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 	if !ok {
 		return Observation{Satisfied: false}, nil
 	}
+	// A PR found by head branch name alone that targets a different base than this promotion is
+	// not this promotion's own (M4 hardening, belt-and-suspenders: PROpenedStep's own Observe
+	// already refuses to adopt one — steps.go — so reaching this with a mismatched s.PR would
+	// mean that check was bypassed, or an older PromotionState predating it was carried
+	// forward). Refuse to merge rather than assume a name match is enough.
+	if pr.Base != s.Base {
+		return Observation{Blocked: fmt.Sprintf(
+			"PR #%d for branch %s targets base %q, not %q — refusing to merge a PR aimed at a different base",
+			pr.Number, s.Branch, pr.Base, s.Base,
+		)}, nil
+	}
 	s.PR = &pr
 	if !pr.Merged {
 		expected := s.PushedSHA
