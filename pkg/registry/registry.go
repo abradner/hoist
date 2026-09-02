@@ -127,11 +127,22 @@ type Client struct {
 	op        *cached[string]
 }
 
-// cached is a one-shot result: the cluster secret is read once, op is run once.
+// cached is a one-shot result: the cluster secret is read once, op is run once, no
+// matter how many goroutines race to resolve credentials for different hosts
+// concurrently. Its own sync.Once — not Client.mu — guards that, so populating it never
+// serialises unrelated network requests against Client.mu.
 type cached[T any] struct {
-	done bool
+	once sync.Once
 	val  T
 	err  error
+}
+
+// get runs compute the first time get is called on this cached value, and returns that
+// same result — value or error — to every caller, including ones that arrive after the
+// first has finished.
+func (c *cached[T]) get(compute func() (T, error)) (T, error) {
+	c.once.Do(func() { c.val, c.err = compute() })
+	return c.val, c.err
 }
 
 // link is one credential candidate for one host.
@@ -262,13 +273,19 @@ func (c *Client) Tags(ctx context.Context, repo string) ([]string, error) {
 
 // do runs op with the remembered credential for reg, or walks the chain until one link's
 // request succeeds. A 401/403 moves to the next link; any other failure is reported at
-// once, since the credential was not what was wrong.
+// once, since the credential was not what was wrong. Client.mu is held only long enough
+// to read or write winners/consulted — never across op itself, which does the network
+// request — so a slow request against one host never blocks a concurrent request
+// against another.
 func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authenticator) error) error {
 	host := reg.RegistryStr()
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.consulted = true
-	if w, ok := c.winners[host]; ok {
+	w, hasWinner := c.winners[host]
+	c.mu.Unlock()
+
+	if hasWinner {
 		if err := op(w.auth); err != nil {
 			return errors.New(describe(err, w.hide))
 		}
@@ -285,7 +302,9 @@ func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authen
 		hide = append(hide, l.hide...)
 		err := op(l.auth)
 		if err == nil {
+			c.mu.Lock()
 			c.winners[host] = l
+			c.mu.Unlock()
 			return nil
 		}
 		msg := describe(err, hide)
@@ -329,15 +348,14 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 			return link{}, "cluster: not configured"
 		}
 		which := "cluster secret " + c.cfg.ClusterSecret
-		if !c.cluster.done {
+		kc, err := c.cluster.get(func() (authn.Keychain, error) {
 			ns, n, _ := strings.Cut(c.cfg.ClusterSecret, "/")
-			c.cluster.val, c.cluster.err = c.cfg.Cluster.DockerConfigSecret(ctx, ns, n)
-			c.cluster.done = true
+			return c.cfg.Cluster.DockerConfigSecret(ctx, ns, n)
+		})
+		if err != nil {
+			return link{}, err.Error()
 		}
-		if c.cluster.err != nil {
-			return link{}, c.cluster.err.Error()
-		}
-		a, err := authn.Resolve(ctx, c.cluster.val, reg)
+		a, err := authn.Resolve(ctx, kc, reg)
 		if err != nil {
 			return link{}, which + ": " + redact.Error(err)
 		}
@@ -349,16 +367,15 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 		if c.cfg.OpRef == "" {
 			return link{}, "op: not configured"
 		}
-		if !c.op.done {
-			c.op.val, c.op.err = opRead(ctx, c.cfg.OpRef)
-			c.op.val = strings.TrimSpace(c.op.val)
-			c.op.done = true
+		val, err := c.op.get(func() (string, error) {
+			v, err := opRead(ctx, c.cfg.OpRef)
+			return strings.TrimSpace(v), err
+		})
+		if err != nil {
+			return link{}, "op: " + err.Error()
 		}
-		if c.op.err != nil {
-			return link{}, "op: " + c.op.err.Error()
-		}
-		user, hide := tokenUser(c.op.val)
-		return link{source: source, name: "op", auth: &authn.Basic{Username: user, Password: c.op.val}, hide: hide}, ""
+		user, hide := tokenUser(val)
+		return link{source: source, name: "op", auth: &authn.Basic{Username: user, Password: val}, hide: hide}, ""
 	}
 	return link{}, string(source) + ": unknown source"
 }

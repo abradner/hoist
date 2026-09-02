@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -213,6 +214,69 @@ func mustRef(t *testing.T, s string) image.Ref {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// slowTransport adds a fixed delay before every request, so a test can tell whether two
+// requests actually ran concurrently or serialised on a lock.
+type slowTransport struct {
+	inner http.RoundTripper
+	delay time.Duration
+}
+
+func (s slowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(s.delay)
+	return s.inner.RoundTrip(req)
+}
+
+// F6 regression: do used to hold Client.mu for the whole request, including the network
+// call, so a slow request against one registry host blocked every other host on the same
+// Client — one slow registry could stall a plan resolving repos on an unrelated one.
+// Two Head calls against different hosts (same backend and gate; only the host name in
+// the ref differs, so they land in different Client.winners buckets) must run
+// concurrently, not serialise.
+func TestConcurrentHeadsToDifferentHostsDoNotSerialise(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	tr.pushImage(t, "example/app:v1")
+	const delay = 150 * time.Millisecond
+	// newClient forces its own transport, so build the Client directly to keep the
+	// slowTransport wrapper.
+	c, err := New(AuthConfig{
+		Order:     []AuthSource{AuthKeychain},
+		Keychain:  k8s.StaticKeychain{Username: "good", Password: "pw-good"},
+		Transport: slowTransport{inner: tr.transport, delay: delay},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	one := func() time.Duration {
+		start := time.Now()
+		if _, err := c.Head(context.Background(), mustRef(t, "ghcr.io/example/app:v1")); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(start)
+	}
+	single := one() // warm and measure a single call's cost
+
+	var wg sync.WaitGroup
+	hosts := []string{"ghcr.io/example/app:v1", "quay.io/example/app:v1", "registry.example.com/example/app:v1"}
+	start := time.Now()
+	for _, h := range hosts {
+		wg.Add(1)
+		go func(ref string) {
+			defer wg.Done()
+			if _, err := c.Head(context.Background(), mustRef(t, ref)); err != nil {
+				t.Error(err)
+			}
+		}(h)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	if elapsed >= 2*single {
+		t.Errorf("elapsed %s for %d concurrent hosts, single call took %s: requests serialised on the client lock", elapsed, len(hosts), single)
+	}
 }
 
 func TestHeadSinglePlatformReturnsManifestDigest(t *testing.T) {
