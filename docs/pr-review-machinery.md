@@ -17,28 +17,26 @@ Read this once per session, not once per PR.
 Reviewers are not interchangeable and most do **not** fire on their own. Establish for each one
 *what triggers it* and *what it is good for* before you need it.
 
-> **The table below is the fleet's default roster, not this repo's — verify it before relying on
-> it, and correct it at init.** A repo's steering doc once named a reviewer whose app had never
-> been installed; PRs satisfied the letter of the rule while getting one bot pass instead of two,
-> and nobody noticed for weeks. Confirm each bot has actually commented in *this* repo
-> before counting it as a review surface, and check **all three surfaces** from §2 — a bot that only
-> leaves inline or issue comments never appears in `pulls/<n>/reviews`, so a reviews-only check can
-> report a reviewer as absent when it is working, or as present when it has only ever errored:
+> **Roster below is this repo's, corrected at init from the operator's description of how the
+> bots behave on sibling repos — unconfirmed: no PR has been reviewed here yet. Confirm on the first
+> PR by checking all three surfaces from §2, then delete this note.** A repo's steering doc once
+> named a reviewer whose app had never been installed; PRs satisfied the letter of the rule while
+> getting one bot pass instead of two, and nobody noticed for weeks. A bot that only leaves inline or
+> issue comments never appears in `pulls/<n>/reviews`, so a reviews-only check can report a reviewer
+> as absent when it is working, or as present when it has only ever errored:
 >
 > ```bash
 > for n in <recent PR numbers>; do
->   gh api repos/{owner}/{repo}/pulls/$n/reviews  --jq '.[].user.login'
->   gh api repos/{owner}/{repo}/pulls/$n/comments --jq '.[].user.login'
->   gh api repos/{owner}/{repo}/issues/$n/comments --jq '.[].user.login'
+>   gh api repos/abradner/hoist/pulls/$n/reviews  --jq '.[].user.login'
+>   gh api repos/abradner/hoist/pulls/$n/comments --jq '.[].user.login'
+>   gh api repos/abradner/hoist/issues/$n/comments --jq '.[].user.login'
 > done | sort -u
 > ```
->
-> Delete rows for reviewers this repo doesn't have.
 
 | Reviewer | Trigger | Cost | Notes |
 |---|---|---|---|
-| **Copilot** | Balanced review automatically on every PR **created or promoted to ready**. Never on push. | Cheap — unrationed | A followup push needs an explicit re-request through the GitHub PR review mechanism, or you are reading a verdict on superseded code. |
-| **Codex** | **Repo-configurable** — may auto-review on PR-open and draft→ready, or may review only when asked via a `@codex <prompt>` comment. Check its own "About Codex in GitHub" box on any past review, which states the repo's actual triggers. | Expensive — budget it | If auto-review is off, its absence is silent: nobody asks, it never reviews, and nothing looks wrong. Spend it on the largest coherent diff available; it takes a prompt, so aim it. |
+| **Copilot** (`copilot-pull-request-reviewer[bot]`) | Automatically when a PR is **opened ready** or **promoted draft→ready**, and on an explicit **re-review request**. Never on push. | Cheap — unrationed | A followup push needs the re-request below, or you are reading a verdict on superseded code. Open as draft while iterating; the ready flip is the trigger. |
+| **Codex** (`chatgpt-codex-connector[bot]`) | **Only when @-mentioned**: an `@codex review` (or `@codex <prompt>`) comment on the PR. No auto-review on open or ready in this repo. | Expensive — budget it (2–3 per batch) | Its absence is silent: nobody asks, it never reviews, and nothing looks wrong. Spend it on the largest coherent diff available; it takes a prompt, so aim it. |
 
 Re-requesting Copilot through the API needs the literal `[bot]` suffix on the login:
 

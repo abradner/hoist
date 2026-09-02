@@ -30,26 +30,24 @@ when green) remains correct for one PR at a time; this skill exists for the mult
 
 ## Repo specifics
 
-[KEEL:FILL — everything in this section is per-repo. Required before first use:
+- **Validation commands** (the pre-push gate, dev-machine form — `mise` provides the toolchain):
 
-- **Validation commands**: the exact pre-push gate (lint, build, full test suite) with any
-  version-manager prefix a dev machine needs.
-- **Bot roster**: the triggers, re-request mechanics, and verification rules are in
-  `docs/pr-review-machinery.md`. Record here only what is repo-specific: which of those reviewers
-  are actually installed (verify, don't copy), and the per-batch budget for the expensive one —
-  2–3 invocations, spent on aggregate diffs (evidence: in one measured batch the cheap reviewer
-  caught 6/6 instances of a mechanical bug class; every expensive-reviewer finding that mattered
-  was cross-file).
-- **Merge strategy**: squash / merge-commit / rebase. Several rules below are strategy-dependent
-  and are marked `[SQUASH]` / `[MERGE-COMMIT]` — keep the matching variant, delete the other.
-  Porting these rules across strategies unexamined has produced subtly wrong instructions that
-  only surfaced under real conflict pressure, three separate times in one sibling repo.
-  If interstitials and the followup use *different* methods, say so explicitly: under stacked
-  flavour one `merge_method` covers the whole atomic group, so a mixed convention costs a second
-  checkout-then-merge cycle (Phase 7) and an agent that doesn't know will collapse the distinction.
-- **Deferral convention**: where non-blocking findings go (the external tracker named in
-  AGENTS.md, with whatever triage metadata it requires). Never a PR-body table — it goes stale
-  between rounds and vanishes on merge.]
+  ```bash
+  mise exec -- go vet ./... && mise exec -- go build ./... && \
+  mise exec -- go test -count=1 -race ./... && mise exec -- golangci-lint run && \
+  ./scripts/public-safety.sh
+  ```
+
+  `-count=1` defeats the test cache; the run count in the output is the gate, not the colour.
+- **Bot roster** (mechanics in `docs/pr-review-machinery.md` §1; provisional until the first PR
+  confirms it): **Copilot** fires on a PR opened ready or promoted draft→ready, and on an explicit
+  re-review request — unrationed. **Codex** fires only on an `@codex <prompt>` comment, never on its
+  own — budget **2–3 invocations per batch**, spent on aggregate diffs (the followup draft against
+  main, and the cap), not per interstitial.
+- **Merge strategy**: **squash**, for interstitials and the followup alike — one `merge_method`
+  covers the whole train. Only the `[SQUASH]` variants of the strategy-flagged rules below are kept.
+- **Deferral convention**: non-blocking findings go to GitHub issues on `abradner/hoist`, with the
+  review link in the issue body. Never a PR-body table.
 
 ## Phase 1 — Flavour probe
 
@@ -224,12 +222,11 @@ an unrecallable external side effect. Everything else waits.
   **exits 0** with "Sync aborted" — a success exit code that means it did not sync. Check for the
   abort, not the exit status. On exit 3, the stack has already been restored; run
   `gh stack rebase` to recreate the conflict, resolve, then `--continue`.
-- **Manual flavour**, if main moves under the stack: `[MERGE-COMMIT]` merge main up through the
-  stack by hand, never rebase a reviewed branch. `[SQUASH]` restart affected branches from fresh
-  main after their parents land; never stack new commits on pre-merge history.
-- **Manual flavour**, showstopper fix injected low in the stack: `[MERGE-COMMIT]` propagates
-  upward through the child merges. `[SQUASH]` must be explicitly propagated into each child —
-  squash does not preserve the ancestry that would reunify it. (Stacked flavour handles this case:
+- **Manual flavour**, if main moves under the stack: restart affected branches from fresh
+  main after their parents land; never stack new commits on pre-merge history, and never rebase a
+  reviewed branch.
+- **Manual flavour**, showstopper fix injected low in the stack: it must be explicitly
+  propagated into each child — squash does not preserve the ancestry that would reunify it. (Stacked flavour handles this case:
   its squash path uses `git rebase --onto` so commits that vanish in the squash don't resurface as
   artificial conflicts in the children.)
 
@@ -381,7 +378,7 @@ how a train lands.
 - Merge bottom-up. Before deleting a merged branch, verify every child PR has already been
   retargeted — deleting a base branch races the platform's auto-retarget and has closed child PRs
   mid-train. Retarget first, confirm, then delete.
-- Followup merges last: `[SQUASH]` squash-merged. `[MERGE-COMMIT]` per repo convention.
+- Followup merges last, squash-merged like everything else.
 - If a child PR does get closed by a race, **it cannot be recovered — do not try to reopen it.**
   `gh pr reopen` and `gh pr edit --base` both refuse a closed PR whose base branch is gone. Open a
   *fresh* PR from the still-live head branch (the commits are intact, and CI results usually carry
@@ -409,7 +406,7 @@ instrument."
 
 ## Phase 8 — Release, if applicable
 
-[KEEL:FILL — delete if the repo has no artifact/tag flow.] **A merge is not a release, and the
+**A merge is not a release, and the
 go-ahead to merge the train does not authorize one.** Report the merged state and stop for a
 separate approval — `AGENTS.md` §8 requires it for each outward-facing action, and approval for one
 is not approval for the next. When that approval comes: one tag for the whole train once main is

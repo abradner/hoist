@@ -23,44 +23,12 @@ tmp/
 # .idea/
 # .vscode/
 
-# --- [KEEL:FILL — uncomment the block(s) for this repo's stack, delete the rest] ---
+# --- Go ---
+/bin/
+/dist/
+*.test
+coverage.out
 
-# Ruby/Rails
-# When using this block, DELETE the universal `tmp/` and `*.log` lines above.
-# Rails tracks .keep files inside otherwise-ignored directories, and git cannot
-# honour a negation beneath a directory-form exclusion — `tmp/` makes
-# `!/tmp/.keep` unreachable. The path-scoped forms below replace them.
-# Note also that `rails new --skip-git` generates no .gitignore at all while
-# still generating config/master.key, so these rules have to land in the same
-# commit as the scaffold — not a later one.
-# /.bundle
-# /vendor/bundle
-# /log/*
-# !/log/.keep
-# /tmp/*
-# !/tmp/.keep
-# /tmp/pids/*
-# !/tmp/pids/
-# !/tmp/pids/.keep
-# /storage/*
-# !/storage/.keep
-# /tmp/storage/*
-# !/tmp/storage/
-# !/tmp/storage/.keep
-# /public/assets
-# /config/*.key
-# /config/master.key
-# /app/assets/builds/*
-# !/app/assets/builds/.keep
-# /node_modules
-
-# Go
-# /bin/
-# *.test
-# coverage.out
-
-# Node/TypeScript (bun, npm, pnpm)
-# node_modules/
-# dist/
-# coverage/
-# *.tsbuildinfo
+# hoist local state never belongs in the repo (XDG dirs are the real home;
+# these guard against a misconfigured HOIST_STATE_DIR pointing inside the tree)
+/.hoist/
