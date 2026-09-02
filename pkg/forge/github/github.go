@@ -198,9 +198,13 @@ type commentResponse struct {
 }
 
 // Comments implements forge.Forge: PR conversation comments (GitHub models these as issue
-// comments), newer than since. Bots (Type != "User") are excluded here as informational
+// comments), newer than since. Bots (Type == "Bot") are excluded here as informational
 // filtering only — R-001's actual author check is M4's job, done against the API's own login
-// field, never the comment body.
+// field, never the comment body. This deliberately excludes only "Bot", not "anything other
+// than User": GitHub's account "type" field also has legitimate non-"User" values such as
+// "Organization" (an org-owned account, not a bot), and the set of values isn't closed, so
+// filtering on Type != "User" would silently drop a real, non-bot commenter along with actual
+// bots.
 func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([]forge.Comment, error) {
 	q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}}
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
@@ -210,7 +214,7 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 	}
 	out := make([]forge.Comment, 0, len(resp))
 	for _, r := range resp {
-		if r.User.Type != "" && r.User.Type != "User" {
+		if r.User.Type == "Bot" {
 			continue
 		}
 		out = append(out, forge.Comment{ID: r.ID, Author: r.User.Login, Body: r.Body, CreatedAt: r.CreatedAt})

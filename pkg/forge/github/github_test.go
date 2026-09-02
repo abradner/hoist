@@ -185,19 +185,27 @@ func TestChecksSummarizesRollup(t *testing.T) {
 	}
 }
 
+// TestCommentsExcludesBots checks the exact set the filter is supposed to draw: a "User"
+// comment and an "Organization" comment (a real GitHub account type for an org-owned account,
+// not a bot — M4's real approval-comment author check depends on this list not silently
+// dropping it) must both survive, while a "Bot" comment must still be excluded.
 func TestCommentsExcludesBots(t *testing.T) {
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/issues/7/comments": static(200, `[
 			{"id": 1, "body": "hoist approve abc", "user": {"login": "alex", "type": "User"}},
-			{"id": 2, "body": "beep boop", "user": {"login": "some-bot", "type": "Bot"}}
+			{"id": 2, "body": "beep boop", "user": {"login": "some-bot", "type": "Bot"}},
+			{"id": 3, "body": "hoist approve abc", "user": {"login": "some-org", "type": "Organization"}}
 		]`),
 	})
 	comments, err := c.Comments(context.Background(), 7, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 1 || comments[0].Author != "alex" {
-		t.Fatalf("Comments = %+v", comments)
+	if len(comments) != 2 {
+		t.Fatalf("Comments = %+v, want 2 (User and Organization survive, Bot excluded)", comments)
+	}
+	if comments[0].Author != "alex" || comments[1].Author != "some-org" {
+		t.Fatalf("Comments = %+v, want alex then some-org", comments)
 	}
 }
 
