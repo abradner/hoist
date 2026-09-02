@@ -16,10 +16,14 @@ Status: greenfield, pre-alpha; milestones M0–M7 are tracked in issues.
 
 Domain nouns, as this repo uses them:
 
-- **Env** — one environment, identified by a directory under the apps root (`cluster/apps/<env>/`)
-  which is also the Kubernetes namespace. Not "environment variable".
-- **Family** — one deployable unit inside an env (`<env>/<family>/*.yaml`), backed by exactly one
-  Argo CD `Application`. A family may hold several containers on the same image.
+- **Env** — one environment: the `spec.destination.namespace` of an Argo CD `Application`
+  wrapper under the apps root. In the target layout that namespace also names the directory
+  (`cluster/apps/<env>/`), but the directory is derived from the wrappers, never the source of
+  truth — `gitops.Discover` keys envs by namespace and would not notice a directory named
+  otherwise (`TestDiscoverEnvIsNamespaceNotDirectoryName`). Not "environment variable".
+- **Family** — one deployable unit inside an env: the `spec.source.path` of exactly one Argo CD
+  `Application`, named by that path's last element (`<env>/<family>/*.yaml` in the target
+  layout). A family may hold several containers on the same image.
 - **Occurrence** — one `image:` scalar in one manifest (file, document, YAML path). Promotion
   rewrites occurrences, grouped by image repo.
 - **Image repo** — the registry path without tag or digest (`ghcr.io/org/app`). "Repo" alone means
