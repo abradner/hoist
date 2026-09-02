@@ -144,6 +144,125 @@ func TestPlanDigestOverrideBeatsPods(t *testing.T) {
 	}
 }
 
+// F4 regression: registryEntryFor and entryAuthConfig, together, are what used to be a
+// single registryFor call applied to every repo — the bug. registryEntryFor picks by
+// longest matching prefix, never the first entry that merely overlaps; entryAuthConfig
+// must never leak one entry's cluster secret or op ref onto a repo a different entry (or
+// no entry) covers.
+func TestRegistryEntryForPicksLongestMatchNeverFirstOverlap(t *testing.T) {
+	registries := []config.RegistryConfig{
+		{Prefix: "ghcr.io/", Auth: []string{"env"}, Op: "op://vault/broad/field"},
+		{Prefix: "ghcr.io/example/web", Auth: []string{"cluster"}, Cluster: config.ClusterSecret{Namespace: "app-staging", Secret: "web-pull"}},
+	}
+	cases := []struct {
+		repo, wantPrefix string
+	}{
+		{"ghcr.io/example/web", "ghcr.io/example/web"},      // matches both; the longer, more specific entry wins
+		{"ghcr.io/example/webhooks", "ghcr.io/example/web"}, // still a prefix match on the longer entry
+		{"ghcr.io/example/marketing", "ghcr.io/"},           // only the broad entry covers it
+		{"quay.io/example/other", ""},                       // no entry covers it at all
+	}
+	for _, tc := range cases {
+		e := registryEntryFor(registries, tc.repo)
+		got := ""
+		if e != nil {
+			got = e.Prefix
+		}
+		if got != tc.wantPrefix {
+			t.Errorf("registryEntryFor(%q) = %q, want %q", tc.repo, got, tc.wantPrefix)
+		}
+	}
+
+	// entryAuthConfig: the entry decides its own values only. The broad ghcr.io/ entry's
+	// op ref must never appear for a repo the specific web entry covers, and the web
+	// entry's cluster secret must never appear for a repo only the broad entry covers.
+	webEntry := registryEntryFor(registries, "ghcr.io/example/web")
+	auth, clusterSecret, opRef := entryAuthConfig(webEntry, resolveOptions{})
+	if len(auth) != 1 || auth[0] != registry.AuthCluster || clusterSecret != "app-staging/web-pull" || opRef != "" {
+		t.Errorf("web entry: auth=%v clusterSecret=%q opRef=%q, want cluster/app-staging/web-pull/\"\"", auth, clusterSecret, opRef)
+	}
+	broadEntry := registryEntryFor(registries, "ghcr.io/example/marketing")
+	auth, clusterSecret, opRef = entryAuthConfig(broadEntry, resolveOptions{})
+	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "" || opRef != "op://vault/broad/field" {
+		t.Errorf("broad entry: auth=%v clusterSecret=%q opRef=%q, want env/\"\"/op://vault/broad/field", auth, clusterSecret, opRef)
+	}
+	// A repo no entry covers gets the default chain, and neither entry's cluster secret
+	// or op ref.
+	auth, clusterSecret, opRef = entryAuthConfig(nil, resolveOptions{})
+	if len(auth) != len(registry.DefaultAuthOrder) || clusterSecret != "" || opRef != "" {
+		t.Errorf("unmatched repo: auth=%v clusterSecret=%q opRef=%q, want the default chain and nothing else", auth, clusterSecret, opRef)
+	}
+	// An explicit flag overrides every entry outright, for any repo.
+	auth, clusterSecret, opRef = entryAuthConfig(webEntry, resolveOptions{auth: []registry.AuthSource{registry.AuthEnv}, clusterSecret: "x/y", opRef: "op://flag/a/b"})
+	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "x/y" || opRef != "op://flag/a/b" {
+		t.Errorf("flag override: auth=%v clusterSecret=%q opRef=%q", auth, clusterSecret, opRef)
+	}
+}
+
+// F4 regression, end to end: two repos, each covered by a different registries[] entry,
+// must resolve through two distinct Clients, each carrying only its own entry's
+// credentials — never a merged chain built from whichever entry a single global lookup
+// happened to pick first (the pre-fix bug: one entry's op ref and cluster secret applied
+// to every promotable repo, ghcr.io/example/marketing included even though the entry that
+// carried them names only ghcr.io/example/web).
+func TestPlanScopesRegistryCredentialsPerRepoEntry(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))
+	writeFile(t, root, "cluster/apps/mkt-app-staging-app.yaml", argoApp("mkt-staging", "cluster/apps/app-staging/marketing", "app-staging"))
+	writeFile(t, root, "cluster/apps/web-app-production-app.yaml", argoApp("web-production", "cluster/apps/app-production/web", "app-production"))
+	writeFile(t, root, "cluster/apps/mkt-app-production-app.yaml", argoApp("mkt-production", "cluster/apps/app-production/marketing", "app-production"))
+	writeFile(t, root, "cluster/apps/app-staging/web/app.yaml", deployment("ghcr.io/example/web:sha-abc123"))
+	writeFile(t, root, "cluster/apps/app-staging/marketing/app.yaml", deployment("ghcr.io/example/marketing:sha-def456"))
+	writeFile(t, root, "cluster/apps/app-production/web/app.yaml", deployment("ghcr.io/example/web:sha-000000@"+digestA))
+	writeFile(t, root, "cluster/apps/app-production/marketing/app.yaml", deployment("ghcr.io/example/marketing:sha-000000@"+digestB))
+
+	reg := &registry.Fake{Digests: map[string]string{
+		"ghcr.io/example/web:sha-abc123":       digestA,
+		"ghcr.io/example/marketing:sha-def456": digestB,
+	}}
+	_, authCfgs := installFakes(t, &k8s.Fake{}, reg)
+
+	cfgPath := writeConfig(t, `
+repos:
+  - path: `+root+`
+    promotable: [ghcr.io/example/]
+registries:
+  - prefix: ghcr.io/example/web
+    op: op://vault/web-only/field
+  - prefix: ghcr.io/example/marketing
+    cluster: { namespace: app-staging, secret: mkt-pull }
+`)
+	code, out, errOut := run3(t, "--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s\nstdout:\n%s", code, errOut, out)
+	}
+	if len(*authCfgs) != 2 {
+		t.Fatalf("expected one Client per matched entry (2), got %d: %+v", len(*authCfgs), *authCfgs)
+	}
+	var webCfg, mktCfg *registry.AuthConfig
+	for i := range *authCfgs {
+		c := &(*authCfgs)[i]
+		switch {
+		case c.OpRef != "":
+			webCfg = c
+		case c.ClusterSecret != "":
+			mktCfg = c
+		}
+	}
+	if webCfg == nil {
+		t.Fatalf("no Client carried the web entry's op ref: %+v", *authCfgs)
+	}
+	if webCfg.OpRef != "op://vault/web-only/field" || webCfg.ClusterSecret != "" {
+		t.Errorf("web's Client leaked or lost credentials: %+v", webCfg)
+	}
+	if mktCfg == nil {
+		t.Fatalf("no Client carried the marketing entry's cluster secret: %+v", *authCfgs)
+	}
+	if mktCfg.ClusterSecret != "app-staging/mkt-pull" || mktCfg.OpRef != "" {
+		t.Errorf("marketing's Client leaked or lost credentials: %+v", mktCfg)
+	}
+}
+
 // A scaled-to-zero repo with a bare tag goes to the registry, and the section reports
 // which credential source authenticated — by name.
 func TestPlanFallsBackToRegistryAndReportsAuthSource(t *testing.T) {
@@ -352,38 +471,36 @@ registries:
 		t.Fatal(err)
 	}
 	rc := cfg.Repos[0]
-	opts, err := resolutionOptions(cfg, &rc, rc.Promotable, f)
+	opts, err := resolutionOptions(cfg, &rc, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if opts.kubeContext != "from-config" || len(opts.order) != 2 || opts.order[0] != resolve.SourceManifest || opts.order[1] != resolve.SourceRegistry {
 		t.Errorf("repo defaults not applied: %+v", opts)
 	}
-	if len(opts.auth) != 2 || opts.auth[0] != registry.AuthCluster || opts.auth[1] != registry.AuthOp || opts.clusterSecret != "app-staging/ghcr-pull" || opts.opRef != "op://vault/item/field" {
-		t.Errorf("registry defaults not applied: %+v", opts)
+	// F4: resolutionOptions no longer merges a registries[] entry into one global chain —
+	// that per-repo decision is registryEntryFor/entryAuthConfig's job, in runResolution.
+	// Absent a flag, auth/clusterSecret/opRef stay at the zero value here.
+	if len(opts.auth) != 0 || opts.clusterSecret != "" || opts.opRef != "" {
+		t.Errorf("registry fields should be unset absent a flag: %+v", opts)
 	}
-	// Flags win, one by one.
-	opts, err = resolutionOptions(cfg, &rc, rc.Promotable, resolveFlags{kubeContext: "flag", digestSources: "none", registryAuth: "env", clusterSecret: "x/y", opRef: "op://a/b/c"})
+	if len(opts.registries) != 1 || opts.registries[0].Prefix != "ghcr.io/example/" {
+		t.Errorf("registries not carried through for per-repo lookup: %+v", opts.registries)
+	}
+	// Flags win, one by one, and apply to every repo (entryAuthConfig).
+	opts, err = resolutionOptions(cfg, &rc, resolveFlags{kubeContext: "flag", digestSources: "none", registryAuth: "env", clusterSecret: "x/y", opRef: "op://a/b/c"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if opts.kubeContext != "flag" || opts.order != nil || len(opts.auth) != 1 || opts.auth[0] != registry.AuthEnv || opts.clusterSecret != "x/y" || opts.opRef != "op://a/b/c" {
 		t.Errorf("flags did not win: %+v", opts)
 	}
-	// A registries[] entry that covers no promotable prefix supplies nothing.
-	opts, err = resolutionOptions(cfg, &rc, []string{"quay.io/other/"}, resolveFlags{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if opts.clusterSecret != "" || opts.opRef != "" || len(opts.auth) != 4 {
-		t.Errorf("unrelated registry entry was applied: %+v", opts)
-	}
 	// No config at all: the documented defaults.
-	opts, err = resolutionOptions(&config.Config{}, nil, []string{"ghcr.io/"}, resolveFlags{})
+	opts, err = resolutionOptions(&config.Config{}, nil, resolveFlags{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.kubeContext != "" || len(opts.order) != 3 || len(opts.auth) != 4 || opts.clusterSecret != "" || opts.opRef != "" {
+	if opts.kubeContext != "" || len(opts.order) != 3 || len(opts.auth) != 0 || opts.clusterSecret != "" || opts.opRef != "" || len(opts.registries) != 0 {
 		t.Errorf("defaults: %+v", opts)
 	}
 

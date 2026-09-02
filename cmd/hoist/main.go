@@ -247,7 +247,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 			return exitUsage
 		}
 	}
-	opts, err := resolutionOptions(cfg, eff.cfg, prefixes, rf)
+	opts, err := resolutionOptions(cfg, eff.cfg, rf)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitUsage
@@ -511,7 +511,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 // principle 5), rather than this function failing to open the TUI at all.
 func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
 	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
-		opts, err := resolutionOptions(cfg, rc, prefixes, resolveFlags{})
+		opts, err := resolutionOptions(cfg, rc, resolveFlags{})
 		if err != nil {
 			return plan.ResolveOutcome{}, err
 		}

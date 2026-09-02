@@ -233,7 +233,20 @@ func resolveRepo(ctx context.Context, in Input, repo string, occ []gitops.Occurr
 				notes = append(notes, "registry not asked: the manifest has no tag")
 				continue
 			}
-			d, err := reg.Head(ctx, image.Ref{Repo: repo, Tag: tag})
+			// F4: a Registry that keeps separate credentials per repo (several
+			// registries[] entries) must be asked through the one scoped to this repo,
+			// never a client built for a different entry — pkg/resolve stays free of
+			// config types, so the lookup is this optional interface, not a config
+			// argument.
+			repoReg := reg
+			if pr, ok := reg.(registry.PerRepo); ok {
+				repoReg = pr.ForRepo(repo)
+			}
+			if repoReg == nil {
+				notes = append(notes, "registry not asked: no registry configured for "+repo)
+				continue
+			}
+			d, err := repoReg.Head(ctx, image.Ref{Repo: repo, Tag: tag})
 			if err != nil {
 				notes = append(notes, "registry: "+err.Error())
 				continue

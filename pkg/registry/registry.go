@@ -51,6 +51,22 @@ type Registry interface {
 	Tags(ctx context.Context, repo string) ([]string, error)
 }
 
+// PerRepo is implemented by a Registry that keeps a separate underlying Registry — its
+// own credentials — per image repo (F4): several registries[] entries, each scoped to its
+// own prefix, so a caller resolving many repos through one Registry value never sends one
+// entry's credential (its op ref, its cluster secret) to a repo covered by a different
+// entry, or by none. resolve.Resolve calls ForRepo before every registry request when the
+// Registry it was given implements this; a Registry that answers every repo alike (most
+// fakes, and a single-entry chain) does not need to.
+type PerRepo interface {
+	Registry
+	// ForRepo returns the Registry scoped to repo, or nil when repo has no configured
+	// registry at all (a repo with no registries[] entry still gets a Registry — a
+	// default chain with no cluster or op link — so nil is rare, not the common case of
+	// "unmatched").
+	ForRepo(repo string) Registry
+}
+
 // AuthReporter is implemented by a Registry that can say which credential source
 // authenticated, by name only, and whether the registry was asked at all.
 type AuthReporter interface {
