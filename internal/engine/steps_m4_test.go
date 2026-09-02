@@ -396,6 +396,39 @@ func TestApprovedTypoRejectDoesNotBlockRealApproval(t *testing.T) {
 	}
 }
 
+// TestApprovedMemoizesIsAllowedAuthorPerAuthor is the minor perf finding's regression: a PR with
+// several comments from the same collaborator must call Forge.IsAllowedAuthor at most once for
+// that login per Observe call, not once per comment — avoidable rate-limit pressure otherwise.
+func TestApprovedMemoizesIsAllowedAuthorPerAuthor(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{Allowed: map[string]bool{"carol": true}}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	s.Approval = "comment"
+	s.Collaborators = true
+	// Three comments from carol: two noise, one the real approval — all must still be checked
+	// against the same single IsAllowedAuthor result.
+	f.AddComment(s.PR.Number, forge.Comment{Author: "carol", AuthorType: "User", Body: "looking at this", CreatedAt: s.PR.CreatedAt.Add(time.Second)})
+	f.AddComment(s.PR.Number, forge.Comment{Author: "carol", AuthorType: "User", Body: "still reviewing", CreatedAt: s.PR.CreatedAt.Add(2 * time.Second)})
+	f.AddComment(s.PR.Number, forge.Comment{Author: "carol", AuthorType: "User", Body: "hoist approve " + s.ID, CreatedAt: s.PR.CreatedAt.Add(3 * time.Second)})
+
+	obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied once carol's real approval is reached, got %+v", obs)
+	}
+	calls := 0
+	for _, c := range f.Calls {
+		if c == "IsAllowedAuthor carol" {
+			calls++
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected IsAllowedAuthor called exactly once for carol across 3 comments, got %d: %v", calls, f.Calls)
+	}
+}
+
 func TestApprovedCollaboratorViaForge(t *testing.T) {
 	fx := newFixture(t)
 	f := &forge.Fake{Allowed: map[string]bool{"carol": true}}

@@ -210,6 +210,14 @@ func (a ApprovedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 		return Observation{}, fmt.Errorf("listing PR #%d comments: %w", s.PR.Number, err)
 	}
 	aRe, rRe := approveRe(s.ID), rejectRe(s.ID)
+	// allowedCache memoizes isAllowed per author login for this Observe call only: a PR with
+	// many comments from the same handful of authors would otherwise repeat the same
+	// collaborator-permission API lookup (Forge.IsAllowedAuthor) once per comment, risking
+	// avoidable rate-limit pressure. Scoped to this call's stack frame, never a field on
+	// ApprovedStep or PromotionState — permissions can change between polls, so nothing here
+	// persists across separate Observe invocations (a config-side login is already covered by
+	// s.Approvers, which needs no lookup at all).
+	allowedCache := map[string]bool{}
 	var lastApprove, lastReject *forge.Comment
 	for i := range comments {
 		c := &comments[i]
@@ -221,9 +229,14 @@ func (a ApprovedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 		if c.AuthorType == "Bot" {
 			continue
 		}
-		allowed, aerr := a.isAllowed(ctx, c.Author, s)
-		if aerr != nil {
-			return Observation{}, fmt.Errorf("checking whether %s may approve #%d: %w", c.Author, s.PR.Number, aerr)
+		allowed, ok := allowedCache[c.Author]
+		if !ok {
+			var aerr error
+			allowed, aerr = a.isAllowed(ctx, c.Author, s)
+			if aerr != nil {
+				return Observation{}, fmt.Errorf("checking whether %s may approve #%d: %w", c.Author, s.PR.Number, aerr)
+			}
+			allowedCache[c.Author] = allowed
 		}
 		if !allowed {
 			continue
