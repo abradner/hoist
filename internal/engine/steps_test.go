@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/pkg/forge"
@@ -182,6 +184,90 @@ func TestCommittedStepActResumesAfterApplyWithoutCommit(t *testing.T) {
 	}
 	if !obs.Satisfied {
 		t.Fatalf("expected Committed satisfied after resume, got %+v", obs)
+	}
+}
+
+// TestCommittedStepActRefusesExtraPathInSameCommit reproduces a shared pre-commit hook (or a
+// change already sitting in the index before this promotion ever ran) riding along into the
+// exact commit CommittedStep.Act makes: Commit's own git commit stages exactly the planned
+// paths via `git add -- <paths>`, but a plain `git commit` (no --only) commits the FULL index,
+// so anything pre-staged in the worktree before Act runs is committed right alongside the
+// planned edit. Without Finding C's check, Act would report success and Push would send that
+// extra change out as part of the promotion. With it, Act must refuse and name the path.
+func TestCommittedStepActRefusesExtraPathInSameCommit(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a hook (or a pre-existing staged change) adding an unplanned file to the index
+	// before Act ever runs.
+	extraPath := filepath.Join(wt, "unexpected.txt")
+	if err := os.WriteFile(extraPath, []byte("surprise\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, wt, "add", "unexpected.txt")
+
+	step := CommittedStep{Git: g}
+	err := step.Act(ctx(), s)
+	if err == nil {
+		t.Fatal("expected Act to refuse a commit containing an unplanned path")
+	}
+	if !strings.Contains(err.Error(), "unexpected.txt") {
+		t.Fatalf("error should name the unexpected path, got: %v", err)
+	}
+	if s.CommitSHA != "" {
+		t.Fatalf("CommitSHA must not be set when the commit contains extra paths, got %q", s.CommitSHA)
+	}
+}
+
+// TestCommittedStepObserveBlocksOnExtraPathInHEAD is the Observe-side counterpart: a resumed
+// process (fresh PromotionState, HEAD already committed by some earlier run) must not treat a
+// commit as satisfying the plan just because every planned path matches — if that same commit
+// also touches an unplanned path, Observe must report Blocked, not Satisfied.
+func TestCommittedStepObserveBlocksOnExtraPathInHEAD(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stage the extra path alongside the planned edit before committing directly (standing in
+	// for whatever earlier run produced this commit — Act itself already refuses this, per the
+	// test above, so this constructs the "already committed with an extra path" state by hand).
+	changed, err := gitops.Apply(wt, s.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) == 0 {
+		t.Fatal("fixture plan should produce a real edit")
+	}
+	extraPath := filepath.Join(wt, "unexpected.txt")
+	if err := os.WriteFile(extraPath, []byte("surprise\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, wt, "add", "--", changed[0], "unexpected.txt")
+	runHost(t, wt, "commit", "-q", "-m", "simulated: planned edit plus an extra path")
+
+	resumed := newState(fx, wt)
+	step := CommittedStep{Git: g}
+	obs, err := step.Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("should not be satisfied: HEAD's commit touches an unplanned path, got %+v", obs)
+	}
+	if obs.Blocked == "" || !strings.Contains(obs.Blocked, "unexpected.txt") {
+		t.Fatalf("expected Blocked naming unexpected.txt, got %+v", obs)
+	}
+	if resumed.CommitSHA != "" {
+		t.Fatalf("CommitSHA must not be set when Blocked, got %q", resumed.CommitSHA)
 	}
 }
 

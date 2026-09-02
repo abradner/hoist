@@ -96,8 +96,56 @@ func (c CommittedStep) Observe(ctx context.Context, s *PromotionState) (Observat
 			return Observation{Satisfied: false, Detail: fmt.Sprintf("HEAD %s exists but %s does not yet match the planned content", sha, path)}, nil
 		}
 	}
+	// Every planned path matches at HEAD — but that alone doesn't prove HEAD's commit touches
+	// *only* those paths (AGENTS.md §4.2: "a one-line-per-occurrence diff is the whole review
+	// surface"). A shared pre-commit hook, or a change already staged in the index before this
+	// promotion ever ran, could have ridden along into the very same commit. Never report this
+	// satisfied — and never let Push run — without confirming that.
+	extra, missing, err := c.verifyExactChangedPaths(ctx, s, sha)
+	if err != nil {
+		return Observation{}, err
+	}
+	if len(extra) > 0 || len(missing) > 0 {
+		return Observation{Blocked: fmt.Sprintf(
+			"commit %s changes paths beyond this promotion's plan — extra=%v missing=%v — refusing to treat it as done; something else changed alongside the planned edit",
+			sha, extra, missing,
+		)}, nil
+	}
 	s.CommitSHA = sha
 	return Observation{Satisfied: true, Detail: "HEAD " + sha + " already matches the planned edits"}, nil
+}
+
+// verifyExactChangedPaths confirms that sha's commit changes exactly the paths in
+// s.ExpectedBlobs relative to its parent — no more, no less. Called from both Observe's "HEAD
+// already matches" branch and from Act right after a fresh commit, so neither a resumed
+// process re-discovering an old commit nor the process that just made a new one can silently
+// let extra changes ride along into what gets pushed.
+func (c CommittedStep) verifyExactChangedPaths(ctx context.Context, s *PromotionState, sha string) (extra, missing []string, err error) {
+	changed, err := c.Git.DiffNameOnly(ctx, s.WorktreeDir, sha+"^", sha)
+	if err != nil {
+		return nil, nil, err
+	}
+	want := make(map[string]bool, len(s.ExpectedBlobs))
+	for p := range s.ExpectedBlobs {
+		want[p] = true
+	}
+	got := make(map[string]bool, len(changed))
+	for _, p := range changed {
+		got[p] = true
+	}
+	for p := range got {
+		if !want[p] {
+			extra = append(extra, p)
+		}
+	}
+	for p := range want {
+		if !got[p] {
+			missing = append(missing, p)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+	return extra, missing, nil
 }
 
 // Act implements Step.
@@ -171,6 +219,19 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 	sha, err := c.Git.Commit(ctx, s.WorktreeDir, s.CommitMessage, changed, commitTimeout, c.OnWaiting)
 	if err != nil {
 		return err
+	}
+	// The commit just made must touch exactly the planned paths — no more, no less. A shared
+	// pre-commit hook (or a change already sitting in the index before this promotion ran)
+	// could otherwise ride along into this exact commit and reach Push undetected (AGENTS.md
+	// §4.2: byte-minimal, verified-before-commit edits are the whole review surface). Refuse
+	// to proceed rather than silently let it through; the commit itself cannot be un-made
+	// here, but CommitSHA is deliberately left unset so nothing downstream treats this as done.
+	extra, missing, verr := c.verifyExactChangedPaths(ctx, s, sha)
+	if verr != nil {
+		return verr
+	}
+	if len(extra) > 0 || len(missing) > 0 {
+		return fmt.Errorf("commit %s changes paths beyond this promotion's plan — extra=%v missing=%v — refusing to push", sha, extra, missing)
 	}
 	s.CommitSHA = sha
 	return nil

@@ -76,6 +76,13 @@ type Git interface {
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
 	HashObject(ctx context.Context, worktreeDir string, content []byte) (blob string, err error)
+	// DiffNameOnly lists the repo-relative paths that differ between fromRev and toRev,
+	// exactly as `git diff --name-only` reports them. Used to confirm a commit changed
+	// exactly the planned paths and nothing more (AGENTS.md §4.2: "a one-line-per-occurrence
+	// diff is the whole review surface for a production change") — a pre-commit hook or a
+	// pre-existing staged change riding along in the same commit must be caught here, not
+	// discovered only once the branch is pushed.
+	DiffNameOnly(ctx context.Context, worktreeDir, fromRev, toRev string) (paths []string, err error)
 	// WorktreeBranch reports whether worktreeDir is registered as a linked worktree of
 	// cloneDir, and if so, which branch it is checked out on. ok=false means it is not
 	// currently registered — absent, or a stale directory git's own registry does not know
@@ -493,6 +500,22 @@ func (e Exec) HashObject(ctx context.Context, worktreeDir string, content []byte
 		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// DiffNameOnly implements Git.
+func (e Exec) DiffNameOnly(ctx context.Context, worktreeDir, fromRev, toRev string) ([]string, error) {
+	out, err := e.run(ctx, worktreeDir, "diff", "--name-only", fromRev, toRev)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, sc.Err()
 }
 
 // WorktreeBranch implements Git.
