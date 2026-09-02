@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,7 +209,7 @@ func TestClaimInFlightManyRacersAgainstOneStaleClaimExactlyOneWins(t *testing.T)
 	}
 
 	// No stray lock directory should survive a clean run: every acquirer released it.
-	if _, statErr := os.Stat(staleClaimLockPath(path)); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(claimLockPath(path)); !os.IsNotExist(statErr) {
 		t.Fatalf("expected the stale-claim lock directory to be gone after all racers finished, stat err: %v", statErr)
 	}
 }
@@ -418,5 +419,254 @@ func TestClaimInFlightFreshClaimIsNotReclaimed(t *testing.T) {
 
 	if _, err := ClaimInFlight("example/gitops", "app-production", "new-attempt"); err == nil {
 		t.Fatal("a fresh, live claim must not be reclaimed")
+	}
+}
+
+// TestReleaseOwnClaimOnlyRemovesMatchingContent is the direct unit test for finding #4 (round
+// 4)'s fix, releaseOwnClaim, isolated from ClaimInFlight's own retry loop: it must remove path
+// only when path's current content still matches the bytes the caller believes it owns, and must
+// leave anything else — including a live claim some other caller has since installed at the same
+// path — completely untouched.
+func TestReleaseOwnClaimOnlyRemovesMatchingContent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	path, err := ClaimPath("example/gitops", "app-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	mine := []byte(`{"ID":"mine","RepoFullName":"example/gitops","TargetEnv":"app-production","ClaimedAt":"` +
+		time.Now().Format(time.RFC3339Nano) + `"}`)
+
+	// Someone else's claim occupies path — simulating a reclaim that happened between this
+	// caller's own claim and its release call. releaseOwnClaim, told to remove `mine`, must leave
+	// this alone: it is not what it believes it owns.
+	someoneElse := []byte(`{"ID":"someone-else","RepoFullName":"example/gitops","TargetEnv":"app-production","ClaimedAt":"` +
+		time.Now().Format(time.RFC3339Nano) + `"}`)
+	if err := os.WriteFile(path, someoneElse, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseOwnClaim(path, mine)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("someone else's claim should still be on disk: %v", err)
+	}
+	if !strings.Contains(string(data), "someone-else") {
+		t.Fatalf("releaseOwnClaim must not remove a claim it doesn't own; got %s", data)
+	}
+
+	// Releasing against content that genuinely still matches must remove it.
+	releaseOwnClaim(path, someoneElse)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("releaseOwnClaim should have removed its own matching claim, stat err: %v", err)
+	}
+
+	// Releasing when nothing is at path at all (already gone) is a safe no-op, not an error.
+	releaseOwnClaim(path, someoneElse)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("expected path to remain absent")
+	}
+}
+
+// TestClaimInFlightReleaseNeverStealsAReclaimedLiveClaim is finding #4 (round 4)'s own deterministic
+// regression, driven end to end through the public ClaimInFlight API exactly as the bug report
+// describes it: caller A claims, is paused past claimStaleAfter (real elapsed time, scaled down via
+// claimStaleAfterOverride — no need to force an artificial interleaving by hand here, since the
+// bug is about A's belated release running long after the fact, not about a narrow scheduling
+// window), caller B legitimately reclaims the now-stale claim, and only then does A's own
+// long-held release() finally run. Against the historical bug (unconditional os.Remove(path)),
+// that release deletes B's brand-new live claim by name. Fixed, A's release must see B's content
+// in place of its own and do nothing, leaving B's claim intact and the env still genuinely
+// claimed.
+func TestClaimInFlightReleaseNeverStealsAReclaimedLiveClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	const testStaleAfter = 20 * time.Millisecond
+	claimStaleAfterOverride = testStaleAfter
+	t.Cleanup(func() { claimStaleAfterOverride = 0 })
+
+	relA, err := ClaimInFlight("example/gitops", "app-production", "caller-a")
+	if err != nil {
+		t.Fatalf("A should win the initial claim: %v", err)
+	}
+
+	// A is paused (GC, OS scheduling, a slow step before its first state save) for longer than
+	// the staleness bound, doing nothing at all in the meantime.
+	time.Sleep(3 * testStaleAfter)
+
+	// B legitimately observes A's claim as stale and reclaims it — correct behavior, not the bug.
+	relB, err := ClaimInFlight("example/gitops", "app-production", "caller-b")
+	if err != nil {
+		t.Fatalf("B should be able to reclaim A's now-stale claim: %v", err)
+	}
+
+	// A now resumes and calls its own long-stored release.
+	relA()
+
+	path, err := ClaimPath("example/gitops", "app-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("B's claim must still be on disk after A's belated release: %v", err)
+	}
+	if !strings.Contains(string(data), "caller-b") {
+		t.Fatalf("expected B's claim to survive A's belated release, got %s", data)
+	}
+
+	// The env must still look genuinely claimed to a third caller — not falsely freed.
+	if _, err := ClaimInFlight("example/gitops", "app-production", "caller-c"); err == nil {
+		t.Fatal("a third caller must see B's surviving live claim as a genuine conflict")
+	}
+
+	relB()
+}
+
+// TestClaimInFlightConcurrentLifecycleStressNeverStealsLiveClaim is the comprehensive,
+// whole-lifecycle regression this file's history now demands: not one more pairwise interleaving
+// (rounds 2-4 each fixed exactly one, and each time a different mutation path in this same file
+// turned out to have its own residual gap), but many goroutines hammering every mutation path —
+// create, stale-reclaim, and release — against the SAME target env at once, for real, under
+// -race.
+//
+// Three roles run concurrently, mirroring the actual shapes a real `hoist promote` process takes:
+//   - "quick": claim, verify it still owns what it just wrote, release almost immediately — the
+//     overwhelmingly common real case (seconds between claim and first state save).
+//   - "paused": claim, verify ownership a few times while still genuinely live, then sleep well
+//     past the (test-scaled) staleness bound before finally calling its own release — standing in
+//     for finding #4 (round 4)'s exact scenario, a caller paused past staleness before it ever
+//     gets to release.
+//   - "hammer": repeatedly attempt to claim and, on success, release right away — pure load and
+//     contention, no pauses.
+//
+// The safety property is checked directly against the filesystem, not against this package's own
+// internal bookkeeping (so it catches the historical bug regardless of which internal helper a
+// regression happens to route through): every goroutine that currently believes it holds a live,
+// not-yet-stale claim periodically rereads the claim file straight off disk and fails the test
+// immediately if it no longer names that goroutine as the owner. A "paused" goroutine's belated
+// release incorrectly deleting some other, currently-live goroutine's claim is exactly what would
+// trip that other goroutine's own ownership check — this is what "prove the whole lifecycle is
+// race-free" means here: at any point in time, at most one goroutine's belief that it holds a
+// live claim is ever contradicted by what is actually on disk.
+//
+// Mutant-verified by hand: reverting ClaimInFlight's release closure back to an unconditional
+// `_ = os.Remove(path)` makes this test fail reliably (a "paused" goroutine's belated release
+// deletes a concurrently-live "quick" or "paused" goroutine's claim, tripping that goroutine's own
+// ownership check) — restoring releaseOwnClaim makes it pass again.
+func TestClaimInFlightConcurrentLifecycleStressNeverStealsLiveClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	// testStaleAfter needs enough headroom over ordinary goroutine-scheduling jitter under -race
+	// with many contending goroutines (each claim/release involves several blocking syscalls —
+	// os.Link, os.Mkdir, os.Remove — any of which can genuinely park a goroutine for tens of
+	// milliseconds under heavy contention) that a "quick" or "paused" holder's own selfCheck,
+	// called only a few milliseconds after it claimed, is never mistaken for a real ownership
+	// violation just because the test runner was briefly slow to reschedule it.
+	const testStaleAfter = 500 * time.Millisecond
+	claimStaleAfterOverride = testStaleAfter
+	t.Cleanup(func() { claimStaleAfterOverride = 0 })
+
+	const repo = "example/gitops"
+	const env = "app-production"
+	const runFor = 3 * time.Second
+
+	path, err := ClaimPath(repo, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var failed atomic.Bool
+	var failMu sync.Mutex
+	fail := func(format string, args ...any) {
+		failMu.Lock()
+		defer failMu.Unlock()
+		if failed.CompareAndSwap(false, true) {
+			t.Errorf(format, args...)
+		}
+	}
+
+	// selfCheck reads path directly off disk — bypassing every package-internal helper, so it
+	// still catches the bug against a reverted mutant too — and fails immediately if it no longer
+	// names id as owner. Only ever called by a goroutine that still genuinely believes it holds a
+	// live (not-yet-stale) claim.
+	selfCheck := func(id string) bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fail("holder %s: claim file vanished while still within its live window: %v", id, err)
+			return false
+		}
+		if !strings.Contains(string(data), `"ID":"`+id+`"`) {
+			fail("holder %s: claim file no longer names it as owner while still within its live window (found %s instead) — something removed or overwrote a claim it did not own", id, data)
+			return false
+		}
+		return true
+	}
+
+	deadline := time.Now().Add(runFor)
+	var wg sync.WaitGroup
+	var seq atomic.Int64
+
+	quick := func(name string) {
+		defer wg.Done()
+		for time.Now().Before(deadline) && !failed.Load() {
+			id := fmt.Sprintf("%s-%d", name, seq.Add(1))
+			rel, err := ClaimInFlight(repo, env, id)
+			if err != nil {
+				continue // ordinary conflict/contention — not a safety violation
+			}
+			selfCheck(id)
+			rel()
+		}
+	}
+
+	paused := func(name string) {
+		defer wg.Done()
+		for time.Now().Before(deadline) && !failed.Load() {
+			id := fmt.Sprintf("%s-%d", name, seq.Add(1))
+			rel, err := ClaimInFlight(repo, env, id)
+			if err != nil {
+				continue
+			}
+			// Verify ownership a few times while still comfortably within the staleness window
+			// (a small fraction of testStaleAfter), simulating the real gap between claiming and
+			// a first state save.
+			ok := true
+			for i := 0; i < 3 && ok; i++ {
+				ok = selfCheck(id)
+				time.Sleep(testStaleAfter / 12)
+			}
+			// Now go well past staleness before ever calling release — standing in for a process
+			// paused (GC, scheduling, a slow step) long enough for another caller to legitimately
+			// reclaim this env as abandoned before this one ever gets back to releasing it.
+			time.Sleep(testStaleAfter * 2)
+			rel()
+		}
+	}
+
+	hammer := func(name string) {
+		defer wg.Done()
+		for time.Now().Before(deadline) && !failed.Load() {
+			id := fmt.Sprintf("%s-%d", name, seq.Add(1))
+			if rel, err := ClaimInFlight(repo, env, id); err == nil {
+				rel()
+			}
+		}
+	}
+
+	const perRole = 8
+	wg.Add(3 * perRole)
+	for i := 0; i < perRole; i++ {
+		go quick(fmt.Sprintf("quick%d", i))
+		go paused(fmt.Sprintf("paused%d", i))
+		go hammer(fmt.Sprintf("hammer%d", i))
+	}
+	wg.Wait()
+
+	if failed.Load() {
+		t.Fatal("see earlier failure(s): a claim believed live was stolen out from under its holder")
 	}
 }
