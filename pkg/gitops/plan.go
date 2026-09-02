@@ -58,7 +58,7 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 	bySrc := map[string][]Occurrence{}
 	var repos []string
 	for _, o := range srcOcc {
-		if !isPromotable(o.Ref.Repo, promotable) {
+		if !IsPromotable(o.Ref.Repo, promotable) {
 			continue
 		}
 		if _, seen := bySrc[o.Ref.Repo]; !seen {
@@ -226,9 +226,29 @@ func listOccurrences(b *strings.Builder, occ []Occurrence) {
 	}
 }
 
-func isPromotable(repo string, prefixes []string) bool {
+// MatchesPrefix reports whether repo is covered by one configured registry prefix. A
+// prefix ending in "/" must literally prefix repo; one that doesn't must still be
+// followed by "/" or nothing. A bare strings.HasPrefix would let "ghcr.io" match
+// "ghcr.io.attacker.example/org/app" — a different host that merely shares the leading
+// bytes — and hand that host the credentials scoped to ghcr.io (AGENTS.md §4.4/§4.10,
+// R-002). This is the one place that decision is made; IsPromotable and every registry
+// entry selection (cmd/hoist's registryEntryFor) call it rather than keeping their own
+// copy of the rule.
+func MatchesPrefix(repo, prefix string) bool {
+	if prefix == "" || !strings.HasPrefix(repo, prefix) {
+		return false
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return true
+	}
+	rest := repo[len(prefix):]
+	return rest == "" || rest[0] == '/'
+}
+
+// IsPromotable reports whether repo matches any of prefixes.
+func IsPromotable(repo string, prefixes []string) bool {
 	for _, p := range prefixes {
-		if p != "" && strings.HasPrefix(repo, p) {
+		if MatchesPrefix(repo, p) {
 			return true
 		}
 	}

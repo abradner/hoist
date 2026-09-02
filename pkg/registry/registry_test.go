@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -31,13 +32,34 @@ import (
 // lacks scope (AGENTS.md §6.1 items 1 and 2), and error bodies that echo the credential
 // they rejected — which the client must never repeat.
 type gate struct {
-	inner    http.Handler
-	users    map[string]string // user → password
-	denied   map[string]bool   // users that authenticate but get 403 on everything
-	pingFail bool              // answer every request 500 with a secret in the body
+	inner      http.Handler
+	users      map[string]string // user → password
+	denied     map[string]bool   // users that authenticate but get 403 on everything
+	pingFail   bool              // answer every request 500 with a secret in the body
+	injectCode string            // once authenticated, answer 404 with this attacker-chosen "code"
 
 	mu       sync.Mutex
-	attempts map[string]int // per user, "" for anonymous
+	attempts map[string]int  // per user, "" for anonymous
+	revoked  map[string]bool // users whose otherwise-correct password now 401s — a token
+	// revoked or rescoped mid-run, simulating the case a Client's cached winner must
+	// notice and fall back from.
+}
+
+// revoke makes every later request from user 401, whatever its password, until the test
+// ends. Safe to call concurrently with ServeHTTP.
+func (g *gate) revoke(user string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.revoked == nil {
+		g.revoked = map[string]bool{}
+	}
+	g.revoked[user] = true
+}
+
+func (g *gate) isRevoked(user string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.revoked[user]
 }
 
 func (g *gate) count(user string) {
@@ -73,12 +95,16 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
-	if g.users[user] != pass {
+	if g.users[user] != pass || g.isRevoked(user) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "credential "+pass+" for "+user+" rejected")
 		return
 	}
 	if g.denied[user] {
 		writeErr(w, http.StatusForbidden, "DENIED", "user "+user+" with credential "+pass+" lacks read:packages")
+		return
+	}
+	if g.injectCode != "" {
+		writeErr(w, http.StatusNotFound, g.injectCode, "irrelevant")
 		return
 	}
 	g.inner.ServeHTTP(w, r)
@@ -208,6 +234,69 @@ func mustRef(t *testing.T, s string) image.Ref {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// slowTransport adds a fixed delay before every request, so a test can tell whether two
+// requests actually ran concurrently or serialised on a lock.
+type slowTransport struct {
+	inner http.RoundTripper
+	delay time.Duration
+}
+
+func (s slowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(s.delay)
+	return s.inner.RoundTrip(req)
+}
+
+// F6 regression: do used to hold Client.mu for the whole request, including the network
+// call, so a slow request against one registry host blocked every other host on the same
+// Client — one slow registry could stall a plan resolving repos on an unrelated one.
+// Two Head calls against different hosts (same backend and gate; only the host name in
+// the ref differs, so they land in different Client.winners buckets) must run
+// concurrently, not serialise.
+func TestConcurrentHeadsToDifferentHostsDoNotSerialise(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	tr.pushImage(t, "example/app:v1")
+	const delay = 150 * time.Millisecond
+	// newClient forces its own transport, so build the Client directly to keep the
+	// slowTransport wrapper.
+	c, err := New(AuthConfig{
+		Order:     []AuthSource{AuthKeychain},
+		Keychain:  k8s.StaticKeychain{Username: "good", Password: "pw-good"},
+		Transport: slowTransport{inner: tr.transport, delay: delay},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	one := func() time.Duration {
+		start := time.Now()
+		if _, err := c.Head(context.Background(), mustRef(t, "ghcr.io/example/app:v1")); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(start)
+	}
+	single := one() // warm and measure a single call's cost
+
+	var wg sync.WaitGroup
+	hosts := []string{"ghcr.io/example/app:v1", "quay.io/example/app:v1", "registry.example.com/example/app:v1"}
+	start := time.Now()
+	for _, h := range hosts {
+		wg.Add(1)
+		go func(ref string) {
+			defer wg.Done()
+			if _, err := c.Head(context.Background(), mustRef(t, ref)); err != nil {
+				t.Error(err)
+			}
+		}(h)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	if elapsed >= 2*single {
+		t.Errorf("elapsed %s for %d concurrent hosts, single call took %s: requests serialised on the client lock", elapsed, len(hosts), single)
+	}
 }
 
 func TestHeadSinglePlatformReturnsManifestDigest(t *testing.T) {
@@ -373,6 +462,39 @@ func TestResponseBodyNeverReachesHeadError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "status 500") {
 		t.Errorf("error lost the status: %v", err)
+	}
+}
+
+// F5 regression: a registry's error response "code" field is the registry's own choice,
+// not something the client can trust — a hostile registry could put anything there,
+// including a fragment of a credential it wants echoed back through a warning or the CLI
+// output. describe must only ever render one of the fixed OCI distribution codes;
+// anything else becomes "unknown error code".
+func TestUnknownRegistryErrorCodeNeverEchoed(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	// Tags does a GET, which (unlike Head's HEAD request) carries a response body the
+	// error code can travel in.
+	tr.gate.injectCode = "SECRET-TOKEN-XYZ"
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	_, err := c.Tags(context.Background(), "ghcr.io/example/app")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN-XYZ") {
+		t.Errorf("attacker-chosen error code echoed verbatim: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unknown error code") {
+		t.Errorf("error lost the fact that an unrecognised code was seen: %v", err)
+	}
+	// Positive control: a real OCI code from the same handler still renders — the
+	// allowlist is what does the filtering, not a check that drops every code.
+	tr.gate.injectCode = "NAME_UNKNOWN"
+	c2 := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	_, err = c2.Tags(context.Background(), "ghcr.io/example/app")
+	if err == nil || !strings.Contains(err.Error(), "NAME_UNKNOWN") {
+		t.Errorf("an allowlisted code must still render: %v", err)
 	}
 }
 
@@ -574,5 +696,45 @@ func TestParseAuthOrder(t *testing.T) {
 		if _, err := ParseAuthOrder(bad); err == nil {
 			t.Errorf("ParseAuthOrder(%v) accepted", bad)
 		}
+	}
+}
+
+// Copilot suppressed comment (followup #29): Client.do's cached-winner fast path returns
+// whatever error the winner produces, with no fallback to the rest of the chain — but the
+// doc comment on do promises "a 401/403 moves to the next link" unconditionally. A token
+// that is revoked or rescoped mid-run (or was only ever scoped to some repos on a host,
+// not all of them) must still fall back to the next configured source, exactly as the
+// uncached first walk already does, not return the stale winner's failure for the rest
+// of the process.
+func TestCachedWinnerFallsBackWhenRevoked(t *testing.T) {
+	tr := newTestRegistry(t)
+	tr.gate.users["hoist"] = "pw-good" // AuthEnv's fixed username with no GHCR_USER set
+	d := tr.pushImage(t, "example/app:v1")
+	t.Setenv("HOIST_GHCR_TOKEN", "pw-good")
+	c := newClient(t, tr, AuthConfig{
+		Order:    []AuthSource{AuthEnv, AuthKeychain},
+		Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"},
+	})
+	ref := mustRef(t, "ghcr.io/example/app:v1")
+
+	got, err := c.Head(context.Background(), ref)
+	if err != nil || got != d.String() {
+		t.Fatalf("first Head = %q, %v; want %s, nil", got, err, d)
+	}
+	if used := c.AuthSourceUsed(); used != "env (HOIST_GHCR_TOKEN)" {
+		t.Fatalf("AuthSourceUsed after first Head = %q, want the env link cached as winner", used)
+	}
+
+	tr.gate.revoke("hoist") // the cached env credential now 401s on every request
+
+	got, err = c.Head(context.Background(), ref)
+	if err != nil || got != d.String() {
+		t.Fatalf("second Head after revocation = %q, %v; want a fallback to keychain, still succeeding", got, err)
+	}
+	if used := c.AuthSourceUsed(); used != "keychain" {
+		t.Fatalf("AuthSourceUsed after fallback = %q, want keychain", used)
+	}
+	if n := tr.gate.tries("good"); n == 0 {
+		t.Error("keychain credential was never attempted on the second request — the stale winner's error was returned without re-walking the chain")
 	}
 }

@@ -15,6 +15,9 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
@@ -125,33 +128,92 @@ func TestAsyncLoad(t *testing.T) {
 	}
 }
 
-// TestResolveErrorDegradesToWarning: a ResolveFunc error must not fail the screen — it
-// plans from the manifests alone and reports the failure as a warning (AGENTS.md
-// principle 5), matching "digest sources: none" mode's own graceful path.
-func TestResolveErrorDegradesToWarning(t *testing.T) {
+// TestResolveErrorFailsTheScreen: a ResolveFunc error means digest resolution was
+// attempted and failed outright (the cluster was unreachable, or its config was
+// invalid) — AGENTS.md §4.10 states that as a whole-operation failure, the same
+// asymmetry cmd/hoist's plan command already enforces (a runResolution error there
+// prints to stderr and exits without ever printing a plan). The screen must not be a
+// second, looser gate on that rule: it fails too, rather than building a selectable
+// plan from manifest values nobody has confirmed against the running environment.
+// (An earlier version of this test asserted the opposite — a Codex review of the
+// draft followup caught it as the exact bypass the rule exists to prevent.)
+func TestResolveErrorFailsTheScreen(t *testing.T) {
 	r := discoverFixture(t)
 	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
 		return ResolveOutcome{}, errCannotReachCluster
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
 	m = runInit(t, m)
+	if m.err == nil {
+		t.Fatal("m.err = nil, want the resolve error to fail the screen")
+	}
+	if !strings.Contains(m.err.Error(), errCannotReachCluster.Error()) {
+		t.Errorf("m.err = %v, want it to name the resolve failure", m.err)
+	}
+	if len(m.rows) != 0 {
+		t.Errorf("rows = %+v, want none — nothing is planned when resolution fails outright", m.rows)
+	}
+}
+
+// F10 regression: the CLI printer redacts every rendered field with pkg/redact
+// (cmd/hoist's resolutionReport.print and printPlan), but the plan screen's own render
+// points — Summary's per-repo Detail, leftBody's disabled-row Reason, rightBody's warning
+// Message — did not. A value registered anywhere in the process must be scrubbed
+// wherever it later surfaces, the same guarantee TestPlanScrubsARegisteredSecretFromRegistryAndKubeErrors
+// proves for the CLI.
+func TestViewRedactsRegisteredSecrets(t *testing.T) {
+	const secret = "SECRET-TOKEN-XYZ"
+	redact.Register(secret)
+
+	r := discoverFixture(t)
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+		return ResolveOutcome{
+			KubeContext:  "test-context",
+			RegistryAuth: "env",
+			Resolutions: map[string]resolve.Resolution{
+				// Resolved, so its Detail lands in Summary's per-repo line.
+				"ghcr.io/example/web": {
+					Repo:   "ghcr.io/example/web",
+					Ref:    image.Ref{Repo: "ghcr.io/example/web", Tag: "v202602150930", Digest: "sha256:1f7e5c3a9b2d4e6f8a0c1b3d5e7f9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f"},
+					Source: resolve.SourceRegistry,
+					Detail: "registry said: token " + secret + " rejected",
+				},
+				// Unresolved, so its warning becomes the disabled row's Reason (leftBody)
+				// as well as a plan warning (rightBody).
+				"ghcr.io/example/marketing": {
+					Repo:   "ghcr.io/example/marketing",
+					Detail: "token " + secret + " rejected",
+					Warnings: []gitops.Warning{{
+						Code:    resolve.WarnUnresolved,
+						Message: "app-staging: no digest for ghcr.io/example/marketing (token " + secret + " rejected)",
+					}},
+				},
+			},
+		}, nil
+	})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m = runInit(t, m)
 	if m.state != stateReady {
-		t.Fatalf("state = %v, want stateReady even when resolveFn errors", m.state)
+		t.Fatalf("state = %v, want stateReady", m.state)
 	}
-	if m.err != nil {
-		t.Fatalf("m.err = %v, want nil (a resolve error degrades, it does not fail the screen)", m.err)
-	}
-	if len(m.rows) == 0 {
-		t.Error("want rows planned from the manifests alone")
-	}
-	found := false
-	for _, w := range m.plan.Warnings {
-		if strings.Contains(w.Message, errCannotReachCluster.Error()) {
-			found = true
+	m = m.SetSize(120, 40)
+	m = m.SetStyles(ui.NewStyles(true))
+
+	// leftBody (disabled-row Reason) and rightBody (the warnings list and the Resolution
+	// summary, which embeds Summary's per-repo Detail) are checked directly rather than
+	// through View(): the viewport View() renders through can clip content out of the
+	// visible window at a fixed terminal size, which would make this test pass for the
+	// wrong reason (viewport height, not redaction) on a body long enough to scroll.
+	for name, body := range map[string]string{"leftBody": m.leftBody(), "rightBody": m.rightBody()} {
+		if strings.Contains(body, secret) {
+			t.Errorf("registered secret leaked into %s:\n%s", name, body)
 		}
 	}
-	if !found {
-		t.Errorf("warnings missing the resolve error: %+v", m.plan.Warnings)
+	if !strings.Contains(m.leftBody(), "token <redacted> rejected") {
+		t.Errorf("leftBody: expected <redacted> in place of the secret:\n%s", m.leftBody())
+	}
+	if !strings.Contains(m.rightBody(), "token <redacted> rejected") {
+		t.Errorf("rightBody: expected <redacted> in place of the secret:\n%s", m.rightBody())
 	}
 }
 
@@ -280,5 +342,28 @@ func TestViewGolden(t *testing.T) {
 	}
 	if diff := cmp.Diff(string(want), got); diff != "" {
 		t.Errorf("plan.txt differs from golden (-want +got):\n%s", diff)
+	}
+}
+
+// Codex P2 (draft #29 pass): viewReady renders m.err.Error() directly with no per-call
+// redact.Strings — the one render point TestViewRedactsRegisteredSecrets's per-field
+// cases don't reach, since they all exercise the success path. A registered secret
+// embedded in a fatal resolveFn error must still be scrubbed by View()'s own final-
+// boundary call, not only by whichever nested renderer remembers to redact itself.
+func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
+	const secret = "SECRET-TOKEN-XYZ"
+	redact.Register(secret)
+
+	r := discoverFixture(t)
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+		return ResolveOutcome{}, sentinelErr("cluster unreachable: token " + secret + " rejected")
+	})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m = runInit(t, m)
+	if m.err == nil {
+		t.Fatal("want the resolve error to have failed the screen")
+	}
+	if got := m.View(); strings.Contains(got, secret) {
+		t.Errorf("View() leaked the registered secret in the fatal-error render:\n%s", got)
 	}
 }

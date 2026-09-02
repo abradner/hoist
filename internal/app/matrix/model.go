@@ -117,9 +117,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Promote):
 			source := m.CurrentEnv()
+			if source == "" {
+				m.notice = "no environments discovered"
+				return m, nil
+			}
 			return m, func() tea.Msg { return OpenPlanMsg{Source: source} }
 		case key.Matches(msg, m.keys.PromoteAs):
 			source := m.CurrentEnv()
+			if source == "" {
+				m.notice = "no environments discovered"
+				return m, nil
+			}
 			return m, func() tea.Msg { return OpenPlanMsg{Source: source, Force: true} }
 		}
 	}

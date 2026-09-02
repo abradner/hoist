@@ -9,6 +9,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -214,9 +215,16 @@ func Summary(o ResolveOutcome) []string {
 	} else {
 		lines = append(lines, "cluster not consulted")
 	}
-	if o.RegistryAuth != "" {
+	switch {
+	case o.RegistryAuth != "":
 		lines = append(lines, "registry auth: "+o.RegistryAuth)
-	} else {
+	case o.RegistryConsulted:
+		// The registry was asked — every link in the chain, including the anonymous
+		// fallback, failed. Distinct from "not consulted" below: a resolution warning
+		// elsewhere already says the registry was asked, so this label must agree
+		// (mirrors cmd/hoist's resolutionReport.print, AGENTS.md §4.10).
+		lines = append(lines, "registry: consulted; all auth sources failed ("+strings.Join(o.RegistryAuthTried, ", ")+")")
+	default:
 		lines = append(lines, "registry not consulted")
 	}
 	for _, repo := range resolve.Repos(o.Resolutions) {
@@ -225,7 +233,7 @@ func Summary(o ResolveOutcome) []string {
 			lines = append(lines, fmt.Sprintf("  %s  unresolved", repo))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  %s  [%s] %s", r.Ref, r.Source, r.Detail))
+		lines = append(lines, fmt.Sprintf("  %s  [%s] %s", r.Ref, r.Source, redact.Strings(r.Detail)))
 	}
 	return lines
 }

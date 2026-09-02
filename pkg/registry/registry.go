@@ -51,6 +51,22 @@ type Registry interface {
 	Tags(ctx context.Context, repo string) ([]string, error)
 }
 
+// PerRepo is implemented by a Registry that keeps a separate underlying Registry — its
+// own credentials — per image repo (F4): several registries[] entries, each scoped to its
+// own prefix, so a caller resolving many repos through one Registry value never sends one
+// entry's credential (its op ref, its cluster secret) to a repo covered by a different
+// entry, or by none. resolve.Resolve calls ForRepo before every registry request when the
+// Registry it was given implements this; a Registry that answers every repo alike (most
+// fakes, and a single-entry chain) does not need to.
+type PerRepo interface {
+	Registry
+	// ForRepo returns the Registry scoped to repo, or nil when repo has no configured
+	// registry at all (a repo with no registries[] entry still gets a Registry — a
+	// default chain with no cluster or op link — so nil is rare, not the common case of
+	// "unmatched").
+	ForRepo(repo string) Registry
+}
+
 // AuthReporter is implemented by a Registry that can say which credential source
 // authenticated, by name only, and whether the registry was asked at all.
 type AuthReporter interface {
@@ -127,11 +143,22 @@ type Client struct {
 	op        *cached[string]
 }
 
-// cached is a one-shot result: the cluster secret is read once, op is run once.
+// cached is a one-shot result: the cluster secret is read once, op is run once, no
+// matter how many goroutines race to resolve credentials for different hosts
+// concurrently. Its own sync.Once — not Client.mu — guards that, so populating it never
+// serialises unrelated network requests against Client.mu.
 type cached[T any] struct {
-	done bool
+	once sync.Once
 	val  T
 	err  error
+}
+
+// get runs compute the first time get is called on this cached value, and returns that
+// same result — value or error — to every caller, including ones that arrive after the
+// first has finished.
+func (c *cached[T]) get(compute func() (T, error)) (T, error) {
+	c.once.Do(func() { c.val, c.err = compute() })
+	return c.val, c.err
 }
 
 // link is one credential candidate for one host.
@@ -262,17 +289,33 @@ func (c *Client) Tags(ctx context.Context, repo string) ([]string, error) {
 
 // do runs op with the remembered credential for reg, or walks the chain until one link's
 // request succeeds. A 401/403 moves to the next link; any other failure is reported at
-// once, since the credential was not what was wrong.
+// once, since the credential was not what was wrong. That holds for the cached winner
+// too: it is a memo of what worked last time, not a promise it still does — a token can
+// be revoked or rescoped mid-run, or never have covered every repo on the host in the
+// first place — so an auth failure from the winner forgets it and re-walks the chain
+// exactly as an uncached host would, rather than returning the same failure for the rest
+// of the process. Client.mu is held only long enough to read or write
+// winners/consulted/the cache — never across op itself, which does the network request —
+// so a slow request against one host never blocks a concurrent request against another.
 func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authenticator) error) error {
 	host := reg.RegistryStr()
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.consulted = true
-	if w, ok := c.winners[host]; ok {
-		if err := op(w.auth); err != nil {
+	w, hasWinner := c.winners[host]
+	c.mu.Unlock()
+
+	if hasWinner {
+		err := op(w.auth)
+		if err == nil {
+			return nil
+		}
+		if !authFailure(err) {
 			return errors.New(describe(err, w.hide))
 		}
-		return nil
+		c.mu.Lock()
+		delete(c.winners, host)
+		c.mu.Unlock()
 	}
 	var outcomes []string
 	var hide []string
@@ -285,7 +328,9 @@ func (c *Client) do(ctx context.Context, reg name.Registry, op func(authn.Authen
 		hide = append(hide, l.hide...)
 		err := op(l.auth)
 		if err == nil {
+			c.mu.Lock()
 			c.winners[host] = l
+			c.mu.Unlock()
 			return nil
 		}
 		msg := describe(err, hide)
@@ -329,15 +374,14 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 			return link{}, "cluster: not configured"
 		}
 		which := "cluster secret " + c.cfg.ClusterSecret
-		if !c.cluster.done {
+		kc, err := c.cluster.get(func() (authn.Keychain, error) {
 			ns, n, _ := strings.Cut(c.cfg.ClusterSecret, "/")
-			c.cluster.val, c.cluster.err = c.cfg.Cluster.DockerConfigSecret(ctx, ns, n)
-			c.cluster.done = true
+			return c.cfg.Cluster.DockerConfigSecret(ctx, ns, n)
+		})
+		if err != nil {
+			return link{}, err.Error()
 		}
-		if c.cluster.err != nil {
-			return link{}, c.cluster.err.Error()
-		}
-		a, err := authn.Resolve(ctx, c.cluster.val, reg)
+		a, err := authn.Resolve(ctx, kc, reg)
 		if err != nil {
 			return link{}, which + ": " + redact.Error(err)
 		}
@@ -349,16 +393,15 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 		if c.cfg.OpRef == "" {
 			return link{}, "op: not configured"
 		}
-		if !c.op.done {
-			c.op.val, c.op.err = opRead(ctx, c.cfg.OpRef)
-			c.op.val = strings.TrimSpace(c.op.val)
-			c.op.done = true
+		val, err := c.op.get(func() (string, error) {
+			v, err := opRead(ctx, c.cfg.OpRef)
+			return strings.TrimSpace(v), err
+		})
+		if err != nil {
+			return link{}, "op: " + err.Error()
 		}
-		if c.op.err != nil {
-			return link{}, "op: " + c.op.err.Error()
-		}
-		user, hide := tokenUser(c.op.val)
-		return link{source: source, name: "op", auth: &authn.Basic{Username: user, Password: c.op.val}, hide: hide}, ""
+		user, hide := tokenUser(val)
+		return link{source: source, name: "op", auth: &authn.Basic{Username: user, Password: val}, hide: hide}, ""
 	}
 	return link{}, string(source) + ": unknown source"
 }
@@ -420,9 +463,32 @@ func authFailure(err error) bool {
 	return false
 }
 
+// knownErrorCodes is the OCI distribution spec's error code enum. A registry chooses its
+// own "code" string in an error response body — it is attacker-controlled input from a
+// registry a caller does not have to trust — so describe renders a code only when it is
+// one of these; anything else becomes "unknown error code" rather than being echoed
+// verbatim into a warning or the CLI output.
+var knownErrorCodes = map[string]bool{
+	"BLOB_UNKNOWN":          true,
+	"BLOB_UPLOAD_INVALID":   true,
+	"BLOB_UPLOAD_UNKNOWN":   true,
+	"DIGEST_INVALID":        true,
+	"MANIFEST_BLOB_UNKNOWN": true,
+	"MANIFEST_INVALID":      true,
+	"MANIFEST_UNKNOWN":      true,
+	"NAME_INVALID":          true,
+	"NAME_UNKNOWN":          true,
+	"SIZE_INVALID":          true,
+	"UNAUTHORIZED":          true,
+	"DENIED":                true,
+	"UNSUPPORTED":           true,
+	"TOOMANYREQUESTS":       true,
+}
+
 // describe renders a request error with nothing from the response body: the status and
-// the registry's error codes for a registry error, the redacted cause otherwise. Every
-// string in hide is scrubbed afterwards.
+// the registry's error codes for a registry error, the redacted cause otherwise. Never
+// message or detail — those are free-form text the registry chose. Every string in hide
+// is scrubbed afterwards.
 func describe(err error, hide []string) string {
 	var te *transport.Error
 	if errors.As(err, &te) {
@@ -431,7 +497,13 @@ func describe(err error, hide []string) string {
 		seen := map[string]bool{}
 		for _, d := range te.Errors {
 			code := string(d.Code)
-			if code == "" || seen[code] {
+			if code == "" {
+				continue
+			}
+			if !knownErrorCodes[code] {
+				code = "unknown error code"
+			}
+			if seen[code] {
 				continue
 			}
 			seen[code] = true

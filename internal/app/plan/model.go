@@ -23,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -38,9 +39,19 @@ const (
 // value is "digest sources: none": BuildPlan then plans from the manifests alone, exactly
 // as M1 did.
 type ResolveOutcome struct {
-	Resolutions  map[string]resolve.Resolution
-	KubeContext  string
+	Resolutions map[string]resolve.Resolution
+	KubeContext string
+	// RegistryAuth names the credential source that authenticated, "" when none did.
 	RegistryAuth string
+	// RegistryConsulted is true when the registry was asked at all (win or lose) —
+	// distinct from RegistryAuth == "", which is also true when the registry was never
+	// consulted in the first place. Summary uses the two together so "not consulted" and
+	// "consulted, every source failed" are never confused, the same distinction
+	// cmd/hoist's own resolutionReport.print makes (AGENTS.md §4.10).
+	RegistryConsulted bool
+	// RegistryAuthTried names the configured credential chain, for the "all failed"
+	// wording when RegistryConsulted is true and RegistryAuth is "".
+	RegistryAuthTried []string
 }
 
 // ResolveFunc resolves the source env's promotable occurrences to digests. cmd/hoist
@@ -79,8 +90,13 @@ type BackMsg struct{}
 type loadedMsg struct {
 	plan    gitops.Plan
 	outcome ResolveOutcome
-	warn    string // resolveFn's error text, "" when resolution was skipped or succeeded
-	err     error  // a BuildPlan failure; fatal for this screen (rendered, never panics)
+	// err is fatal for this screen (rendered, never panics): either resolveFn failed —
+	// which AGENTS.md §4.10 states is a whole-operation failure whenever resolution was
+	// attempted at all, the same asymmetry cmd/hoist's runPlan enforces for the CLI — or
+	// BuildPlan itself failed. The screen must not have a looser gate on that rule than
+	// the command line does; it never plans from unverified manifest values when the
+	// cluster it was told to consult could not be reached.
+	err error
 }
 
 type keyMap struct {
@@ -216,21 +232,27 @@ func (m Model) loadCmd() tea.Cmd {
 	repo, source, target, promotable, resolveFn := m.repo, m.source, m.target, m.promotable, m.resolveFn
 	return func() tea.Msg {
 		var outcome ResolveOutcome
-		var warn string
 		if resolveFn != nil {
 			out, err := resolveFn(context.Background(), repo, source)
 			if err != nil {
-				warn = err.Error()
-			} else {
-				outcome = out
+				// A resolveFn error means digest resolution was attempted and failed
+				// outright — the cluster was unreachable, or the resolution
+				// configuration itself was invalid. It is never a per-repo registry
+				// miss (pkg/resolve handles that as an unresolved Resolution, not an
+				// error return), so there is nothing safe left to plan from: fail the
+				// screen exactly as cmd/hoist's plan command fails the whole run,
+				// rather than building a selectable plan from manifest values nobody
+				// has confirmed against the running environment.
+				return loadedMsg{err: fmt.Errorf("digest resolution: %w", err)}
 			}
+			outcome = out
 		}
 		digests := resolve.Digests(outcome.Resolutions)
 		pl, err := gitops.BuildPlan(repo, source, target, promotable, digests)
 		if err == nil {
 			pl.Warnings = append(resolve.Warnings(outcome.Resolutions), pl.Warnings...)
 		}
-		return loadedMsg{plan: pl, outcome: outcome, warn: warn, err: err}
+		return loadedMsg{plan: pl, outcome: outcome, err: err}
 	}
 }
 
@@ -272,12 +294,6 @@ func (m Model) onLoaded(msg loadedMsg) Model {
 	}
 	m.plan = msg.plan
 	m.outcome = msg.outcome
-	if msg.warn != "" {
-		m.plan.Warnings = append([]gitops.Warning{{
-			Code:    "resolution-unavailable",
-			Message: "digest resolution failed, planning from manifests alone: " + msg.warn,
-		}}, m.plan.Warnings...)
-	}
 	m.rows = DeriveRows(m.plan, m.outcome.Resolutions)
 	m.buildMultiSelect()
 	m = m.recomputeDiff()
@@ -449,16 +465,23 @@ func (m Model) SetStyles(s ui.Styles) Model {
 	return m
 }
 
-// View renders the current state.
+// View renders the current state. Every rendered string passes through redact.Strings
+// once more here, at the output boundary, in addition to each render point that already
+// calls it (Summary's per-repo Detail, the disabled-row Reason, warning messages,
+// viewReady's own fatal-error line) — so a display field that forgets to redact itself,
+// or a credential registered after an earlier call already built its string, is still
+// caught before it reaches the terminal (AGENTS.md §4.4/§4.10, R-002).
 func (m Model) View() string {
+	var out string
 	switch m.state {
 	case stateSelectEnv:
-		return m.viewSelectEnv()
+		out = m.viewSelectEnv()
 	case stateLoading:
-		return m.viewLoading()
+		out = m.viewLoading()
 	default:
-		return m.viewReady()
+		out = m.viewReady()
 	}
+	return redact.Strings(out)
 }
 
 func (m Model) header() string {
@@ -542,7 +565,7 @@ func (m Model) leftBody() string {
 			if len(r.Warnings) > 0 {
 				marker = "! "
 			}
-			fmt.Fprintf(&b, "%s%s  (%s)\n", marker, r.Repo, r.Reason)
+			fmt.Fprintf(&b, "%s%s  (%s)\n", marker, r.Repo, redact.Strings(r.Reason))
 		}
 	}
 	return b.String()
@@ -561,7 +584,7 @@ func (m Model) rightBody() string {
 	}
 	fmt.Fprintf(&b, "\nWarnings (%d):\n", len(m.plan.Warnings))
 	for _, w := range m.plan.Warnings {
-		fmt.Fprintf(&b, "  [%s] %s\n", w.Code, strings.ReplaceAll(w.Message, "\n", "\n  "))
+		fmt.Fprintf(&b, "  [%s] %s\n", w.Code, redact.Strings(strings.ReplaceAll(w.Message, "\n", "\n  ")))
 	}
 	b.WriteString("\nResolution:\n")
 	for _, line := range Summary(m.outcome) {

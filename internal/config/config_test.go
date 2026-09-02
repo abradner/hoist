@@ -169,6 +169,21 @@ func TestMissingFileIsEmptyConfigNotError(t *testing.T) {
 
 // A file that exists and does not parse is always an error naming the file — never a
 // silent fall-back to defaults.
+// The doc comment on Load says a missing file yields normalized, validated defaults; F1
+// regression: the missing-file branch used to return right after Normalize, skipping
+// Validate. Prove Validate actually runs on that path by making a default fail it, and
+// prove the ordinary missing-file path is still untouched (Found=false, no error).
+func TestMissingFileStillValidatesDefaults(t *testing.T) {
+	saved := defaultPoll.CI
+	defaultPoll.CI = 0 // an invalid default: poll durations must be positive
+	defer func() { defaultPoll.CI = saved }()
+
+	p := filepath.Join(t.TempDir(), "nope", "config.yaml")
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "poll.ci") {
+		t.Errorf("missing file with an invalid default: err = %v, want a poll.ci validation error", err)
+	}
+}
+
 func TestBadFileIsAnError(t *testing.T) {
 	for name, body := range map[string]string{
 		"not yaml":        "repos: [\n",
@@ -276,6 +291,56 @@ func TestValidationErrorsNamePath(t *testing.T) {
 	// Env names are not checked against a repo here: a name no wrapper declares loads.
 	if _, err := Load(write(t, "repos:\n  - path: /x\n    envs: { production: [does-not-exist], pairs: { nor: this } }\n")); err != nil {
 		t.Errorf("unknown env names must not be validated at load: %v", err)
+	}
+}
+
+// F2 regression: a decoder that only calls Decode once silently ignores every document
+// after the first `---`, so a second document (accidental or a leftover template) never
+// takes effect and never errors either. Parse must reject it.
+func TestMultipleYAMLDocumentsRejected(t *testing.T) {
+	p := write(t, "repos:\n  - path: /x\n---\nrepos:\n  - path: /y\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("accepted a file with two YAML documents")
+	}
+	if !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Errorf("error = %v, want it to name the multiple-documents problem", err)
+	}
+	// Positive control: a single document, with trailing blank lines and a comment, still
+	// loads — the rejection is specific to an actual second document.
+	if _, err := Load(write(t, "repos:\n  - path: /x\n\n# trailing comment\n\n")); err != nil {
+		t.Errorf("a single document with trailing noise: %v", err)
+	}
+}
+
+// F3 regression: yaml.v3 never trims a scalar, so a stray leading/trailing space in an
+// env name, a pairs key/value, an approval key, or a registry prefix loads without error
+// and then silently never matches anything compared against it by ==. Reject instead of
+// accepting a value that would sabotage its own comparison.
+func TestSurroundingWhitespaceRejected(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"production padded", "repos:\n  - path: /x\n    envs: { production: [' prod'] }\n", "repos[0].envs.production[0]: \" prod\" has surrounding whitespace"},
+		{"pairs key padded", "repos:\n  - path: /x\n    envs: { pairs: { 'staging ': production } }\n", "repos[0].envs.pairs[staging ] (key): \"staging \" has surrounding whitespace"},
+		{"pairs value padded", "repos:\n  - path: /x\n    envs: { pairs: { staging: ' production' } }\n", "repos[0].envs.pairs.staging: \" production\" has surrounding whitespace"},
+		{"approval key padded", "repos:\n  - path: /x\n    envs: { approval: { ' prod': comment } }\n", "repos[0].envs.approval[ prod] (key): \" prod\" has surrounding whitespace"},
+		{"registry prefix padded", "registries:\n  - prefix: ' ghcr.io/'\n", "registries[0].prefix: \" ghcr.io/\" has surrounding whitespace"},
+	}
+	for _, tc := range cases {
+		p := write(t, tc.body)
+		_, err := Load(p)
+		if err == nil {
+			t.Errorf("%s: accepted", tc.name)
+			continue
+		}
+		if s := err.Error(); !strings.Contains(s, tc.want) {
+			t.Errorf("%s: error %q lacks %q", tc.name, s, tc.want)
+		}
+	}
+	// Positive control: the same shapes with no surrounding whitespace load cleanly.
+	if _, err := Load(write(t, "repos:\n  - path: /x\n    envs: { production: [prod], pairs: { staging: prod }, approval: { prod: comment } }\nregistries:\n  - prefix: ghcr.io/\n")); err != nil {
+		t.Errorf("clean values rejected: %v", err)
 	}
 }
 

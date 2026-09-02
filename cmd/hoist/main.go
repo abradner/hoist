@@ -247,7 +247,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 			return exitUsage
 		}
 	}
-	opts, err := resolutionOptions(cfg, eff.cfg, prefixes, rf)
+	opts, err := resolutionOptions(cfg, eff.cfg, rf)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitUsage
@@ -339,7 +339,7 @@ func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests dige
 	if len(prefixes) > 0 {
 		var outside []string
 		for repo := range digests {
-			if !isPromotable(repo, prefixes) {
+			if !gitops.IsPromotable(repo, prefixes) {
 				outside = append(outside, repo)
 			}
 		}
@@ -447,20 +447,10 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 }
 
 func untouchedReason(ref image.Ref, src string, prefixes []string) string {
-	if isPromotable(ref.Repo, prefixes) {
+	if gitops.IsPromotable(ref.Repo, prefixes) {
 		return "not running in " + src
 	}
 	return "third-party: outside " + strings.Join(prefixes, ",")
-}
-
-// isPromotable mirrors BuildPlan's prefix test so the CLI's messages agree with its plan.
-func isPromotable(repo string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if p != "" && strings.HasPrefix(repo, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func splitList(s string) []string {
@@ -510,10 +500,10 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 // the error per call and degrades to "digest sources: none" with a warning line (AGENTS.md
 // principle 5), rather than this function failing to open the TUI at all.
 func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
+	opts, optsErr := resolutionOptions(cfg, rc, resolveFlags{})
 	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
-		opts, err := resolutionOptions(cfg, rc, prefixes, resolveFlags{})
-		if err != nil {
-			return plan.ResolveOutcome{}, err
+		if optsErr != nil {
+			return plan.ResolveOutcome{}, optsErr
 		}
 		if len(opts.order) == 0 {
 			return plan.ResolveOutcome{}, nil // digest sources: none
@@ -522,10 +512,21 @@ func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []stri
 		if err != nil {
 			return plan.ResolveOutcome{}, err
 		}
-		used := ""
+		var used string
+		var consulted bool
 		if ar, ok := rep.registry.(registry.AuthReporter); ok && rep.registry != nil {
-			used = ar.AuthSourceUsed()
+			used, consulted = ar.AuthSourceUsed(), ar.Consulted()
 		}
-		return plan.ResolveOutcome{Resolutions: rep.res, KubeContext: rep.kubeContext, RegistryAuth: used}, nil
+		authTried := make([]string, 0, len(rep.auth))
+		for _, a := range rep.auth {
+			authTried = append(authTried, string(a))
+		}
+		return plan.ResolveOutcome{
+			Resolutions:       rep.res,
+			KubeContext:       rep.kubeContext,
+			RegistryAuth:      used,
+			RegistryConsulted: consulted,
+			RegistryAuthTried: authTried,
+		}, nil
 	}
 }

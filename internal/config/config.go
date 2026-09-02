@@ -162,6 +162,9 @@ func Load(path string) (*Config, error) {
 		if err := c.Normalize(); err != nil {
 			return nil, err
 		}
+		if err := c.Validate(); err != nil {
+			return nil, err
+		}
 		return c, nil
 	}
 	if err != nil {
@@ -176,11 +179,20 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse decodes data as the file named file (for messages), then Normalize and Validate.
+// Only one YAML document is accepted: a second `---` document in the file is a mistake
+// (the rest of the file is silently ignored by a decoder that only reads the first), not
+// an alternate config, so it is rejected rather than dropped.
 func Parse(data []byte, file string) (*Config, error) {
 	c := &Config{File: file}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) { // io.EOF: an empty file is an empty config
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("%s: multiple YAML documents", file)
+	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
 	if err := c.Normalize(); err != nil {
@@ -374,6 +386,7 @@ func validateEnvs(p *problems, k string, e EnvsConfig) {
 			p.add(path, "empty env name")
 			continue
 		}
+		checkNoSurroundingWhitespace(p, path, env)
 		if seen[env] {
 			p.add(path, "%q listed twice", env)
 		}
@@ -389,12 +402,15 @@ func validateEnvs(p *problems, k string, e EnvsConfig) {
 		case src == dst:
 			p.add(path, "an env cannot promote to itself")
 		}
+		checkNoSurroundingWhitespace(p, k+".pairs["+src+"] (key)", src)
+		checkNoSurroundingWhitespace(p, path, dst)
 	}
 	for env, mode := range e.Approval {
 		if strings.TrimSpace(env) == "" {
 			p.add(k+".approval", "empty env name")
 			continue
 		}
+		checkNoSurroundingWhitespace(p, k+".approval["+env+"] (key)", env)
 		validateEnum(p, k+".approval."+env, mode, ApprovalComment, ApprovalAuto)
 	}
 }
@@ -402,6 +418,8 @@ func validateEnvs(p *problems, k string, e EnvsConfig) {
 func validateRegistry(p *problems, k string, r RegistryConfig) {
 	if strings.TrimSpace(r.Prefix) == "" {
 		p.add(k+".prefix", "is required")
+	} else {
+		checkNoSurroundingWhitespace(p, k+".prefix", r.Prefix)
 	}
 	validateList(p, k+".auth", r.Auth, "env", "keychain", "cluster", "op")
 	if (r.Cluster.Namespace == "") != (r.Cluster.Secret == "") {
@@ -409,6 +427,17 @@ func validateRegistry(p *problems, k string, r RegistryConfig) {
 	}
 	if r.Op != "" && !strings.HasPrefix(r.Op, "op://") {
 		p.add(k+".op", "want an op://vault/item/field reference")
+	}
+}
+
+// checkNoSurroundingWhitespace reports a value that yaml.v3 read literally (it never
+// trims scalars) but that a later exact-match comparison — an env name against a wrapper's
+// namespace, a map key against another env, an image repo prefix against a repo string —
+// would never match because of it. Silence, not a loud error, is what surrounding
+// whitespace would otherwise buy the operator.
+func checkNoSurroundingWhitespace(p *problems, path, v string) {
+	if strings.TrimSpace(v) != v {
+		p.add(path, "%q has surrounding whitespace, which will never match", v)
 	}
 }
 

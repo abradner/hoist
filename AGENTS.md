@@ -187,6 +187,56 @@ embed. *Why:* the first UI PR (#10) had no stated convention and adopted this sh
 in `internal/app/doc.go` (§8, "building structure where no convention is stated is a decision");
 stating it here once means the next screen follows it instead of re-litigating shape per PR.
 
+Three more conventions, codified from PR #27 (the plan screen), which needed all three and found
+no rule stated for any of them:
+
+- **A screen requests navigation by emitting a message of its own concrete type**
+  (`matrix.OpenPlanMsg`, `plan.BackMsg`) that the root's `Update` switches on to push or pop a
+  screen. This is what keeps "a screen never imports `app`" true in the other direction too: the
+  screen names the transition, the root decides what it means.
+- **The matrix keeps a column cursor** (`matrix.Model.col`, moved by Left/Right) so "current env"
+  is real state (`CurrentEnv()`), not a value only derivable from the table's row cursor — a
+  promotion is planned from an env, not a family, and the two cursors are independent.
+- **`cmd/hoist` owns the adapter from CLI options to the TUI's resolve function**
+  (`buildResolveFunc` in `cmd/hoist/main.go`): the plan screen's `ResolveFunc` type lives in
+  `internal/app/plan` and knows nothing of `resolutionOptions` or `runResolution`; only `cmd/hoist`
+  is allowed to know both sides, so a screen's own package still never imports `config` or
+  `registry` policy, only the plain function type it calls.
+
+### 4.9 Configuration
+
+Codified from PR #22's proposal (`internal/config`), which needed a stated shape for the config
+file and found none:
+
+- One typed struct per YAML mapping, decoded with `KnownFields(true)`: an unrecognized key is an
+  error naming the file and the key, never a silently ignored typo.
+- Defaults live in one `Normalize` step; nothing else fills in a zero value, so `Validate` and
+  every consumer see the same filled-in config regardless of call order.
+- `Validate` reports every problem it finds at once, each one prefixed with the file and the
+  YAML path (`repos[0].envs.pairs.app-staging: ...`) — not the first problem only.
+- A required value has no fallback: a missing `repos[].path` is an error, never a guess.
+- The loader never execs a program, reads the network, or touches the repo it describes —
+  loading config is pure decode-and-check, so `hoist config show` is always safe to run.
+
+### 4.10 Digest resolution
+
+Codified from PR #26's proposal (`pkg/resolve`, `pkg/registry`), which needed a stated shape for
+how a digest is chosen and how a registry credential is scoped:
+
+- `--digest-sources` is a priority order, first wins, default `pods,manifest,registry` — never a
+  merge of several sources' answers into one.
+- Pods win when they agree; a manifest pin that disagrees becomes the alternative, with a warning
+  naming both digests, never a silent override (§4.2 principle 3, §8 "warn, don't block").
+- An unreachable cluster fails the whole plan (the operator asked for the running digests, and
+  planning from the registry instead would silently promote a different thing); an unreachable
+  registry only unresolves the one repo it was asked about, since every other repo may still
+  resolve.
+- Every adaptor registers each credential value it loads with `pkg/redact` the moment it is read,
+  and everything printed — the CLI's plan output and the TUI's plan screen alike (F10) — passes
+  through it before reaching the terminal. A registry's own error response is never trusted
+  beyond a fixed allowlist of status codes (F5): its free-form message and detail fields are
+  never rendered at all.
+
 ## 5. Repository Map
 
 `docs/repo-map.md` is the living boundary map: surfaces, trust boundaries, cross-cutting flows,
@@ -238,7 +288,7 @@ consulted and which sources were tried; either way, by name only, never a value.
 `--digest` override still wins over every source. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
 `q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
-`mise exec -- go test ./pkg/gitops ./internal/app -update`; the fixture repo is `testdata/repo`
+`mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan -update`; the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.

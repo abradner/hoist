@@ -1,6 +1,7 @@
 package matrix
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -74,5 +75,29 @@ func TestCurrentEnvEmptyRepo(t *testing.T) {
 	m := New(&gitops.Repo{Root: "repo", Envs: map[string]*gitops.Env{}}, []string{"ghcr.io/"})
 	if got := m.CurrentEnv(); got != "" {
 		t.Errorf("CurrentEnv() on an empty repo = %q, want empty", got)
+	}
+}
+
+// F8 regression: with zero envs, CurrentEnv() is "" — p/P must not emit OpenPlanMsg{Source:
+// ""}, which the root would otherwise hand to the plan screen as a real (empty) source env.
+// Both keys should instead surface a status-bar notice and produce no command.
+func TestPromoteWithNoEnvsShowsNoticeInsteadOfOpeningPlan(t *testing.T) {
+	m := New(&gitops.Repo{Root: "repo", Envs: map[string]*gitops.Env{}}, []string{"ghcr.io/"})
+	m = m.SetSize(80, 24)
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if cmd != nil {
+		t.Errorf("p with no envs produced a command: %v", cmd())
+	}
+	if !strings.Contains(m2.View(), "no environments discovered") {
+		t.Errorf("p with no envs: View() lacks the notice:\n%s", m2.View())
+	}
+
+	m3, cmd := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
+	if cmd != nil {
+		t.Errorf("P with no envs produced a command: %v", cmd())
+	}
+	if !strings.Contains(m3.View(), "no environments discovered") {
+		t.Errorf("P with no envs: View() lacks the notice:\n%s", m3.View())
 	}
 }
