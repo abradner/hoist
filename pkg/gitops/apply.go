@@ -203,11 +203,45 @@ func checkScalarStart(line []byte, o *Occurrence) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("column %d is beyond the end of the line", o.Col)
 	}
-	re := regexp.MustCompile(`(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `[ \t]*:[ \t]+$`)
-	if !re.Match(line[:off]) {
+	if !keyBefore(line[:off], key) {
 		return 0, fmt.Errorf("column %d is not the start of a \"%s: value\" pair on that line (before it: %q); hoist rewrites only an %s scalar that shares its line with its key", o.Col, key, truncate(line[:off]), key)
 	}
 	return off, nil
+}
+
+// keyBefore is checkScalarStart's grammar as a right-to-left byte scan: prefix must be
+// `(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + key + `[ \t]*:[ \t]+$`. Read from the end: one or
+// more blanks, the colon, optional blanks, the key, and then either only indentation, an item
+// marker "-" preceded by indentation only and followed by at least one blank, or flow
+// punctuation with optional blanks after it. It is called once per occurrence at discovery and
+// once per edit at write time, so it must not compile anything. TestKeyBeforeMatchesRegex keeps
+// the regex above as the oracle it is checked against.
+func keyBefore(prefix []byte, key string) bool {
+	p := trimBlanks(prefix)
+	if len(p) == len(prefix) || len(p) == 0 || p[len(p)-1] != ':' {
+		return false
+	}
+	p = trimBlanks(p[:len(p)-1])
+	if !bytes.HasSuffix(p, []byte(key)) {
+		return false
+	}
+	rest := p[:len(p)-len(key)]
+	p = trimBlanks(rest)
+	if len(p) == 0 {
+		return true
+	}
+	switch p[len(p)-1] {
+	case ',', '{', '[':
+		return true
+	case '-':
+		return len(p) < len(rest) && len(trimBlanks(p[:len(p)-1])) == 0
+	}
+	return false
+}
+
+// trimBlanks drops trailing spaces and tabs — the regex's [ \t], not unicode.IsSpace.
+func trimBlanks(b []byte) []byte {
+	return bytes.TrimRight(b, " \t")
 }
 
 // byteOffset converts yaml.v3's 1-based character column into a byte offset.

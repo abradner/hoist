@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -383,6 +384,100 @@ func TestResolvePath(t *testing.T) {
 	for _, bad := range []string{"../out.yaml", "dir/../../out.yaml", "dir/escape.yaml", ".", "..", "/etc/passwd", filepath.Join(parent, "out.yaml")} {
 		if p, err := ResolvePath(root, bad); err == nil {
 			t.Errorf("%s: accepted as %s", bad, p)
+		}
+	}
+}
+
+// keyBeforeRegex is the regex keyBefore replaced, kept here as the oracle: the byte scanner
+// must accept and reject exactly the prefixes this pattern does. Compiled once per key only
+// so the exhaustive table below runs in a second, not twenty.
+var keyBeforeOracles = map[string]*regexp.Regexp{}
+
+func keyBeforeRegex(prefix []byte, key string) bool {
+	re := keyBeforeOracles[key]
+	if re == nil {
+		re = regexp.MustCompile(`(?:^[ \t]*(?:-[ \t]+)?|[,{\[][ \t]*)` + regexp.QuoteMeta(key) + `[ \t]*:[ \t]+$`)
+		keyBeforeOracles[key] = re
+	}
+	return re.Match(prefix)
+}
+
+// TestKeyBeforeMatchesRegex is the proof for the scanner: a named table of the shapes the
+// grammar is about, then every prefix built from a small alphabet on each side of the key,
+// all compared against the regex. Both accepted and rejected counts are asserted non-zero so
+// an oracle that answered one thing for everything could not pass.
+func TestKeyBeforeMatchesRegex(t *testing.T) {
+	named := []string{
+		"", " ", "image", "image:", "image: ", "image:\t", "  image: ", "\timage:  ", "image : ", "image\t:\t",
+		"- image: ", "-   image: ", "-\timage: ", "  - image: ", "-image: ", "- - image: ", "-- image: ",
+		"{image: ", "{ image: ", "[image: ", "[ image: ", "a: {b: 1, image: ", "x,image: ", ", - image: ", "[ - image: ",
+		"ximage: ", "images: ", "imag: ", "image: ghcr.io/x/y:v1 ", "name: a image: ", "  image:x ", "- image :",
+		"# image: ", "image:: ", "image: image: ", "\"image\": ", "'image': ", "image\r: ", "\rimage: ", "image: \r",
+		"- {image: ", "-, image: ", "- [ image: ", "[[image: ", "{,image: ", " \t image \t : \t ",
+	}
+	var accepted, rejected int
+	check := func(prefix, key string) {
+		got, want := keyBefore([]byte(prefix), key), keyBeforeRegex([]byte(prefix), key)
+		if got != want {
+			t.Errorf("key %q prefix %q: keyBefore = %v, regex = %v", key, prefix, got, want)
+		}
+		if want {
+			accepted++
+		} else {
+			rejected++
+		}
+	}
+	for _, p := range named {
+		check(p, "image")
+	}
+	check("image: ", "images")
+	check("images: ", "image")
+	check("a.b: ", "a.b")
+	check("axb: ", "a.b") // QuoteMeta: the key is literal
+	// Exhaustive: lead (before the key) up to 3 bytes, mid (key..colon) and tail (after the
+	// colon) up to 2 bytes each, over the bytes the grammar distinguishes plus one it does not.
+	lead := []byte{' ', '\t', '-', ',', '{', '[', 'x'}
+	side := []byte{' ', '\t', 'x'}
+	var leads, sides []string
+	for n := 0; n <= 3; n++ {
+		leads = append(leads, combos(lead, n)...)
+	}
+	for n := 0; n <= 2; n++ {
+		sides = append(sides, combos(side, n)...)
+	}
+	for _, l := range leads {
+		for _, m := range sides {
+			for _, r := range sides {
+				check(l+"image"+m+":"+r, "image")
+			}
+		}
+	}
+	if accepted == 0 || rejected == 0 {
+		t.Fatalf("table is one-sided: %d accepted, %d rejected", accepted, rejected)
+	}
+	t.Logf("%d accepted, %d rejected, identical to the regex", accepted, rejected)
+}
+
+// combos returns every string of length n over alphabet, in order.
+func combos(alphabet []byte, n int) []string {
+	if n == 0 {
+		return []string{""}
+	}
+	var out []string
+	for _, s := range combos(alphabet, n-1) {
+		for _, b := range alphabet {
+			out = append(out, s+string(b))
+		}
+	}
+	return out
+}
+
+func BenchmarkCheckScalarStart(b *testing.B) {
+	line := []byte(`          image: "ghcr.io/example/web:v1"`)
+	o := &Occurrence{Path: "spec.template.spec.containers[0].image", Col: 18}
+	for i := 0; i < b.N; i++ {
+		if _, err := checkScalarStart(line, o); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
