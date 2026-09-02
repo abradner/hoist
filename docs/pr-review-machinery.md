@@ -93,7 +93,8 @@ gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(
 ```
 
 before concluding a reviewer found nothing. `first:100` covers the overwhelming majority of PRs
-outright; check `pageInfo.hasNextPage` and re-run with `after:"<endCursor>"` before trusting an
+outright; check `pageInfo.hasNextPage` and re-run with `after` passed to `reviewThreads` itself
+(`reviewThreads(first:100, after:"<endCursor>")`), not as a separate top-level flag, before trusting an
 empty or suspiciously-short result on a PR with a long review history — a capped page looks
 identical to "nothing more to find" until you check for one. `comments(first:1)` is deliberate,
 not a second instance of the same bug: it exists only to identify each thread's originating
