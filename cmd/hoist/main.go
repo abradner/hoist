@@ -2,10 +2,12 @@
 // in an Argo CD GitOps repository and follows the change through PR, merge and rollout.
 //
 // Subcommands land milestone by milestone (see AGENTS.md §1). Today: the matrix screen
-// (no command), plan --dry-run, and config show/path.
+// (no command), plan --dry-run with digest resolution from the source env's pods, its
+// manifests and the registry, and config show/path.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +22,8 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // version is overwritten at build time by -ldflags "-X main.version=…".
@@ -69,7 +73,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, given: map[string]bool{}}
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	if fs.NArg() == 0 {
-		eff, err := resolve(cfg, sel)
+		eff, err := selectRepo(cfg, sel)
 		if err != nil {
 			fmt.Fprintf(stderr, "hoist: %v\n", err)
 			return exitFailure
@@ -158,18 +162,20 @@ type selection struct {
 	given                      map[string]bool
 }
 
-// effective is what the config file and the flags agree the run is about.
+// effective is what the config file and the flags agree the run is about. cfg is the
+// selected repos[] entry, nil when the run is on flags alone.
 type effective struct {
 	repo, appsRoot string
 	promotable     []string
+	cfg            *config.RepoConfig
 }
 
-// resolve applies the precedence: a flag given on the command line wins; otherwise the
+// selectRepo applies the precedence: a flag given on the command line wins; otherwise the
 // selected repo's config value; otherwise the flag's M1 default. The repo is selected by
 // --repo (a repos[] name or path) or, with no --repo, as the only configured repo. A
 // --repo that matches no entry is a plain checkout path and takes the flag defaults, so
 // the config file never changes what an explicit command line means.
-func resolve(cfg *config.Config, sel selection) (effective, error) {
+func selectRepo(cfg *config.Config, sel selection) (effective, error) {
 	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable)}
 	if len(cfg.Repos) == 0 {
 		return eff, nil
@@ -185,6 +191,7 @@ func resolve(cfg *config.Config, sel selection) (effective, error) {
 		return effective{}, fmt.Errorf("%s: %s.path is required to open %s; add it or pass --repo <path>", cfg.File, rc.Key, rc.Name)
 	}
 	eff.repo = rc.Dir
+	eff.cfg = &rc
 	if !sel.given["apps-root"] {
 		eff.appsRoot = rc.AppsRoot
 	}
@@ -205,6 +212,12 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
+	var rf resolveFlags
+	fs.StringVar(&rf.kubeContext, "kube-context", "", "kubeconfig context whose pods supply digests (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is printed)")
+	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins: pods (what --from is running), manifest (its own pin), registry (HEAD of its tag); none plans from the manifests alone, exactly as M1 did (default: the selected repo's digest_sources when configured, else pods,manifest,registry)")
+	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order: env, keychain, cluster, op; the one that worked is reported by name (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op)")
+	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; unset skips the source)")
+	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source, read with `op read` (default: the matching registries[] entry's op when configured; unset skips the source and runs nothing)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -213,7 +226,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	}
 	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
-	eff, err := resolve(cfg, sel)
+	eff, err := selectRepo(cfg, sel)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
@@ -224,6 +237,19 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		return exitUsage
 	}
 	prefixes := eff.promotable
+	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
+	// default" only when the flag was not given at all.
+	for name, val := range map[string]string{"digest-sources": rf.digestSources, "registry-auth": rf.registryAuth} {
+		if sel.given[name] && strings.TrimSpace(val) == "" {
+			fmt.Fprintf(stderr, "hoist plan: --%s: empty; %s\n", name, map[string]string{"digest-sources": "use none to plan without resolution", "registry-auth": "list at least one of env, keychain, cluster, op"}[name])
+			return exitUsage
+		}
+	}
+	opts, err := resolutionOptions(cfg, eff.cfg, prefixes, rf)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
+		return exitUsage
+	}
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -234,12 +260,28 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	plan, err := gitops.BuildPlan(r, *from, *to, prefixes, digests)
+	planDigests := map[string]image.Ref(digests)
+	var rep *resolutionReport
+	if len(opts.order) > 0 {
+		rep, err = runResolution(context.Background(), r, *from, prefixes, opts, digests)
+		if err != nil {
+			// The CLI printer's own guard (R-002): a cluster or registry error is already
+			// redacted at its adaptor, but this is the last stop before stderr, so a value
+			// registered anywhere in the process is scrubbed here too.
+			fmt.Fprintf(stderr, "hoist plan: %s\n", redact.Strings(err.Error()))
+			return exitFailure
+		}
+		planDigests = rep.digests(digests)
+	}
+	plan, err := gitops.BuildPlan(r, *from, *to, prefixes, planDigests)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	if err := printPlan(stdout, r, &plan, prefixes); err != nil {
+	if rep != nil {
+		plan.Warnings = append(resolve.Warnings(rep.res), plan.Warnings...)
+	}
+	if err := printPlan(stdout, r, &plan, prefixes, rep); err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
@@ -332,8 +374,9 @@ func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests dige
 }
 
 // printPlan renders the plan read-only: files are read from disk, edits applied in memory,
-// verified, and diffed. Nothing is written.
-func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string) error {
+// verified, and diffed. Nothing is written. rep, when non-nil, adds the resolution section
+// before the warnings; with nil the output is M1's, byte for byte.
+func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string, rep *resolutionReport) error {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
 	var noops []gitops.Edit
@@ -382,9 +425,15 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 		fmt.Fprintf(w, "  %s  (%s)\n", ref, untouchedReason(ref, plan.SourceEnv, prefixes))
 	}
 	fmt.Fprintln(w)
+	if rep != nil {
+		rep.print(w)
+	}
 	fmt.Fprintf(w, "Warnings (%d):\n", len(plan.Warnings))
 	for _, wn := range plan.Warnings {
-		fmt.Fprintf(w, "  [%s] %s\n", wn.Code, strings.ReplaceAll(wn.Message, "\n", "\n  "))
+		// Every warning is already redacted at its source package; this is the CLI
+		// printer's own guard (R-002) so a value registered anywhere in the process is
+		// still caught here even if some future warning path forgets to.
+		fmt.Fprintf(w, "  [%s] %s\n", wn.Code, redact.Strings(strings.ReplaceAll(wn.Message, "\n", "\n  ")))
 	}
 	if len(r.Unmanaged) > 0 {
 		fmt.Fprintf(w, "\nUnmanaged (%d): directories with manifests but no Application wrapper; not scanned:\n", len(r.Unmanaged))

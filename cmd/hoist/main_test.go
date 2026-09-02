@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/registry"
 )
 
 const fixture = "../../testdata/repo"
@@ -340,14 +342,14 @@ func TestPrintPlanRefusesFileOutsideRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Positive control: the unmodified plan prints.
-	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}); err != nil {
+	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}, nil); err != nil {
 		t.Fatalf("control: %v", err)
 	}
 	for _, file := range []string{"../" + plan.Edits[0].File, "x/../../" + plan.Edits[0].File} {
 		esc := plan
 		esc.Edits = append([]gitops.Edit(nil), plan.Edits...)
 		esc.Edits[0].File = file
-		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
+		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}, nil); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
 			t.Errorf("%s: printPlan err = %v, want a containment refusal", file, err)
 		}
 	}
@@ -398,7 +400,9 @@ func TestRunTUIFailsBeforeStartingOnBadRepo(t *testing.T) {
 }
 
 // TestMain points the default config location at an empty directory so the developer's
-// own ~/.config/hoist/config.yaml cannot leak into the M1 behaviour the tests above pin.
+// own ~/.config/hoist/config.yaml cannot leak into the M1 behaviour the tests above pin,
+// and replaces the cluster and registry constructors with fakes so no test can reach a
+// real cluster or registry (tests that need particular fakes install their own).
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "hoist-test-xdg")
 	if err != nil {
@@ -407,6 +411,8 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
 		panic(err)
 	}
+	newCluster = func(string) (k8s.Cluster, string, error) { return &k8s.Fake{}, "test-context", nil }
+	newRegistry = func(registry.AuthConfig) (registry.Registry, error) { return &registry.Fake{}, nil }
 	code := m.Run()
 	_ = os.RemoveAll(dir) // best effort; the OS reaps its temp dir anyway
 	os.Exit(code)
