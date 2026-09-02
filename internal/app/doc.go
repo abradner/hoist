@@ -1,7 +1,6 @@
 // Package app is the root Bubble Tea model for the hoist TUI.
 //
-// Shape (a convention proposal — AGENTS.md §4 states none for TUI structure; codify or
-// correct in review):
+// Shape (the convention in AGENTS.md §4.8, first adopted here):
 //
 //   - internal/app holds the root tea.Model: the screen stack, the window size, the theme
 //     (built once from tea.BackgroundColorMsg) and the global keys (q / ctrl+c quit). It is

@@ -167,6 +167,22 @@ libraries, cobra (arrives for free if `abradner/workflow`'s `cli` is adopted lat
 driven through the Kubernetes API alone: refresh = the `argocd.argoproj.io/refresh` annotation on
 the `Application`, status = its `status` subresource. No Argo API server, no Argo token.
 
+### 4.8 TUI structure
+
+`internal/app` holds the one root `tea.Model`: the screen stack, the window size, the theme
+(built once from `tea.BackgroundColorMsg`) and the global keys. Every screen is a value-typed
+model in its own package `internal/app/<screen>` with a `New(...)` constructor, a pure `Update`
+that returns the screen's concrete type, `View() string`, and `SetSize`/`SetStyles` setters the
+root calls on resize and theme change; the root adapts each one through its `Screen` interface
+(`internal/app/screen.go`), so a screen never imports `app`. A screen's derived data — what it
+shows, before any styling — lives in a file with no terminal dependency (`matrix/cells.go`) so it
+is unit-testable as plain values; the model file only lays that data out. `internal/ui` holds the
+shared palette and small shared widgets (the status bar), nothing screen-specific. No layout
+library (§4.7): screens compose strings with `strings.Join` and the Bubbles components they
+embed. *Why:* the first UI PR (#10) had no stated convention and adopted this shape as a proposal
+in `internal/app/doc.go` (§8, "building structure where no convention is stated is a decision");
+stating it here once means the next screen follows it instead of re-litigating shape per PR.
+
 ## 5. Repository Map
 
 `docs/repo-map.md` is the living boundary map: surfaces, trust boundaries, cross-cutting flows,
@@ -497,7 +513,18 @@ be cited from code comments and PR descriptions.
 Entry shape: **what happened → the actual root cause → the general rule → where the regression
 test lives** (if one exists).
 
-*No entries yet.*
+1. **`yaml.v3` `Node.Column` on a quoted scalar points at the opening quote, not the first
+   character of the value.** What happened: the M1 brief described the recorded column as "after
+   any quote"; for `image: "ghcr.io/…"` yaml.v3 reports the column of the `"`, one before the
+   value, and code written to the brief's description would match `Raw` one character early.
+   Root cause: `Column` is the start of the scalar *token*, quote included (verified against
+   yaml.v3 v3.0.1; the docs are silent). Rule: `Occurrence.Col` records
+   yaml.v3's value unchanged and is opaque to callers; `gitops.Apply` and `gitops.Verify` step past
+   the opening quote for `DoubleQuotedStyle`/`SingleQuotedStyle` before matching `Raw`, and any
+   new consumer of `Col` must do the same rather than "fix" the recorded value. Regression tests:
+   `TestApplyBytesDoubleQuotedByteExact` and `TestApplyBytesSingleQuotedByteExact` in
+   `pkg/gitops/apply_test.go`; `TestDiscoverPositionsMatchFileBytes` and
+   `TestDiscoverInitContainersAndQuotingStyles` in `pkg/gitops/discover_test.go`.
 
 ## 10. Maintaining This Document
 
