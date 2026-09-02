@@ -90,6 +90,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
 	base := fs.String("base", "main", "the GitOps repo's default branch: what the promotion branch is created from and the PR targets")
+	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag (AGENTS.md M6 'Direct mode'): this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct too")
+	confirmDirect := fs.Bool("confirm-direct", false, "the operator's explicit second acknowledgement required alongside --direct — the CLI's keypress-then-confirm shape (the TUI's equivalent is internal/app/tags' own keypress + huh.Confirm dialog)")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
 	var rf resolveFlags
@@ -117,7 +119,21 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fs.Usage()
 		return exitUsage
 	}
-	if eff.cfg == nil || eff.cfg.GitHub == "" {
+	if *direct {
+		// Direct mode's whole safety rests on knowing envs.production (AGENTS.md invariant
+		// 6): a flags-only run has no such list, which would make internal/engine.
+		// DirectCommitGateStep's ProductionEnvs empty and every env look non-production by
+		// omission. Fail fast rather than silently treat "unconfigured" as "safe" (AGENTS.md
+		// §8: never provide a fallback default for required configuration).
+		if eff.cfg == nil {
+			fmt.Fprintln(stderr, "hoist promote: --direct requires a configured repo (repos[].envs.production must be known — hoist cannot otherwise tell a production env from any other)")
+			return exitUsage
+		}
+		if !*confirmDirect {
+			fmt.Fprintln(stderr, "hoist promote: --direct requires --confirm-direct too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)")
+			return exitUsage
+		}
+	} else if eff.cfg == nil || eff.cfg.GitHub == "" {
 		fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file")
 		return exitUsage
 	}
@@ -308,7 +324,16 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintln(stderr, "hoist promote: waiting for signing approval...")
 		}
 	}
-	steps := engine.AllSteps(newGit, f, onWaiting)
+	var steps []engine.Step
+	if *direct {
+		// eff.cfg.Envs.Production, unfiltered — DirectSteps'/DirectCommitGateStep's own doc
+		// comments explain why this must be exactly that list, verbatim, never narrowed.
+		// Confirmed is true only because both --direct and --confirm-direct were given,
+		// checked above (the CLI's keypress-then-confirm equivalent).
+		steps = engine.DirectSteps(newGit, eff.cfg.Envs.Production, true, onWaiting)
+	} else {
+		steps = engine.AllSteps(newGit, f, onWaiting)
+	}
 	// The claim only needs to outlive the gap up to the first durable state write — once that
 	// lands, findInFlight's own re-observation of the real state file is what enforces invariant
 	// 5 for the rest of the (possibly hours-long) promotion, so release it here rather than
@@ -348,7 +373,14 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 		fmt.Fprintf(stdout, "%s: %s -> %s\n", cmdName, sourceEnv, targetEnv)
 		fmt.Fprintf(stdout, "  branch: %s\n", s.Branch)
 		fmt.Fprintf(stdout, "  commit: %s\n", s.CommitSHA)
-		if s.PR != nil {
+		switch {
+		case s.PR == nil:
+			// A successfully completed promotion with no PR at all is direct mode's own
+			// signature (it never creates one) — reportDriveResult is shared with resume.go,
+			// which has no --direct flag of its own to check, so this reads it off the
+			// PromotionState itself rather than taking a parameter only promote.go could supply.
+			fmt.Fprintf(stdout, "  pushed straight to %s (direct mode, no PR)\n", s.Base)
+		case s.PR != nil:
 			fmt.Fprintf(stdout, "  PR: %s\n", s.PR.URL)
 		}
 		if s.MergeSHA != "" {

@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -95,6 +96,25 @@ func TestFakeCommentsSortsRegardlessOfAddOrder(t *testing.T) {
 	}
 	if got[0].Body != "oldest" || got[1].Body != "middle" || got[2].Body != "newest" {
 		t.Fatalf("Comments not sorted oldest-first despite being added out of order: %+v", got)
+	}
+}
+
+func TestFakeTagsReturnsConfiguredList(t *testing.T) {
+	want := []GitTag{{Name: "v1", Date: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}}
+	f := &Fake{GitTags: want}
+	got, err := f.Tags(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Tags = %+v, want %+v", got, want)
+	}
+}
+
+func TestFakeTagsReturnsConfiguredError(t *testing.T) {
+	f := &Fake{TagsErr: errors.New("boom")}
+	if _, err := f.Tags(context.Background()); err == nil {
+		t.Fatal("expected the configured error")
 	}
 }
 

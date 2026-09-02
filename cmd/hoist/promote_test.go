@@ -395,6 +395,83 @@ func TestPromoteNoOpRefusesDirtyClone(t *testing.T) {
 	}
 }
 
+// TestPromoteDirectCommitsWithoutPR exercises the CLI's own invocation of direct mode
+// end-to-end: newPromoteFixture's config sets no envs.production at all, so app-production
+// is not listed there and --direct succeeds — pushing straight to origin/main with no PR and
+// no branch of the promotion's own name left behind.
+func TestPromoteDirectCommitsWithoutPR(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct"}
+
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(out.String(), "pushed straight to main (direct mode, no PR)") {
+		t.Fatalf("stdout should report direct mode's own outcome:\n%s", out.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("direct mode must never open a PR, got %+v", f.PRs())
+	}
+
+	var g git.Exec
+	branchLine := strings.Split(out.String(), "\n")[1]
+	branch := strings.TrimSpace(strings.TrimPrefix(branchLine, "  branch:"))
+	if _, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch); err != nil || ok {
+		t.Fatalf("no branch named after the promotion should exist on origin: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", "main"); err != nil || !ok {
+		t.Fatalf("origin/main should exist: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestPromoteDirectRefusedForConfiguredProductionEnv is the CLI-level counterpart to
+// internal/engine's own mandatory adversarial test: with envs.production naming
+// app-production, --direct --confirm-direct must still be refused — the flags alone are not
+// the gate, internal/engine.DirectCommitGateStep is.
+func TestPromoteDirectRefusedForConfiguredProductionEnv(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withProd := strings.Replace(string(data), "    promotable: [ghcr.io/example/]\n", "    promotable: [ghcr.io/example/]\n    envs:\n      production: [app-production]\n", 1)
+	if err := os.WriteFile(cfgPath, []byte(withProd), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit refusing production, got 0; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "app-production") || !strings.Contains(errOut.String(), "envs.production") {
+		t.Fatalf("stderr should name the env and cite envs.production: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created either: %+v", f.PRs())
+	}
+}
+
+// TestPromoteDirectRequiresConfirmFlag: --direct alone, without --confirm-direct, must be
+// refused as a usage error rather than silently proceeding.
+func TestPromoteDirectRequiresConfirmFlag(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct"}
+	var errOut bytes.Buffer
+	got := run(args, io.Discard, &errOut)
+	if got != exitUsage {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitUsage, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--confirm-direct") {
+		t.Errorf("stderr should name the missing flag: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("nothing should have run at all: %+v", f.PRs())
+	}
+}
+
 func TestPromoteRequiresGitHubConfig(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	data, err := os.ReadFile(cfgPath)

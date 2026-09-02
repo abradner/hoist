@@ -20,7 +20,9 @@ import (
 
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
@@ -489,7 +491,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		envs = eff.cfg.Envs
 	}
 	resolveFn := buildResolveFunc(cfg, eff.cfg, eff.promotable)
-	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn), tea.WithOutput(stdout)).Run(); err != nil {
+	tagsFn := buildTagsFunc(cfg, eff.cfg)
+	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, tagsFn), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
@@ -534,5 +537,83 @@ func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []stri
 			RegistryConsulted: consulted,
 			RegistryAuthTried: authTried,
 		}, nil
+	}
+}
+
+// buildTagsFunc adapts the same registries[]-entry credential chain buildResolveFunc uses,
+// plus (when RepoConfig.Apps maps the requested image repo) a pkg/forge/github.Client for
+// that app repo, into a tags.BuildFunc the TUI's tag picker calls per image repo — never
+// importing registry/forge/config policy itself (AGENTS.md §4.8, mirroring buildResolveFunc
+// exactly). Unlike buildResolveFunc, this has no gitops.Repo occurrence to scope credentials
+// by (M6's tag picker is "a direct caller that skips resolve", per resolution.go's own
+// multiRegistry doc comment) — registryEntryFor/entryAuthConfig still pick the one
+// registries[] entry (if any) covering imageRepo, so a repo a different entry covers, or none
+// does, never borrows another entry's credentials (F4's rule, unchanged here).
+func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig) tags.BuildFunc {
+	var registries []config.RegistryConfig
+	if cfg != nil {
+		registries = cfg.Registries
+	}
+	return func(imageRepo string) (bool, tags.ListFunc, tags.MetaFunc) {
+		entry := registryEntryFor(registries, imageRepo)
+		auth, clusterSecret, opRef := entryAuthConfig(entry, resolveOptions{})
+		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
+		if clusterSecret != "" && has(auth, registry.AuthCluster) {
+			kctx := ""
+			if rc != nil {
+				kctx = rc.Kube.Context
+			}
+			if cluster, _, err := newCluster(kctx); err == nil {
+				regCfg.ClusterSecret, regCfg.Cluster = clusterSecret, cluster
+			}
+			// An unreachable cluster here just means the cluster credential source will
+			// itself fail and the chain falls through to the next one (pkg/registry's own
+			// documented behavior) — never a reason to fail opening the picker.
+		}
+		reg, err := newRegistry(regCfg)
+		if err != nil {
+			failed := func(context.Context) ([]string, []forge.GitTag, error) { return nil, nil, err }
+			return false, failed, nil
+		}
+
+		appRepo, mapped := "", false
+		if rc != nil {
+			appRepo, mapped = rc.Apps[imageRepo]
+		}
+		var fc forge.Forge
+		if mapped {
+			fc, err = newForge(appRepo)
+			if err != nil {
+				// Degrade to Created-based ordering (AGENTS.md principle 5) rather than
+				// failing the whole picker over a forge the operator may not have configured
+				// `gh` access to yet.
+				mapped = false
+			}
+		}
+
+		listFn := func(ctx context.Context) ([]string, []forge.GitTag, error) {
+			regTags, err := reg.Tags(ctx, imageRepo)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !mapped {
+				return regTags, nil, nil
+			}
+			gitTags, err := fc.Tags(ctx)
+			if err != nil {
+				// Same degrade-not-fail call as above, now that the forge has actually been
+				// asked: the registry tags are still useful without git-tag ordering.
+				return regTags, nil, nil
+			}
+			return regTags, gitTags, nil
+		}
+		metaFn := func(ctx context.Context, tag string) (registry.ImageMeta, error) {
+			ref, err := image.Parse(imageRepo + ":" + tag)
+			if err != nil {
+				return registry.ImageMeta{}, err
+			}
+			return reg.Config(ctx, ref)
+		}
+		return mapped, listFn, metaFn
 	}
 }

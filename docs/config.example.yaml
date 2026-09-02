@@ -26,7 +26,10 @@ repos:
                                                 # after grace (M4)
     kube: { context: my-cluster }               # kubeconfig context for pod digests (M2)
     digest_sources: [pods, manifest, registry]  # order tried; default as shown (M2)
-    apps: { ghcr.io/me/app: me/app }            # image repo -> app git repo (M7)
+    apps: { ghcr.io/me/app: me/app }            # image repo -> app git repo; used by the M6
+                                                # tag picker to order tags by this repo's own
+                                                # git tag dates instead of the registry's
+                                                # unordered list, and later by pkg/migrate (M7)
 
 registries:
   - prefix: ghcr.io/me/

@@ -119,6 +119,18 @@ type Git interface {
 	// remote and SSH config — routing it through pkg/forge instead would need a GitHub API
 	// scope this repo does not otherwise require merging to need.
 	DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error
+	// PushHeadTo pushes worktreeDir's current HEAD directly onto remote's remoteBranch, even
+	// when remoteBranch is not the name of any branch checked out in worktreeDir. Direct mode
+	// (AGENTS.md M6) uses this to land a promotion's own commit straight on a target env's
+	// base branch (e.g. "main") without ever checking that name out in a second worktree:
+	// git refuses to check out a branch that is already checked out elsewhere, and the base
+	// branch is, by far the common case, exactly what the user's own clone already has
+	// checked out in its primary worktree. Pushing HEAD (a commit, not a branch ref) as the
+	// source side of the refspec sidesteps that entirely — the promotion's own worktree stays
+	// on its own distinct local branch (BranchedStep's normal hoist/<env>/<id> name), and only
+	// the remote ref named remoteBranch ever moves. Like Push, a rejected non-fast-forward
+	// push is reported as an error and never retried with --force.
+	PushHeadTo(ctx context.Context, worktreeDir, remote, remoteBranch string) error
 	// HashObject returns the git blob hash content would have, without requiring it to be
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
@@ -636,6 +648,13 @@ func (e Exec) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch s
 	if _, exists, lsErr := e.LsRemoteBranch(ctx, cloneDir, remote, branch); lsErr == nil && !exists {
 		return nil
 	}
+	return err
+}
+
+// PushHeadTo implements Git.
+func (e Exec) PushHeadTo(ctx context.Context, worktreeDir, remote, remoteBranch string) error {
+	ref := "HEAD:refs/heads/" + remoteBranch
+	_, err := e.run(ctx, worktreeDir, "push", remote, ref)
 	return err
 }
 

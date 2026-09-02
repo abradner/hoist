@@ -8,6 +8,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -15,9 +16,11 @@ import (
 )
 
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
-// what a screen needs to open the plan screen (internal/app/plan) without app.New having
-// to be called again — the repo, the promotable prefixes, the envs config (pairs,
-// production) and the digest-resolution adaptor (nil in "digest sources: none" mode).
+// what a screen needs to open the plan screen (internal/app/plan) or the tag picker
+// (internal/app/tags) without app.New having to be called again — the repo, the promotable
+// prefixes, the envs config (pairs, production), the digest-resolution adaptor (nil in
+// "digest sources: none" mode) and the tag-picker's own registry/forge adaptor (nil runs the
+// picker with no data source at all, reported as its own error state rather than a panic).
 type Model struct {
 	stack         []Screen
 	styles        ui.Styles
@@ -27,6 +30,7 @@ type Model struct {
 	promotable []string
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
+	tagsFn     tags.BuildFunc
 
 	// notice is a transient, root-level message shown below the top screen — currently only
 	// used for flight.OpenPRMsg/AbortMsg (see their cases in Update): neither has a real
@@ -42,15 +46,18 @@ type Model struct {
 // image repo prefixes that count as first-party (the same list hoist plan --promotable
 // takes). envs is the selected repo's envs config (production, pairs), zero-valued when
 // there is none. resolveFn is what the plan screen calls to resolve digests; nil runs it in
-// "digest sources: none" mode throughout. The theme starts dark and is replaced when the
-// terminal reports its background.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc) Model {
+// "digest sources: none" mode throughout. tagsFn is what the tag-picker screen calls to list
+// and fetch registry/forge data for one image repo; nil opens the picker with no data source
+// (it reports the resulting error itself, same as a resolveFn failure does for plan). The
+// theme starts dark and is replaced when the terminal reports its background.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, tagsFn tags.BuildFunc) Model {
 	m := Model{
 		styles:     ui.NewStyles(true),
 		repo:       repo,
 		promotable: promotable,
 		envs:       envs,
 		resolveFn:  resolveFn,
+		tagsFn:     tagsFn,
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
@@ -125,6 +132,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// #2), so msg.ID here is always a real, non-empty id.
 		m.notice = fmt.Sprintf("abort not wired yet for promotion %s", msg.ID)
 		return m, nil
+	case matrix.OpenTagsMsg:
+		var mapped bool
+		var listFn tags.ListFunc
+		var metaFn tags.MetaFunc
+		if m.tagsFn != nil {
+			mapped, listFn, metaFn = m.tagsFn(msg.ImageRepo)
+		}
+		production := plan.IsProduction(msg.Target, m.envs)
+		stagingEnv, stagingTag, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
+		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, mapped, production, stagingEnv, stagingTag, hasMismatch, listFn, metaFn)}
+		m = m.push(ts)
+		return m, ts.Init()
+	case tags.BackMsg:
+		return m.pop(), nil
+	case tags.SelectedMsg, tags.DirectRequestedMsg:
+		// This milestone's picker stops at reporting the operator's choice (SelectedMsg/
+		// DirectRequestedMsg's own doc comments): no screen in this codebase drives a write
+		// yet (hoist promote is CLI-only). Pop back to the matrix; a future "deploy new
+		// image" milestone is what turns this into an actual promotion.
+		return m.pop(), nil
 	}
 	if len(m.stack) == 0 {
 		return m, nil

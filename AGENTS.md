@@ -317,11 +317,27 @@ lists every promotion state
 file with its phase re-observed the same way, and `hoist resume <id>` (or `hoist resume --env
 <target-env>`) re-drives one from wherever `Observe` actually finds it — the CLI's own poll loop
 (`internal/config`'s `poll` section) is what does the actual waiting on CI/approval, never a
-`Step`'s own `Act`. `mise exec -- go
+`Step`'s own `Act`. `promote` also takes `--direct` (M6): commit straight to `--base` instead of
+opening a PR, driving `internal/engine.DirectSteps` (branch, commit, then push straight to
+`--base` — no separate branch left on origin, no PR) rather than `Steps`. `--direct` requires
+both a configured repo (`repos[].envs.production` must be known — a flags-only run has no such
+list, and `promote` refuses `--direct` outright rather than treat "unconfigured" as "every env is
+non-production") and `--confirm-direct=<env>`, a second, distinct flag the operator must also
+pass, repeating `--to`'s exact value as the confirming argument (refused if it doesn't match) —
+the CLI's equivalent of the TUI tag picker's keypress + `huh.Confirm` gesture. Neither flag is
+itself the gate: `internal/engine.DirectCommitGateStep` independently refuses any env listed in
+`envs.production` regardless of what the CLI or the TUI believed (§4.5, invariant 5 in the M6
+milestone), checked before any planning fast path (including the all-no-op short circuit) can
+report success. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
-`q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
-`mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan -update`; the fixture repo is `testdata/repo`
-(synthetic, placeholder-only — §4.4).
+`q` quits, `?` help; `p`/`P` plan a promotion, `d` opens the tag picker — `internal/app/tags`,
+M6 — for the current cell's first-party image, listing the registry's own tags with
+created/digest columns, preferring the mapped app repo's git tag dates for ordering when
+`repos[].apps` names one; the picker's own `D` key walks through the same keypress-then-confirm
+gesture as `--direct`/`--confirm-direct`, but nothing in the TUI drives an actual commit yet —
+`hoist promote` is still the only write path). Golden files under `testdata/golden/` regenerate
+with `mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan ./internal/app/tags
+-update`; the fixture repo is `testdata/repo` (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
 

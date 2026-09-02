@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"flag"
 	"image/color"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
@@ -15,8 +17,11 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/registry"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
@@ -36,7 +41,7 @@ func sized(t *testing.T) tea.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil)
 	_ = m.Init()
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -248,6 +253,116 @@ func TestRootNoticeClearsOnNextKeypress(t *testing.T) {
 	m, _ = press(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if strings.Contains(plain(m), "not wired yet") {
 		t.Error("root notice still shown after a later keypress")
+	}
+}
+
+// TestDeployNewPushesTagsScreen is M6's tag-picker counterpart to TestPromotePushesPlanScreen:
+// d on the matrix screen pushes internal/app/tags on top, and esc from there pops back.
+func TestDeployNewPushesTagsScreen(t *testing.T) {
+	m := sized(t)
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d produced no command")
+	}
+	msg := cmd()
+	if _, ok := msg.(matrix.OpenTagsMsg); !ok {
+		t.Fatalf("d's command yields %T, want matrix.OpenTagsMsg", msg)
+	}
+	m, _ = m.Update(msg)
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after d, want 2", n)
+	}
+	// No tagsFn was supplied (sized(t) passes nil), so the picker's own error state shows
+	// rather than hanging — proving the nil case is handled, not just the happy path.
+	if v := plain(m); !strings.Contains(v, "hoist tags:") {
+		t.Errorf("tags screen view missing its own header:\n%s", v)
+	}
+	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd == nil {
+		t.Fatal("esc on the tags screen produced no command")
+	}
+	m, _ = m.Update(backCmd())
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("esc did not pop back to the matrix: stack has %d screens", n)
+	}
+}
+
+// drainTags runs a tea.Cmd (and every cmd it in turn produces) to completion, exactly as a
+// real tea.Program would deliver messages to the whole app model — needed here because the
+// tags screen's Init kicks off an async ListFunc/MetaFunc load (internal/app/tags.Model.Init),
+// which TestDeployNewPushesTagsScreen never exercises (its nil tagsFn errors synchronously).
+// Mirrors internal/app/tags/model_test.go's own drain helper, one level up the screen stack.
+func drainTags(m tea.Model, cmd tea.Cmd) tea.Model {
+	for cmd != nil {
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			var next tea.Cmd
+			for _, c := range batch {
+				if c == nil {
+					continue
+				}
+				sub := c()
+				if _, isTick := sub.(spinner.TickMsg); isTick {
+					continue
+				}
+				var mc tea.Cmd
+				m, mc = m.Update(sub)
+				next = tea.Batch(next, mc)
+			}
+			cmd = next
+			continue
+		}
+		if _, isTick := msg.(spinner.TickMsg); isTick {
+			return m
+		}
+		m, cmd = m.Update(msg)
+	}
+	return m
+}
+
+// TestDeployNewThreadsRealStagingTag is the regression test for AGENTS.md invariant 4 / M6's
+// production/staging tag-mismatch warning, guarding against the exact bug a sibling M6 attempt
+// shipped: its matrix.OpenTagsMsg handler called tags.New with the paired staging env's
+// currently-running tag hardcoded to "", so the mismatch note could never render from the real
+// running app (only from a unit test calling tags.New directly). This test drives the real
+// app-wiring path — app.Model.Update's own matrix.OpenTagsMsg case, not a direct tags.New call
+// — with a config naming app-staging as app-production's pair, against the fixture repo where
+// app-production/web and app-staging/web genuinely carry different tags
+// (v202601010101/v202602150930). If a future change reintroduces a hardcoded "" (or otherwise
+// drops the real lookup), hasStagingMismatch/stagingTag never reach tags.New with real values,
+// the note never renders, and this test fails.
+func TestDeployNewThreadsRealStagingTag(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envs := config.EnvsConfig{
+		Production: []string{"app-production"},
+		Pairs:      map[string]string{"app-staging": "app-production"},
+	}
+	tagsFn := func(string) (bool, tags.ListFunc, tags.MetaFunc) {
+		listFn := func(context.Context) ([]string, []forge.GitTag, error) {
+			return []string{"v202601010101"}, nil, nil
+		}
+		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
+			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil
+		}
+		return false, listFn, metaFn
+	}
+	m := New(r, []string{"ghcr.io/"}, envs, nil, tagsFn)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+
+	msg := matrix.OpenTagsMsg{ImageRepo: "ghcr.io/example/web", Target: "app-production"}
+	tm, cmd := tm.Update(msg)
+	if n := len(tm.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after OpenTagsMsg, want 2", n)
+	}
+	tm = drainTags(tm, cmd)
+
+	v := plain(tm)
+	if !strings.Contains(v, "app-staging") || !strings.Contains(v, "v202602150930") {
+		t.Errorf("tags screen view is missing the real staging-mismatch note (want app-staging / v202602150930, the fixture's actual app-staging/web tag):\n%s", v)
 	}
 }
 

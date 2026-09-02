@@ -6,6 +6,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/ui"
 )
 
@@ -80,4 +81,23 @@ func (s flightScreen) SetSize(width, height int) Screen {
 
 func (s flightScreen) SetStyles(st ui.Styles) Screen {
 	return flightScreen{s.Model.SetStyles(st)}
+}
+
+// tagsScreen adapts tags.Model the same way. It is pushed on top of the matrix when the
+// operator asks to pick a new tag (matrix.OpenTagsMsg, handled in app.go).
+type tagsScreen struct{ tags.Model }
+
+func (s tagsScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s tagsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return tagsScreen{m}, cmd
+}
+
+func (s tagsScreen) SetSize(width, height int) Screen {
+	return tagsScreen{s.Model.SetSize(width, height)}
+}
+
+func (s tagsScreen) SetStyles(st ui.Styles) Screen {
+	return tagsScreen{s.Model.SetStyles(st)}
 }

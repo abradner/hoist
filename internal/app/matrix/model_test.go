@@ -70,6 +70,44 @@ func TestPromoteOpensPlanForCurrentEnv(t *testing.T) {
 	}
 }
 
+// TestDeployNewOpensTagsForCurrentCell: d (deploy new image) emits OpenTagsMsg naming the
+// current cell's first-party image repo and CurrentEnv (M6's tag picker).
+func TestDeployNewOpensTagsForCurrentCell(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"})
+	// Default cursor: row 0 (families sort to "absent" first), col 0 (envs sort to "a" first).
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d produced no command")
+	}
+	msg, ok := cmd().(OpenTagsMsg)
+	if !ok {
+		t.Fatalf("d's command yields %T, want OpenTagsMsg", cmd())
+	}
+	if msg.Target != "a" || msg.ImageRepo != "ghcr.io/x/app" {
+		t.Fatalf("OpenTagsMsg = %+v, want {ImageRepo: ghcr.io/x/app, Target: a}", msg)
+	}
+}
+
+// TestDeployNewWithNoFirstPartyImageShowsNotice: the "thirdparty" family has no first-party
+// image at all — d must not emit OpenTagsMsg{ImageRepo: ""} (which the root would otherwise
+// hand to the tag picker as a real, empty image repo).
+func TestDeployNewWithNoFirstPartyImageShowsNotice(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"})
+	m = m.SetSize(80, 24)
+	// Move down to "thirdparty": absent, drift, empty, mixedtags, multi, pinned, sidecar,
+	// thirdparty — 7 rows down from "absent".
+	for i := 0; i < 7; i++ {
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd != nil {
+		t.Fatalf("d on a third-party-only cell produced a command: %v", cmd())
+	}
+	if !strings.Contains(m2.View(), "no first-party image") {
+		t.Errorf("d with no first-party image: View() lacks the notice:\n%s", m2.View())
+	}
+}
+
 // TestCurrentEnvEmptyRepo: a repo with no envs at all must not panic or index out of range.
 func TestCurrentEnvEmptyRepo(t *testing.T) {
 	m := New(&gitops.Repo{Root: "repo", Envs: map[string]*gitops.Env{}}, []string{"ghcr.io/"})
