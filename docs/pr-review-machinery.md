@@ -80,13 +80,15 @@ gh api repos/{owner}/{repo}/pulls/<n>/comments     # INLINE — usually where th
 count.** A Copilot review on this repo's PR #32 said "Comments generated: 2" and named a third
 finding as a "previously missed" suppressed comment in the body, but `gh api
 repos/{owner}/{repo}/pulls/<n>/comments` — even unfiltered — returned zero rows for two of the
-three. The GraphQL `reviewThreads` query found both immediately. Separately, Codex's four P1s and two P2s on that same PR were real inline comments the
-REST route did return, but a first pass that filtered them by a commit-id field matching the
-*current* head silently dropped every one, because they were anchored to an earlier commit — the
-exact `commit_id`/`original_commit_id` re-anchoring trap this section covers in detail further down (this paragraph doesn't
-restate which field means what; read that explanation for the mechanics, not this one). They were read only once a full re-fetch checked every comment with no commit filter
-at all. **When a review body's stated count disagrees with what the REST route returns, or
-whenever a review predates the current head, cross-check with:**
+three. The GraphQL `reviewThreads` query found both immediately. Separately, Codex's four P1s and
+two P2s on that same PR were real inline comments the REST route did return, but a first pass that
+filtered them by a commit-id field matching the *current* head silently dropped every one, because
+they were anchored to an earlier commit — the exact `commit_id`/`original_commit_id` re-anchoring
+trap this section covers in detail further down (this paragraph doesn't restate which field means
+what; read that explanation for the mechanics, not this one). They were read only once a full
+re-fetch checked every comment with no commit filter at all. **When a review body's stated count
+disagrees with what the REST route returns, or whenever a review predates the current head,
+cross-check with:**
 
 ```bash
 gh api graphql -f query='{repository(owner:"{owner}",name:"{repo}"){pullRequest(number:<n>){reviewThreads(first:100){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{databaseId author{login} path line body}}}}}}}'
