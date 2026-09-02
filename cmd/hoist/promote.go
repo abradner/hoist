@@ -90,8 +90,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
 	base := fs.String("base", "main", "the GitOps repo's default branch: what the promotion branch is created from and the PR targets")
-	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag (AGENTS.md M6 'Direct mode'): this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct too")
-	confirmDirect := fs.Bool("confirm-direct", false, "the operator's explicit second acknowledgement required alongside --direct — the CLI's keypress-then-confirm shape (the TUI's equivalent is internal/app/tags' own keypress + huh.Confirm dialog)")
+	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag (AGENTS.md M6 'Direct mode'): this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
+	confirmDirect := fs.String("confirm-direct", "", "the operator's explicit second acknowledgement required alongside --direct: must repeat --to's exact value (refused otherwise) — the CLI's stronger keypress-then-confirm shape (the TUI's equivalent is internal/app/tags' own keypress + huh.Confirm dialog, which names the same env in its prompt)")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
 	var rf resolveFlags
@@ -129,8 +129,25 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintln(stderr, "hoist promote: --direct requires a configured repo (repos[].envs.production must be known — hoist cannot otherwise tell a production env from any other)")
 			return exitUsage
 		}
-		if !*confirmDirect {
-			fmt.Fprintln(stderr, "hoist promote: --direct requires --confirm-direct too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)")
+		// Direct mode still needs the same github: owner/name the non-direct branch below
+		// requires — not for the forge (direct mode never opens one), but because
+		// engine.DeriveID(eff.cfg.GitHub, plan) hashes it into the promotion's id, which names
+		// the state path, the branch and the worktree directory. Two repos both configured
+		// without github: that promote the same env+digest set would otherwise derive the
+		// IDENTICAL id — a real identity collision (one repo's run could overwrite the
+		// other's state file or remove the other's still-active worktree as "unregistered
+		// stale"), not merely a cosmetic gap. A git-only, no-PR operation still needs a stable
+		// repo identity for that reason alone.
+		if eff.cfg.GitHub == "" {
+			fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file (direct mode still needs it — promotion identity is hashed from it)")
+			return exitUsage
+		}
+		if *confirmDirect == "" {
+			fmt.Fprintln(stderr, "hoist promote: --direct requires --confirm-direct=<env> too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)")
+			return exitUsage
+		}
+		if *confirmDirect != *to {
+			fmt.Fprintf(stderr, "hoist promote: --confirm-direct=%q does not match --to=%q; repeat the exact target env to confirm\n", *confirmDirect, *to)
 			return exitUsage
 		}
 	} else if eff.cfg == nil || eff.cfg.GitHub == "" {

@@ -401,7 +401,7 @@ func TestPromoteNoOpRefusesDirtyClone(t *testing.T) {
 // no branch of the promotion's own name left behind.
 func TestPromoteDirectCommitsWithoutPR(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
-	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct"}
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
 
 	var out, errOut bytes.Buffer
 	if got := run(args, &out, &errOut); got != 0 {
@@ -440,7 +440,7 @@ func TestPromoteDirectRefusedForConfiguredProductionEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct"}
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
 	var out, errOut bytes.Buffer
 	got := run(args, &out, &errOut)
 	if got == 0 {
@@ -472,6 +472,25 @@ func TestPromoteDirectRequiresConfirmFlag(t *testing.T) {
 	}
 }
 
+// TestPromoteDirectRequiresConfirmValueToMatchTo is finding 8's own mandatory test: a
+// --confirm-direct value that doesn't equal --to exactly must be refused, even though --direct
+// itself would otherwise be allowed (newPromoteFixture's config sets no envs.production).
+func TestPromoteDirectRequiresConfirmValueToMatchTo(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-staging"}
+	var errOut bytes.Buffer
+	got := run(args, io.Discard, &errOut)
+	if got != exitUsage {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitUsage, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "app-staging") || !strings.Contains(errOut.String(), "app-production") {
+		t.Errorf("stderr should name both the mismatched value and --to's real value: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("nothing should have run at all: %+v", f.PRs())
+	}
+}
+
 func TestPromoteRequiresGitHubConfig(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	data, err := os.ReadFile(cfgPath)
@@ -489,6 +508,35 @@ func TestPromoteRequiresGitHubConfig(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "github") {
 		t.Errorf("stderr should mention the missing github config: %s", errOut.String())
+	}
+}
+
+// TestPromoteDirectRequiresGitHubConfig is finding 1's own mandatory test: a repo configured
+// without github: must be refused for --direct too, not only for the non-direct/PR path above
+// — engine.DeriveID hashes eff.cfg.GitHub into the promotion's id, which names the state path,
+// branch and worktree directory; two repos both configured without github: that promote the
+// same env+digest set would otherwise derive the identical id and collide.
+func TestPromoteDirectRequiresGitHubConfig(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noGitHub := strings.Replace(string(data), "    github: example/gitops\n", "", 1)
+	if err := os.WriteFile(cfgPath, []byte(noGitHub), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
+	var errOut bytes.Buffer
+	got := run(args, io.Discard, &errOut)
+	if got != exitUsage {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitUsage, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "github") {
+		t.Errorf("stderr should mention the missing github config: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("nothing should have run at all: %+v", f.PRs())
 	}
 }
 
