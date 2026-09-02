@@ -375,6 +375,54 @@ func TestApprovedRejectAfterApproveWins(t *testing.T) {
 	}
 }
 
+// TestApprovedExactTimestampTieRejectHasLargerIDWins is the P2 regression for finding #4: an
+// approve and a later reject that happen to share the exact same recorded CreatedAt (GitHub's
+// comment timestamp precision can collide) must not silently resolve to "approved" just because
+// a strict CreatedAt.After comparison can never see the reject as newer. Comment.ID (assigned in
+// strictly increasing creation order) is the tiebreaker — the reject here has the larger ID,
+// meaning it was truly posted after the approve despite the identical timestamp, and must win.
+func TestApprovedExactTimestampTieRejectHasLargerIDWins(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	s.Approval = "comment"
+	s.Approvers = []string{"alice", "bob"}
+	tie := s.PR.CreatedAt.Add(time.Second)
+	f.AddComment(s.PR.Number, forge.Comment{ID: 10, Author: "alice", AuthorType: "User", Body: "hoist approve " + s.ID, CreatedAt: tie})
+	f.AddComment(s.PR.Number, forge.Comment{ID: 11, Author: "bob", AuthorType: "User", Body: "hoist reject " + s.ID, CreatedAt: tie})
+
+	obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("on an exact CreatedAt tie, the reject with the larger comment ID must win, got %+v", obs)
+	}
+}
+
+// TestApprovedExactTimestampTieApproveHasLargerIDWins is the mirror direction: same exact
+// CreatedAt tie, but this time the approve carries the larger ID (posted after the reject in
+// real creation order) — the approve must win, proving the tiebreak isn't just "reject always
+// wins ties" but genuinely follows Comment.ID.
+func TestApprovedExactTimestampTieApproveHasLargerIDWins(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	s.Approval = "comment"
+	s.Approvers = []string{"alice", "bob"}
+	tie := s.PR.CreatedAt.Add(time.Second)
+	f.AddComment(s.PR.Number, forge.Comment{ID: 20, Author: "bob", AuthorType: "User", Body: "hoist reject " + s.ID, CreatedAt: tie})
+	f.AddComment(s.PR.Number, forge.Comment{ID: 21, Author: "alice", AuthorType: "User", Body: "hoist approve " + s.ID, CreatedAt: tie})
+
+	obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("on an exact CreatedAt tie, the approve with the larger comment ID must win, got %+v", obs)
+	}
+}
+
 // TestApprovedTypoRejectDoesNotBlockRealApproval is the named adversary's other half: a typo'd
 // reject ("hoft reject <id>") must not match the exact pattern at all, so a real approve right
 // after it must still satisfy.

@@ -78,6 +78,29 @@ func matchesCommand(re *regexp.Regexp, body string) bool {
 	return false
 }
 
+// isNewerComment reports whether candidate is strictly newer than current (nil current always
+// loses). Primarily by CreatedAt; on an exact tie — GitHub's comment timestamp precision can
+// collide, so an approve and a later reject can genuinely share one recorded CreatedAt — by
+// forge.Comment.ID instead, preferring the numerically larger one. GitHub assigns comment IDs
+// from a single, strictly increasing sequence at creation time (never reused, never assigned
+// out of post order — this is the same ordering FindPR's own body-marker fallback and the
+// PR-number sequence itself already rely on being monotonic), so on a timestamp tie a larger ID
+// reliably means "posted later" even when CreatedAt cannot tell the two apart. Used both while
+// scanning for the newest approve/reject of each kind and for the final approve-vs-reject
+// comparison, so a tie is broken exactly the same way in both places.
+func isNewerComment(candidate, current *forge.Comment) bool {
+	if current == nil {
+		return true
+	}
+	if candidate.CreatedAt.After(current.CreatedAt) {
+		return true
+	}
+	if candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.ID > current.ID
+	}
+	return false
+}
+
 // CIGreenStep is satisfied once the pushed head sha's checks are all green, under the
 // configured ci.none policy when nothing has been reported at all (R-003).
 type CIGreenStep struct {
@@ -243,17 +266,17 @@ func (a ApprovedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 		}
 		switch {
 		case matchesCommand(aRe, c.Body):
-			if lastApprove == nil || c.CreatedAt.After(lastApprove.CreatedAt) {
+			if isNewerComment(c, lastApprove) {
 				lastApprove = c
 			}
 		case matchesCommand(rRe, c.Body):
-			if lastReject == nil || c.CreatedAt.After(lastReject.CreatedAt) {
+			if isNewerComment(c, lastReject) {
 				lastReject = c
 			}
 		}
 	}
 	switch {
-	case lastReject != nil && (lastApprove == nil || lastReject.CreatedAt.After(lastApprove.CreatedAt)):
+	case lastReject != nil && isNewerComment(lastReject, lastApprove):
 		return Observation{Blocked: fmt.Sprintf("rejected by %s at %s", lastReject.Author, lastReject.CreatedAt.Format(time.RFC3339))}, nil
 	case lastApprove != nil:
 		return Observation{Satisfied: true, Detail: "approved by " + lastApprove.Author}, nil
