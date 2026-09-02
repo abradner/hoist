@@ -186,11 +186,18 @@ func resolveRepo(ctx context.Context, in Input, repo string, occ []gitops.Occurr
 	}
 
 	if ov, ok := in.Overrides[repo]; ok {
+		// The override decides the reference; it does not silence what the sources found.
+		// A running disagreement and a running-vs-manifest split are still warnings
+		// (principle 3: never silent), with every other digest as an alternative.
 		res.Ref, res.Source, res.Detail = ov, SourceOverride, "caller-supplied digest"
 		for _, d := range append([]string{podsDigest, manifest.Digest}, podsAlternatives...) {
 			if d != "" && d != ov.Digest {
 				res.Alternatives = appendRef(res.Alternatives, withTag(d))
 			}
+		}
+		res.Warnings = append(res.Warnings, podsWarnings...)
+		if podsDigest != "" && manifest.Digest != "" && podsDigest != manifest.Digest {
+			res.Warnings = append(res.Warnings, runningVsManifest(in.Namespace, repo, occ, manifest.Digest, podsDigest, SourceOverride))
 		}
 		return res
 	}
@@ -326,8 +333,11 @@ func choosePods(namespace, repo string, occ []gitops.Occurrence, running []k8s.R
 
 func runningVsManifest(namespace, repo string, occ []gitops.Occurrence, manifestDigest, podsDigest string, chosen Source) gitops.Warning {
 	using := "using the running digest; the manifest pin is listed as an alternative"
-	if chosen == SourceManifest {
+	switch chosen {
+	case SourceManifest:
 		using = "using the manifest pin; the running digest is listed as an alternative"
+	case SourceOverride:
+		using = "using the caller-supplied digest; both are listed as alternatives"
 	}
 	return gitops.Warning{
 		Code: WarnRunningVsManifest,

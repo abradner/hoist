@@ -262,8 +262,10 @@ func TestOverrideBeatsEveryOtherSource(t *testing.T) {
 	if r.Ref != ov || r.Source != SourceOverride {
 		t.Errorf("got %s from %s, want the override", r.Ref, r.Source)
 	}
-	if len(r.Warnings) != 0 {
-		t.Errorf("an override should not warn: %v", codes(r.Warnings))
+	// One running digest against a manifest pin: the split is still a warning; the
+	// override only decides the reference.
+	if got := codes(r.Warnings); len(got) != 1 || got[0] != WarnRunningVsManifest {
+		t.Errorf("warnings = %v, want exactly %s", got, WarnRunningVsManifest)
 	}
 	// Alternatives keep the manifest's tag: that is the tag those digests were seen with.
 	if diff := cmp.Diff([]image.Ref{{Repo: web, Tag: "v2", Digest: digestA}, {Repo: web, Tag: "v2", Digest: digestB}}, r.Alternatives); diff != "" {
@@ -274,6 +276,34 @@ func TestOverrideBeatsEveryOtherSource(t *testing.T) {
 	}
 	if Digests(map[string]Resolution{web: r})[web] != ov {
 		t.Error("Digests() should carry the override")
+	}
+}
+
+// An override decides the reference; it does not make a mid-rollout disagreement
+// silent. Principle 3: running containers that disagree are a warning, never silent.
+func TestOverrideKeepsRunningDisagreementWarning(t *testing.T) {
+	ov := image.Ref{Repo: web, Tag: "v9", Digest: digestD}
+	in := Input{Namespace: ns, Order: DefaultOrder, Overrides: map[string]image.Ref{web: ov},
+		Occurrences: []gitops.Occurrence{occ(t, "web.yaml", "web", web+":v2")}}
+	cluster := fakeCluster(running("web-1", "web", web, digestA), running("web-2", "web", web, digestB))
+	reg := &registry.Fake{}
+	r := resolveWeb(t, in, cluster, reg)
+	if r.Ref != ov || r.Source != SourceOverride {
+		t.Fatalf("got %s from %s, want the override", r.Ref, r.Source)
+	}
+	if got := codes(r.Warnings); len(got) != 1 || got[0] != WarnRunningDisagrees {
+		t.Fatalf("warnings = %v, want exactly %s", got, WarnRunningDisagrees)
+	}
+	for _, want := range []string{"pod web-1 container web " + digestA, "pod web-2 container web " + digestB} {
+		if !strings.Contains(r.Warnings[0].Message, want) {
+			t.Errorf("warning does not name %q:\n%s", want, r.Warnings[0].Message)
+		}
+	}
+	if diff := cmp.Diff([]image.Ref{{Repo: web, Tag: "v2", Digest: digestA}, {Repo: web, Tag: "v2", Digest: digestB}}, r.Alternatives); diff != "" {
+		t.Errorf("alternatives (-want +got):\n%s", diff)
+	}
+	if len(reg.Calls) != 0 {
+		t.Errorf("registry consulted under an override: %v", reg.Calls)
 	}
 }
 

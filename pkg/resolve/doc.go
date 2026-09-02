@@ -11,8 +11,9 @@
 //
 // The rules, in the order they apply to one image repo:
 //
-//   - A caller override (`--digest`) wins over every source and warns about nothing; the
-//     other sources' digests are still listed as alternatives.
+//   - A caller override (`--digest`) wins over every source: it decides the reference. It
+//     does not silence the sources — a running disagreement or a running-vs-manifest split
+//     is still a warning, and the other sources' digests are still listed as alternatives.
 //   - Sources are consulted in the caller's order (default pods, manifest, registry).
 //     The first that yields a digest is the Source of the resolution; a later source that
 //     yields a different digest is an alternative and, for pods against manifest, a
