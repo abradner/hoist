@@ -28,6 +28,12 @@ func pollInterval(poll config.PollConfig, phase engine.StepName) time.Duration {
 		return time.Duration(poll.CI)
 	case engine.StepApproved:
 		return time.Duration(poll.Approval)
+	case engine.StepArgoRefreshed, engine.StepArgoSynced:
+		// Both wait on Argo CD's own reconcile loop (refresh landing, then sync/health
+		// converging) — the same remote, so the same knob.
+		return time.Duration(poll.Argo)
+	case engine.StepRolledOut:
+		return time.Duration(poll.Rollout)
 	default:
 		// Branched/Committed/Pushed/PROpened/Merged only ever wait on the interactive signing
 		// prompt (handled separately via onWaiting) or a single merge/branch-delete retry — a
