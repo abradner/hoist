@@ -53,7 +53,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        commit the plan's edits to a worktree, push a branch and open a PR (resumable; see AGENTS.md §4.1)\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
 	}
@@ -89,6 +89,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
 		return runPlan(fs.Args()[1:], cfg, sel, stdout, stderr)
+	case "promote":
+		return runPromote(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
 		return runConfig(fs.Args()[1:], cfg, stdout, stderr)
 	default:

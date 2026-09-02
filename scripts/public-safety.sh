@@ -15,7 +15,11 @@ patterns=(
   'admin@athena'
 )
 # Known-benign matches (file names, XDG paths). Keep this list short and specific.
-allow='settings\.local\.json|\.local/share|\.local/bin'
+# `\.local"[[:space:]]*,[[:space:]]*"state` matches the split filepath.Join(home, ".local",
+# "state", ...) shape internal/engine/state.go and its test use for the real XDG state-dir
+# default ($XDG_STATE_HOME, else ~/.local/state) — not a bare ".local"-terminated string, so
+# it does not also swallow a genuine internal .local hostname written some other way.
+allow='settings\.local\.json|\.local/share|\.local/bin|\.local/state|\.local"[[:space:]]*,[[:space:]]*"state'
 status=0
 for p in "${patterns[@]}"; do
   if hits=$(git ls-files -z | xargs -0 grep -nE -- "$p" 2>/dev/null | grep -v '^scripts/public-safety.sh:' | grep -vE -- "$allow"); then

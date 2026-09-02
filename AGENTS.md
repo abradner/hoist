@@ -273,7 +273,8 @@ redacted; `hoist config path` prints where it looked. `mise exec -- go run ./cmd
 prints the unified diff, the untouched images and the warnings, and touches no git state
 (`--repo`, `--apps-root` and `--promotable` fall back to the selected `repos[]` entry — the only
 one, or the one `--repo` names — then to `cluster/apps` and the `ghcr.io/` placeholder). Without
-`--dry-run` it prints the same and exits 3 — writing lands in a later milestone. Before planning,
+`--dry-run` it prints the same and exits 3 — `plan` itself never writes; `hoist promote` (below)
+is the write path. Before planning,
 `plan` resolves every promotable source-env image to a digest (`pkg/resolve` over `pkg/k8s` and
 `pkg/registry`): the source namespace's running pods first, then the manifest's own pin, then a
 registry HEAD of the tag, in the order of `--digest-sources` (default `pods,manifest,registry`;
@@ -285,7 +286,22 @@ two links in; the dry run's "Resolution" section names each repo's digest and so
 alternative and disagreement, and which credential source authenticated, or — when the registry
 was asked and every source in the chain failed, the anonymous fallback included — that it was
 consulted and which sources were tried; either way, by name only, never a value. A
-`--digest` override still wins over every source. `mise exec -- go
+`--digest` override still wins over every source.
+
+`mise exec -- go run ./cmd/hoist promote --repo <path> --from <env> --to <env>` (M3) takes the
+same flags as `plan` minus `--dry-run` — its whole point is to act — plus `--base` (the GitOps
+repo's default branch, `main` unless given) and requires `repos[].github: owner/name` for the
+selected repo. It builds the same plan `hoist plan` would, then drives `internal/engine`'s four
+steps: create or reuse a `git worktree` under `$XDG_CACHE_HOME/hoist/worktrees/<id>` from the
+user's own clone (never a fresh clone, never the user's own checkout — §4.6), apply and commit
+the edits (SSH-signed via the user's own git config, `hoist promote` says "waiting for signing
+approval" if a commit sits for 5s), push the branch, and open a PR via the user's own `gh` login
+(`pkg/forge/github`, via `go-gh` — never a token flag or env var). Every step re-observes the
+worktree/remote/forge before acting (§4.1), so killing the process and re-running the identical
+command is safe and resumes rather than duplicating; a state file under
+`$XDG_STATE_HOME/hoist/promotions/<id>.json` is kept purely as a human-readable index (History),
+never consulted to decide what already happened. A plan whose edits are all no-ops prints
+"already current" and exits 0 without touching git or the forge. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
 `q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan -update`; the fixture repo is `testdata/repo`
