@@ -42,6 +42,28 @@ const claimStaleAfter = 5 * time.Minute
 // small bound is enough to guarantee termination without ever looping forever.
 const claimAttempts = 4
 
+// lockAttempts and lockRetryDelay bound acquireStaleClaimLock's own retry loop against the lock
+// directory itself (never the claim file): a caller that cannot os.Mkdir the lock dir because
+// another caller currently holds it backs off lockRetryDelay and tries again, up to
+// lockAttempts times. This is ordinary mutex-acquisition spinning, not the same "only retry on
+// observed forward progress" reasoning claimAttempts documents — but the critical section the
+// lock guards is two file syscalls (a read and, sometimes, a remove), realistically
+// microseconds, so lockAttempts*lockRetryDelay (a few seconds) is comfortably above any queue
+// depth this process will ever see even with many goroutines racing the same stale claim.
+const lockAttempts = 500
+const lockRetryDelay = 5 * time.Millisecond
+
+// lockStaleAfter bounds how long a lock directory is trusted to be genuinely held: holding
+// acquireStaleClaimLock's critical section is only ever a couple of file operations (never a
+// network call, never anything that waits on another process), so it should complete in
+// milliseconds — nothing like claimStaleAfter's 5-minute bound for the claim file itself, which
+// exists to survive real waiting (CI, human approval). A lock dir older than this was almost
+// certainly left behind by a process that died (kill -9) between os.Mkdir and its deferred
+// os.Remove, and is reclaimed the same way a stale claim file is: judged abandoned by age, then
+// removed so a crash inside the critical section cannot wedge every future caller for this
+// target env forever.
+const lockStaleAfter = 2 * time.Second
+
 // claimRecord is a claim file's own content: enough to name what claimed it (for the conflict
 // message) and to decide staleness (ClaimedAt). Never consulted for anything but that — like a
 // promotion's own state file, it is an index, not evidence (AGENTS.md §4.1's shape applied here
@@ -107,25 +129,20 @@ func ClaimInFlight(repoFullName, targetEnv, id string) (release func(), err erro
 		if !errors.Is(cerr, os.ErrExist) {
 			return nil, fmt.Errorf("claiming %s/%s: %w", repoFullName, targetEnv, cerr)
 		}
-		state, raw := examineExisting(path)
+		state, lerr := examineAndMaybeReclaim(path)
+		if lerr != nil {
+			return nil, fmt.Errorf("claiming %s/%s: %w", repoFullName, targetEnv, lerr)
+		}
 		switch state {
-		case existingVanished:
-			// Released (or reclaimed by someone else) between our failed create and now — the
-			// slot may be free again; loop back and try the create once more.
-			continue
-		case existingStale:
-			// The owning process almost certainly died before ever writing real state (kill -9
-			// between claiming and the first save) — remove and retry. removeIfUnchanged (not a
-			// bare os.Remove) closes the reclaim-from-stale race this comment used to describe
-			// as already closed but wasn't: two concurrent callers can both classify the same
-			// claim as stale, and a bare os.Remove(path) here removes whatever is CURRENTLY at
-			// path by name — which, if the other caller's own remove-then-tryClaim cycle already
-			// completed, is that caller's brand-new LIVE claim, not the stale one this call
-			// examined. removeIfUnchanged only removes path if its content still byte-for-byte
-			// matches what examineExisting just read; if it doesn't (someone else already
-			// changed it), this call removes nothing and simply loops back to re-examine fresh
-			// state on the next iteration — never a second, uninformed delete.
-			removeIfUnchanged(path, raw)
+		case existingVanished, existingStale:
+			// existingVanished: released (or reclaimed by someone else) between our failed
+			// create and now. existingStale: examineAndMaybeReclaim judged it stale and already
+			// removed it, under the lock that serializes that decision against every other
+			// concurrent caller (see acquireStaleClaimLock's doc comment) — a bare
+			// examine-then-remove here would reopen the exact double-reclaim race this file
+			// exists to close, no matter how carefully the two steps compared bytes, because the
+			// gap between them is still a gap. Either way the slot may be free now; loop back
+			// and try the create once more.
 			continue
 		case existingLive:
 			return nil, fmt.Errorf(
@@ -202,9 +219,12 @@ const (
 
 // examineExisting inspects path when a create attempt against it failed with os.ErrExist,
 // returning both the classification and the exact raw bytes read (nil unless state is
-// existingStale, since that is the only case a caller needs them for — see
-// removeIfUnchanged). A second, later call against the same path is not guaranteed to see the
-// same content: that gap is exactly what removeIfUnchanged closes for the stale-reclaim path.
+// existingStale, since that is the only case a caller needs them for — see removeIfUnchanged).
+// A second, later call against the same path is not guaranteed to see the same content —
+// callers that intend to act on an existingStale result (i.e. remove the file) must do so only
+// while holding the lock acquireStaleClaimLock provides (see examineAndMaybeReclaim); calling
+// this alone, unlocked, and then removing based on what it returned is exactly the TOCTOU this
+// package used to have and no longer does.
 func examineExisting(path string) (state existingClaimState, raw []byte) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -223,23 +243,110 @@ func examineExisting(path string) (state existingClaimState, raw []byte) {
 	return existingLive, nil
 }
 
-// removeIfUnchanged removes path only if its content still byte-for-byte matches expected —
-// the compare half of a compare-and-remove for ClaimInFlight's stale-reclaim path. Without
-// this, two concurrent callers that both examined the same stale claim and both decided to
-// remove it could interleave as: caller A removes the stale file and installs its own fresh
-// live claim at path; caller B, still acting on its own earlier (now outdated) examination,
-// then calls a bare os.Remove(path) — which deletes A's brand-new live claim by name alone,
-// with no idea it is no longer the file B looked at. Reading path again immediately before
-// removing and comparing byte-for-byte against what was read when the caller decided "stale"
-// ensures a caller only ever removes the exact claim it examined: if the content changed (or
-// the file is already gone), this is a no-op and the caller must loop back to re-examine fresh
-// state rather than assume its remove succeeded. Reports whether it actually removed anything
-// — ClaimInFlight's own loop doesn't need the answer (it re-examines fresh either way), but
-// the race test that proves this closes the reclaim-from-stale race does.
+// removeIfUnchanged removes path only if its content still byte-for-byte matches expected. This
+// used to be this package's *only* defense against the double-reclaim race (a bare
+// compare-then-remove, with the compare and the remove as two separate syscalls) — and it still
+// left a real gap: two concurrent callers could each read the same stale bytes, and whichever
+// one's remove-and-reclaim finished first would leave the second one comparing its own
+// (now-stale) snapshot against content the first caller had since replaced, off by exactly the
+// window between "read to compare" and "remove". Closing that gap needed a real mutual-exclusion
+// primitive, not a tighter comparison — see acquireStaleClaimLock and examineAndMaybeReclaim,
+// which now serialize the whole read-judge-remove decision so at most one caller is ever inside
+// it at a time. removeIfUnchanged is kept as defense in depth *underneath* that lock (a caller
+// holding the lock still only removes the exact bytes it just read, in case something outside
+// ClaimInFlight's own protocol touched the file), not as the race-closing mechanism itself.
+// Reports whether it actually removed anything, for the tests that exercise it directly.
 func removeIfUnchanged(path string, expected []byte) bool {
 	data, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(data, expected) {
 		return false
 	}
+	if testStaleClaimHook != nil {
+		testStaleClaimHook()
+	}
 	return os.Remove(path) == nil
+}
+
+// testStaleClaimHook, when set by a test, is called the instant removeIfUnchanged has confirmed
+// path's content still matches expected but before its own os.Remove executes — the one
+// deterministic way to force the exact interleaving finding #1 (round 3) describes: another
+// caller's entire read-compare-remove-reclaim cycle landing, unseen, in the gap between this
+// compare succeeding and this remove actually running. Real goroutine scheduling essentially
+// never lands in a gap this narrow by chance, which is exactly why round 2's own regression test
+// for this same finding could pass while the bug remained — it never forced the interleaving,
+// only hoped for it. Always nil outside a test; a test that sets this must restore it to nil
+// (e.g. via t.Cleanup) before returning, so it never leaks into an unrelated test.
+var testStaleClaimHook func()
+
+// staleClaimLockPath derives the lock directory path for the claim file at path: a fixed,
+// deterministic name (path + ".lock") every concurrent caller derives the same way, so
+// os.Mkdir's atomicity on that one path is the actual serialization primitive — POSIX guarantees
+// exactly one caller's mkdir on a given path succeeds when several race it, with every other
+// caller getting EEXIST.
+func staleClaimLockPath(path string) string {
+	return path + ".lock"
+}
+
+// acquireStaleClaimLock serializes ClaimInFlight's entire "is the claim at path stale, and if so
+// reclaim it" decision against every other concurrent caller for the same path. A caller that
+// fails to os.Mkdir the lock dir (another caller currently holds it) backs off and retries,
+// bounded by lockAttempts/lockRetryDelay — it never proceeds to examine or reclaim the claim
+// without holding this lock first. A lock dir found older than lockStaleAfter is judged
+// abandoned (the only way to hold this lock for that long is a process that died — kill -9 —
+// mid-critical-section, since the section itself is only ever a couple of file operations) and
+// is removed so a crash here cannot wedge every future caller for this target env forever; after
+// removing it this call simply loops back and retries the os.Mkdir like any other contended
+// attempt, rather than assuming it now owns the lock.
+//
+// This is what actually closes the race compare-and-remove alone could not: by the time any
+// second caller enters its own examine, the first caller's full read-judge-remove-or-not
+// sequence has already completed and released — so the second caller's examine reflects
+// whatever is really at path *now* (a fresh live claim it must not touch, or genuinely still-
+// absent state), never a snapshot taken before the first caller's own write landed.
+func acquireStaleClaimLock(path string) (release func(), err error) {
+	lockPath := staleClaimLockPath(path)
+	for attempt := 0; attempt < lockAttempts; attempt++ {
+		if mkErr := os.Mkdir(lockPath, 0o700); mkErr == nil {
+			released := false
+			return func() {
+				if released {
+					return
+				}
+				released = true
+				_ = os.Remove(lockPath)
+			}, nil
+		} else if !errors.Is(mkErr, os.ErrExist) {
+			return nil, fmt.Errorf("acquiring stale-claim lock: %w", mkErr)
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(info.ModTime()) > lockStaleAfter {
+				// Best-effort: if this fails (someone else already removed it, or is about to),
+				// just fall through to the retry below and let the next os.Mkdir decide.
+				_ = os.Remove(lockPath)
+				continue
+			}
+		}
+		time.Sleep(lockRetryDelay)
+	}
+	return nil, fmt.Errorf("gave up waiting %s for the stale-claim lock at %s", time.Duration(lockAttempts)*lockRetryDelay, lockPath)
+}
+
+// examineAndMaybeReclaim is ClaimInFlight's entire "is this claim stale, and if so reclaim it"
+// decision, executed under acquireStaleClaimLock so at most one concurrent caller for path is
+// ever inside it. It returns the state a fresh examineExisting found while holding the lock
+// (which may differ from whatever an earlier, unlocked probe saw — that earlier probe is never
+// trusted to decide anything, only this one is) and, when that state is existingStale, has
+// already removed the claim file before returning — the caller has nothing left to do for that
+// case but retry its own create.
+func examineAndMaybeReclaim(path string) (existingClaimState, error) {
+	release, err := acquireStaleClaimLock(path)
+	if err != nil {
+		return existingUnknown, err
+	}
+	defer release()
+	state, raw := examineExisting(path)
+	if state == existingStale {
+		removeIfUnchanged(path, raw)
+	}
+	return state, nil
 }
