@@ -168,14 +168,8 @@ func TestBuildPlanRefusesTaglessPinnedSource(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "ghcr.io/example/api:") || !strings.Contains(err.Error(), "a tag is required") {
 		t.Errorf("error must name the repo and say a tag is required: %v", err)
 	}
-	// The same rule with nothing in the target to write: still a plan failure (the tagless
-	// source is wrong regardless), and only the BuildPlan layer can catch it here.
-	r = twoEnvRepo(t,
-		deployment("api", "api", "ghcr.io/example/api@"+digestA),
-		deployment("api", "api", "ghcr.io/example/other:v1@"+digestC))
-	if _, err := BuildPlan(r, "staging", "production", promotable, nil); err == nil || !strings.Contains(err.Error(), "a tag is required") {
-		t.Errorf("tagless source with no target occurrence: err = %v", err)
-	}
+	// With nothing in the target to write the same ref is a warning, not a failure:
+	// TestBuildPlanSourceOnlyUnwritableWarns.
 	// A tagless override is refused the same way; one carrying both parts satisfies it.
 	r = twoEnvRepo(t,
 		deployment("api", "api", "ghcr.io/example/api@"+digestA),
@@ -186,6 +180,91 @@ func TestBuildPlanRefusesTaglessPinnedSource(t *testing.T) {
 	p, err := BuildPlan(r, "staging", "production", promotable, map[string]image.Ref{"ghcr.io/example/api": {Tag: "v2", Digest: digestA}})
 	if err != nil || len(p.Edits) != 1 || p.Edits[0].New.String() != "ghcr.io/example/api:v2@"+digestA {
 		t.Fatalf("plan with tag+digest override: %+v, %v", p.Edits, err)
+	}
+}
+
+// A promotable repo that runs only in the source env, as a ref hoist could never write,
+// must not abort the plan for every other repo: nothing would be written for it, so
+// invariant 1 is not at stake (issue #13; AGENTS.md principle 5). It is reported as
+// source-only-unpinned, naming the repo, why it could not be planned and its occurrences,
+// and the other repos' edits are unaffected.
+func TestBuildPlanSourceOnlyUnwritableWarns(t *testing.T) {
+	target := deployment("api", "api", "ghcr.io/example/api:v0@"+digestC)
+	for name, tc := range map[string]struct{ ref, why string }{
+		"bare tag":        {"ghcr.io/example/side:v2", "bare tag"},
+		"implicit latest": {"ghcr.io/example/side", "bare tag"},
+		"tagless digest":  {"ghcr.io/example/side@" + digestB, "a tag is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := twoEnvRepo(t,
+				deployment("api", "api", "ghcr.io/example/api:v1@"+digestA, "side", tc.ref),
+				target)
+			p, err := BuildPlan(r, "staging", "production", promotable, nil)
+			if err != nil {
+				t.Fatalf("source-only unwritable ref failed the whole plan: %v", err)
+			}
+			if len(p.Edits) != 1 || p.Edits[0].Container != "api" || p.Edits[0].New.String() != "ghcr.io/example/api:v1@"+digestA {
+				t.Errorf("edits = %+v, want the one api edit intact", p.Edits)
+			}
+			if len(p.Warnings) != 1 {
+				t.Fatalf("warnings = %+v, want exactly one", p.Warnings)
+			}
+			w := p.Warnings[0]
+			if w.Code != WarnSourceOnlyUnpinned {
+				t.Errorf("warning code = %q, want %q", w.Code, WarnSourceOnlyUnpinned)
+			}
+			if len(w.Occurrences) != 1 || w.Occurrences[0].Container != "side" || w.Occurrences[0].Ref.String() != mustRef(t, tc.ref).String() {
+				t.Errorf("warning occurrences = %+v, want side's one occurrence", w.Occurrences)
+			}
+			for _, want := range []string{"ghcr.io/example/side", tc.why, "no occurrence in production", "cluster/apps/staging/api/app.yaml:12 Deployment/api container=side"} {
+				if !strings.Contains(w.Message, want) {
+					t.Errorf("warning lacks %q: %s", want, w.Message)
+				}
+			}
+			if len(p.Untouched) != 0 {
+				t.Errorf("Untouched = %+v, want none", p.Untouched)
+			}
+		})
+	}
+}
+
+// The positive control for the case above: the same source ref with an occurrence in the
+// target would need a write, and the plan still fails exactly as before.
+func TestBuildPlanSourceUnwritableWithTargetStillRefused(t *testing.T) {
+	for name, tc := range map[string]struct{ ref, want string }{
+		"bare tag":       {"ghcr.io/example/side:v2", "ghcr.io/example/side: ghcr.io/example/side:v2 runs as side in staging, a bare tag with no digest; nothing hoist writes is a bare tag (AGENTS.md §4.2) — supply a digest for this repo"},
+		"tagless digest": {"ghcr.io/example/side@" + digestB, "ghcr.io/example/side: ghcr.io/example/side@" + digestB + " runs as side in staging, a digest with no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required — supply a digest override for this repo carrying both the tag and the digest"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := twoEnvRepo(t,
+				deployment("api", "api", "ghcr.io/example/api:v1@"+digestA, "side", tc.ref),
+				deployment("api", "api", "ghcr.io/example/api:v0@"+digestC, "side", "ghcr.io/example/side:v1@"+digestC))
+			_, err := BuildPlan(r, "staging", "production", promotable, nil)
+			if err == nil {
+				t.Fatal("unwritable source ref with a target occurrence accepted")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("err = %q\nwant %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A digest override still wins for a source-only repo: the ref becomes writable, so the
+// warning is the ordinary missing-in-target one and there is still nothing to edit.
+func TestBuildPlanSourceOnlyOverrideSilencesWarning(t *testing.T) {
+	r := twoEnvRepo(t,
+		deployment("api", "api", "ghcr.io/example/api:v1@"+digestA, "side", "ghcr.io/example/side:v2"),
+		deployment("api", "api", "ghcr.io/example/api:v0@"+digestC))
+	p, err := BuildPlan(r, "staging", "production", promotable, map[string]image.Ref{"ghcr.io/example/side": {Tag: "v2", Digest: digestB}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Edits) != 1 || p.Edits[0].Container != "api" {
+		t.Errorf("edits = %+v, want only the api edit", p.Edits)
+	}
+	if len(p.Warnings) != 1 || p.Warnings[0].Code != WarnMissingInTarget || !strings.Contains(p.Warnings[0].Message, "ghcr.io/example/side") {
+		t.Errorf("warnings = %+v, want one %s for side and no %s", p.Warnings, WarnMissingInTarget, WarnSourceOnlyUnpinned)
 	}
 }
 
