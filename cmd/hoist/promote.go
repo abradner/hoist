@@ -356,16 +356,18 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 	// since the operator just asked for it again.
 	if prev, err := engine.LoadState(statePath); err == nil && prev != nil && prev.ID == id {
 		s.History = prev.History
-		// Policy fields (CINone/CIGrace/Approval/Approvers/Collaborators), set above from
-		// eff.cfg, are overwritten here with what the existing state file already persisted —
-		// mirroring runResume's own fix (cmd/hoist/resume.go, commit f3b1c53) for the identical
-		// bug at this sibling call site: PromotionState's doc comment (internal/engine/state.go)
-		// states these are policy "as of when this promotion started", carried forward so a
-		// promotion never straddles two different policies mid-flight. Re-confirming a plan
-		// whose id already has a state file is still a resume of THAT promotion, not a new
-		// one — leaving these fresh from current config would let an operator's mid-flight
-		// config edit retroactively change what policy an already-started promotion enforces,
-		// exactly the bug runResume was fixed for.
+		// Base, and the policy fields (CINone/CIGrace/Approval/Approvers/Collaborators), set
+		// above from the caller's base/eff.cfg, are overwritten here with what the existing
+		// state file already persisted — mirroring runResume's own fix (cmd/hoist/resume.go,
+		// commit f3b1c53) for the identical bug at this sibling call site: PromotionState's doc
+		// comment (internal/engine/state.go) states these are policy "as of when this promotion
+		// started", carried forward so a promotion never straddles two different policies
+		// mid-flight. Re-confirming a plan whose id already has a state file is still a resume
+		// of THAT promotion, not a new one — leaving these fresh from the current base/config
+		// would let a re-run with a different --base (or the TUI path's own implicit default)
+		// retroactively redirect an already-started promotion, disagreeing with the PR/worktree
+		// it already built against and later Blocking on pr.Base != s.Base (Copilot review).
+		s.Base = prev.Base
 		s.CINone = prev.CINone
 		s.CIGrace = prev.CIGrace
 		s.Approval = prev.Approval

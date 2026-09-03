@@ -327,6 +327,69 @@ func TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
 	}
 }
 
+// TestPromoteRetryKeepsPersistedBase is the sibling regression to
+// TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits, for --base specifically (Copilot
+// review): buildPromotionForConfirm restored every OTHER policy field (CINone, Approval, ...)
+// from a previously-persisted state, but always overwrote s.Base from the CURRENT --base flag
+// regardless — a retry (or the TUI's own implicit default) passing a different --base than the
+// promotion originally started with would silently redirect an already-started promotion,
+// disagreeing with the PR/worktree it already built against. This starts a promotion under
+// --base main, lets it sit waiting on approval (never posted), retries with a DIFFERENT --base
+// value (one that doesn't even need to exist as a real branch — the fix must never let it reach
+// a real git operation) and confirms the persisted state still names "main".
+func TestPromoteRetryKeepsPersistedBase(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "main"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval (no comment posted yet), got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	if states[0].Base != "main" {
+		t.Fatalf("expected the first run to persist Base=main, got %q", states[0].Base)
+	}
+
+	// Retry with a DIFFERENT --base — one that need not even exist as a real branch, since the
+	// fix must restore the persisted value before anything git-related ever sees it.
+	retryArgs := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "some-other-branch-that-does-not-exist"}
+	out.Reset()
+	errOut.Reset()
+	if got := run(retryArgs, &out, &errOut); got == 0 {
+		t.Fatalf("retry should still be waiting on alice's comment, got success: %s", out.String())
+	}
+
+	states, err = engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].Base != "main" {
+		t.Fatalf("retry with a different --base must not overwrite the persisted Base; got states=%+v", states)
+	}
+}
+
 // TestPromoteNothingToDoIsANoOp exercises runPromote's own "every edit is already a no-op"
 // guard directly: after the first promotion's PR is merged conceptually (here: after the
 // content already matches, committed so the clone is clean relative to --base), promoting the
