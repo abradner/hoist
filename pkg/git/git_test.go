@@ -312,6 +312,34 @@ func TestIsAncestor(t *testing.T) {
 	}
 }
 
+// TestObjectExists is the direct real-git regression for MergedStep.mergeWasReverted's own
+// negative-path contract (round-9 finding: only exercised indirectly via engine-level tests
+// before this) — a well-formed but missing sha must be exists=false, err=nil (never treated as
+// a failure, since this is the ordinary "the base was reset past this commit" case), while a
+// genuinely malformed rev is a real error, so revert-detection logic can't silently regress
+// without a dedicated test in this package noticing.
+func TestObjectExists(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	head, ok, err := g.RevParse(ctx(), cloneDir, "HEAD")
+	if err != nil || !ok {
+		t.Fatalf("RevParse HEAD: ok=%v err=%v", ok, err)
+	}
+
+	if exists, err := g.ObjectExists(ctx(), cloneDir, head); err != nil || !exists {
+		t.Fatalf("HEAD should exist: exists=%v err=%v", exists, err)
+	}
+	const wellFormedButMissing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if exists, err := g.ObjectExists(ctx(), cloneDir, wellFormedButMissing); err != nil {
+		t.Fatalf("a well-formed but missing sha must not be a real error, got: %v", err)
+	} else if exists {
+		t.Fatal("a sha no commit in this repo ever produced must not report exists=true")
+	}
+	if _, err := g.ObjectExists(ctx(), cloneDir, "not-a-real-sha"); err == nil {
+		t.Fatal("a malformed rev should be a real error, not a false negative")
+	}
+}
+
 // TestFetchBranchMissingBranchReturnsNotOK is FetchBranch's real-git regression for classifying
 // a branch that plain does not exist on the remote: ok=false, err=nil, not a stderr-text match.
 // This exercises the real fix (an authoritative LsRemoteBranch re-check after the fetch errors)
