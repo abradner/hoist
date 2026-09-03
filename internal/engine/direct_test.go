@@ -198,6 +198,66 @@ func TestDirectModeReObserveToleratesBaseAdvancingFurther(t *testing.T) {
 	}
 }
 
+// TestDirectModeDoesNotTreatRevertedContentAsSatisfied is the flip side of
+// TestDirectModeReObserveToleratesBaseAdvancingFurther, and the reason ancestry alone was
+// replaced with a content comparison (DirectPushedStep.Observe's own doc comment): a direct
+// promotion's own commit remains an ancestor of Base's tip FOREVER once pushed, even after
+// someone `git revert`s it — a revert commit undoes the file content but never removes the
+// reverted commit from history. The old ancestor-only check could not tell "Base advanced with
+// an unrelated later change" (content still matches — genuinely still satisfied) from "this
+// exact promotion was reverted" (content no longer matches — must not read as satisfied): both
+// have "this promotion's commit is still an ancestor" equally true. Re-running the identical
+// promotion after a revert must not exit as if it were already done — it planned digest is no
+// longer actually present at the tip, so Observe must report unsatisfied, and Act's own push
+// must then either restore it or surface a real conflict, never silently do nothing.
+func TestDirectModeDoesNotTreatRevertedContentAsSatisfied(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	first := newState(fx, wt)
+	if err := Drive(ctx(), DirectSteps(g, nil, true, nil), first, nil); err != nil {
+		t.Fatalf("first Drive: %v", err)
+	}
+
+	// Someone reverts the promotion's own commit, from a separate clone, and pushes the revert
+	// straight to main — first.CommitSHA remains an ancestor of the new tip (revert commits never
+	// remove history), but the file content it changed is now back to what it was before.
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	runHost(t, other, "revert", "--no-edit", first.CommitSHA)
+	runHost(t, other, "push", "-q", "origin", "main")
+
+	// Re-observe the exact same promotion, as a restarted `hoist promote` process would build
+	// it: a fresh PromotionState, same worktree (still holding its own single, un-reverted
+	// commit — nothing here touches fx.cloneDir or the worktree itself).
+	resumed := newState(fx, wt)
+	// CommittedStep must run first in a real Drive to populate ExpectedBlobs/CommitSHA; do that
+	// here too, exactly as Drive would, before asking DirectPushedStep about it.
+	if _, err := (CommittedStep{Git: g}).Observe(ctx(), resumed); err != nil {
+		t.Fatalf("CommittedStep.Observe: %v", err)
+	}
+	obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("should not be satisfied: the promotion's own commit was reverted, its planned content is no longer at the tip — got %+v", obs)
+	}
+	if resumed.PushedSHA != "" {
+		t.Fatalf("PushedSHA must not be set when the planned content isn't actually present, got %q", resumed.PushedSHA)
+	}
+
+	// Driving the whole thing end to end: Act must not silently succeed doing nothing — the
+	// worktree's own HEAD (first.CommitSHA, unreverted, based on the ORIGINAL pre-revert base)
+	// is no longer a fast-forward of the current tip (the revert moved main to a new commit
+	// whose tree differs), so the push is rejected as a real conflict rather than replayed.
+	err = Drive(ctx(), DirectSteps(g, nil, true, nil), newState(fx, wt), nil)
+	if err == nil {
+		t.Fatal("Drive should not report success after this promotion's commit was reverted upstream — nothing restores the promoted digest silently")
+	}
+}
+
 // newTwoFamilyOrigin is like newFixtureOrigin but with two independent families (distinct
 // registry prefixes, so BuildPlan can be scoped to exactly one of them per plan): "app" under
 // ghcr.io/example/, and "app2" under ghcr.io/example2/. Used only by

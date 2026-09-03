@@ -166,6 +166,15 @@ type Git interface {
 	// happen to make an earlier PR on stale content unreachable (see steps_m4.go's doc
 	// comment); CommitTime lets Approved state that fact directly instead of leaning on it.
 	CommitTime(ctx context.Context, dir, sha string) (time.Time, error)
+	// WorktreeAtRef creates a throwaway, detached linked worktree of cloneDir at dir, checked
+	// out at ref exactly as it resolves right now — no branch is created, reused or advanced,
+	// unlike Worktree. The caller owns dir and must call RemoveWorktree once done reading from
+	// it; dir is meant to be read from and discarded within one invocation, never reused across
+	// a restart. Added for direct mode's own discovery/planning pass (cmd/hoist/promote.go): it
+	// reads a fresh, uncommitted snapshot of origin/<base>'s current tree — never cloneDir's own
+	// checked-out branch or working files (AGENTS.md §4.6) — so direct mode never has to trust
+	// cloneDir's local disk being current with origin/<base> the way discovery historically has.
+	WorktreeAtRef(ctx context.Context, cloneDir, dir, ref string) error
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -737,6 +746,17 @@ func (e Exec) Log(ctx context.Context, worktreeDir, revRange string) ([]string, 
 		}
 	}
 	return shas, sc.Err()
+}
+
+// WorktreeAtRef implements Git.
+func (e Exec) WorktreeAtRef(ctx context.Context, cloneDir, dir, ref string) error {
+	if err := guardDisposablePath(cloneDir, dir); err != nil {
+		return err
+	}
+	if _, err := e.run(ctx, cloneDir, "worktree", "add", "--detach", dir, ref); err != nil {
+		return fmt.Errorf("git worktree add --detach %s %s: %w", dir, ref, err)
+	}
+	return nil
 }
 
 // WorktreeBranch implements Git.

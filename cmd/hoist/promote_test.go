@@ -568,6 +568,73 @@ func TestPromoteFetchesOriginFreshBeforeTrustingClone(t *testing.T) {
 	}
 }
 
+// TestPromoteDirectRefusesWhenOriginHasAnOccurrenceLocalDoesNotKnow is
+// checkNoMissingOccurrenceAtFreshBase's own regression test (round-N finding,
+// "base-advanced-with-new-occurrence"): origin/main gains an entirely new family — a second
+// occurrence of a promotable image repo — via a route that never touches the primary clone at
+// all (a second, independent clone standing in for another operator's own direct-mode run, or
+// any other route to origin that bypasses this checkout entirely). The primary clone's own
+// local disk has no idea this family exists at all: gitops.Discover reading it never sees the
+// file, so plan.Edits never mentions it, and checkCloneCurrentForBase — which only validates
+// files plan.Edits already names — has nothing to compare it against either. Without this
+// check, direct mode would silently promote only the family it already knew about and leave the
+// new one on its old image, violating AGENTS.md principle 3's "every occurrence" contract. With
+// it, the whole run refuses outright, naming the file, rather than silently under-promoting.
+//
+// Mutant-verified: removing the checkNoMissingOccurrenceAtFreshBase call in runPromote makes
+// this test fail — the promotion proceeds and reports success while app2 is never touched.
+func TestPromoteDirectRefusesWhenOriginHasAnOccurrenceLocalDoesNotKnow(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	origin := originURL(t, clone)
+
+	// A second, independent clone adds a brand-new family under the SAME promotable prefix and
+	// pushes it straight to origin — never through the primary clone.
+	second := filepath.Join(t.TempDir(), "second-clone")
+	runGitHost(t, "", "clone", "-q", origin, second)
+	digestApp2Staging := "sha256:" + strings.Repeat("9", 64)
+	digestApp2Prod := "sha256:" + strings.Repeat("8", 64)
+	wrapper := func(env string) string {
+		return "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: app2-" + env + "\n  namespace: argocd\n" +
+			"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/" + env + "/app2\n" +
+			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
+	}
+	deployment := func(ref string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app2\nspec:\n  template:\n    spec:\n      containers:\n        - name: app2\n          image: " + ref + "\n"
+	}
+	write := func(rel, content string) {
+		p := filepath.Join(second, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("cluster/apps/app-staging-app2.yaml", wrapper("app-staging"))
+	write("cluster/apps/app-production-app2.yaml", wrapper("app-production"))
+	write("cluster/apps/app-staging/app2/deployment.yaml", deployment("ghcr.io/example/app2:v2@"+digestApp2Staging))
+	write("cluster/apps/app-production/app2/deployment.yaml", deployment("ghcr.io/example/app2:v1@"+digestApp2Prod))
+	runGitHost(t, second, "add", ".")
+	runGitHost(t, second, "commit", "-q", "-m", "add app2, straight to origin, bypassing the primary clone")
+	runGitHost(t, second, "push", "-q", "origin", "main")
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected refusal — origin has an occurrence (app2) the primary clone's local disk never knew about; got exit 0, stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must never report false success while silently missing an occurrence: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "app2") {
+		t.Fatalf("stderr should name the missing occurrence's file (app2): %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should ever be involved in direct mode: %+v", f.PRs())
+	}
+}
+
 // TestPromoteRefusesUnpushedLocalCommitAheadOfOrigin is round 5's finding 2 regression test: the
 // clone's local main branch carries a commit changing the production file that origin does NOT
 // have (an ordinary unpushed local commit — no direct-mode promotion involved at all). The

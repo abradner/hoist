@@ -26,3 +26,27 @@ package engine
 // direct-mode promotion is never mistaken for foreign drift. This package itself still never
 // enforces the checkout is clean or current — that check lives in cmd/hoist, which is what
 // actually knows how to refuse before starting the engine at all.
+//
+// checkCloneCurrentForBase only validates files plan.Edits already names — it has nothing to
+// compare a file against if gitops.Discover never saw that file to begin with. Direct mode's own
+// prior pushes are the one route that can put origin/<base> ahead of the clone's local disk in a
+// way the clone itself never observes (PushHeadTo only ever moves origin's ref; §4.6 forbids
+// touching the clone's own checked-out branch directly, and nothing else refreshes it), so a
+// promotable image repo can gain a whole new occurrence on origin/<base> that the clone's disk
+// has no record of at all — silently left on the old image, since nothing ever asked about it.
+// cmd/hoist's own checkNoMissingOccurrenceAtFreshBase closes that gap alongside
+// checkCloneCurrentForBase, direct mode only: it discovers and plans a second time, from a
+// throwaway detached checkout of origin/<base>'s actual current tree (pkg/git.Git.WorktreeAtRef),
+// and refuses if that finds an occurrence — by file/line/column, never by its current value, since
+// a differing value at an already-known position is exactly what checkCloneCurrentForBase already
+// catches — the clone-based plan doesn't already know about. The PR flow's own worktree is always
+// built directly from the clone's content, whatever it is, and any staleness there surfaces as an
+// ordinary GitHub merge conflict; only direct mode's silent, no-PR write needs this loud a refusal.
+//
+// DirectPushedStep's own re-observe (direct.go) compares planned blob CONTENT at whatever
+// origin/<base>'s current tip is, never mere object-graph ancestry — an earlier revision used
+// git.Git.IsAncestor instead, which could not tell "Base advanced with a distinct, later,
+// legitimate change that never touches these paths" (content still matches; genuinely still
+// satisfied) from "this exact promotion was reverted" (this promotion's commit remains an
+// ancestor forever — a revert never removes it from history — but the content it changed is no
+// longer at the tip). See DirectPushedStep.Observe's own doc comment for the full reasoning.

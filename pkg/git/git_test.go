@@ -141,6 +141,67 @@ func TestWorktreeRecoversFromStaleDirectory(t *testing.T) {
 	}
 }
 
+// TestWorktreeAtRefChecksOutDetachedSnapshot is WorktreeAtRef's own regression test (added for
+// cmd/hoist's direct-mode discoverAtFreshBase): the snapshot must reflect ref's actual content —
+// not the clone's own checked-out branch — and must not create or advance any branch, local or
+// remote (a plain detached checkout), and RemoveWorktree must clean it up completely, leaving no
+// trace in cloneDir's own worktree registry.
+func TestWorktreeAtRefChecksOutDetachedSnapshot(t *testing.T) {
+	cloneDir, originDir := newTestRepo(t)
+	var g Exec
+
+	// A second, independent commit lands on origin, never touching cloneDir's own checkout.
+	other := filepath.Join(t.TempDir(), "other")
+	if err := runHost(t, "", "clone", originDir, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "add", "second.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "commit", "-m", "second commit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.FetchBranch(ctx(), cloneDir, "origin", "main"); err != nil {
+		t.Fatalf("FetchBranch: %v", err)
+	}
+
+	snap := filepath.Join(t.TempDir(), "snap")
+	if err := g.WorktreeAtRef(ctx(), cloneDir, snap, "origin/main"); err != nil {
+		t.Fatalf("WorktreeAtRef: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snap, "second.txt")); err != nil {
+		t.Fatalf("snapshot should carry the second commit's file (from origin, never cloneDir's own branch): %v", err)
+	}
+	// cloneDir's own checked-out branch is completely untouched (AGENTS.md §4.6): the primary
+	// worktree still shows only the original seed file.
+	if _, err := os.Stat(filepath.Join(cloneDir, "second.txt")); !os.IsNotExist(err) {
+		t.Fatalf("cloneDir's own checkout must not be touched, stat err = %v", err)
+	}
+
+	// The snapshot is detached, not a branch: `git symbolic-ref` fails on a detached HEAD.
+	cmd := exec.Command("git", "-C", snap, "symbolic-ref", "-q", "HEAD")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("WorktreeAtRef should leave the snapshot on a detached HEAD, not a branch")
+	}
+
+	if err := g.RemoveWorktree(ctx(), cloneDir, snap); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	branch, ok, err := g.WorktreeBranch(ctx(), cloneDir, snap)
+	if err != nil {
+		t.Fatalf("WorktreeBranch: %v", err)
+	}
+	if ok {
+		t.Fatalf("snapshot should no longer be registered after RemoveWorktree, got branch=%q", branch)
+	}
+}
+
 func TestWorktreeThenCommitSurvivesReuse(t *testing.T) {
 	cloneDir, originDir := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")

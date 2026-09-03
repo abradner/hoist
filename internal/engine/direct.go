@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/abradner/hoist/pkg/git"
 )
@@ -109,14 +110,26 @@ type DirectPushedStep struct{ Git git.Git }
 // Name implements Step.
 func (DirectPushedStep) Name() StepName { return StepDirectPushed }
 
-// Observe implements Step: satisfied when origin's Base ref already carries this promotion's
-// own commit — either exactly (the common case) or as an ancestor of a tip that has since moved
-// further (AGENTS.md gotcha, same class as MergedStep's own revert check elsewhere in this
-// milestone's history: exact-tip comparison alone cannot distinguish "Base advanced further with
-// a distinct, later, legitimate change" — this promotion's commit is still genuinely pushed —
-// from "Base was rewound or replaced" — a real conflict. Only the second is Blocked-worthy; the
-// first must read as done, not retried). A Base ref that exists but carries neither this
-// promotion's own commit nor an ancestor relationship to it is reported unsatisfied, not
+// Observe implements Step: satisfied when origin's Base ref already carries what this
+// promotion actually planned to write — either because the tip IS this promotion's own commit
+// (the common case, checked by exact equality first) or because every one of this promotion's
+// planned paths already matches its planned content at whatever the tip currently is (AGENTS.md
+// gotcha, same class as MergedStep's own revert check elsewhere in this milestone's history).
+//
+// This deliberately compares planned blob CONTENT at the tip, never mere object-graph ANCESTRY
+// (an earlier revision of this method used git.Git.IsAncestor instead — reverted here; see this
+// package's own doc.go for the history). Ancestry alone cannot tell two cases apart that need
+// opposite answers: "Base advanced further with a distinct, later, legitimate change" (this
+// promotion's own commit is still an ancestor, AND the planned content is still genuinely there
+// — Satisfied is correct) from "someone git-reverted this exact promotion's commit" (this
+// promotion's own commit remains an ancestor forever — a revert commit never removes it from
+// history — but the file content it changed is no longer at the tip; treating that as Satisfied
+// would let a re-run of the identical promotion exit "successfully" without restoring anything).
+// Comparing content directly gets both right without needing the ancestry relationship at all: a
+// legitimate later change that never touches these paths still matches, and a revert (or any
+// other rewrite) that changes them back no longer does.
+//
+// A Base ref that exists but doesn't yet carry the planned content is reported unsatisfied, not
 // Blocked — Act's own push is what actually discovers whether that is "not pushed yet" or "a
 // genuine conflict" (mirroring PushedStep's shape one step later, since direct mode has no
 // separate branch push to observe first).
@@ -132,26 +145,41 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 		s.PushedSHA = remoteSHA
 		return Observation{Satisfied: true, Detail: "origin/" + s.Base + " is already at " + remoteSHA}, nil
 	}
-	// remoteSHA differs from this promotion's own commit. Fetch first: IsAncestor needs the
-	// object for remoteSHA to actually exist in s.CloneDir's own repository (a bare sha from
-	// LsRemoteBranch alone is not enough — merge-base operates on local history), and
-	// FetchBranch only ever refreshes the remote-tracking ref, never s.CloneDir's own local
-	// branch of the same name (AGENTS.md §4.6; see FetchBranch's own doc comment in pkg/git).
+	// remoteSHA differs from this promotion's own commit. Fetch first: the per-path content
+	// check below needs the object for remoteSHA to actually exist in s.CloneDir's own
+	// repository (a bare sha from LsRemoteBranch alone is not enough — ls-tree operates on
+	// local history), and FetchBranch only ever refreshes the remote-tracking ref, never
+	// s.CloneDir's own local branch of the same name (AGENTS.md §4.6; see FetchBranch's own doc
+	// comment in pkg/git).
 	if _, _, err := d.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
 		return Observation{}, err
 	}
-	isAncestor, err := d.Git.IsAncestor(ctx, s.CloneDir, s.CommitSHA, remoteSHA)
-	if err != nil {
-		return Observation{}, err
+	// s.ExpectedBlobs is guaranteed populated by the time this runs: Drive runs steps strictly
+	// in order (engine.go) and CommittedStep — which always computes it before reporting
+	// Satisfied — precedes this step in DirectSteps' own list.
+	paths := make([]string, 0, len(s.ExpectedBlobs))
+	for p := range s.ExpectedBlobs {
+		paths = append(paths, p)
 	}
-	if isAncestor {
-		s.PushedSHA = s.CommitSHA
-		return Observation{Satisfied: true, Detail: fmt.Sprintf(
-			"origin/%s has moved to %s, but this promotion's own commit %s is still an ancestor of it — already pushed, not reverted",
-			s.Base, remoteSHA, s.CommitSHA,
-		)}, nil
+	sort.Strings(paths)
+	for _, p := range paths {
+		blob, ok, err := d.Git.LsTreeBlob(ctx, s.CloneDir, remoteSHA, p)
+		if err != nil {
+			return Observation{}, err
+		}
+		if !ok || blob != s.ExpectedBlobs[p] {
+			return Observation{Satisfied: false}, nil
+		}
 	}
-	return Observation{Satisfied: false}, nil
+	// PushedSHA names THIS promotion's own commit, not whatever else the tip now is — mirroring
+	// the exact-match branch above and PushedStep's own field semantics: "PushedSHA" confirms
+	// this promotion's own commit is effectively present, not "here is the tip's current SHA"
+	// (which s.Base's own remote ref already tells a caller, if that's what they want).
+	s.PushedSHA = s.CommitSHA
+	return Observation{Satisfied: true, Detail: fmt.Sprintf(
+		"origin/%s has moved to %s (not this promotion's own commit %s), but every planned path still matches the planned content there — already effectively promoted, not reverted",
+		s.Base, remoteSHA, s.CommitSHA,
+	)}, nil
 }
 
 // Act implements Step.

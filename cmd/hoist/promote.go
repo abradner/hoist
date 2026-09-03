@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -174,6 +175,113 @@ func shortRev(sha string) string {
 	return sha
 }
 
+// discoverAtFreshBase fetches origin/base fresh (never a cached ref) and checks out its exact
+// current tip into a throwaway, detached worktree — never cloneDir's own checked-out branch or
+// working files (AGENTS.md §4.6) — so a caller can discover and plan against exactly what
+// origin/base currently holds, independent of whatever cloneDir's own local disk happens to
+// show. Used only by checkNoMissingOccurrenceAtFreshBase below, as a cross-check: planning
+// itself still reads from cloneDir, exactly as it always has (see checkCloneCurrentForBase's own
+// doc comment for why that source, and its own validate-and-refuse dance, is kept — resolving a
+// promotable digest from the "manifest" source, in particular, means the source env's own local
+// content is meant to be authoritative, unpushed edits included, not silently overridden by
+// whatever origin happens to hold).
+//
+// Returns the snapshot directory and a cleanup func the caller must call once done reading from
+// it (nothing here needs to survive past that one comparison; cleanup is idempotent-safe to call
+// more than once or after a partial failure).
+func discoverAtFreshBase(ctx context.Context, g git.Git, cloneDir, base string) (dir string, cleanup func(), err error) {
+	if _, _, err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
+		return "", nil, fmt.Errorf("fetching origin/%s: %w", base, err)
+	}
+	// Mirrors pkg/git.Exec's own resolveBase: prefer the remote-tracking ref whenever it
+	// exists, falling back to the bare branch name only for a repo with no "origin" configured
+	// at all, or one nothing has ever fetched from — resolveBase's own doc comment explains why
+	// (some tests construct exactly that; a real clone always has one after the fetch above).
+	ref := base
+	if _, ok, rerr := g.RevParse(ctx, cloneDir, "origin/"+base); rerr != nil {
+		return "", nil, rerr
+	} else if ok {
+		ref = "origin/" + base
+	}
+	tmp, err := os.MkdirTemp("", "hoist-direct-discover-*")
+	if err != nil {
+		return "", nil, err
+	}
+	snap := filepath.Join(tmp, "base")
+	cleanup = func() {
+		_ = g.RemoveWorktree(context.Background(), cloneDir, snap)
+		_ = os.RemoveAll(tmp)
+	}
+	if err := g.WorktreeAtRef(ctx, cloneDir, snap, ref); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("checking out a throwaway snapshot of %s: %w", ref, err)
+	}
+	return snap, cleanup, nil
+}
+
+// checkNoMissingOccurrenceAtFreshBase is direct mode's own addition alongside
+// checkCloneCurrentForBase (round-N finding, "base-advanced-with-new-occurrence"): it
+// independently discovers and plans from a throwaway, freshly-fetched snapshot of origin/base's
+// current tree, then refuses if that discovers any occurrence — identified by file/line/column,
+// never by its current value, since a differing value at an ALREADY-known position is exactly
+// what checkCloneCurrentForBase already validates — that plan (built from cloneDir's own disk,
+// same as always) does not already know about at all.
+//
+// Only direct mode needs this: only direct mode's own prior pushes can put origin/base ahead of
+// cloneDir's local disk in a way cloneDir itself never observes (PushHeadTo never advances
+// cloneDir's own checked-out branch — AGENTS.md §4.6 — and nothing else refreshes it either).
+// The PR flow's own worktree is always built directly from cloneDir's content, whatever it is,
+// and any staleness there surfaces as an ordinary merge conflict on GitHub — a softer failure
+// this check does not need to guard against.
+//
+// planDigests is reused as-is from the caller's own already-completed resolution (pods/manifest/
+// registry): this is only about which occurrences BuildPlan finds, never a second, independent
+// digest resolution against the fresh snapshot — the source env's own local content stays
+// authoritative for what digest is "current" (discoverAtFreshBase's own doc comment).
+func checkNoMissingOccurrenceAtFreshBase(ctx context.Context, g git.Git, cloneDir, base, appsRoot, src, dst string, prefixes []string, planDigests map[string]image.Ref, plan gitops.Plan) error {
+	snap, cleanup, err := discoverAtFreshBase(ctx, g, cloneDir, base)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	freshRepo, err := gitops.Discover(snap, appsRoot)
+	if err != nil {
+		return fmt.Errorf("discovering origin/%s's own current tree: %w", base, err)
+	}
+	freshPlan, err := gitops.BuildPlan(freshRepo, src, dst, prefixes, planDigests)
+	if err != nil {
+		return fmt.Errorf("planning against origin/%s's own current tree: %w", base, err)
+	}
+
+	known := make(map[string]bool, len(plan.Edits))
+	for _, e := range plan.Edits {
+		known[occurrencePositionKey(e.Occurrence)] = true
+	}
+	var missing []string
+	for _, e := range freshPlan.Edits {
+		if !known[occurrencePositionKey(e.Occurrence)] {
+			missing = append(missing, fmt.Sprintf("%s (line %d)", e.File, e.Line))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf(
+		"origin/%s has occurrence(s) %s's own local checkout doesn't know about at all: %s — fetch/merge to update your clone and re-run; direct mode never writes a file it can't already see locally",
+		base, cloneDir, strings.Join(missing, ", "),
+	)
+}
+
+// occurrencePositionKey identifies an occurrence by WHERE it is, never by its current value —
+// the same physical scalar discovered from two different snapshots (cloneDir's disk, origin's
+// fresh tree) shares this key even when the two disagree on content, which is exactly the case
+// checkCloneCurrentForBase already handles separately.
+func occurrencePositionKey(o gitops.Occurrence) string {
+	return fmt.Sprintf("%s#%d:%d", o.File, o.Line, o.Col)
+}
+
 func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist promote", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -290,6 +398,21 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err := checkCloneCurrentForBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
+	}
+
+	// Direct mode's own additional gap (round-N finding, "base-advanced-with-new-occurrence"):
+	// checkCloneCurrentForBase above only validates files plan.Edits already names — it cannot
+	// catch an occurrence origin/*base has gained that eff.repo's own local disk never had at
+	// all, since gitops.Discover above never saw that file to begin with. This is specific to
+	// direct mode: only direct mode's own prior pushes can put origin/*base ahead of eff.repo's
+	// local disk in the first place (PushHeadTo never advances eff.repo's own checked-out
+	// branch — AGENTS.md §4.6 — and nothing else refreshes it either), so only direct mode
+	// needs this cross-check.
+	if *direct {
+		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, *from, *to, prefixes, planDigests, plan); err != nil {
+			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+			return exitFailure
+		}
 	}
 
 	changed := false
