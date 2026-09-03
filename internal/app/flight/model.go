@@ -269,6 +269,20 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.busy = false
+	// msg.state is adopted unconditionally, before msg.err is ever classified below — PR #50
+	// round-4 review finding #7 (Codex). driveFn (cmd/hoist/wiring.go) always returns however
+	// far one drive iteration actually got, even when it ends in error: engine.Drive can
+	// create the branch, commit, push and open a PR — each a real, already-persisted change —
+	// before a later step's Act then fails (an auto-approved promotion whose merge or branch
+	// cleanup errors on its very first iteration, say). Before this fix, the error branch below
+	// returned without ever touching m.state, so the screen kept showing whatever it was
+	// constructed with (typically empty: no History, no PR) — o reported no PR to open despite
+	// one having actually been created, and R re-drove from that same stale copy instead of the
+	// real, further-along state driveFn had just handed back and persisted. The success path
+	// already did this unconditionally for itself; this just moves it earlier so the error path
+	// gets it too, matching how far the underlying promotion has actually progressed regardless
+	// of whether this particular poll ended cleanly.
+	m.state = msg.state
 	if msg.err != nil {
 		m.errNotice = redact.Strings(msg.err.Error())
 		if !retryableErr(msg.err) {
@@ -290,10 +304,27 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 	}
 	m.errNotice = ""
 	m.stopped = false
-	m.state = msg.state
 	m.done = msg.done
 	m.rows = DeriveRows(m.order, m.done, msg.statuses)
 	if m.done {
+		return m, nil
+	}
+	if _, blocked := BlockedStep(m.rows); blocked {
+		// Blocked is terminal until an operator resolves the underlying conflict out-of-band
+		// (a same-name branch already on origin with different content, a CI check that
+		// reported failed rather than pending, a rejected approval) — engine.BlockedError's
+		// own doc comment: "retrying will not help". cmd/hoist/wiring.go's DriveFunc
+		// deliberately never surfaces this as msg.err (Blocked is read from the statuses
+		// engine.Status produces, the same way Waiting already is — see DriveFunc's own
+		// comment), so msg.err == nil here and the terminal branch above never runs for it.
+		// Without this check, this screen would otherwise silently repeat the identical
+		// blocked observation and state save every ~2s until poll.Deadline elapsed, exactly
+		// the "stuck polling a promotion nothing will unstick" failure the msg.err-driven
+		// terminal check above already exists to prevent for a StepError — Blocked just
+		// never goes through that path (Codex review, PR #50 round 4). R still lets the
+		// operator retry by hand once the conflict is resolved, same as the msg.err terminal
+		// case above.
+		m.stopped = true
 		return m, nil
 	}
 	return m, m.scheduleTick()
@@ -460,6 +491,14 @@ func (m Model) statusLeft() string {
 		return "promotion complete"
 	}
 	if m.stopped {
+		// A Blocked step (BlockedStep's own doc comment) stops polling via m.stopped too, but
+		// never sets m.errNotice — its own reason is already shown as the blocked row's
+		// Detail, in the step list above, not as a separate notice below. "see error below"
+		// would send the operator looking for text that was never written, so this checks
+		// for that case specifically rather than assuming every stop came with one.
+		if _, blocked := BlockedStep(m.rows); blocked {
+			return "blocked: resolve the conflict, then press R to re-observe"
+		}
 		return "stopped: see error below"
 	}
 	return ""

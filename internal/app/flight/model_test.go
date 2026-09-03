@@ -490,6 +490,75 @@ func TestDriveErrorOnNonRetryableStepStopsPolling(t *testing.T) {
 	}
 }
 
+// TestDriveResultAdoptsStateOnError is PR #50 round-4 review finding #7 (Codex): driveFn
+// always returns however far a single drive iteration actually got, even one that ends in
+// error — a branch, commit, push and PR can all have already succeeded (and been persisted by
+// driveFn's own save callback) before a later step's Act then fails. Before this fix,
+// onDriveResult's error branch returned without ever adopting msg.state, so the screen kept
+// showing whatever it was constructed with — here, a state with no PR at all — even though the
+// state driveFn actually returned (and drove.lastSeen would be re-driven from on a manual R)
+// already has one. This proves m.state is the returned state, not the constructor's original
+// one, once an error result has been processed.
+func TestDriveResultAdoptsStateOnError(t *testing.T) {
+	original := fixtureState() // no PR set
+	withPR := original
+	withPR.PR = &forge.PR{Number: 7, URL: "https://example.invalid/pull/7"}
+	drv := &stubDrive{
+		next: withPR,
+		err:  &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")},
+	}
+	m := New(original, PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, _ = m.Update(batch[1]())
+
+	if url, ok := PRURL(m.state); !ok || url != withPR.PR.URL {
+		t.Errorf("m.state after an errored drive result has PR %v, want the returned state's PR %v (o would report no PR to open otherwise)", m.state.PR, withPR.PR)
+	}
+}
+
+// TestDriveResultBlockedStopsPolling is PR #50 round-4 review finding #5 (Codex):
+// cmd/hoist/wiring.go's DriveFunc deliberately suppresses *engine.BlockedError as msg.err (it
+// is read from the statuses engine.Status produces instead, the same way Waiting already is —
+// see DriveFunc's own comment), so msg.err is nil even when the active step is genuinely
+// Blocked. Before this fix, onDriveResult only ever stopped automatic polling by inspecting
+// msg.err, so a Blocked result — terminal until an operator resolves the underlying conflict,
+// per engine.BlockedError's own doc comment ("retrying will not help") — fell through to the
+// success path and scheduled another tick, repeating the identical blocked observation and
+// state save every poll interval forever. This proves polling stops once the active status is
+// Blocked, exactly like a non-retryable StepError already does, and that a stray tick
+// afterward still does not fire another drive call.
+func TestDriveResultBlockedStopsPolling(t *testing.T) {
+	drv := &stubDrive{statuses: []engine.StepStatus{
+		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
+		{Step: engine.StepCommitted, Observation: engine.Observation{Satisfied: true}},
+		{Step: engine.StepPushed, Observation: engine.Observation{
+			Blocked: "origin/promo-1 already exists with different content",
+		}},
+	}}
+	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, tickCmd := m.Update(batch[1]())
+	if m.busy {
+		t.Error("busy = true after a blocked drive result")
+	}
+	if !m.stopped {
+		t.Error("stopped = false after a blocked drive result, want true (terminal until an operator resolves it)")
+	}
+	if !strings.Contains(m.View(), "already exists with different content") {
+		t.Errorf("view missing the blocked reason:\n%s", m.View())
+	}
+	if tickCmd != nil {
+		t.Error("a blocked drive result still scheduled another poll")
+	}
+	if _, cmd := m.Update(tickMsg{}); cmd != nil {
+		t.Error("a stray tick after a blocked drive result still fired another drive call")
+	}
+}
+
 // TestDriveErrorRedactsRegisteredSecret: a registered credential embedded in a DriveFunc
 // error must not reach View() verbatim, mirroring plan.Model's TestViewRedactsRegisteredSecrets.
 func TestDriveErrorRedactsRegisteredSecret(t *testing.T) {

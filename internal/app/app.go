@@ -48,8 +48,12 @@ type Promotion struct {
 
 // promotionBuiltMsg is delivered once the tea.Cmd wrapping a StartPromotionFunc call finishes
 // (see the plan.StartMsg case below) — an app.go-private message, never exported, since
-// nothing outside the root ever needs to construct or match it.
+// nothing outside the root ever needs to construct or match it. gen is stamped with the
+// issuing Model's own m.buildGen at the moment the request was launched, so Update can drop a
+// stale result the same way flight.Model.onDriveResult already drops a stale driveResultMsg —
+// see Model.buildGen's own doc comment for what "stale" means at this layer.
 type promotionBuiltMsg struct {
+	gen     uint64
 	state   engine.PromotionState
 	driveFn flight.DriveFunc
 	err     error
@@ -82,6 +86,26 @@ type Model struct {
 	// Cleared on the next keypress, mirroring every screen's own per-keypress notice
 	// convention (matrix.Model, plan.Model, flight.Model all clear theirs the same way).
 	notice string
+
+	// buildGen is the generation of the current (or most recently abandoned)
+	// startPromotion request. The plan screen stays fully interactive while its StartMsg's
+	// startPromotion call runs in the background (buildStartPromotion can take a real round
+	// trip to git/the forge) — so before that call's promotionBuiltMsg ever arrives, the
+	// operator can press Esc (abandoning it, plan.BackMsg below) or Enter again (a second,
+	// overlapping StartMsg for the same or a different plan). Without this guard, whichever
+	// promotionBuiltMsg happened to arrive later was adopted unconditionally regardless of
+	// which request — or none at all — the operator still cared about: a plan already backed
+	// out of could still get its flight screen pushed and start driving (creating a real
+	// branch/PR) the moment its result landed, and two staggered confirmations could each push
+	// their own flight screen for the same promotion, driving it from two independent
+	// goroutines at once (Codex review, PR #50 round 4). Every StartMsg increments buildGen and
+	// stamps the new value into the promotionBuiltMsg its own command will eventually produce;
+	// popping the plan screen away before that arrives (plan.BackMsg) increments it again with
+	// nothing to stamp, so any request still outstanding is orphaned. The promotionBuiltMsg
+	// case checks msg.gen against the current value before acting on the result at all — the
+	// same shape as flight.Model.gen/onDriveResult, one layer up the stack, guarding the
+	// analogous build step instead of the drive step.
+	buildGen uint64
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -140,6 +164,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.push(ps)
 		return m, ps.Init()
 	case plan.BackMsg:
+		// Abandon any startPromotion request this plan screen has outstanding — see
+		// Model.buildGen's own doc comment. Bumping unconditionally (whether or not a request
+		// is actually in flight) costs nothing: it only ever prevents an already-resolved or
+		// never-issued gen from matching again, never a live one.
+		m.buildGen++
 		return m.pop(), nil
 	case plan.StartMsg:
 		if msg.Mode == plan.ModeDirect {
@@ -165,6 +194,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		start, p, deadline := m.startPromotion, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
+		m.buildGen++
+		gen := m.buildGen
 		return m, func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
@@ -181,9 +212,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				defer cancel()
 			}
 			state, driveFn, err := start(ctx, p)
-			return promotionBuiltMsg{state: state, driveFn: driveFn, err: err}
+			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err}
 		}
 	case promotionBuiltMsg:
+		if msg.gen != m.buildGen {
+			// Stale: superseded by a later StartMsg (a second confirmation before this
+			// one's result arrived), or the plan screen that issued it has since been
+			// popped away (plan.BackMsg above). Dropped outright, before either the
+			// error or the success branch below ever runs — see Model.buildGen's own
+			// doc comment.
+			return m, nil
+		}
 		if msg.err != nil {
 			// A real in-flight conflict, missing github config, or a claim failure —
 			// shown as a notice on whatever screen is still on top (matrix or plan,
@@ -306,6 +345,16 @@ func (m Model) pop() Model {
 // commit message/PR body engine.RenderCommitMessage/RenderPRBody render from p.Edits (both key
 // off Edit.New.Repo, cmd/hoist's internal/engine/template.go) describe exactly what the
 // operator saw and confirmed, nothing more.
+//
+// Warnings gets the same treatment, for the same reason: engine.RenderPRBody also renders
+// p.Warnings verbatim, and without this a PR body could carry a warning about a repo the
+// operator explicitly unticked — one that never appears in p.Edits and so never appears
+// anywhere else in the PR — describing a repo not part of the promotion at all (Copilot, PR
+// #50 round 4). plan.WarningRepo names the repo each warning is about (every Warning built by
+// pkg/gitops or pkg/resolve carries Occurrences for exactly one repo); a warning naming no
+// repo at all (WarningRepo returns "", which none of today's constructors produce, but nothing
+// forbids a future one that isn't per-repo) is kept unconditionally rather than dropped, since
+// there is no ticked/unticked repo to test it against.
 func filterTicked(p gitops.Plan, ticked []string) gitops.Plan {
 	keep := make(map[string]bool, len(ticked))
 	for _, r := range ticked {
@@ -318,6 +367,13 @@ func filterTicked(p gitops.Plan, ticked []string) gitops.Plan {
 		}
 	}
 	p.Edits = edits
+	warnings := make([]gitops.Warning, 0, len(p.Warnings))
+	for _, w := range p.Warnings {
+		if repo := plan.WarningRepo(w); repo == "" || keep[repo] {
+			warnings = append(warnings, w)
+		}
+	}
+	p.Warnings = warnings
 	return p
 }
 

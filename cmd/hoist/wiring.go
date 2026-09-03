@@ -152,21 +152,25 @@ var browserOpener = defaultOpenBrowser
 
 // browserCommand is the pure half of defaultOpenBrowser: for a given runtime.GOOS value, it
 // picks the program and arguments that would open url in the operator's default browser —
-// `open` on macOS, `xdg-open` on Linux, `cmd /c start "" <url>` on Windows (the empty "" is the
-// window-title argument `start` expects before the URL; without it, a URL containing quotes or
-// starting with certain characters would itself be misread as the title) — without ever
-// touching os/exec. Any other GOOS falls back to xdg-open's Unix convention rather than erroring
-// outright, on the theory that a BSD or other Unix hoist is only run on is more likely to have
-// xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS itself) is the
-// seam wiring_test.go uses to exercise every branch on every OS, without a build tag per branch
-// and without ever calling exec.Command in a test (no test in this repo launches a real
-// browser).
+// `open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler <url>` on Windows —
+// without ever touching os/exec. The Windows branch deliberately avoids `cmd /c start`: cmd.exe
+// parses metacharacters like `&|<>` in its command line, so a URL containing one would be split
+// and reinterpreted rather than passed through verbatim — a real command-injection risk in
+// general, even though today's one caller only ever passes a forge-returned PR URL (see
+// defaultOpenBrowser's own doc comment). rundll32's FileProtocolHandler entry point takes the
+// URL as a single opaque argument and never invokes a shell, so no such splitting can happen
+// (Copilot, PR #50 round 4). Any other GOOS falls back to xdg-open's Unix convention rather than
+// erroring outright, on the theory that a BSD or other Unix hoist is only run on is more likely
+// to have xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS
+// itself) is the seam wiring_test.go uses to exercise every branch on every OS, without a build
+// tag per branch and without ever calling exec.Command in a test (no test in this repo launches
+// a real browser).
 func browserCommand(goos, url string) (name string, args []string) {
 	switch goos {
 	case "darwin":
 		return "open", []string{url}
 	case "windows":
-		return "cmd", []string{"/c", "start", "", url}
+		return "rundll32", []string{"url.dll,FileProtocolHandler", url}
 	default:
 		return "xdg-open", []string{url}
 	}
@@ -200,6 +204,13 @@ func startAndReap(cmd *exec.Cmd, done chan<- struct{}) error {
 // already covers). Start, not Run, by way of startAndReap: the browser process outlives this
 // one and this call must not block the TUI waiting for the user to close their browser tab, but
 // the launcher (open/xdg-open/cmd) that hands off to it still gets reaped once it exits.
+//
+// The only caller today is flight.OpenPRMsg's handler (app.go), whose url is always
+// PRURL(state) — a PR URL the forge itself returned when this promotion opened it, not
+// something an attacker gets to choose in the common case. browserCommand's own Windows
+// hardening (no cmd.exe metacharacter parsing) is worth having regardless: it is free, and
+// this function's contract ("open this url") should not depend on trusting every caller to
+// have vetted url first.
 func defaultOpenBrowser(url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
 	if err := startAndReap(exec.Command(name, args...), nil); err != nil {

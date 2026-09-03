@@ -171,6 +171,22 @@ func ActiveStep(rows []Row) (engine.StepName, bool) {
 	return "", false
 }
 
+// BlockedStep is the row DeriveRows rendered with GlyphBlocked, if any. A blocked row is
+// always the one Active row too (deriveRow's own Blocked case sets both), so this is really
+// "ActiveStep, but only when that step is Blocked rather than merely Waiting or not-yet-acted
+// — the distinction Model.onDriveResult needs to decide whether to keep polling: a Blocked
+// step is terminal until an operator resolves the conflict (engine.BlockedError's own doc
+// comment: "retrying will not help"), unlike a Waiting or not-yet-acted one, which is exactly
+// what the poll loop exists to keep re-observing.
+func BlockedStep(rows []Row) (engine.StepName, bool) {
+	for _, r := range rows {
+		if r.Glyph == GlyphBlocked {
+			return r.Step, true
+		}
+	}
+	return "", false
+}
+
 // StartedAt is the promotion's start time: History[0].At, the first entry Drive ever
 // appends (BranchedStep's own first Observe/Act). PromotionState carries no separate
 // started-at field (state.go) — the audit trail is the only place this is recorded

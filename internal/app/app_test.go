@@ -249,6 +249,140 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	}
 }
 
+// TestPromotionBuiltMsgStampsCurrentBuildGen is the direct, narrow check that a StartMsg's
+// own command stamps promotionBuiltMsg with the Model's buildGen at the moment it was issued —
+// mirrors TestDriveCmdStampsCurrentGen at the flight layer (internal/app/flight/model_test.go),
+// one layer up the stack, guarding the build step instead of the drive step.
+func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		return engine.PromotionState{ID: "abcd1234"}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg with a wired startPromotion produced no command")
+	}
+	pbm, ok := cmd().(promotionBuiltMsg)
+	if !ok {
+		t.Fatalf("command yields %T, want promotionBuiltMsg", pbm)
+	}
+	if pbm.gen != m.(Model).buildGen {
+		t.Errorf("promotionBuiltMsg.gen = %d, want %d (m.buildGen)", pbm.gen, m.(Model).buildGen)
+	}
+}
+
+// TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped is PR #50 round-4 review finding #4
+// (Codex): the plan screen stays fully interactive while its StartMsg's startPromotion call
+// runs in the background, so the operator can press Esc (plan.BackMsg, popping back to the
+// matrix) before that call's result ever arrives. Without a generation check, the
+// promotionBuiltMsg would still be adopted unconditionally once it landed — pushing a flight
+// screen (which immediately starts driving: committing, pushing, opening a PR) for a plan the
+// operator already backed out of. This proves the stale result is dropped: the stack stays on
+// the matrix, and nothing is pushed.
+func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
+	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		return s, true, nil, nil
+	}
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		return wantState, stubDriveFn, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+
+	// Push the plan screen (mirrors TestPromotePushesPlanScreen) so plan.BackMsg has
+	// something real to pop.
+	m, _ = m.Update(matrix.OpenPlanMsg{Source: "app-staging"})
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after opening the plan screen, want 2", n)
+	}
+
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg with a wired startPromotion produced no command")
+	}
+	built := cmd() // the request completes...
+
+	// ...but before its result is delivered, the operator backs out of the plan screen
+	// (Esc — plan.Model emits BackMsg for this key regardless of screen state).
+	m, _ = m.Update(plan.BackMsg{})
+	if n := len(m.(Model).stack); n != 1 {
+		t.Fatalf("plan.BackMsg left stack at %d screens, want 1 (popped back to the matrix)", n)
+	}
+
+	m, cmd = m.Update(built)
+	if cmd != nil {
+		t.Errorf("a stale promotionBuiltMsg produced a command: %#v", cmd())
+	}
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("stack changed to %d screens processing a stale promotionBuiltMsg, want unchanged at 1 (no flight screen pushed for an abandoned plan)", n)
+	}
+}
+
+// TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped is PR #50 round-4 review finding
+// #4 (Codex): the plan screen has no "confirming" indicator once Enter fires StartMsg, so
+// nothing stops the operator pressing Enter again before the first request's result arrives.
+// Without a generation check, whichever of the two overlapping requests happened to resolve
+// last was adopted unconditionally — risking two independent flight screens (two goroutines)
+// driving the very same promotion at once. This proves only the second (current) request's
+// result is ever adopted: the first, superseded one is dropped even though it is the one
+// actually delivered to Update.
+func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
+	first := engine.PromotionState{ID: "first-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	second := engine.PromotionState{ID: "second-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		return s, true, nil, nil
+	}
+	calls := 0
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		calls++
+		if calls == 1 {
+			return first, stubDriveFn, nil
+		}
+		return second, stubDriveFn, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+
+	// First confirmation: request issued, not yet resolved.
+	m, cmd1 := m.Update(msg)
+	if cmd1 == nil {
+		t.Fatal("first StartMsg produced no command")
+	}
+	firstResult := cmd1()
+
+	// Second confirmation, before the first ever resolved (the plan screen is still on top
+	// and still fully interactive): supersedes the first.
+	m, cmd2 := m.Update(msg)
+	if cmd2 == nil {
+		t.Fatal("second StartMsg produced no command")
+	}
+	secondResult := cmd2()
+
+	// The first (now-stale) result arrives first: must be dropped, not pushed.
+	before := len(m.(Model).stack)
+	m, cmd := m.Update(firstResult)
+	if cmd != nil {
+		t.Errorf("the stale first result produced a command: %#v", cmd())
+	}
+	if n := len(m.(Model).stack); n != before {
+		t.Fatalf("stack changed to %d screens processing the stale first result, want unchanged at %d", n, before)
+	}
+
+	// The second (current) result arrives: must be adopted.
+	m, _ = m.Update(secondResult)
+	if n := len(m.(Model).stack); n != before+1 {
+		t.Fatalf("stack has %d screens after the current second result, want %d (flight screen pushed)", n, before+1)
+	}
+	if v := plain(m); !strings.Contains(v, second.ID) {
+		t.Errorf("flight screen view missing the second request's own state ID %q:\n%s", second.ID, v)
+	}
+	if v := plain(m); strings.Contains(v, first.ID) {
+		t.Errorf("flight screen view shows the superseded first request's state ID %q:\n%s", first.ID, v)
+	}
+}
+
 // TestStartMsgFiltersToTickedRepos is PR #50 review finding #2: plan.StartMsg.Ticked is the
 // repo subset the operator actually left checked (the same set plan.Model.recomputeDiff
 // already filters the confirm screen's own diff by), but msg.Plan carries BuildPlan's full,
@@ -291,6 +425,74 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	}
 	if got := gotPlan.Edits[0].Ref.Repo; got != keep.Repo {
 		t.Errorf("startPromotion's one edit is for repo %q, want the ticked repo %q", got, keep.Repo)
+	}
+}
+
+// TestStartMsgFiltersWarningsToTickedRepos is PR #50 round-4 review finding #3 (Copilot):
+// filterTicked narrowed Plan.Edits to the operator's ticked selection but left Plan.Warnings
+// untouched, so engine.RenderPRBody (which renders p.Warnings verbatim) could describe a repo
+// the operator explicitly unticked and never saw change in the confirmed diff. This proves a
+// warning about the dropped repo never reaches startPromotion, a warning about the kept repo
+// does, and a warning tied to no repo at all (zero Occurrences — plan.WarningRepo's own "no
+// convention produces this today, but nothing forbids it" case) is kept regardless, since
+// there is no ticked/unticked repo to test it against.
+func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
+	keep := image.Ref{Repo: "ghcr.io/example/keep", Tag: "v2"}
+	drop := image.Ref{Repo: "ghcr.io/example/drop", Tag: "v2"}
+	edits := []gitops.Edit{
+		{Occurrence: gitops.Occurrence{Ref: image.Ref{Repo: keep.Repo, Tag: "v1"}}, New: keep},
+		{Occurrence: gitops.Occurrence{Ref: image.Ref{Repo: drop.Repo, Tag: "v1"}}, New: drop},
+	}
+	warnings := []gitops.Warning{
+		{Code: "keep-warning", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: keep.Repo}}}},
+		{Code: "drop-warning", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: drop.Repo}}}},
+		{Code: "no-repo-warning"},
+	}
+	var gotPlan gitops.Plan
+	called := false
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		called = true
+		gotPlan = p
+		return engine.PromotionState{ID: "abcd1234"}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{
+		Plan:   gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production", Edits: edits, Warnings: warnings},
+		Mode:   plan.ModePR,
+		Ticked: []string{keep.Repo},
+		Source: "app-staging",
+		Target: "app-production",
+	}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg produced no command")
+	}
+	cmd()
+	if !called {
+		t.Fatal("the command never called the wired startPromotion")
+	}
+	var codes []string
+	for _, w := range gotPlan.Warnings {
+		codes = append(codes, w.Code)
+	}
+	if len(gotPlan.Warnings) != 2 {
+		t.Fatalf("startPromotion called with %d warnings, want exactly 2 (kept repo + no-repo): %v", len(gotPlan.Warnings), codes)
+	}
+	for _, want := range []string{"keep-warning", "no-repo-warning"} {
+		found := false
+		for _, c := range codes {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("warnings %v missing %q", codes, want)
+		}
+	}
+	for _, c := range codes {
+		if c == "drop-warning" {
+			t.Errorf("warnings %v still carry drop-warning for the unticked repo", codes)
+		}
 	}
 }
 

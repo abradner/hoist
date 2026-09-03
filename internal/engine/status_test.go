@@ -198,6 +198,64 @@ func TestStatusPropagatesObserveError(t *testing.T) {
 	}
 }
 
+// TestStatusObserveErrorIsStepError is PR #50 round-4 review finding #6 (Codex):
+// internal/app/flight.Model's retry classifier (retryableErr) only ever retries a *StepError
+// naming StepCIGreen or StepApproved — the exact shape cmd/hoist/drive.go's own
+// driveToCompletion already retries when Drive's Observe hits the identical transient failure
+// directly. Before this fix, Status wrapped an Observe error with a bare fmt.Errorf, which
+// errors.As(err, &StepError{}) never matches, so a transient Checks/Comments hiccup on the
+// immediately-following Status call (in cmd/hoist/wiring.go's own DriveFunc, right after Drive
+// itself had already observed the same step successfully) permanently stopped the flight
+// screen's polling instead of being retried like the CLI path. This proves Status's own error —
+// both from the ordinary walk and from the final-step short-circuit probe — is a *StepError
+// naming the actual step and "observe", with the underlying error still reachable via
+// errors.Is/Unwrap exactly as before.
+func TestStatusObserveErrorIsStepError(t *testing.T) {
+	t.Run("mid-walk", func(t *testing.T) {
+		wantErr := errors.New("GET /repos/.../check-runs: 404")
+		steps := []Step{
+			stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+			stepStub{name: StepCIGreen, err: wantErr},
+			stepStub{name: StepPushed, obs: Observation{Satisfied: false}},
+		}
+		_, _, err := Status(ctx(), steps, &PromotionState{})
+		var stepErr *StepError
+		if !errors.As(err, &stepErr) {
+			t.Fatalf("err = %v (%T), want it to be a *StepError", err, err)
+		}
+		if stepErr.Step != StepCIGreen {
+			t.Errorf("StepError.Step = %q, want %q", stepErr.Step, StepCIGreen)
+		}
+		if stepErr.Op != "observe" {
+			t.Errorf("StepError.Op = %q, want %q", stepErr.Op, "observe")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Errorf("error = %v, want it to still wrap %v", err, wantErr)
+		}
+	})
+	t.Run("final-step short-circuit", func(t *testing.T) {
+		wantErr := errors.New("GET /repos/.../pulls/1: 404")
+		steps := []Step{
+			stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+			stepStub{name: StepApproved, err: wantErr},
+		}
+		_, _, err := Status(ctx(), steps, &PromotionState{})
+		var stepErr *StepError
+		if !errors.As(err, &stepErr) {
+			t.Fatalf("err = %v (%T), want it to be a *StepError", err, err)
+		}
+		if stepErr.Step != StepApproved {
+			t.Errorf("StepError.Step = %q, want %q", stepErr.Step, StepApproved)
+		}
+		if stepErr.Op != "observe" {
+			t.Errorf("StepError.Op = %q, want %q", stepErr.Op, "observe")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Errorf("error = %v, want it to still wrap %v", err, wantErr)
+		}
+	})
+}
+
 // observeCountingStub wraps a stepStub and counts how many times Observe is called on it —
 // used by TestStatusObservesFinalStepExactlyOnce to prove the final step's Observe is not
 // called a second time when the walk reaches it (PR #39 review finding #3), rather than only
