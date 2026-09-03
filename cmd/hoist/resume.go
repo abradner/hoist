@@ -54,6 +54,15 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Bounded the same way promote/resume's own drive path already is (round-6 finding): each
+	// candidate's re-observation talks to a real forge/git, and a hung call here had no bound
+	// at all beyond an interrupt — `hoist promotions` could stall forever on one bad candidate
+	// instead of listing the rest.
+	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deadline)
+		defer cancel()
+	}
 	for _, s := range states {
 		rc, ok := repoConfigFor(cfg, s.RepoFullName)
 		if !ok {
