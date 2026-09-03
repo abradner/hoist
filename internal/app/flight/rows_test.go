@@ -99,7 +99,7 @@ func TestDeriveRowsActiveNotYetActed(t *testing.T) {
 // step's own StepStatus, matching what Status actually returns in that case.
 func TestDeriveRowsDone(t *testing.T) {
 	statuses := []engine.StepStatus{
-		st(engine.StepMerged, engine.Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}),
+		st(engine.StepRolledOut, engine.Observation{Satisfied: true, Detail: "app: rollout complete"}),
 	}
 	rows := DeriveRows(StepOrder, true, statuses)
 	if len(rows) != len(StepOrder) {
@@ -111,8 +111,8 @@ func TestDeriveRowsDone(t *testing.T) {
 		}
 	}
 	last := rows[len(rows)-1]
-	if last.Step != engine.StepMerged || last.Detail != "merged as abc123; branch deleted" {
-		t.Errorf("last row = %+v, want Merged with the short-circuited detail", last)
+	if last.Step != engine.StepRolledOut || last.Detail != "app: rollout complete" {
+		t.Errorf("last row = %+v, want RolledOut (engine.AllSteps' own last step, M5 on) with the short-circuited detail", last)
 	}
 	if _, ok := ActiveStep(rows); ok {
 		t.Error("ActiveStep found one in a fully-done list")

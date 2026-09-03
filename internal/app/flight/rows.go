@@ -1,6 +1,7 @@
 // Package flight is the flight screen: shown once a promotion starts driving through
-// engine.AllSteps (branch, commit, push, PR, CI green, approved, merged), it lists every
-// step with a glyph for its current state, the active step's own human detail text, a
+// engine.AllSteps (branch, commit, push, PR, CI green, approved, merged, then (M5) Argo
+// refresh, Argo sync, rollout), it lists every step with a glyph for its current state,
+// the active step's own human detail text, a
 // stopwatch since the promotion started, and a togglable scrollback of
 // PromotionState.History. rows.go derives the step rows from a PromotionState and the
 // ordered per-step statuses engine.Status produces, with no terminal dependency (AGENTS.md
@@ -29,14 +30,14 @@ const (
 )
 
 // StepOrder is the fixed order flight renders steps in — engine.AllSteps' own order,
-// branch/commit/push/PR then CI green/approved/merged. It is a plain literal rather than
-// derived from engine.AllSteps(nil, nil, nil) at runtime (technically possible: nil
-// satisfies the git.Git/forge.Forge interface parameters without this package importing
-// either, and every Step.Name() implementation ignores its receiver's fields) because a
-// literal is more legible here and does not depend on every future Step implementation
-// continuing to ignore its own fields in Name(). TestStepOrderMatchesAllSteps in
-// model_test.go is what keeps this from silently drifting if AllSteps' own order ever
-// changes.
+// branch/commit/push/PR then CI green/approved/merged, then (M5) Argo refresh/sync and
+// rollout. It is a plain literal rather than derived from engine.AllSteps(nil, nil, nil,
+// nil, nil) at runtime (technically possible: nil satisfies every interface parameter
+// without this package importing pkg/git/pkg/forge/pkg/argo/pkg/rollout, and every
+// Step.Name() implementation ignores its receiver's fields) because a literal is more
+// legible here and does not depend on every future Step implementation continuing to
+// ignore its own fields in Name(). TestStepOrderMatchesAllSteps in model_test.go is what
+// keeps this from silently drifting if AllSteps' own order ever changes.
 var StepOrder = []engine.StepName{
 	engine.StepBranched,
 	engine.StepCommitted,
@@ -45,18 +46,24 @@ var StepOrder = []engine.StepName{
 	engine.StepCIGreen,
 	engine.StepApproved,
 	engine.StepMerged,
+	engine.StepArgoRefreshed,
+	engine.StepArgoSynced,
+	engine.StepRolledOut,
 }
 
 // stepLabels is the human-readable name shown for each step in the list — short, so the
 // glyph column stays aligned regardless of terminal width.
 var stepLabels = map[engine.StepName]string{
-	engine.StepBranched:  "branch",
-	engine.StepCommitted: "commit",
-	engine.StepPushed:    "push",
-	engine.StepPROpened:  "PR",
-	engine.StepCIGreen:   "CI",
-	engine.StepApproved:  "approval",
-	engine.StepMerged:    "merge",
+	engine.StepBranched:      "branch",
+	engine.StepCommitted:     "commit",
+	engine.StepPushed:        "push",
+	engine.StepPROpened:      "PR",
+	engine.StepCIGreen:       "CI",
+	engine.StepApproved:      "approval",
+	engine.StepMerged:        "merge",
+	engine.StepArgoRefreshed: "argo refresh",
+	engine.StepArgoSynced:    "argo sync",
+	engine.StepRolledOut:     "rollout",
 }
 
 // Label is the human-readable name for a step; falls back to the raw StepName for anything

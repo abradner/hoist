@@ -17,12 +17,13 @@ import (
 )
 
 // TestStepOrderMatchesAllSteps guards StepOrder (a literal, see rows.go's doc comment)
-// against drifting from engine.AllSteps' own order. Passing nil for the git.Git/forge.Forge
-// parameters is safe here: every Step.Name() implementation in internal/engine ignores its
-// receiver's fields, and this test would fail loudly (a nil-pointer panic from some future
-// Name() that stopped ignoring them) rather than silently, if that ever changed.
+// against drifting from engine.AllSteps' own order. Passing nil for every git.Git/forge.Forge/
+// argo.Argo/rollout.Rollout parameter is safe here: every Step.Name() implementation in
+// internal/engine ignores its receiver's fields, and this test would fail loudly (a
+// nil-pointer panic from some future Name() that stopped ignoring them) rather than
+// silently, if that ever changed.
 func TestStepOrderMatchesAllSteps(t *testing.T) {
-	steps := engine.AllSteps(nil, nil, nil)
+	steps := engine.AllSteps(nil, nil, nil, nil, nil)
 	if len(steps) != len(StepOrder) {
 		t.Fatalf("engine.AllSteps has %d steps, StepOrder has %d", len(steps), len(StepOrder))
 	}
