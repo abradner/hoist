@@ -176,34 +176,30 @@ func browserCommand(goos, url string) (name string, args []string) {
 	}
 }
 
-// startAndReap starts cmd without blocking the caller, then waits for it in a background
-// goroutine so it never lingers as a zombie / unreaped process once it exits: Go's os/exec does
-// not do this on its own for a Start-only *exec.Cmd — only Wait (or Run, which calls it
-// internally) releases the resources an exited-but-unwaited process holds. Without this, a
-// caller that only ever calls Start (defaultOpenBrowser, below) would leak one such process per
-// call for as long as a long-running process like this TUI keeps executing (Codex review, PR
-// #50). done, when non-nil, is notified (a channel with capacity >= 1) once the background Wait
-// call returns; production callers pass nil — it exists purely so a test can observe that the
-// reap actually happened without racing a real process's own exit timing.
-func startAndReap(cmd *exec.Cmd, done chan<- struct{}) error {
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go func() {
-		_ = cmd.Wait()
-		if done != nil {
-			done <- struct{}{}
-		}
-	}()
-	return nil
-}
+// browserLaunchTimeout bounds defaultOpenBrowser's own Run call — see its doc comment for why
+// this is a Run, not the Start-and-reap shape a real long-lived browser process would need.
+// Generous for what should normally be a near-instant fork+exec-and-return (open/xdg-open/
+// rundll32 are all designed as fire-and-forget dispatchers that hand off and exit immediately,
+// never blocking for the browser's own lifetime), while still bounding the worst case (no
+// DISPLAY set, a genuinely wedged launcher) to a few seconds of TUI unresponsiveness rather than
+// forever.
+const browserLaunchTimeout = 5 * time.Second
 
 // defaultOpenBrowser opens url in the operator's default browser (no new dependency, AGENTS.md
 // §4.7; e.g. github.com/pkg/browser is exactly this well-known exec.Command-per-platform idiom
 // in a package no heavier than browserCommand's dozen lines plus this one exec.Command call
-// already covers). Start, not Run, by way of startAndReap: the browser process outlives this
-// one and this call must not block the TUI waiting for the user to close their browser tab, but
-// the launcher (open/xdg-open/cmd) that hands off to it still gets reaped once it exits.
+// already covers). Run, not Start-and-reap: the LAUNCHER (open/xdg-open/rundll32) is what this
+// call waits on, not the browser itself, which stays running long after the launcher — designed
+// to hand off and exit — has already returned. Round-4's original Start-and-reap shape (a
+// startAndReap helper, since removed — its only caller was this function, and Run reaps the
+// launcher itself, no background goroutine needed) could not observe the launcher's own exit
+// status at all: cmd.Start() only errors if the binary itself couldn't even be found, and the
+// background goroutine reaping cmd.Wait() discarded whatever it returned, so a launcher that
+// started but then failed at runtime (no browser installed, a bad DISPLAY, xdg-open's own
+// failure) reported nil here — flight.OpenPRMsg's handler showed no notice at all, even though
+// nothing actually opened (Copilot review, PR #50). browserLaunchTimeout bounds the wait so a
+// genuinely wedged launcher cannot block the TUI's whole event loop indefinitely — see its own
+// doc comment for why that bound is safe here specifically.
 //
 // The only caller today is flight.OpenPRMsg's handler (app.go), whose url is always
 // PRURL(state) — a PR URL the forge itself returned when this promotion opened it, not
@@ -213,8 +209,20 @@ func startAndReap(cmd *exec.Cmd, done chan<- struct{}) error {
 // have vetted url first.
 func defaultOpenBrowser(url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
-	if err := startAndReap(exec.Command(name, args...), nil); err != nil {
+	if err := runLauncher(name, args...); err != nil {
 		return fmt.Errorf("opening %s in a browser: %w", url, err)
 	}
 	return nil
+}
+
+// runLauncher runs name/args to completion (bounded by browserLaunchTimeout) and surfaces
+// whatever exec.Cmd.Run reports — including a non-zero exit from the launcher itself, not only
+// the "binary not found" failure a bare Start would have reported. Split out from
+// defaultOpenBrowser so a test can exercise this exact mechanism against a command it fully
+// owns and controls, without ever launching a real browser or a process it doesn't own (this
+// repo's own hard constraint, AGENTS.md §4.7 / newPromoteFixture's own comment).
+func runLauncher(name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), browserLaunchTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Run()
 }

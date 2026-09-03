@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -349,31 +350,36 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	_ = driveFn2
 }
 
-// TestStartAndReapWaitsOnLauncherProcess is PR #50 review finding #10 (Codex): Start alone
-// leaves a *exec.Cmd's process a zombie/unreaped once it exits — Go's os/exec never reaps a
-// Start-only process on its own, only Wait does — so defaultOpenBrowser's own launcher
-// (open/xdg-open/cmd) would otherwise accumulate one such process per o press for as long as
-// this long-running TUI keeps executing. Rather than launching a real browser (no test in this
-// repo launches a real browser or a process it doesn't own — see newPromoteFixture's own
-// comment), this uses the standard os/exec "helper process" idiom: re-exec this same test
-// binary as a trivial, near-instant subprocess it fully owns and controls, then confirms
-// startAndReap's background goroutine actually waited on it (the done channel fires) rather
-// than only starting it and returning.
-func TestStartAndReapWaitsOnLauncherProcess(t *testing.T) {
+// TestRunLauncherSurfacesNonZeroExit is Copilot's PR #50 review finding: defaultOpenBrowser's
+// original Start-and-reap shape only ever reported an error when the launcher binary itself
+// couldn't be found — a launcher that started but then failed at runtime (no browser installed,
+// a bad DISPLAY, xdg-open's own failure) reported nil, so flight.OpenPRMsg's handler showed no
+// notice at all even though nothing actually opened. Rather than launching a real browser (no
+// test in this repo launches a real browser or a process it doesn't own — see
+// newPromoteFixture's own comment), this uses the standard os/exec "helper process" idiom:
+// re-exec this same test binary as a subprocess it fully owns and controls, this time made to
+// exit non-zero deliberately, and confirms runLauncher's own error reflects that exit rather
+// than reporting success.
+func TestRunLauncherSurfacesNonZeroExit(t *testing.T) {
 	if os.Getenv("HOIST_WIRING_TEST_HELPER_PROCESS") == "1" {
-		// Acts as the launcher stand-in: exit immediately, doing nothing else.
-		return
+		// Acts as a launcher that started fine but failed at runtime.
+		os.Exit(7)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestStartAndReapWaitsOnLauncherProcess$")
-	cmd.Env = append(os.Environ(), "HOIST_WIRING_TEST_HELPER_PROCESS=1")
-	done := make(chan struct{}, 1)
-	if err := startAndReap(cmd, done); err != nil {
-		t.Fatalf("startAndReap: %v", err)
+	// Set only after the check above, and only for this process going forward — runLauncher's
+	// re-exec'd child inherits it (exec.Cmd's default Env, nil, means "the current process's
+	// environment" at Start time), while this same check at the TOP of this very function
+	// already ran and returned false before this line, so the parent invocation is unaffected.
+	t.Setenv("HOIST_WIRING_TEST_HELPER_PROCESS", "1")
+	err := runLauncher(os.Args[0], "-test.run=^TestRunLauncherSurfacesNonZeroExit$")
+	if err == nil {
+		t.Fatal("runLauncher = nil, want the helper process's non-zero exit surfaced as an error")
 	}
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("startAndReap never waited on the launcher process within 2s — it starts the process but does not reap it")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("runLauncher error = %v (%T), want an *exec.ExitError", err, err)
+	}
+	if exitErr.ExitCode() != 7 {
+		t.Errorf("exit code = %d, want 7 (the helper process's own deliberate exit)", exitErr.ExitCode())
 	}
 }
 
