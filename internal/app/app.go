@@ -156,12 +156,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, ts.Init()
 	case tags.BackMsg:
 		return m.pop(), nil
-	case tags.SelectedMsg, tags.DirectRequestedMsg:
-		// This milestone's picker stops at reporting the operator's choice (SelectedMsg/
-		// DirectRequestedMsg's own doc comments): no screen in this codebase drives a write
-		// yet (hoist promote is CLI-only). Pop back to the matrix; a future "deploy new
-		// image" milestone is what turns this into an actual promotion.
-		return m.pop(), nil
+	case tags.SelectedMsg:
+		// This milestone's picker stops at reporting the operator's choice (SelectedMsg's own
+		// doc comment): no screen in this codebase drives a write yet (hoist promote is
+		// CLI-only). Round-N finding: silently popping back to the matrix here used to leave
+		// no trace that the selection did nothing — an operator who pressed enter expecting a
+		// promotion to start would see the matrix again with no explanation. Say so plainly
+		// instead of claiming (by silence) that something happened.
+		m = m.pop()
+		return m.withMatrixNotice(fmt.Sprintf(
+			"%s:%s selected, but the tag picker only reports the choice today — nothing was written (hoist promote is still the only write path)",
+			msg.ImageRepo, msg.Tag,
+		)), nil
+	case tags.DirectRequestedMsg:
+		// Same honesty gap, direct-mode side: DirectRequestedMsg is only emitted once the
+		// operator has completed the keypress + huh.Confirm gesture invariant 5 requires
+		// (tags.DirectRequestedMsg's own doc comment) — a real, deliberate confirmation, not a
+		// stray keypress. Popping back to the matrix with no notice would let the operator
+		// believe a direct commit just happened when nothing wires this message to an actual
+		// write yet (see internal/app/tags' own package doc and AGENTS.md §8 "building
+		// structure where no convention is stated is a decision": wiring this into a real
+		// write path is out of this PR's scope — a separate PR already wires the pair-
+		// promotion confirm path into a real start function and explicitly defers this one).
+		m = m.pop()
+		return m.withMatrixNotice(fmt.Sprintf(
+			"direct commit to %s:%s was confirmed, but nothing wires the TUI to an actual write yet — no commit was made (use hoist promote --direct instead)",
+			msg.ImageRepo, msg.Tag,
+		)), nil
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -209,6 +230,26 @@ func (m Model) pop() Model {
 		return m
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
+	return m
+}
+
+// withMatrixNotice sets notice on the matrix screen, wherever it sits in the stack (today
+// always the bottom, and — after tags.SelectedMsg/DirectRequestedMsg's own pop above — always
+// the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags screen,
+// always directly onto the matrix). A no-op if the matrix isn't on the stack at all, or isn't
+// on top, rather than assuming a shape a future screen stack might not have.
+func (m Model) withMatrixNotice(notice string) Model {
+	if len(m.stack) == 0 {
+		return m
+	}
+	top := len(m.stack) - 1
+	ms, ok := m.stack[top].(matrixScreen)
+	if !ok {
+		return m
+	}
+	stack := append([]Screen(nil), m.stack...)
+	stack[top] = matrixScreen{ms.WithNotice(notice)}
+	m.stack = stack
 	return m
 }
 

@@ -240,6 +240,18 @@ func (m Model) Cursor() int { return m.tbl.Cursor() }
 // Matrix is the computed matrix the screen shows.
 func (m Model) Matrix() Table { return m.matrix }
 
+// WithNotice sets the status-bar notice shown on this screen, exactly as the screen's own key
+// handling already does internally (Update's "no environments discovered"/"no first-party image
+// in this cell" cases) — exported so the root can surface an honest message on the matrix after
+// popping back to it from another screen whose own message it chose not to act on (AGENTS.md §4.8
+// pattern: the screen names the transition, the root decides what it means; this is the root
+// telling the operator what that decision actually was, via the screen it already owns showing
+// it, rather than silently discarding the message).
+func (m Model) WithNotice(notice string) Model {
+	m.notice = notice
+	return m
+}
+
 func (m Model) layout() Model {
 	if m.width <= 0 || m.height <= 0 {
 		return m

@@ -391,6 +391,51 @@ func TestFailedMetaFetchIsNotRetriedForever(t *testing.T) {
 	}
 }
 
+// TestSelectCurrentDistinguishesFailedFromStillLoading is Copilot's own round-N finding: a row
+// whose metadata permanently failed (MetaErr set, never retried — TestFailedMetaFetchIsNotRetriedForever
+// above) is indistinguishable from a row still in flight under a bare "!MetaLoaded" check —
+// selectCurrent used to report "still loading... try again in a moment" for both, which never
+// self-corrects for the failed case: fetchVisible will never retry it, so the row is
+// permanently unselectable with no operator-visible explanation of why. Enter must instead say
+// the fetch failed and won't be retried, and must still emit no message (a selection without a
+// resolved digest is refused regardless — AGENTS.md principle 3).
+func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
+	regTags := []string{"v1", "v2"}
+	metaFn := func(_ context.Context, tag string) (registry.ImageMeta, error) {
+		if tag == "v1" {
+			return registry.ImageMeta{}, errors.New("manifest not found")
+		}
+		return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("2", 64)}, nil
+	}
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return regTags, nil, false, nil
+	}
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, metaFn)
+	m = m.SetSize(100, 30)
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	if m.selectedTag != "v1" {
+		t.Fatalf("fixture precondition: v1 should be selected by default (unmapped, incoming order), got %q", m.selectedTag)
+	}
+	i := IndexOf(m.rows, "v1")
+	if i < 0 || m.rows[i].MetaErr == nil {
+		t.Fatal("fixture precondition: v1's Config call must have failed")
+	}
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("Enter on a permanently-failed row must not emit a message (no digest to promote), got a command: %v", cmd())
+	}
+	if strings.Contains(m2.notice, "still loading") {
+		t.Fatalf("notice = %q: must not claim this row is still loading — it already failed and fetchVisible will never retry it", m2.notice)
+	}
+	if !strings.Contains(m2.notice, "fail") {
+		t.Fatalf("notice = %q, want it to say the metadata fetch failed", m2.notice)
+	}
+}
+
 func TestFilterNarrowsRowsAndResetsCursor(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})

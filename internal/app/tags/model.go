@@ -403,7 +403,16 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	}
 	r := rows[idx]
 	if !r.MetaLoaded {
-		m.notice = fmt.Sprintf("still loading metadata for %s — try again in a moment", r.Tag)
+		// MetaErr set means fetchVisible already tried this row and settled it as failed
+		// (its own doc comment: a failed row is never rescheduled) — "still loading" would be
+		// permanently wrong for it and would never self-correct, leaving the row silently
+		// unselectable with no operator-visible explanation (round-N finding). Only the absence
+		// of both MetaLoaded and MetaErr means a fetch is genuinely still in flight.
+		if r.MetaErr != nil {
+			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — cannot select without a digest (AGENTS.md principle 3)", r.Tag)
+		} else {
+			m.notice = fmt.Sprintf("still loading metadata for %s — try again in a moment", r.Tag)
+		}
 		return m, nil
 	}
 	if !direct {

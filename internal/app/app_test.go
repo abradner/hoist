@@ -287,6 +287,62 @@ func TestDeployNewPushesTagsScreen(t *testing.T) {
 	}
 }
 
+// TestDirectRequestedMsgShowsHonestNotice and TestSelectedMsgShowsHonestNotice are the
+// honesty-fix regression tests for a round-N finding: the root used to pop straight back to the
+// matrix on tags.SelectedMsg/DirectRequestedMsg with no notice at all — indistinguishable, at a
+// glance, from "that worked" — even though neither message is wired to an actual write yet (no
+// screen in this codebase drives a real promotion; hoist promote is still CLI-only). Both must
+// still pop back to the matrix (unchanged) AND leave a plain, honest notice on it naming what
+// was (and wasn't) done. The window is widened past the default 80 columns so the assertions
+// aren't fighting the status bar's own truncation (internal/ui.StatusBar) rather than testing
+// the notice's content.
+func TestDirectRequestedMsgShowsHonestNotice(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d produced no command")
+	}
+	m, _ = m.Update(cmd())
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after d, want 2", n)
+	}
+
+	m, _ = m.Update(tags.DirectRequestedMsg{ImageRepo: "ghcr.io/example/web", Tag: "v2", Digest: "sha256:" + strings.Repeat("a", 64)})
+	if n := len(m.(Model).stack); n != 1 {
+		t.Fatalf("DirectRequestedMsg should pop back to the matrix: stack has %d screens", n)
+	}
+	v := plain(m)
+	if !strings.Contains(v, "v2") {
+		t.Errorf("notice does not name the tag that was confirmed:\n%s", v)
+	}
+	if !strings.Contains(v, "no commit was made") {
+		t.Errorf("notice does not say plainly that no commit was made:\n%s", v)
+	}
+}
+
+func TestSelectedMsgShowsHonestNotice(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d produced no command")
+	}
+	m, _ = m.Update(cmd())
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after d, want 2", n)
+	}
+
+	m, _ = m.Update(tags.SelectedMsg{ImageRepo: "ghcr.io/example/web", Tag: "v2", Digest: "sha256:" + strings.Repeat("a", 64)})
+	if n := len(m.(Model).stack); n != 1 {
+		t.Fatalf("SelectedMsg should pop back to the matrix: stack has %d screens", n)
+	}
+	v := plain(m)
+	if !strings.Contains(v, "nothing was written") {
+		t.Errorf("notice does not say plainly that nothing was written:\n%s", v)
+	}
+}
+
 // drainTags runs a tea.Cmd (and every cmd it in turn produces) to completion, exactly as a
 // real tea.Program would deliver messages to the whole app model — needed here because the
 // tags screen's Init kicks off an async ListFunc/MetaFunc load (internal/app/tags.Model.Init),
