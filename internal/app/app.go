@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
@@ -13,6 +14,42 @@ import (
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 )
+
+// StartPromotionFunc builds a real engine.PromotionState and flight.DriveFunc for a plan the
+// operator just confirmed (plan.StartMsg) — the id/branch/worktree derivation, the
+// claim-then-rescan one-in-flight check, and the prior-state merge-in that
+// cmd/hoist/promote.go's buildPromotionForConfirm already does for the CLI path (AGENTS.md
+// §4.8's "cmd/hoist owns the adapter" rule: this package only ever sees the plain function
+// type, never pkg/git, pkg/forge or internal/config themselves). It is called from inside a
+// tea.Cmd (see the plan.StartMsg case below), never directly from Update, since it can talk to
+// a real git remote and forge (AGENTS.md §4.3) — exactly like plan.ResolveFunc.
+//
+// A non-nil error means the plan cannot start right now (a real in-flight conflict, missing
+// github config, a claim failure) and is shown as a notice on whichever screen popped up
+// plan.StartMsg, rather than pushing the flight screen at all.
+type StartPromotionFunc func(ctx context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error)
+
+// Promotion groups everything New needs to actually drive a confirmed plan and act on the
+// flight screen's own requests, beyond what ResolveFunc already covers — the wiring PR #39
+// left as a stub (see plan.StartMsg's and flight.OpenPRMsg's cases below). Start is nil in a
+// context with nothing to drive (mirrors ResolveFunc's own nil convention): the plan screen's
+// Enter key then shows a notice instead of pushing a read-only flight screen. OpenURL is nil
+// the same way: flight.OpenPRMsg then falls back to the pre-wiring "not wired yet" notice
+// rather than panicking on a nil call.
+type Promotion struct {
+	Start   StartPromotionFunc
+	Poll    flight.PollDurations
+	OpenURL func(url string) error
+}
+
+// promotionBuiltMsg is delivered once the tea.Cmd wrapping a StartPromotionFunc call finishes
+// (see the plan.StartMsg case below) — an app.go-private message, never exported, since
+// nothing outside the root ever needs to construct or match it.
+type promotionBuiltMsg struct {
+	state   engine.PromotionState
+	driveFn flight.DriveFunc
+	err     error
+}
 
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
 // what a screen needs to open the plan screen (internal/app/plan) without app.New having
@@ -28,13 +65,18 @@ type Model struct {
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
 
-	// notice is a transient, root-level message shown below the top screen — currently only
-	// used for flight.OpenPRMsg/AbortMsg (see their cases in Update): neither has a real
-	// handler wired in yet (cmd/hoist's own URL-opener and abort mechanism are documented
-	// follow-up work, per PR #39's own report), so this is the "don't silently drop it"
-	// feedback until that wiring lands (PR #39 review finding #1). Cleared on the next
-	// keypress, mirroring every screen's own per-keypress notice convention (matrix.Model,
-	// plan.Model, flight.Model all clear theirs the same way).
+	// startPromotion, poll and openURL are Promotion's three fields, unpacked here — see
+	// Promotion's own doc comment for what each one is and why a nil Start/OpenURL degrades
+	// to a notice rather than a panic.
+	startPromotion StartPromotionFunc
+	poll           flight.PollDurations
+	openURL        func(url string) error
+
+	// notice is a transient, root-level message shown below the top screen — used for
+	// plan.StartMsg's own construction failure (a real in-flight conflict, missing config) and
+	// for flight.OpenPRMsg/AbortMsg when no real handler is wired in (nil Start/OpenURL).
+	// Cleared on the next keypress, mirroring every screen's own per-keypress notice
+	// convention (matrix.Model, plan.Model, flight.Model all clear theirs the same way).
 	notice string
 }
 
@@ -42,15 +84,19 @@ type Model struct {
 // image repo prefixes that count as first-party (the same list hoist plan --promotable
 // takes). envs is the selected repo's envs config (production, pairs), zero-valued when
 // there is none. resolveFn is what the plan screen calls to resolve digests; nil runs it in
-// "digest sources: none" mode throughout. The theme starts dark and is replaced when the
-// terminal reports its background.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc) Model {
+// "digest sources: none" mode throughout. promo is what confirming a plan and driving the
+// flight screen need — see Promotion's own doc comment. The theme starts dark and is
+// replaced when the terminal reports its background.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion) Model {
 	m := Model{
-		styles:     ui.NewStyles(true),
-		repo:       repo,
-		promotable: promotable,
-		envs:       envs,
-		resolveFn:  resolveFn,
+		styles:         ui.NewStyles(true),
+		repo:           repo,
+		promotable:     promotable,
+		envs:           envs,
+		resolveFn:      resolveFn,
+		startPromotion: promo.Start,
+		poll:           promo.Poll,
+		openURL:        promo.OpenURL,
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
@@ -92,38 +138,69 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case plan.BackMsg:
 		return m.pop(), nil
 	case plan.StartMsg:
-		// internal/app has no repoFullName (RepoConfig.GitHub), CI/approval policy,
-		// CloneDir/WorktreeDir/Base, or concrete git.Git/forge.Forge adaptor to build a
-		// real engine.PromotionState or flight.DriveFunc from here — cmd/hoist owns wiring
-		// that in (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule; see
-		// internal/engine/identity.go's DeriveID, template.go's RenderPRBody/
-		// RenderCommitMessage, and cmd/hoist/promote.go for what building the real thing
-		// actually takes). This pushes the flight screen with only what StartMsg carries
-		// and a nil DriveFunc, so it renders read-only (every step "not yet reached", no
-		// ticking) until that wiring lands — proving the navigation shape without
-		// fabricating an ID or branch name this package cannot derive correctly.
-		fs := flightScreen{flight.New(engine.PromotionState{
-			SourceEnv: msg.Source,
-			TargetEnv: msg.Target,
-		}, flight.PollDurations{}, nil)}
+		if m.startPromotion == nil {
+			// Mirrors ResolveFunc's own nil convention: a caller that hasn't wired
+			// cmd/hoist's adaptor in gets a clear notice instead of a nil-pointer panic,
+			// and the plan screen stays on top so the operator can see it.
+			m.notice = "starting a promotion is not wired up"
+			return m, nil
+		}
+		start, p := m.startPromotion, msg.Plan
+		return m, func() tea.Msg {
+			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
+			// remote and forge — the claim-then-rescan one-in-flight check re-observes
+			// any conflicting promotion for this target env — so this runs off the
+			// Update call stack (AGENTS.md §4.3), exactly like plan.ResolveFunc's own
+			// loadCmd.
+			state, driveFn, err := start(context.Background(), p)
+			return promotionBuiltMsg{state: state, driveFn: driveFn, err: err}
+		}
+	case promotionBuiltMsg:
+		if msg.err != nil {
+			// A real in-flight conflict, missing github config, or a claim failure —
+			// shown as a notice on whatever screen is still on top (matrix or plan,
+			// whichever popped up plan.StartMsg) rather than crashing or silently
+			// pushing a broken flight screen.
+			m.notice = fmt.Sprintf("could not start promotion: %v", msg.err)
+			return m, nil
+		}
+		fs := flightScreen{flight.New(msg.state, m.poll, msg.driveFn)}
 		m = m.push(fs)
 		return m, fs.Init()
 	case flight.BackMsg:
 		return m.pop(), nil
 	case flight.OpenPRMsg:
-		// cmd/hoist has not wired a real "open this URL in the operator's browser"
-		// mechanism into internal/app yet (documented follow-up work, per PR #39's own
-		// report) — until it does, silently dropping this message would make the o key
-		// look like it did nothing. Surface the URL instead (PR #39 review finding #1).
-		m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
+		if m.openURL == nil {
+			// Mirrors startPromotion's own nil convention above: a caller that hasn't
+			// wired a browser opener in gets a clear notice instead of a nil-pointer
+			// panic (documented follow-up work, per PR #39's own report).
+			m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
+			return m, nil
+		}
+		if err := m.openURL(msg.URL); err != nil {
+			m.notice = fmt.Sprintf("could not open %s: %v", msg.URL, err)
+		}
 		return m, nil
 	case flight.AbortMsg:
-		// Same principle as OpenPRMsg above: no real abort mechanism (closing the PR,
-		// deleting the branch) is wired in yet, so surface a clear notice rather than
-		// silently eating the x keypress (PR #39 review finding #1). flight.Model itself
-		// now refuses to emit this message at all for an empty/read-only promotion (finding
-		// #2), so msg.ID here is always a real, non-empty id.
-		m.notice = fmt.Sprintf("abort not wired yet for promotion %s", msg.ID)
+		// Real abort semantics at the engine level (close the PR? delete the branch?) are
+		// deliberately out of scope here: no milestone has ever defined what "abort" means
+		// for a promotion, and inventing one now risks a rushed, unreviewed design in an
+		// area that has already been hardened hard for safety (invariant 5, the
+		// claim-then-rescan dance) elsewhere. The one narrow, safe interpretation
+		// implemented instead: stop watching this promotion from the TUI and return to
+		// the matrix, leaving the real branch/PR/state file exactly as they are — the
+		// operator drives it further via `hoist resume <id>` or the forge directly, and a
+		// re-opened plan screen can always confirm the same digests again (the same
+		// deterministic id, per AGENTS.md §4.1) to pick the flight screen back up. No
+		// engine call happens here at all: flight.Model itself now refuses to emit
+		// AbortMsg for an empty/read-only promotion (PR #39 review finding #2), so
+		// msg.ID is always a real id, but this handler does not even need it. A
+		// driveCmd already in flight for the popped screen may still deliver one more
+		// (harmless, unmatched) message to whatever screen is now on top once it
+		// completes or its own poll.Deadline elapses.
+		if len(m.stack) > 1 {
+			m.stack = append([]Screen(nil), m.stack[:1]...)
+		}
 		return m, nil
 	}
 	if len(m.stack) == 0 {

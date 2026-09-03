@@ -176,19 +176,6 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return 0
 	}
 
-	id := engine.DeriveID(eff.cfg.GitHub, plan)
-	branch := engine.BranchName(plan.TargetEnv, id)
-	worktreeDir, err := engine.WorktreeDir(id)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
-	}
-	statePath, err := engine.StatePath(id)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
-	}
-
 	f, err := newForge(eff.cfg.GitHub)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
@@ -203,30 +190,15 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		defer cancel()
 	}
 
-	// Invariant 5: one in-flight promotion per target env. A different image set for the same
-	// target env gets a different id (§4.1), so this can only find *another* promotion's state
-	// file — re-observed fresh, never trusted from its own Phase (findInFlight/ObserveAll).
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
-		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
-		return exitFailure
-	} else if conflict != nil {
-		fmt.Fprintf(stderr, "hoist promote: promotion %s targeting %s is still in flight (at %s: %s); run `hoist resume %s` instead of starting a second one\n",
-			conflict.ID, plan.TargetEnv, status.Step, statusDetail(status.Observation), conflict.ID)
-		return exitFailure
-	}
-
-	// findInFlight above is read-only (it only ever looks at state files already on disk), so a
-	// second `hoist promote` racing this one for the same target env could pass that check too,
-	// before either process has written its own state file — engine.ClaimInFlight closes that
-	// window with an atomic filesystem claim; a concurrent loser gets a clear conflict error here
-	// rather than silently proceeding to open a second branch/PR for the same env. released
-	// tracks whether it's already been let go so the deferred cleanup below is a no-op once the
-	// first successful state save has released it for real (see the save wrapper further down).
-	release, err := engine.ClaimInFlight(eff.cfg.GitHub, plan.TargetEnv, id)
+	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
 	}
+	// released tracks whether the claim has already been let go so the deferred cleanup below
+	// is a no-op once the first successful state save has released it for real (see the save
+	// wrapper further down) — mirrors buildPromotionForConfirm's own internal release-once
+	// guard, which only covers its own error paths.
 	released := false
 	defer func() {
 		if !released {
@@ -235,70 +207,10 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 	}()
 
-	// The scan above and the claim just acquired are not one atomic operation: a second
-	// `hoist promote` (a different id, targeting the same env) can finish its own scan before
-	// this process claimed anything, then pause; this process claims, drives all the way to its
-	// first durable state save, and releases the claim (the claim's job is done once the state
-	// file itself can be found by a future scan); only then does the second process resume and
-	// successfully claim the now-free slot, without ever repeating its scan — so it never sees
-	// the state file this process just wrote. Re-running the same scan now, while still holding
-	// the claim, closes that window: nothing else can win the claim while this check runs, and
-	// anything that raced into existence on disk between the first scan and now is caught here.
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
-		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
+	statePath, err := engine.StatePath(s.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
-	} else if conflict != nil {
-		fmt.Fprintf(stderr, "hoist promote: promotion %s targeting %s is still in flight (at %s: %s); run `hoist resume %s` instead of starting a second one\n",
-			conflict.ID, plan.TargetEnv, status.Step, statusDetail(status.Observation), conflict.ID)
-		return exitFailure
-	}
-
-	s := &engine.PromotionState{
-		ID:             id,
-		RepoFullName:   eff.cfg.GitHub,
-		SourceEnv:      plan.SourceEnv,
-		TargetEnv:      plan.TargetEnv,
-		Branch:         branch,
-		CloneDir:       eff.repo,
-		WorktreeDir:    worktreeDir,
-		Base:           *base,
-		Edits:          plan.Edits,
-		CommitMessage:  engine.RenderCommitMessage(id, plan),
-		PRTitle:        engine.PRTitle(plan),
-		PRBody:         engine.RenderPRBody(id, plan),
-		CINone:         eff.cfg.CI.None,
-		CIGrace:        time.Duration(eff.cfg.CI.Grace),
-		CINoneOverride: *overrideCINone,
-		Approval:       eff.cfg.Approval(plan.TargetEnv),
-		Approvers:      eff.cfg.Approvers,
-		Collaborators:  eff.cfg.Collaborators,
-	}
-	// The state file is an index of what to look at, never evidence of what happened
-	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the
-	// remote regardless of what's loaded here. Carrying History forward is purely so
-	// `hoist promote`'s own output can show it; a missing or unreadable file never blocks
-	// the run. An override flag given on a later re-run always wins over what a previous run
-	// persisted, since the operator just asked for it again.
-	if prev, err := engine.LoadState(statePath); err == nil && prev != nil && prev.ID == id {
-		s.History = prev.History
-		// Policy fields (CINone/CIGrace/Approval/Approvers/Collaborators), set above from
-		// eff.cfg, are overwritten here with what the existing state file already persisted —
-		// mirroring runResume's own fix (cmd/hoist/resume.go, commit f3b1c53) for the identical
-		// bug at this sibling call site: PromotionState's doc comment (internal/engine/state.go)
-		// states these are policy "as of when this promotion started", carried forward so a
-		// promotion never straddles two different policies mid-flight. Re-invoking `hoist
-		// promote` for an id that already has a state file is still a resume of THAT promotion,
-		// not a new one — leaving these fresh from current config would let an operator's
-		// mid-flight config edit retroactively change what policy an already-started promotion
-		// enforces, exactly the bug runResume was fixed for.
-		s.CINone = prev.CINone
-		s.CIGrace = prev.CIGrace
-		s.Approval = prev.Approval
-		s.Approvers = prev.Approvers
-		s.Collaborators = prev.Collaborators
-		if !*overrideCINone {
-			s.CINoneOverride = prev.CINoneOverride
-		}
 	}
 
 	waited := false
@@ -326,6 +238,146 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
 	return reportDriveResult(stdout, stderr, "hoist promote", plan.SourceEnv, plan.TargetEnv, s, err)
+}
+
+// buildPromotionForConfirm does everything runPromote does up through constructing (or loading
+// and merging into) a real *engine.PromotionState for plan, before driveToCompletion's own
+// polling loop ever starts: the id/branch/worktree/statePath derivation, the claim-then-rescan
+// one-in-flight check (round-6 hardening — see the two findInFlight calls below, and
+// ClaimInFlight's own doc comment for why a single scan-then-claim is not atomic), and the
+// prior-state merge-in (the resume-safety fix, commit f3b1c53, that keeps a retried/resumed
+// promotion from straddling two different CI/approval policies). This is real, hardened,
+// several-review-rounds-deep logic; runPromote itself now calls this rather than inlining a copy
+// (see its own body above), and cmd/hoist's TUI wiring (wiring.go's startPromotion) calls it too,
+// so the CLI and TUI paths can never silently drift apart.
+//
+// base and overrideCINone are the CLI's own --base/--override-ci-none flag values; the TUI has
+// no equivalent flags yet, so its own caller passes the same defaults ("main", false) runPromote
+// itself defaults to.
+//
+// On success, release must be called by the caller exactly once the returned state's first
+// successful save lands (ClaimInFlight's own doc comment: the claim's job is done once a durable
+// state file exists for a future findInFlight/ObserveAll scan to see) — never held for the whole
+// promotion. On error, any claim this call acquired has already been released; release is nil
+// whenever err is non-nil.
+func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge) (*engine.PromotionState, func(), error) {
+	id := engine.DeriveID(eff.cfg.GitHub, plan)
+	branch := engine.BranchName(plan.TargetEnv, id)
+	worktreeDir, err := engine.WorktreeDir(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	statePath, err := engine.StatePath(id)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Invariant 5: one in-flight promotion per target env. A different image set for the same
+	// target env gets a different id (§4.1), so this can only find *another* promotion's state
+	// file — re-observed fresh, never trusted from its own Phase (findInFlight/ObserveAll).
+	if conflict, status, ferr := findInFlight(ctx, g, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+		return nil, nil, fmt.Errorf("checking whether another promotion is already in flight: %w", ferr)
+	} else if conflict != nil {
+		return nil, nil, inFlightConflictError(conflict, plan.TargetEnv, status)
+	}
+
+	// findInFlight above is read-only (it only ever looks at state files already on disk), so a
+	// second confirm racing this one for the same target env could pass that check too, before
+	// either process has written its own state file — engine.ClaimInFlight closes that window
+	// with an atomic filesystem claim; a concurrent loser gets a clear conflict error here
+	// rather than silently proceeding to open a second branch/PR for the same env. released
+	// tracks whether it's already been let go so releaseOnce is idempotent for every error path
+	// below and for a caller that later calls the returned release itself.
+	claimRelease, err := engine.ClaimInFlight(eff.cfg.GitHub, plan.TargetEnv, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	released := false
+	releaseOnce := func() {
+		if !released {
+			released = true
+			claimRelease()
+		}
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			releaseOnce()
+		}
+	}()
+
+	// The scan above and the claim just acquired are not one atomic operation: a second
+	// confirm (a different id, targeting the same env) can finish its own scan before this
+	// process claimed anything, then pause; this process claims, drives all the way to its
+	// first durable state save, and releases the claim (the claim's job is done once the state
+	// file itself can be found by a future scan); only then does the second process resume and
+	// successfully claim the now-free slot, without ever repeating its scan — so it never sees
+	// the state file this process just wrote. Re-running the same scan now, while still holding
+	// the claim, closes that window: nothing else can win the claim while this check runs, and
+	// anything that raced into existence on disk between the first scan and now is caught here.
+	if conflict, status, ferr := findInFlight(ctx, g, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+		return nil, nil, fmt.Errorf("checking whether another promotion is already in flight: %w", ferr)
+	} else if conflict != nil {
+		return nil, nil, inFlightConflictError(conflict, plan.TargetEnv, status)
+	}
+
+	s := &engine.PromotionState{
+		ID:             id,
+		RepoFullName:   eff.cfg.GitHub,
+		SourceEnv:      plan.SourceEnv,
+		TargetEnv:      plan.TargetEnv,
+		Branch:         branch,
+		CloneDir:       eff.repo,
+		WorktreeDir:    worktreeDir,
+		Base:           base,
+		Edits:          plan.Edits,
+		CommitMessage:  engine.RenderCommitMessage(id, plan),
+		PRTitle:        engine.PRTitle(plan),
+		PRBody:         engine.RenderPRBody(id, plan),
+		CINone:         eff.cfg.CI.None,
+		CIGrace:        time.Duration(eff.cfg.CI.Grace),
+		CINoneOverride: overrideCINone,
+		Approval:       eff.cfg.Approval(plan.TargetEnv),
+		Approvers:      eff.cfg.Approvers,
+		Collaborators:  eff.cfg.Collaborators,
+	}
+	// The state file is an index of what to look at, never evidence of what happened
+	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the
+	// remote regardless of what's loaded here. Carrying History forward is purely so the
+	// caller's own output can show it; a missing or unreadable file never blocks the run. An
+	// override flag given on a later re-run always wins over what a previous run persisted,
+	// since the operator just asked for it again.
+	if prev, err := engine.LoadState(statePath); err == nil && prev != nil && prev.ID == id {
+		s.History = prev.History
+		// Policy fields (CINone/CIGrace/Approval/Approvers/Collaborators), set above from
+		// eff.cfg, are overwritten here with what the existing state file already persisted —
+		// mirroring runResume's own fix (cmd/hoist/resume.go, commit f3b1c53) for the identical
+		// bug at this sibling call site: PromotionState's doc comment (internal/engine/state.go)
+		// states these are policy "as of when this promotion started", carried forward so a
+		// promotion never straddles two different policies mid-flight. Re-confirming a plan
+		// whose id already has a state file is still a resume of THAT promotion, not a new
+		// one — leaving these fresh from current config would let an operator's mid-flight
+		// config edit retroactively change what policy an already-started promotion enforces,
+		// exactly the bug runResume was fixed for.
+		s.CINone = prev.CINone
+		s.CIGrace = prev.CIGrace
+		s.Approval = prev.Approval
+		s.Approvers = prev.Approvers
+		s.Collaborators = prev.Collaborators
+		if !overrideCINone {
+			s.CINoneOverride = prev.CINoneOverride
+		}
+	}
+
+	ok = true
+	return s, releaseOnce, nil
+}
+
+// inFlightConflictError is the one-in-flight-per-target-env refusal message, shared by both of
+// buildPromotionForConfirm's findInFlight calls above (the CLI's original wording, unchanged).
+func inFlightConflictError(conflict *engine.PromotionState, targetEnv string, status engine.StepStatus) error {
+	return fmt.Errorf("promotion %s targeting %s is still in flight (at %s: %s); run `hoist resume %s` instead of starting a second one",
+		conflict.ID, targetEnv, status.Step, statusDetail(status.Observation), conflict.ID)
 }
 
 // statusDetail picks whichever of Observation's message fields is set — Blocked takes
