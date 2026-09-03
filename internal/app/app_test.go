@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -20,6 +22,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
@@ -259,6 +262,62 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	}
 	if v := plain(m); !strings.Contains(v, "still in flight") {
 		t.Errorf("view missing the construction-error notice:\n%s", v)
+	}
+}
+
+// TestStartMsgBoundedByPollDeadline: mirrors flight.Model's own TestDriveCmdBoundedByPollDeadline
+// — a startPromotion call that hangs (blocks on ctx.Done() rather than ever returning) must not
+// stall the plan screen forever. m.poll.Deadline bounds the call the same way it bounds
+// flight.Model.driveCmd's own DriveFunc call, so this returns with ctx's deadline error instead
+// of the goroutine blocking indefinitely.
+func TestStartMsgBoundedByPollDeadline(t *testing.T) {
+	hung := func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		<-ctx.Done()
+		return engine.PromotionState{}, nil, ctx.Err()
+	}
+	promo := Promotion{Start: hung, Poll: flight.PollDurations{Deadline: 20 * time.Millisecond}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg with a wired startPromotion produced no command")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case built := <-done:
+		pbm, ok := built.(promotionBuiltMsg)
+		if !ok {
+			t.Fatalf("command yields %T, want promotionBuiltMsg", built)
+		}
+		if !errors.Is(pbm.err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want context.DeadlineExceeded", pbm.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartMsg's command did not return within 2s of a 20ms poll.Deadline — a hung startPromotion call can still stall the plan screen forever")
+	}
+}
+
+// TestStartMsgErrorNoticeIsRedacted: buildPromotionForConfirm's error can embed a git/forge
+// transport message carrying a credential (a token in a remote URL, say) — the root notice must
+// scrub it the same way plan.Model.View and flight.Model.View already redact their own rendered
+// output, rather than leaking it to the terminal unredacted.
+func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
+	const secret = "ghp_totallysecrettoken1234567890"
+	redact.Register(secret)
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		return engine.PromotionState{}, nil, fmt.Errorf("push failed: authentication using %s rejected", secret)
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd := m.Update(msg)
+	m, _ = m.Update(cmd())
+	v := plain(m)
+	if strings.Contains(v, secret) {
+		t.Errorf("view leaks the registered secret unredacted:\n%s", v)
+	}
+	if !strings.Contains(v, redact.Redacted) {
+		t.Errorf("view missing %q for the redacted notice:\n%s", redact.Redacted, v)
 	}
 }
 

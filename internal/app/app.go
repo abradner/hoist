@@ -13,6 +13,7 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // StartPromotionFunc builds a real engine.PromotionState and flight.DriveFunc for a plan the
@@ -145,14 +146,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "starting a promotion is not wired up"
 			return m, nil
 		}
-		start, p := m.startPromotion, msg.Plan
+		start, p, deadline := m.startPromotion, msg.Plan, m.poll.Deadline
 		return m, func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
 			// any conflicting promotion for this target env — so this runs off the
 			// Update call stack (AGENTS.md §4.3), exactly like plan.ResolveFunc's own
 			// loadCmd.
-			state, driveFn, err := start(context.Background(), p)
+			// Bounded by m.poll.Deadline, not left on context.Background() — the same
+			// reasoning as flight.Model.driveCmd's own bound: a single hung network
+			// call must not stall the plan screen forever with no way to cancel.
+			ctx := context.Background()
+			if deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, deadline)
+				defer cancel()
+			}
+			state, driveFn, err := start(ctx, p)
 			return promotionBuiltMsg{state: state, driveFn: driveFn, err: err}
 		}
 	case promotionBuiltMsg:
@@ -222,7 +232,11 @@ func (m Model) View() tea.View {
 		content = m.stack[n-1].View()
 	}
 	if m.notice != "" {
-		content += "\n" + m.styles.Notice.Render(m.notice)
+		// Every notice set above (a start failure whose error can embed a git/forge
+		// transport message, an open-URL failure) passes through redact.Strings here,
+		// once, at the render boundary — the same convention plan.Model.View and
+		// flight.Model.View already use, rather than wrapping each setter individually.
+		content += "\n" + m.styles.Notice.Render(redact.Strings(m.notice))
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
