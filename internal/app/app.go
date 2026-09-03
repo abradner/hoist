@@ -105,7 +105,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		fs := flightScreen{flight.New(engine.PromotionState{
 			SourceEnv: msg.Source,
 			TargetEnv: msg.Target,
-		}, config.PollConfig{}, nil)}
+		}, flight.PollDurations{}, nil)}
 		m = m.push(fs)
 		return m, fs.Init()
 	case flight.BackMsg:

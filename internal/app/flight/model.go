@@ -10,11 +10,19 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
+
+// PollDurations is the plain-value slice of internal/config.PollConfig this screen actually
+// needs, in place of importing internal/config itself. AGENTS.md §4.8: a screen never imports
+// config/registry policy, only the plain values or function types cmd/hoist (the one place
+// allowed to know both sides) translates for it. Zero values are valid — New/pollInterval
+// already fall back to a fixed default for anything left unset.
+type PollDurations struct {
+	CI, Approval, Deadline time.Duration
+}
 
 // DriveFunc advances a promotion by one poll iteration: it runs engine.Drive once (Drive
 // itself calls Act on whichever steps are not yet satisfied, in order, then returns at the
@@ -88,7 +96,7 @@ type Model struct {
 	done  bool
 
 	driveFn DriveFunc
-	poll    config.PollConfig
+	poll    PollDurations
 	// busy is true while a driveCmd is in flight, so a tick landing mid-call and a manual R
 	// press can't both fire a second, overlapping DriveFunc call.
 	busy bool
@@ -110,7 +118,7 @@ type Model struct {
 // screen's "start" flow or engine.LoadState on hoist resume). driveFn is nil in a read-only
 // context with nothing to drive: the screen still renders state and never ticks or
 // schedules a poll, and R shows a notice instead of calling nil.
-func New(state engine.PromotionState, poll config.PollConfig, driveFn DriveFunc) Model {
+func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Model {
 	m := Model{
 		state:   state,
 		order:   StepOrder,
@@ -153,7 +161,7 @@ func (m Model) Init() tea.Cmd {
 // the promotion started, not this call), but it turns "can hang forever" into "eventually
 // errors," which is the actual gap being closed.
 func (m Model) driveCmd() tea.Cmd {
-	driveFn, state, deadline := m.driveFn, m.state, time.Duration(m.poll.Deadline)
+	driveFn, state, deadline := m.driveFn, m.state, m.poll.Deadline
 	if driveFn == nil {
 		return nil
 	}
@@ -367,17 +375,18 @@ func (m Model) hint() string {
 // pollInterval mirrors cmd/hoist/drive.go's own pollInterval exactly. It is duplicated
 // rather than imported because cmd/hoist is package main and cannot be imported from here;
 // the PR report flags this duplication for a reviewer to double-check against
-// cmd/hoist/drive.go if that function's own switch ever changes. CI and Approval read
-// config.PollConfig, so this never hand-copies cmd/hoist's magic numbers — only the 2s
-// fallback for every other step is a literal, identical to cmd/hoist's own (there is
-// nothing to tune there: every other step only ever waits on the interactive signing prompt
-// or a single merge/branch-delete retry).
-func pollInterval(poll config.PollConfig, phase engine.StepName) time.Duration {
+// cmd/hoist/drive.go if that function's own switch ever changes. CI and Approval read the
+// PollDurations the caller translated from config.PollConfig at the cmd/hoist boundary, so
+// this never hand-copies cmd/hoist's magic numbers itself — only the 2s fallback for every
+// other step is a literal, identical to cmd/hoist's own (there is nothing to tune there:
+// every other step only ever waits on the interactive signing prompt or a single
+// merge/branch-delete retry).
+func pollInterval(poll PollDurations, phase engine.StepName) time.Duration {
 	switch phase {
 	case engine.StepCIGreen:
-		return time.Duration(poll.CI)
+		return poll.CI
 	case engine.StepApproved:
-		return time.Duration(poll.Approval)
+		return poll.Approval
 	default:
 		return 2 * time.Second
 	}

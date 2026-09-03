@@ -10,7 +10,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/forge"
@@ -109,7 +108,7 @@ func TestInitDrivesImmediately(t *testing.T) {
 	drv := &stubDrive{statuses: []engine.StepStatus{
 		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true, Detail: "worktree present"}},
 	}}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	if !m.busy {
 		t.Fatal("busy = false immediately after New with a non-nil driveFn")
 	}
@@ -137,7 +136,7 @@ func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
 		<-ctx.Done()
 		return s, false, nil, ctx.Err()
 	}
-	m := New(fixtureState(), config.PollConfig{Deadline: config.Duration(20 * time.Millisecond)}, hung)
+	m := New(fixtureState(), PollDurations{Deadline: 20 * time.Millisecond}, hung)
 	cmd := m.driveCmd()
 	if cmd == nil {
 		t.Fatal("driveCmd returned nil for a non-nil driveFn")
@@ -162,7 +161,7 @@ func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
 // plan.StartMsg handler currently pushes — see app.go's own comment on why) never calls
 // anything and never schedules a tick.
 func TestNilDriveFuncNeverTicks(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+	m := New(fixtureState(), PollDurations{}, nil)
 	if m.busy {
 		t.Fatal("busy = true with a nil driveFn")
 	}
@@ -184,7 +183,7 @@ func TestReobserveBypassesTick(t *testing.T) {
 	drv := &stubDrive{statuses: []engine.StepStatus{
 		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
 	}}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	m = runInit(t, m) // consume the initial drive so calls resets meaning clearly
 	if drv.calls != 1 {
 		t.Fatalf("setup: driveFn called %d times, want 1", drv.calls)
@@ -210,7 +209,7 @@ func TestReobserveBypassesTick(t *testing.T) {
 // fire an overlapping DriveFunc call.
 func TestReobserveIgnoredWhileBusy(t *testing.T) {
 	drv := &stubDrive{}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	// Do not run Init's cmd — m.busy is already true (set by New), simulating "a drive call
 	// is in flight".
 	if !m.busy {
@@ -225,7 +224,7 @@ func TestReobserveIgnoredWhileBusy(t *testing.T) {
 // TestReobserveOnNilDriveFuncShowsNotice: R on a read-only screen shows a notice rather than
 // panicking on a nil DriveFunc call.
 func TestReobserveOnNilDriveFuncShowsNotice(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+	m := New(fixtureState(), PollDurations{}, nil)
 	m = m.SetSize(80, 10)
 	m, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
 	if cmd != nil {
@@ -239,7 +238,7 @@ func TestReobserveOnNilDriveFuncShowsNotice(t *testing.T) {
 // TestOpenPRKey: o emits OpenPRMsg naming s.PR's URL once one has been observed; before
 // that, it shows a notice instead.
 func TestOpenPRKey(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+	m := New(fixtureState(), PollDurations{}, nil)
 	m = m.SetSize(80, 10)
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
@@ -275,7 +274,7 @@ func TestAbortKeyNoticeWhenNotDriving(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(tc.state, config.PollConfig{}, tc.driveFn)
+			m := New(tc.state, PollDurations{}, tc.driveFn)
 			m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 			m, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 			if cmd != nil {
@@ -294,7 +293,7 @@ func TestAbortKeyNoticeWhenNotDriving(t *testing.T) {
 // the currently-always-true stub case, it does not change the general contract.
 func TestAbortKeyEmitsWhenDriving(t *testing.T) {
 	state := fixtureState() // ID: "abcd1234"
-	m := New(state, config.PollConfig{}, (&stubDrive{}).fn())
+	m := New(state, PollDurations{}, (&stubDrive{}).fn())
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if cmd == nil {
 		t.Fatal("x produced no command")
@@ -307,7 +306,7 @@ func TestAbortKeyEmitsWhenDriving(t *testing.T) {
 
 // TestBackKey: esc emits BackMsg.
 func TestBackKey(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+	m := New(fixtureState(), PollDurations{}, nil)
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd == nil {
 		t.Fatal("esc produced no command")
@@ -319,7 +318,7 @@ func TestBackKey(t *testing.T) {
 
 // TestLogToggle: l shows/hides PromotionState.History in View().
 func TestLogToggle(t *testing.T) {
-	m := New(fixtureState(), config.PollConfig{}, nil)
+	m := New(fixtureState(), PollDurations{}, nil)
 	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
 	if strings.Contains(m.View(), "History:") {
 		t.Fatal("history shown before l was pressed")
@@ -339,7 +338,7 @@ func TestLogToggle(t *testing.T) {
 // behaviour for a transient Checks/Comments failure).
 func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
 	drv := &stubDrive{err: errors.New("GET check-runs: 404")}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
@@ -368,7 +367,7 @@ func TestDriveErrorRedactsRegisteredSecret(t *testing.T) {
 	const secret = "SEKRIT-FLIGHT-TOKEN"
 	redact.Register(secret)
 	drv := &stubDrive{err: errors.New("checking CI status: token " + secret + " rejected")}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
@@ -388,7 +387,7 @@ func TestDoneStopsTicking(t *testing.T) {
 	drv := &stubDrive{done: true, statuses: []engine.StepStatus{
 		{Step: engine.StepMerged, Observation: engine.Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
 	}}
-	m := New(fixtureState(), config.PollConfig{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn())
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 	m = runInit(t, m)
 	if !m.done {
@@ -414,7 +413,7 @@ func TestDoneStopsTicking(t *testing.T) {
 // invisible animation loop for as long as the screen stayed open.
 func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 	t.Run("nil driveFn: Init never starts the spinner", func(t *testing.T) {
-		m := New(fixtureState(), config.PollConfig{}, nil)
+		m := New(fixtureState(), PollDurations{}, nil)
 		if cmd := m.Init(); cmd != nil {
 			t.Errorf("Init on a read-only screen returned a command, want nil (got %#v)", cmd())
 		}
@@ -422,7 +421,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 
 	t.Run("busy: spinner.TickMsg reschedules", func(t *testing.T) {
 		drv := &stubDrive{}
-		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn())
 		if !m.busy {
 			t.Fatal("setup: expected busy = true (New sets it for a non-nil driveFn)")
 		}
@@ -434,7 +433,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 
 	t.Run("not busy: spinner.TickMsg does not reschedule", func(t *testing.T) {
 		drv := &stubDrive{}
-		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn())
 		m.busy = false // simulate the gap between polls, waiting on scheduleTick's timer
 		_, cmd := m.Update(spinner.TickMsg{})
 		if cmd != nil {
@@ -446,7 +445,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 		drv := &stubDrive{done: true, statuses: []engine.StepStatus{
 			{Step: engine.StepMerged, Observation: engine.Observation{Satisfied: true, Detail: "merged"}},
 		}}
-		m := New(fixtureState(), config.PollConfig{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn())
 		m = runInit(t, m)
 		if !m.done {
 			t.Fatal("setup: expected done = true")
@@ -458,10 +457,10 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 	})
 }
 
-// TestPollIntervalUsesConfig: scheduleTick's own pollInterval reads config.PollConfig for
-// CI/Approval rather than a hand-copied literal.
+// TestPollIntervalUsesConfig: scheduleTick's own pollInterval reads the caller-supplied
+// PollDurations for CI/Approval rather than a hand-copied literal.
 func TestPollIntervalUsesConfig(t *testing.T) {
-	poll := config.PollConfig{CI: config.Duration(7 * time.Second), Approval: config.Duration(11 * time.Second)}
+	poll := PollDurations{CI: 7 * time.Second, Approval: 11 * time.Second}
 	cases := []struct {
 		phase engine.StepName
 		want  time.Duration
@@ -487,7 +486,7 @@ func TestViewFixedSize(t *testing.T) {
 	styles := ui.NewStyles(true)
 
 	t.Run("mid CI waiting", func(t *testing.T) {
-		m := New(fixtureState(), config.PollConfig{}, nil)
+		m := New(fixtureState(), PollDurations{}, nil)
 		m = m.SetSize(100, 30).SetStyles(styles)
 		m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
 			st(engine.StepBranched, engine.Observation{Satisfied: true}),
@@ -517,7 +516,7 @@ func TestViewFixedSize(t *testing.T) {
 	})
 
 	t.Run("blocked", func(t *testing.T) {
-		m := New(fixtureState(), config.PollConfig{}, nil)
+		m := New(fixtureState(), PollDurations{}, nil)
 		m = m.SetSize(100, 30).SetStyles(styles)
 		m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
 			st(engine.StepBranched, engine.Observation{Satisfied: true}),
@@ -537,7 +536,7 @@ func TestViewFixedSize(t *testing.T) {
 	})
 
 	t.Run("done", func(t *testing.T) {
-		m := New(fixtureState(), config.PollConfig{}, nil)
+		m := New(fixtureState(), PollDurations{}, nil)
 		m = m.SetSize(100, 30).SetStyles(styles)
 		m.done = true
 		m.rows = DeriveRows(StepOrder, true, []engine.StepStatus{
