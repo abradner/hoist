@@ -445,6 +445,21 @@ func equalSets(a, b []string) bool {
 	return true
 }
 
+// CapturesText implements app.Screen (via planScreen's thin delegate in internal/app/screen.go).
+// The root queries this before treating "q" as its own global quit key (round 5, finding 3).
+// Always false: huh.Select and huh.MultiSelect both support their own "/" filter-typing mode in
+// principle (GetFiltering), but neither field here ever has huh.Field.WithKeyMap called on it
+// (that only happens automatically inside a huh.Form/Group, and this screen uses both fields
+// standalone — AGENTS.md §4.7, "no layout library", extends to not adopting huh.Form just for
+// its wiring) — so every keymap-gated mode on these fields, filtering included, is unreachable
+// through real key input today, not only "q" specifically. Verified directly: pressing Down or
+// Space against a bare huh.NewMultiSelect() with no WithKeyMap call moves nothing and toggles
+// nothing. That gap is real but is this screen's own pre-existing wiring issue, independent of
+// the quit-key bug this method exists to fix, and is flagged separately rather than fixed here.
+// If a future change wires a real keymap (or a text-entry mode of its own), this should change
+// to query it exactly as tags.Model.CapturesText queries its own m.filtering.
+func (m Model) CapturesText() bool { return false }
+
 // SetSize lays every huh field and the viewport out inside width × height.
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height

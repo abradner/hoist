@@ -366,6 +366,45 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 	}
 }
 
+// TestQuitKeyTypedIntoTagsFilterDoesNotQuit is round 5's finding 3 regression test: the root's
+// global quit binding used to run before the top screen's own key handling ever saw the press,
+// so typing "q" into the tag picker's filter box quit the whole program instead of landing in
+// the filter query. Drives the real app-wiring path (matrix.OpenTagsMsg through app.Model.Update,
+// like TestDeployNewThreadsRealStagingTag above), opens the filter with "/", then types "q".
+func TestQuitKeyTypedIntoTagsFilterDoesNotQuit(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagsFn := func(string) (bool, tags.ListFunc, tags.MetaFunc) {
+		listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+			return []string{"v1", "v2"}, nil, false, nil
+		}
+		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
+			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil
+		}
+		return false, listFn, metaFn
+	}
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, tagsFn)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+
+	msg := matrix.OpenTagsMsg{ImageRepo: "ghcr.io/example/web", Target: "app-production"}
+	tm, cmd := tm.Update(msg)
+	tm = drainTags(tm, cmd)
+
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	tm, cmd = tm.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("typing q into the tag picker's filter quit the program")
+		}
+	}
+	if v := plain(tm); !strings.Contains(v, "filter: > q") {
+		t.Errorf("filter should have gained a q character, view:\n%s", v)
+	}
+}
+
 func TestBackgroundColorRethemes(t *testing.T) {
 	m := sized(t)
 	if !m.(Model).styles.Dark {

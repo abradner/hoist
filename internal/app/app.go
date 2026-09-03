@@ -85,8 +85,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		m.notice = ""
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			// Round 5, finding 3: this used to quit unconditionally, before the top screen's
+			// own key handling ever saw the press — so typing "q" into the tag picker's filter
+			// (or a huh field's own "/" filter, plan.Model.CapturesText) quit the whole program
+			// instead of typing. Falls through to the normal forward-to-screen code below
+			// whenever the top screen reports it's mid-text-entry; ctrl+c above is unaffected
+			// and always quits.
+			if !m.capturesText() {
+				return m, tea.Quit
+			}
 		}
 	case matrix.OpenPlanMsg:
 		target := ""
@@ -200,6 +210,16 @@ func (m Model) pop() Model {
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
 	return m
+}
+
+// capturesText reports whether the top screen is currently mid-text-entry (see Screen.
+// CapturesText's own doc comment) — false when the stack is empty, matching how View/Update
+// already treat an empty stack as "nothing to defer to".
+func (m Model) capturesText() bool {
+	if len(m.stack) == 0 {
+		return false
+	}
+	return m.stack[len(m.stack)-1].CapturesText()
 }
 
 // each applies f to every screen, copying the stack.

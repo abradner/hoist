@@ -332,6 +332,26 @@ func TestEnterWithNothingTickedShowsNotice(t *testing.T) {
 	}
 }
 
+// TestCapturesTextIsAlwaysFalseTodayGivenUnwiredHuhKeymap documents round 5's finding 3
+// investigation for this screen: internal/app's root queries Model.CapturesText before treating
+// "q" as its global quit key (see app.go's own regression test for the tag picker's own working
+// case of the same bug). huh.MultiSelect supports its own "/" filter-typing mode in principle,
+// but this screen never calls huh.Field.WithKeyMap on either of its huh fields (they're used
+// standalone, outside a huh.Form/Group, which is what normally wires that up) — so pressing "/"
+// here does nothing at all (confirmed: it doesn't even reach huh's own filter, matching the
+// finding that Down/Space are equally inert against an unwired field). CapturesText must
+// therefore stay false — claiming otherwise would protect a mode that can never actually engage.
+func TestCapturesTextIsAlwaysFalseTodayGivenUnwiredHuhKeymap(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if m.CapturesText() {
+		t.Fatal("CapturesText should be false before any key is pressed")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if m.CapturesText() {
+		t.Fatal("CapturesText should still be false: \"/\" does not reach huh's own filter mode without WithKeyMap ever being called")
+	}
+}
+
 // TestSkipStagingWarning: promoting straight to a production env that is not the source's
 // configured pair shows the warning, never blocks (AGENTS.md §4.5).
 func TestSkipStagingWarning(t *testing.T) {

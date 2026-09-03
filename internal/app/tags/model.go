@@ -361,6 +361,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// CapturesText implements app.Screen (via tagsScreen's thin delegate in internal/app/screen.go).
+// The root queries this before treating "q" as its own global quit key (round 5, finding 3):
+// only the filter's own text-entry mode counts — the confirm dialog is a huh.Confirm (y/n/enter/
+// esc only; "q" was never meant to be typed there, so leaving it to the global quit key is fine).
+func (m Model) CapturesText() bool { return m.filtering }
+
 func (m Model) filtered() []Row { return Filter(m.rows, m.filterQuery) }
 
 func (m Model) moveCursor(delta int) (Model, tea.Cmd) {

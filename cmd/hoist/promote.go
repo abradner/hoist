@@ -69,7 +69,7 @@ var (
 // Drive's own re-observation, AGENTS.md §4.1, is what correctly reports it done rather than this
 // function refusing a legitimate resume).
 func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
-	if err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
+	if _, _, err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
 		return fmt.Errorf("fetching origin/%s to confirm the clone is current: %w", base, err)
 	}
 
