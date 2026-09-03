@@ -254,6 +254,75 @@ func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
 	}
 }
 
+// TestUnmappedLazyOrderingMarksUnevaluatedRows is round 5's finding 4 regression test: an
+// unmapped repo's Created-based ordering (invariant 3's fallback) is only ever established among
+// rows fetchVisible has actually loaded — a genuinely newer tag sitting outside every window the
+// cursor has visited is never fetched, and so can never be sorted to the top. This builds an
+// unmapped, 30-tag list at a small height (pageSize = max(10-4,5) = 6, so only the first 6 rows
+// ever get fetched at cursor v00) where the very LAST tag (v29, off past the fetched window) is
+// deliberately the actual newest — proving both halves: the limitation itself (v29 is never
+// promoted to the top) and this round's chosen fix (the view honestly marks how many rows
+// outside the window remain unevaluated, rather than silently claiming a complete sort).
+func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
+	const n = 30
+	regTags := make([]string, n)
+	metas := map[string]registry.ImageMeta{}
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < n; i++ {
+		tag := fmt.Sprintf("v%02d", i)
+		regTags[i] = tag
+		// Every tag except the cursor's own (v00, below) gets an OLD date. This keeps the
+		// fetch window from cascading past its initial page: once v00's own window-mates
+		// (v01..v05) load, they all sort BEHIND v00 (older), so v00's own index — and
+		// therefore the window fetchVisible computes around it — never moves. Without this,
+		// a naively increasing date-by-index would make every row progressively newer than
+		// the cursor's, and the resulting cascade of re-fetches would eventually load the
+		// entire list, defeating what this test needs to demonstrate.
+		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: base.AddDate(0, 0, i)}
+	}
+	// v00 (the initially-selected cursor, and the first tag fetchVisible's first window
+	// includes) is deliberately newer than every one of its initial window-mates, so it stays
+	// at the front once they all load.
+	metas["v00"] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("0", 64), Created: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	// v29 is actually the newest tag of all — but it sits at the far end of the list, well
+	// outside the window that ever gets fetched, so Reorder never learns its date at all.
+	metas["v29"] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("9", 64), Created: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)}
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, nil, false, nil }
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, fixedMetas(metas))
+	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
+	m = m.SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	if m.selectedTag != "v00" {
+		t.Fatalf("initial selection = %q, want v00 (unmapped: DeriveRows never reorders before anything loads)", m.selectedTag)
+	}
+	loaded := 0
+	for _, r := range m.rows {
+		if r.MetaLoaded {
+			loaded++
+		}
+		if r.Tag == "v29" && r.MetaLoaded {
+			t.Fatal("v29 sits far outside the visible window and must not have been fetched — otherwise this test isn't exercising the lazy-fetch gap at all")
+		}
+	}
+	if loaded != 6 {
+		t.Fatalf("expected exactly the 6-row initial window to have been fetched, got %d loaded rows — this test's own fixture no longer keeps the fetch window bounded", loaded)
+	}
+
+	got := ansi.Strip(m.View())
+	if strings.Contains(got, "v29") {
+		t.Fatalf("v29 was never evaluated and must not have been promoted into the visible top rows:\n%s", got)
+	}
+	if !strings.Contains(got, "haven't been evaluated yet") {
+		t.Fatalf("view should honestly mark that rows outside the window remain unevaluated, rather than silently claim a complete Created-sort:\n%s", got)
+	}
+	if !strings.Contains(got, "24 tag(s)") {
+		t.Fatalf("24 of the 30 rows (everything outside the 6-row window) should be counted as unevaluated:\n%s", got)
+	}
+}
+
 func TestEnterEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})

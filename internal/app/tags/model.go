@@ -643,6 +643,33 @@ func (m Model) viewReady() string {
 		b.WriteString("\n")
 	}
 
+	// Finding 4 (round 5): for an unmapped repo, Created-based ordering (invariant 3's fallback)
+	// is only actually established among rows fetchVisible has already loaded — AGENTS.md
+	// invariant 4's deliberate laziness (New's own doc comment) means a row outside every window
+	// the cursor has visited so far may never be fetched at all, so a genuinely newer tag sitting
+	// there can never be sorted to the top. Rather than eagerly fetching every row up front
+	// (which would defeat that laziness) or silently claiming a Created-sort this screen hasn't
+	// actually established, count and name how many rows outside the current window are still
+	// unevaluated so the operator can tell the sort is provisional, not complete.
+	if !m.mapped {
+		var pending int
+		for i, r := range rows {
+			if i >= start && i < end {
+				continue
+			}
+			if !r.MetaLoaded {
+				pending++
+			}
+		}
+		if pending > 0 {
+			b.WriteString(m.styles.Notice.Render(fmt.Sprintf(
+				"%d tag(s) outside the visible window haven't been evaluated yet — Created order isn't fully established",
+				pending,
+			)))
+			b.WriteString("\n")
+		}
+	}
+
 	if m.notice != "" {
 		b.WriteString(m.styles.Notice.Render(m.notice))
 		b.WriteString("\n")

@@ -88,6 +88,14 @@ func DeriveRows(regTags []string, gitTags []forge.GitTag, mapped bool) []Row {
 // keeps separate). A row not yet loaded keeps its current relative position, appended after
 // every loaded row, so a row already visible under the cursor never jumps out from under it
 // mid-fetch.
+//
+// This sort is only ever complete among rows that have actually loaded (finding 4, round 5):
+// fetchVisible (model.go) only fetches metadata for whatever window is currently visible, so a
+// genuinely newer tag sitting outside every window the cursor has visited yet is never fetched
+// at all, and can never be sorted ahead of what's already loaded — Reorder has no way to rank a
+// row it has no Created value for. model.go's viewReady renders a count of rows outside the
+// current window that are still unevaluated for exactly this reason, rather than let the
+// unmapped case's ordering look complete when it may not be.
 func Reorder(rows []Row, mapped bool) []Row {
 	if mapped {
 		return rows
