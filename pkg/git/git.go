@@ -256,7 +256,11 @@ func (e Exec) Worktree(ctx context.Context, cloneDir, worktreeDir, branch, base 
 	if branchExists {
 		args = []string{"worktree", "add", worktreeDir, branch}
 	} else {
-		args = []string{"worktree", "add", "-b", branch, worktreeDir, base}
+		baseRef, err := e.resolveBase(ctx, cloneDir, base)
+		if err != nil {
+			return err
+		}
+		args = []string{"worktree", "add", "-b", branch, worktreeDir, baseRef}
 	}
 	if _, err := e.run(ctx, cloneDir, args...); err != nil {
 		// A concurrent invocation of the exact same promotion may have won the race to
@@ -378,7 +382,13 @@ func resolvePath(p string) string {
 }
 
 func (e Exec) localBranchExists(ctx context.Context, cloneDir, branch string) (bool, error) {
-	_, exitCode, err := e.runRaw(ctx, cloneDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return e.refExists(ctx, cloneDir, "refs/heads/"+branch)
+}
+
+// refExists reports whether ref (a full ref name, e.g. "refs/heads/main" or
+// "refs/remotes/origin/main") resolves in cloneDir.
+func (e Exec) refExists(ctx context.Context, cloneDir, ref string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, cloneDir, "show-ref", "--verify", "--quiet", ref)
 	switch {
 	case err == nil:
 		return true, nil
@@ -389,6 +399,32 @@ func (e Exec) localBranchExists(ctx context.Context, cloneDir, branch string) (b
 	default:
 		return false, err
 	}
+}
+
+// resolveBase picks what a brand-new promotion branch is created from: the remote-tracking ref
+// (refs/remotes/origin/<base>) when one exists, over the bare local branch name of the same
+// name. AGENTS.md principle 2 ("re-observe, never remember") applies to Base too — a local
+// branch can lag origin's actual current tip, most reliably once direct mode (AGENTS.md M6)
+// starts committing straight to origin's base branch: §4.6 forbids ever moving the user's own
+// local branch of that name directly, so the remote-tracking ref is the only locally-cached
+// view of Base direct mode is allowed to keep current. In the common case that ref is already
+// current for free — a plain `git push` to a ref covered by origin's default fetch refspec
+// updates the corresponding remote-tracking ref as a standard side effect, so direct mode's own
+// push (PushHeadTo) already leaves it pointing at what was just pushed without any extra step;
+// FetchBranch exists as a belt-and-suspenders refresh for the rest (someone else's push through
+// a different clone entirely, or a remote whose fetch refspec doesn't cover this side effect).
+// Falling back to the bare name keeps every existing caller working in a repo with no "origin"
+// remote configured at all, or one nothing has ever pushed to or fetched from (some tests
+// construct exactly that).
+func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, error) {
+	ok, err := e.refExists(ctx, cloneDir, "refs/remotes/origin/"+base)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return "origin/" + base, nil
+	}
+	return base, nil
 }
 
 // LsRemoteBranch implements Git.

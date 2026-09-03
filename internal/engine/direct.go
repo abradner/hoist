@@ -49,7 +49,8 @@ const (
 //     that constructs DirectCommitGateStep (cmd/hoist) is the one place responsible for never
 //     setting Confirmed true except in direct response to that confirmed gesture (or, at the
 //     CLI, its own explicit two-flag equivalent — see cmd/hoist's own doc comment on
-//     runPromote's --direct/--yes-no-pr flags).
+//     runPromote's --direct/--confirm-direct=<env> flags — the latter must equal --to exactly,
+//     refused otherwise; see runPromote's own doc comment).
 type DirectCommitGateStep struct {
 	// ProductionEnvs is RepoConfig.Envs.Production, verbatim.
 	ProductionEnvs []string
@@ -108,22 +109,47 @@ type DirectPushedStep struct{ Git git.Git }
 // Name implements Step.
 func (DirectPushedStep) Name() StepName { return StepDirectPushed }
 
-// Observe implements Step: satisfied exactly when origin's Base ref already carries this
-// promotion's own commit. A Base ref that exists but doesn't yet match is reported
-// unsatisfied, not Blocked — Act's own push is what actually discovers whether that is "not
-// pushed yet" or "a genuine conflict" (mirroring PushedStep's shape one step later, since
-// direct mode has no separate branch push to observe first).
+// Observe implements Step: satisfied when origin's Base ref already carries this promotion's
+// own commit — either exactly (the common case) or as an ancestor of a tip that has since moved
+// further (AGENTS.md gotcha, same class as MergedStep's own revert check elsewhere in this
+// milestone's history: exact-tip comparison alone cannot distinguish "Base advanced further with
+// a distinct, later, legitimate change" — this promotion's commit is still genuinely pushed —
+// from "Base was rewound or replaced" — a real conflict. Only the second is Blocked-worthy; the
+// first must read as done, not retried). A Base ref that exists but carries neither this
+// promotion's own commit nor an ancestor relationship to it is reported unsatisfied, not
+// Blocked — Act's own push is what actually discovers whether that is "not pushed yet" or "a
+// genuine conflict" (mirroring PushedStep's shape one step later, since direct mode has no
+// separate branch push to observe first).
 func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	remoteSHA, ok, err := d.Git.LsRemoteBranch(ctx, s.CloneDir, "origin", s.Base)
 	if err != nil {
 		return Observation{}, err
 	}
-	if !ok {
+	if !ok || s.CommitSHA == "" {
 		return Observation{Satisfied: false}, nil
 	}
-	if s.CommitSHA != "" && remoteSHA == s.CommitSHA {
+	if remoteSHA == s.CommitSHA {
 		s.PushedSHA = remoteSHA
 		return Observation{Satisfied: true, Detail: "origin/" + s.Base + " is already at " + remoteSHA}, nil
+	}
+	// remoteSHA differs from this promotion's own commit. Fetch first: IsAncestor needs the
+	// object for remoteSHA to actually exist in s.CloneDir's own repository (a bare sha from
+	// LsRemoteBranch alone is not enough — merge-base operates on local history), and
+	// FetchBranch only ever refreshes the remote-tracking ref, never s.CloneDir's own local
+	// branch of the same name (AGENTS.md §4.6; see FetchBranch's own doc comment in pkg/git).
+	if _, _, err := d.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
+		return Observation{}, err
+	}
+	isAncestor, err := d.Git.IsAncestor(ctx, s.CloneDir, s.CommitSHA, remoteSHA)
+	if err != nil {
+		return Observation{}, err
+	}
+	if isAncestor {
+		s.PushedSHA = s.CommitSHA
+		return Observation{Satisfied: true, Detail: fmt.Sprintf(
+			"origin/%s has moved to %s, but this promotion's own commit %s is still an ancestor of it — already pushed, not reverted",
+			s.Base, remoteSHA, s.CommitSHA,
+		)}, nil
 	}
 	return Observation{Satisfied: false}, nil
 }
@@ -141,6 +167,18 @@ func (d DirectPushedStep) Act(ctx context.Context, s *PromotionState) error {
 		return fmt.Errorf("git push (retryable — check network and try again): %w", err)
 	}
 	s.PushedSHA = s.CommitSHA
+	// Belt and suspenders, not the sole mechanism: a plain `git push` to a ref covered by
+	// origin's default fetch refspec already updates cloneDir's own refs/remotes/origin/<Base>
+	// as a side effect (verified against real git; this is standard behavior, not something
+	// this package arranges), which is what lets pkg/git.Exec.Worktree's own resolveBase see
+	// this push's content for a later, independent promotion's BranchedStep without any extra
+	// step here at all. This call exists for the corner case where that side effect doesn't
+	// apply (a customized remote.origin.fetch, in particular) rather than leaving the fix
+	// resting entirely on an implicit git behavior nothing here asserts explicitly. Best-effort:
+	// a failure is never fatal — the promotion itself is already done, the push above is what
+	// actually matters — and worst case a later promotion falls back to exactly the staleness
+	// this call exists to additionally guard against, never worse than before either existed.
+	_, _, _ = d.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
 	return nil
 }
 
