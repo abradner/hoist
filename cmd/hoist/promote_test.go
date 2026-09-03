@@ -425,6 +425,82 @@ func TestPromoteDirectCommitsWithoutPR(t *testing.T) {
 	}
 }
 
+// gitShowFile returns rev:path's blob content via `git show`, read-only — never touches dir's
+// own checkout, branch, working tree or index (AGENTS.md §4.6), so it is safe to call against a
+// clone under test without disturbing what the test is trying to observe.
+func gitShowFile(t *testing.T, dir, rev, path string) string {
+	t.Helper()
+	cmd := exec.Command("git", "show", rev+":"+path)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git show %s:%s: %v", rev, path, err)
+	}
+	return string(out)
+}
+
+// TestPromoteSecondDirectPromotionSeesFirstsPushedContent is finding 1's own regression test
+// (round 2 — round 1's fix, adding git.Git.FetchBranch after a direct push, only refreshed
+// cloneDir's refs/remotes/origin/main; it never made cloneDir's own disk content — what
+// gitops.Discover actually reads — reflect what direct mode had just pushed). After one direct
+// promotion lands, cloneDir's own disk is never touched by it (AGENTS.md §4.6: direct mode only
+// ever advances refs/remotes/origin/<base>) — a second, independent promotion (a new digest
+// arriving on staging) touching the SAME production file must not silently plan against the
+// pre-promotion content still sitting on the clone's disk. Here the two promotions target
+// different digests, so the resulting plan looks like an entirely ordinary edit rather than a
+// no-op — the harder of the finding's two named failure modes, since nothing before
+// gitops.Apply/Verify (three steps into the engine) would otherwise have caught the mismatch at
+// all. runPromote must refuse clearly, before ever deriving an id, creating a worktree or
+// attempting a commit.
+func TestPromoteSecondDirectPromotionSeesFirstsPushedContent(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	args := func() []string {
+		return []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
+	}
+
+	var out, errOut bytes.Buffer
+	if got := run(args(), &out, &errOut); got != 0 {
+		t.Fatalf("first direct promotion: exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodPath := "cluster/apps/app-production/app/deployment.yaml"
+	// Ground the test's own premise: origin/main's production file really did move to the
+	// first promotion's digest, pushed straight there with no PR (direct mode) — and never
+	// through cloneDir's own checkout at all.
+	if got := gitShowFile(t, clone, "origin/main", prodPath); !strings.Contains(got, digestNew) {
+		t.Fatalf("origin/main's production file should already carry the first promotion's digest %s:\n%s", digestNew, got)
+	}
+
+	// A new image lands on staging — a third digest, distinct from both the fixture's original
+	// ("old", still what cloneDir's own disk shows for production — direct mode never rewrites
+	// it there) and "new" (what the first promotion already pushed to origin/main).
+	digestThird := "sha256:" + strings.Repeat("2", 64)
+	stagingFile := filepath.Join(clone, "cluster/apps/app-staging/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v3@" + digestThird + "\n"
+	if err := os.WriteFile(stagingFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "staging now runs a third digest")
+
+	out.Reset()
+	errOut.Reset()
+	got := run(args(), &out, &errOut)
+	if got == 0 {
+		t.Fatalf("second, independent direct promotion should refuse planning against a stale clone, got exit 0; stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must never report false success against stale content: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "fallen behind") || !strings.Contains(errOut.String(), prodPath) {
+		t.Fatalf("stderr should name the stale file and explain why: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should ever be involved in direct mode: %+v", f.PRs())
+	}
+}
+
 // TestPromoteDirectRefusedForConfiguredProductionEnv is the CLI-level counterpart to
 // internal/engine's own mandatory adversarial test: with envs.production naming
 // app-production, --direct --confirm-direct must still be refused — the flags alone are not

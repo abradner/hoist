@@ -35,25 +35,69 @@ var (
 // PR. Named "promote" rather than "push": the command's whole point is the promotion — commit
 // + push + PR together — and "push" would read as only the git step, one of four this command
 // actually performs.
-// checkNoOpAgainstBase guards the all-NoOp fast path: it re-derives, for every distinct file
-// the plan's edits reference, whether the clone (cloneDir, no worktree exists yet at this
-// point) is dirty relative to base for that file — the clone's current on-disk blob (computed
-// with the same HashObject the engine uses for ExpectedBlobs) must match the blob committed
-// at base (read with the same LsTreeBlob the engine uses to Observe HEAD). A mismatch means an
-// uncommitted local change to a file this promotion cares about, which makes "all no-op"
-// unverifiable — refuse by naming the file(s) rather than reporting a false success.
-func checkNoOpAgainstBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
-	seen := map[string]bool{}
+
+// checkCloneCurrentForBase confirms, for every distinct file the plan's edits reference, that
+// planning against the clone's (cloneDir's) on-disk content — exactly what gitops.Discover and
+// BuildPlan already read, above, to build this plan — is still trustworthy. Two independent
+// questions, both about content this package cannot repair directly (AGENTS.md §4.6 forbids
+// ever bringing cloneDir's own checked-out files up to date via `git reset --hard`/`merge
+// --ff-only` — that would touch "the user's own checked-out branch, working tree or index" even
+// when that checkout happens to be on base itself — so a mismatch is only ever refused, never
+// silently fixed):
+//
+//  1. Is cloneDir's disk clean relative to what it has actually committed on base? (This check's
+//     original, round-1 scope: an uncommitted local edit means the plan was built from content
+//     nothing else will ever see.)
+//  2. Has cloneDir's own local base branch fallen behind origin/base without either side
+//     noticing? This is finding 1's own gap: direct mode (AGENTS.md M6) advances
+//     refs/remotes/origin/<base> without ever touching cloneDir's own checked-out branch — so a
+//     clone that looks perfectly clean against its own local base can still be planning against
+//     content a prior direct-mode promotion (to this same file, from anywhere) has since moved
+//     past.
+//
+// Question 2 is answered directionally, not by blob equality alone: IsAncestor tells whether
+// origin/base's tip is already contained in local base's history. When it is — local is caught
+// up with, or ahead of, everything origin currently shows — a difference is never a sign of
+// missed drift, only of something local knows about that hasn't been pushed outward yet (an
+// ordinary, harmless direction: a local commit not yet pushed, or origin simply not yet fetched
+// into a clone that never needed to be), and per-file content is trusted exactly as before. Only
+// when origin's tip is NOT yet contained in local's history — origin has advanced independently
+// — does this function additionally compare each file against origin/base's real current blob;
+// a mismatch there is refused unless it equals exactly what applying this promotion's own edits
+// to the clone's current content would produce (the resume-safety carve-out: that shape is this
+// exact promotion's own prior, successful direct-mode push, or any other route to the identical
+// end state — not foreign drift — and Drive's own re-observation, AGENTS.md §4.1, is what
+// correctly reports it done rather than this function refusing a legitimate resume).
+func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
+	localSHA, localOK, err := g.RevParse(ctx, cloneDir, base)
+	if err != nil {
+		return err
+	}
+	originRef := "origin/" + base
+	originSHA, originOK, err := g.RevParse(ctx, cloneDir, originRef)
+	if err != nil {
+		return err
+	}
+	originAhead := false
+	if localOK && originOK && localSHA != originSHA {
+		caughtUp, err := g.IsAncestor(ctx, cloneDir, originSHA, localSHA)
+		if err != nil {
+			return err
+		}
+		originAhead = !caughtUp
+	}
+
+	byFile := map[string][]gitops.Edit{}
 	var files []string
 	for _, e := range edits {
-		if !seen[e.File] {
-			seen[e.File] = true
+		if _, ok := byFile[e.File]; !ok {
 			files = append(files, e.File)
 		}
+		byFile[e.File] = append(byFile[e.File], e)
 	}
 	sort.Strings(files)
 
-	var dirty []string
+	var dirty, stale []string
 	for _, f := range files {
 		p, err := gitops.ResolvePath(cloneDir, f)
 		if err != nil {
@@ -67,16 +111,38 @@ func checkNoOpAgainstBase(ctx context.Context, g git.Git, cloneDir, base string,
 		if err != nil {
 			return err
 		}
-		baseBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, base, f)
+		localBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, base, f)
 		if err != nil {
 			return err
 		}
-		if !ok || baseBlob != curBlob {
+		if !ok || curBlob != localBlob {
 			dirty = append(dirty, f)
+			continue // already refusing this file; no need to also check it against origin.
+		}
+		if !originAhead {
+			continue
+		}
+		after, err := gitops.ApplyBytes(cur, byFile[f])
+		if err != nil {
+			return err
+		}
+		afterBlob, err := g.HashObject(ctx, cloneDir, after)
+		if err != nil {
+			return err
+		}
+		originBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, originRef, f)
+		if err != nil {
+			return err
+		}
+		if !ok || (originBlob != curBlob && originBlob != afterBlob) {
+			stale = append(stale, f)
 		}
 	}
 	if len(dirty) > 0 {
-		return fmt.Errorf("the plan looks already current, but %s has uncommitted local changes not yet in %q for: %s — a no-op computed against dirty content can't be trusted; commit, stash or discard the local changes and re-run", cloneDir, base, strings.Join(dirty, ", "))
+		return fmt.Errorf("%s has uncommitted local changes not yet in %q for: %s — a plan built from that content can't be trusted; commit, stash or discard the local changes and re-run", cloneDir, base, strings.Join(dirty, ", "))
+	}
+	if len(stale) > 0 {
+		return fmt.Errorf("%s's local %q has fallen behind %s's real current content for: %s — likely a prior direct-mode promotion that moved %s without ever touching this checkout (AGENTS.md §4.6); update the clone (e.g. git fetch) and re-run", cloneDir, base, originRef, strings.Join(stale, ", "), originRef)
 	}
 	return nil
 }
@@ -185,6 +251,19 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return exitFailure
 	}
 
+	// gitops.Discover, above, read every occurrence's position and content from eff.repo's own
+	// disk — whatever was there at the moment this process started. Confirm that's still
+	// trustworthy relative to --base's real current content before trusting the plan built from
+	// it at all: unconditionally, not only when the plan turns out all-no-op (checkNoOpAgainstBase's
+	// original, round-1 scope). A false "already current" from a stale no-op is this package's
+	// worst failure mode (nothing downstream calls gitops.Apply/Verify to catch it — no worktree
+	// exists yet on that path); a real edit built from stale content deserves this clearer,
+	// earlier answer too, rather than only a confusing verification failure deep in the engine.
+	if err := checkCloneCurrentForBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+
 	changed := false
 	for _, e := range plan.Edits {
 		if !e.NoOp() {
@@ -193,18 +272,6 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 	}
 	if !changed {
-		// An all-NoOp plan means "the target already carries the planned ref" — but Edit.NoOp
-		// only knows about the bytes gitops.Discover already read from the clone. Nothing
-		// downstream of here calls gitops.Apply/Verify (there is no worktree yet on this
-		// path), so this is the one place a dirty clone can otherwise slip through: if the
-		// user has an uncommitted local edit to a file the plan touches, the plan can compute
-		// all-NoOp against that dirty content while it would NOT be all-NoOp against what's
-		// actually committed at --base. Confirm the clone isn't dirty for those paths before
-		// trusting the conclusion (AGENTS.md §4.2, "Verify runs before git add, always").
-		if err := checkNoOpAgainstBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-			return exitFailure
-		}
 		fmt.Fprintf(stdout, "hoist promote: %s -> %s is already current; nothing to promote.\n", plan.SourceEnv, plan.TargetEnv)
 		return 0
 	}
