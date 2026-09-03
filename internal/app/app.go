@@ -150,8 +150,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mapped, listFn, metaFn = m.tagsFn(msg.ImageRepo)
 		}
 		production := plan.IsProduction(msg.Target, m.envs)
-		stagingEnv, stagingTag, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
-		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, mapped, production, stagingEnv, stagingTag, hasMismatch, listFn, metaFn)}
+		stagingEnv, stagingTags, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
+		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, mapped, production, stagingEnv, stagingTags, hasMismatch, listFn, metaFn)}
 		m = m.push(ts)
 		return m, ts.Init()
 	case tags.BackMsg:
@@ -233,23 +233,31 @@ func (m Model) pop() Model {
 	return m
 }
 
-// withMatrixNotice sets notice on the matrix screen, wherever it sits in the stack (today
-// always the bottom, and — after tags.SelectedMsg/DirectRequestedMsg's own pop above — always
-// the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags screen,
-// always directly onto the matrix). A no-op if the matrix isn't on the stack at all, or isn't
-// on top, rather than assuming a shape a future screen stack might not have.
+// withMatrixNotice sets notice on the matrix screen, wherever it actually sits in the stack —
+// today always the bottom, and (after tags.SelectedMsg/DirectRequestedMsg's own pop above)
+// always the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
+// screen, always directly onto the matrix. A no-op if the matrix isn't on the stack at all.
+//
+// Round-N finding (Copilot): an earlier revision of this function only ever checked
+// m.stack[top], so the doc comment's "wherever it sits in the stack" was true only by the
+// current stack shape's own invariant (matrix is always at the position this checked), not
+// because the code actually searched for it — a claim the mechanism didn't itself deliver
+// (AGENTS.md principle 1). Searching the whole stack, rather than the top slot alone, makes
+// the claim true unconditionally: it costs one more loop over a stack that is never more than
+// a few screens deep, and it means a future screen shape (a third screen pushed between the
+// matrix and a tags screen, say) degrades to "notice still lands on the matrix" instead of
+// "notice silently vanishes".
 func (m Model) withMatrixNotice(notice string) Model {
-	if len(m.stack) == 0 {
+	for i, s := range m.stack {
+		ms, ok := s.(matrixScreen)
+		if !ok {
+			continue
+		}
+		stack := append([]Screen(nil), m.stack...)
+		stack[i] = matrixScreen{ms.WithNotice(notice)}
+		m.stack = stack
 		return m
 	}
-	top := len(m.stack) - 1
-	ms, ok := m.stack[top].(matrixScreen)
-	if !ok {
-		return m
-	}
-	stack := append([]Screen(nil), m.stack...)
-	stack[top] = matrixScreen{ms.WithNotice(notice)}
-	m.stack = stack
 	return m
 }
 

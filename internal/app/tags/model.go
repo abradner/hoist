@@ -159,8 +159,22 @@ type Model struct {
 	// listLoadedMsg/metaLoadedMsg's own doc comment.
 	generation int64
 
-	stagingEnv, stagingTag string
-	hasStagingMismatch     bool
+	// ctx/cancel scope every listFn/metaFn call this instance ever makes (loadCmd/fetchCmd
+	// close over ctx, never context.Background()). cancel is called once the operator leaves
+	// this picker for good — Esc (onKey's Back handling, both in and out of the confirm
+	// dialog), a plain Enter selection, or a confirmed direct-mode request (round-N finding,
+	// Codex P2, "cancel tag loads when leaving the picker"): without it, a load already in
+	// flight when the picker closes keeps running to completion in the background even though
+	// its eventual result is already discarded by the generation guard above — for a mapped
+	// repo, ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests, so
+	// repeatedly opening and closing pickers could pile up obsolete crawls consuming the API
+	// rate limit, or leave one hanging behind a slow request, for no operator-visible reason.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	stagingEnv         string
+	stagingTags        []string // rows.StagingMismatch's own doc comment: 1+ distinct tags, sorted
+	hasStagingMismatch bool
 
 	listFn ListFunc
 	metaFn MetaFunc
@@ -195,19 +209,25 @@ type Model struct {
 // lookup itself still fails at runtime. production is whether target is listed in
 // envs.production, which gates the 'D' (direct commit) key entirely — the UI-side half of
 // AGENTS.md invariant 5; internal/engine.DirectCommitGateStep is the half that actually
-// matters. stagingEnv/stagingTag/hasMismatch are rows.StagingMismatch's own result, computed
+// matters. stagingEnv/stagingTags/hasMismatch are rows.StagingMismatch's own result, computed
 // by the caller (cmd/hoist) once up front from data already discovered rather than a second
-// registry call — see StagingMismatch's doc comment. listFn/metaFn are nil-safe: a nil listFn
-// immediately reports an error state rather than hanging in stateLoading forever.
-func New(imageRepo, target string, mapped, production bool, stagingEnv, stagingTag string, hasStagingMismatch bool, listFn ListFunc, metaFn MetaFunc) Model {
+// registry call — see StagingMismatch's doc comment; stagingTags carries every distinct tag
+// StagingMismatch found (round-N finding: never just the first one it happened to see), and
+// viewReady renders either the single agreed tag or an explicit disagreement across all of
+// them. listFn/metaFn are nil-safe: a nil listFn immediately reports an error state rather
+// than hanging in stateLoading forever.
+func New(imageRepo, target string, mapped, production bool, stagingEnv string, stagingTags []string, hasStagingMismatch bool, listFn ListFunc, metaFn MetaFunc) Model {
+	ctx, cancel := context.WithCancel(context.Background())
 	return Model{
 		imageRepo:          imageRepo,
 		target:             target,
 		mapped:             mapped,
 		production:         production,
 		generation:         nextGeneration.Add(1),
+		ctx:                ctx,
+		cancel:             cancel,
 		stagingEnv:         stagingEnv,
-		stagingTag:         stagingTag,
+		stagingTags:        stagingTags,
 		hasStagingMismatch: hasStagingMismatch,
 		listFn:             listFn,
 		metaFn:             metaFn,
@@ -229,11 +249,17 @@ func (m Model) loadCmd() tea.Cmd {
 	listFn := m.listFn
 	imageRepo := m.imageRepo
 	gen := m.generation
+	ctx := m.ctx
 	return func() tea.Msg {
 		if listFn == nil {
-			return listLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s", "this repo")}
+			// Findings 4/5 (round N): this used to say "no registry configured for this
+			// repo" — a hardcoded placeholder naming neither the actual image repo nor how
+			// to fix it. Name imageRepo and point at the config knob that supplies listFn
+			// (cmd/hoist wires this from the matching registries[] entry — BuildFunc's own
+			// doc comment).
+			return listLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
 		}
-		regTags, gitTags, mapped, err := listFn(context.Background())
+		regTags, gitTags, mapped, err := listFn(ctx)
 		return listLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, gitTags: gitTags, mapped: mapped, err: err}
 	}
 }
@@ -242,11 +268,15 @@ func (m Model) fetchCmd(tag string) tea.Cmd {
 	metaFn := m.metaFn
 	imageRepo := m.imageRepo
 	gen := m.generation
+	ctx := m.ctx
 	return func() tea.Msg {
 		if metaFn == nil {
-			return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, err: fmt.Errorf("no registry configured")}
+			// Same class of fix as loadCmd's listFn==nil case above: name the image repo and
+			// tag this call was for, and point at the same registries[] config knob, rather
+			// than a bare "no registry configured" the operator can't act on.
+			return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, err: fmt.Errorf("no registry configured for %s:%s; add a matching entry under registries[] in the config file", imageRepo, tag)}
 		}
-		meta, err := metaFn(context.Background(), tag)
+		meta, err := metaFn(ctx, tag)
 		return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, meta: meta, err: err}
 	}
 }
@@ -328,11 +358,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.confirming {
 		if key.Matches(msg, m.keys.Back) {
 			m.confirming = false
+			m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 			return m, func() tea.Msg { return BackMsg{} }
 		}
 		return m.updateConfirm(msg)
 	}
 	if key.Matches(msg, m.keys.Back) {
+		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		return m, func() tea.Msg { return BackMsg{} }
 	}
 	if m.state != stateReady {
@@ -416,6 +448,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if !direct {
+		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest := r.Tag, r.Meta.Digest
 		return m, func() tea.Msg { return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest} }
 	}
@@ -442,6 +475,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		r := rows[idx]
+		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest := r.Tag, r.Meta.Digest
 		return m, func() tea.Msg { return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest} }
 	}
@@ -593,6 +627,21 @@ func (m Model) View() string {
 	return redact.Strings(out)
 }
 
+// stagingNote renders the paired staging env's committed manifest tag(s) for this image repo:
+// the single agreed tag in the common case, or an explicit disagreement (finding 3, round N)
+// when StagingMismatch found more than one distinct tag across the staging env's own
+// families/occurrences — gitops.BuildPlan's WarnSourceDisagrees is the same "warn, don't
+// block" shape for the analogous disagreement among one env's SOURCE occurrences; this
+// mirrors it rather than silently rendering an arbitrary one of them and hiding the rest.
+// Only ever called when m.hasStagingMismatch is true, which StagingMismatch never reports
+// alongside an empty m.stagingTags (see its own doc comment).
+func (m Model) stagingNote() string {
+	if len(m.stagingTags) == 1 {
+		return fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTags[0])
+	}
+	return fmt.Sprintf("note: %s (paired staging) disagrees with itself on this image's committed manifest tag: %s", m.stagingEnv, strings.Join(m.stagingTags, ", "))
+}
+
 func (m Model) header() string {
 	left := fmt.Sprintf("hoist tags: %s -> %s", m.imageRepo, m.target)
 	right := "revision: " + Revision + " (pkg/migrate, later)"
@@ -621,14 +670,14 @@ func (m Model) viewReady() string {
 		fmt.Fprintf(&b, "filter: %q (esc in filter mode to clear)\n", m.filterQuery)
 	}
 	if m.hasStagingMismatch {
-		// "committed manifest tag", not "currently running" (finding 5, round 2): stagingTag
+		// "committed manifest tag", not "currently running" (finding 5, round 2): stagingTags
 		// comes from StagingMismatch, which reads only the gitops repo's own parsed
 		// occurrences — never live cluster or Argo state (this package has no such connection
 		// wired in at all, AGENTS.md §4.8). Argo not having synced yet, an incomplete rollout,
 		// or the live workload otherwise differing from git would make "currently running" a
 		// false claim about live state, precisely while the operator is deciding whether to
 		// bypass staging via direct mode.
-		b.WriteString(m.styles.Notice.Render(fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTag)))
+		b.WriteString(m.styles.Notice.Render(m.stagingNote()))
 		b.WriteString("\n")
 	}
 	b.WriteString(m.tableHeader())

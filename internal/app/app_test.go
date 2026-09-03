@@ -343,6 +343,38 @@ func TestSelectedMsgShowsHonestNotice(t *testing.T) {
 	}
 }
 
+// TestWithMatrixNoticeFindsMatrixWhenNotOnTop is finding 6's own regression test (round N,
+// Copilot): withMatrixNotice's doc comment says it sets the notice on the matrix screen
+// "wherever it actually sits in the stack", but an earlier revision only ever checked
+// m.stack[top] — true only because every real caller today happens to reach it exactly
+// there (tags.SelectedMsg/DirectRequestedMsg pop straight back to a matrix that's always
+// immediately below, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
+// screen). Build a stack where the matrix is deliberately NOT on top — matrix, then a plan
+// screen pushed on top of it, mirroring TestPromotePushesPlanScreen — and confirm
+// withMatrixNotice still finds and updates it rather than silently doing nothing.
+func TestWithMatrixNoticeFindsMatrixWhenNotOnTop(t *testing.T) {
+	m := sized(t)
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if cmd == nil {
+		t.Fatal("p produced no command")
+	}
+	m, _ = m.Update(cmd())
+	stack := m.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("stack has %d screens after p, want 2", n)
+	}
+	if _, ok := stack[len(stack)-1].(matrixScreen); ok {
+		t.Fatal("fixture precondition: the plan screen, not the matrix, must be on top")
+	}
+
+	const notice = "test-notice-not-on-top"
+	m2 := m.(Model).withMatrixNotice(notice)
+	m3 := m2.pop() // drop the plan screen back off to see the matrix's own view
+	if v := plain(m3); !strings.Contains(v, notice) {
+		t.Fatalf("withMatrixNotice should have found the matrix even though it wasn't on top:\n%s", v)
+	}
+}
+
 // drainTags runs a tea.Cmd (and every cmd it in turn produces) to completion, exactly as a
 // real tea.Program would deliver messages to the whole app model — needed here because the
 // tags screen's Init kicks off an async ListFunc/MetaFunc load (internal/app/tags.Model.Init),

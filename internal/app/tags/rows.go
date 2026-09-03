@@ -152,22 +152,37 @@ func ShortDigest(digest string) string {
 	return d
 }
 
-// StagingMismatch reports the paired staging env's own committed-manifest tag for imageRepo —
-// read from repo, the gitops repository's own parsed occurrences, never any live cluster or
-// Argo state (this package has no k8s/Argo read wired in at all — AGENTS.md §4.8 keeps that
-// connection, like every other, at cmd/hoist's layer, and none of it reaches here). Finding 5,
-// round 2: an earlier revision of this doc comment, and the text the caller (model.go's
-// viewReady) rendered from this result, both called this "currently running" — a false claim
-// about live state whenever Argo hasn't synced yet, a rollout is incomplete, or the live
-// workload otherwise differs from what's committed; both are corrected to say "committed
-// manifest tag" instead, matching what's actually being compared here. AGENTS.md invariant 4 /
-// principle 5: informs, never blocks (mirroring plan.SkippedStaging's shape for the plan
-// screen's own production-skip warning). ok is false when target is not a production env, has
-// no paired staging env (envs.pairs has no source env whose value is target — pairs maps
-// source env -> target env, so the staging env is target's own key there), that env has no
-// occurrence of imageRepo, or its occurrence carries no tag to compare (a bare digest pin,
-// nothing to differ from).
-func StagingMismatch(repo *gitops.Repo, imageRepo, target string, envs config.EnvsConfig) (stagingEnv, stagingTag string, ok bool) {
+// StagingMismatch reports the paired staging env's own committed-manifest tag(s) for
+// imageRepo — read from repo, the gitops repository's own parsed occurrences, never any live
+// cluster or Argo state (this package has no k8s/Argo read wired in at all — AGENTS.md §4.8
+// keeps that connection, like every other, at cmd/hoist's layer, and none of it reaches
+// here). Finding 5, round 2: an earlier revision of this doc comment, and the text the caller
+// (model.go's viewReady) rendered from this result, both called this "currently running" — a
+// false claim about live state whenever Argo hasn't synced yet, a rollout is incomplete, or
+// the live workload otherwise differs from what's committed; both are corrected to say
+// "committed manifest tag" instead, matching what's actually being compared here. AGENTS.md
+// invariant 4 / principle 5: informs, never blocks (mirroring plan.SkippedStaging's shape for
+// the plan screen's own production-skip warning). ok is false when target is not a production
+// env, has no paired staging env (envs.pairs has no source env whose value is target — pairs
+// maps source env -> target env, so the staging env is target's own key there), that env has
+// no occurrence of imageRepo, or none of its occurrences carry a tag to compare (every one a
+// bare digest pin, nothing to differ from).
+//
+// Round-N findings (Copilot, two; Codex, one — all three against the same nondeterminism):
+// envs.Pairs and Env.Families are both maps, and this function used to range over each one
+// directly and return on the first match, so (1) a config naming more than one source env
+// paired to the same production target (never rejected by config.Validate) picked a
+// different "the" staging env from run to run, and (2) a staging env genuinely carrying more
+// than one distinct tag for imageRepo across its families/occurrences (or within one family)
+// returned an arbitrary one of them, silently, run to run — hiding a real disagreement
+// exactly like the one gitops.BuildPlan's own ChooseRef/WarnSourceDisagrees already treats as
+// worth surfacing for the analogous case within one env's SOURCE occurrences, never blocking,
+// only warning. Both are fixed the same way BuildPlan fixes its own version of this: collect
+// every candidate first, then decide deterministically — sort.Strings before picking the
+// first source env for (1); collect the full distinct, sorted set of tags for (2), so the
+// caller (model.go's viewReady) can render either the single agreed tag or an explicit
+// disagreement across every distinct value, never an arbitrary pick that hides the others.
+func StagingMismatch(repo *gitops.Repo, imageRepo, target string, envs config.EnvsConfig) (stagingEnv string, stagingTags []string, ok bool) {
 	isProd := false
 	for _, p := range envs.Production {
 		if p == target {
@@ -176,30 +191,42 @@ func StagingMismatch(repo *gitops.Repo, imageRepo, target string, envs config.En
 		}
 	}
 	if !isProd || repo == nil {
-		return "", "", false
+		return "", nil, false
 	}
+	var candidates []string
 	for src, dst := range envs.Pairs {
 		if dst == target {
-			stagingEnv = src
-			break
+			candidates = append(candidates, src)
 		}
 	}
-	if stagingEnv == "" {
-		return "", "", false
+	if len(candidates) == 0 {
+		return "", nil, false
 	}
+	sort.Strings(candidates)
+	stagingEnv = candidates[0]
+
 	env, ok2 := repo.Envs[stagingEnv]
 	if !ok2 {
-		return "", "", false
+		return "", nil, false
 	}
+	seen := map[string]bool{}
 	for _, f := range env.Families {
 		for _, o := range f.Occurrences {
-			if o.Ref.Repo == imageRepo {
-				if o.Ref.Tag == "" {
-					return "", "", false
-				}
-				return stagingEnv, o.Ref.Tag, true
+			if o.Ref.Repo != imageRepo || o.Ref.Tag == "" {
+				continue
+			}
+			if !seen[o.Ref.Tag] {
+				seen[o.Ref.Tag] = true
+				stagingTags = append(stagingTags, o.Ref.Tag)
 			}
 		}
 	}
-	return "", "", false
+	if len(stagingTags) == 0 {
+		return "", nil, false
+	}
+	// The final sort is what makes the result independent of Env.Families' own map iteration
+	// order too — collecting the full distinct set first, then sorting once, needs no
+	// separate deterministic-iteration-order fix on the way in.
+	sort.Strings(stagingTags)
+	return stagingEnv, stagingTags, true
 }

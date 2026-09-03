@@ -93,7 +93,7 @@ func readyModel(t *testing.T, target string, mapped, production bool) Model {
 		}
 		return regTags, gitTags, true, nil
 	}
-	m := New("ghcr.io/example/app", target, mapped, production, "app-staging", "v1", target == "app-production", listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", target, mapped, production, "app-staging", []string{"v1"}, target == "app-production", listFn, fixedMetas(metas))
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -157,7 +157,7 @@ func TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime(t *testing.T)
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", true /* config says mapped */, false, "", "", false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", true /* config says mapped */, false, "", nil, false, listFn, fixedMetas(metas))
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -222,7 +222,7 @@ func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
 		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: date}
 	}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
-	m := New("ghcr.io/example/app", "app-staging", true, false, "", "", false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", true, false, "", nil, false, listFn, fixedMetas(metas))
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -288,7 +288,7 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 	// outside the window that ever gets fetched, so Reorder never learns its date at all.
 	metas["v29"] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("9", 64), Created: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, nil, false, nil }
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, fixedMetas(metas))
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -357,7 +357,7 @@ func TestFailedMetaFetchIsNotRetriedForever(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, metaFn)
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, metaFn)
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -410,7 +410,7 @@ func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, metaFn)
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, metaFn)
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -483,8 +483,39 @@ func TestStagingMismatchNoteDoesNotClaimLiveState(t *testing.T) {
 	if !strings.Contains(v, "committed manifest tag") {
 		t.Fatalf("the staging note should honestly describe a committed manifest value:\n%s", v)
 	}
-	if !strings.Contains(v, m.stagingEnv) || !strings.Contains(v, m.stagingTag) {
-		t.Fatalf("the staging note should still name the env and tag (%q, %q):\n%s", m.stagingEnv, m.stagingTag, v)
+	if !strings.Contains(v, m.stagingEnv) || !strings.Contains(v, m.stagingTags[0]) {
+		t.Fatalf("the staging note should still name the env and tag (%q, %q):\n%s", m.stagingEnv, m.stagingTags, v)
+	}
+}
+
+// TestStagingNoteRendersDisagreementAcrossMultipleTags is finding 3's own rendering
+// regression test: when StagingMismatch reports more than one distinct tag (the staging env
+// genuinely disagrees with itself across families/occurrences), the note must say so
+// explicitly and name every distinct tag — never fall back to the singular "committed
+// manifest tag is %s" phrasing, which would silently hide the disagreement behind whichever
+// one happened to be first.
+func TestStagingNoteRendersDisagreementAcrossMultipleTags(t *testing.T) {
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return []string{"v1"}, nil, false, nil
+	}
+	metaFn := fixedMetas(map[string]registry.ImageMeta{
+		"v1": {Digest: "sha256:" + strings.Repeat("1", 64)},
+	})
+	m := New("ghcr.io/example/app", "app-production", false, true, "app-staging", []string{"v1", "v2"}, true, listFn, metaFn)
+	m = m.SetSize(300, 30)
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	v := m.View()
+	if !strings.Contains(v, "disagrees") {
+		t.Fatalf("expected the staging note to say the tags disagree:\n%s", v)
+	}
+	if !strings.Contains(v, "v1") || !strings.Contains(v, "v2") {
+		t.Fatalf("expected both distinct tags to be named:\n%s", v)
+	}
+	if strings.Contains(v, "committed manifest tag is") {
+		t.Fatalf("must not render the singular-tag phrasing when there's more than one distinct tag:\n%s", v)
 	}
 }
 
@@ -586,7 +617,7 @@ func TestEscEmitsBackMsg(t *testing.T) {
 // Model instance's command produced it, so without imageRepo-scoping a stale listLoadedMsg
 // would silently overwrite the new picker's own rows.
 func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
-	left := New("ghcr.io/example/other", "app-staging", false, false, "", "", false,
+	left := New("ghcr.io/example/other", "app-staging", false, false, "", nil, false,
 		func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return []string{"stale"}, nil, false, nil
 		},
@@ -639,7 +670,7 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 // second, even though msg.imageRepo == current.imageRepo trivially holds for both.
 func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
-	first := New(repo, "app-staging", true, false, "", "", false,
+	first := New(repo, "app-staging", true, false, "", nil, false,
 		func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return []string{"stale-from-first"}, nil, false, nil
 		},
@@ -675,7 +706,7 @@ func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 // must not overwrite the reopened picker's already-loaded (or loading) row metadata.
 func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
-	first := New(repo, "app-staging", true, false, "", "", false,
+	first := New(repo, "app-staging", true, false, "", nil, false,
 		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"v1"}, nil, false, nil },
 		fixedMetas(nil))
 	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
@@ -696,7 +727,7 @@ func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 }
 
 func TestListErrorRendersInsteadOfHanging(t *testing.T) {
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false,
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false,
 		func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return nil, nil, false, errors.New("registry unreachable")
 		},
@@ -707,6 +738,167 @@ func TestListErrorRendersInsteadOfHanging(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "registry unreachable") {
 		t.Fatalf("View() should show the error:\n%s", m.View())
+	}
+}
+
+// TestNilListFuncErrorNamesRepoAndConfigKnob is finding 4's own regression test (round N,
+// Copilot): a nil listFn used to report "no registry configured for this repo" — a hardcoded
+// placeholder naming neither the actual image repo nor how to fix it. The error must name the
+// real image repo and point at the registries[] config knob that supplies listFn.
+func TestNilListFuncErrorNamesRepoAndConfigKnob(t *testing.T) {
+	m := New("ghcr.io/example/nilcase", "app-staging", false, false, "", nil, false, nil, nil)
+	m = drain(m, m.Init())
+	if m.err == nil {
+		t.Fatal("expected an error state for a nil listFn")
+	}
+	msg := m.err.Error()
+	if !strings.Contains(msg, "ghcr.io/example/nilcase") {
+		t.Fatalf("error should name the actual image repo, got %q", msg)
+	}
+	if !strings.Contains(msg, "registries[]") {
+		t.Fatalf("error should point at the registries[] config knob, got %q", msg)
+	}
+}
+
+// TestNilMetaFuncErrorNamesRepoTagAndConfigKnob is finding 5's own regression test (round N,
+// Copilot): a nil metaFn used to report a bare "no registry configured" — no image repo, no
+// tag, no pointer to how to fix it. The row's own recorded error must name the image repo and
+// the tag this fetch was for, and point at the same registries[] config knob.
+func TestNilMetaFuncErrorNamesRepoTagAndConfigKnob(t *testing.T) {
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return []string{"v1"}, nil, false, nil
+	}
+	m := New("ghcr.io/example/nilmeta", "app-staging", false, false, "", nil, false, listFn, nil)
+	m = m.SetSize(100, 30)
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	i := IndexOf(m.rows, "v1")
+	if i < 0 || m.rows[i].MetaErr == nil {
+		t.Fatal("fixture precondition: v1's Config fetch must have failed for a nil metaFn")
+	}
+	msg := m.rows[i].MetaErr.Error()
+	if !strings.Contains(msg, "ghcr.io/example/nilmeta") || !strings.Contains(msg, "v1") {
+		t.Fatalf("error should name both the image repo and the tag, got %q", msg)
+	}
+	if !strings.Contains(msg, "registries[]") {
+		t.Fatalf("error should point at the registries[] config knob, got %q", msg)
+	}
+}
+
+// TestLoadCmdUsesModelsCancellableContext and TestFetchCmdUsesModelsCancellableContext are
+// finding 8's own wiring regression tests (round N, Codex P2, "cancel tag loads when leaving
+// the picker"): loadCmd/fetchCmd used to close over context.Background(), which nothing can
+// ever cancel — the fix is a context.Context/CancelFunc pair stored on Model (New's own doc
+// comment) and threaded through both. Cancelling the model's own context before invoking the
+// command must be visible to listFn/metaFn, proving the wiring, not just that a cancel field
+// exists somewhere unused.
+func TestLoadCmdUsesModelsCancellableContext(t *testing.T) {
+	var gotCtx context.Context
+	listFn := func(ctx context.Context) ([]string, []forge.GitTag, bool, error) {
+		gotCtx = ctx
+		return nil, nil, false, nil
+	}
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, nil)
+	m.cancel()
+	m.loadCmd()()
+	if gotCtx == nil {
+		t.Fatal("listFn was never called")
+	}
+	if gotCtx.Err() != context.Canceled {
+		t.Fatalf("loadCmd must pass the model's own cancellable context to listFn, not context.Background(): Err()=%v", gotCtx.Err())
+	}
+}
+
+func TestFetchCmdUsesModelsCancellableContext(t *testing.T) {
+	var gotCtx context.Context
+	metaFn := func(ctx context.Context, _ string) (registry.ImageMeta, error) {
+		gotCtx = ctx
+		return registry.ImageMeta{}, nil
+	}
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, nil, metaFn)
+	m.cancel()
+	m.fetchCmd("v1")()
+	if gotCtx == nil {
+		t.Fatal("metaFn was never called")
+	}
+	if gotCtx.Err() != context.Canceled {
+		t.Fatalf("fetchCmd must pass the model's own cancellable context to metaFn, not context.Background(): Err()=%v", gotCtx.Err())
+	}
+}
+
+// TestEscCancelsPendingLoad, TestEscDuringConfirmCancelsPendingLoad,
+// TestSelectCurrentCancelsPendingLoad and TestConfirmedDirectRequestCancelsPendingLoad are
+// finding 8's own "leaving the picker" regression tests: every path that leaves this screen
+// for good (Esc outside the confirm dialog, Esc inside it, a plain Enter selection, and a
+// confirmed direct-mode request) must cancel the model's own context so a load still in
+// flight actually stops — for a mapped repo, ListFunc can walk Forge.Tags through up to 301
+// sequential GitHub requests, so an abandoned crawl left running would otherwise keep
+// consuming the API rate limit even though its eventual result is already discarded by the
+// generation guard. Each test calls m.cancel() indirectly, through the real key-handling code
+// path, and reads back m.ctx.Err() on the ORIGINAL model value — cancel's closure operates on
+// the shared underlying context regardless of which value-copy invoked it, so this proves the
+// call actually happened rather than merely that some copy's field looks right.
+func TestEscCancelsPendingLoad(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	if m.ctx.Err() != nil {
+		t.Fatal("fixture precondition: context must not be canceled yet")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.ctx.Err() != context.Canceled {
+		t.Fatalf("Esc should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	}
+}
+
+func TestEscDuringConfirmCancelsPendingLoad(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	if !m.confirming {
+		t.Fatal("fixture precondition: D on a non-production target should open the confirm dialog")
+	}
+	if m.ctx.Err() != nil {
+		t.Fatal("fixture precondition: context must not be canceled yet")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.ctx.Err() != context.Canceled {
+		t.Fatalf("Esc during the confirm dialog should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	}
+}
+
+func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	if m.ctx.Err() != nil {
+		t.Fatal("fixture precondition: context must not be canceled yet")
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected a command")
+	}
+	if _, ok := cmd().(SelectedMsg); !ok {
+		t.Fatalf("got %T, want SelectedMsg", cmd())
+	}
+	if m.ctx.Err() != context.Canceled {
+		t.Fatalf("selecting a tag should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	}
+}
+
+func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	m.confirmValue = true
+	if m.ctx.Err() != nil {
+		t.Fatal("fixture precondition: context must not be canceled yet")
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected a command")
+	}
+	if _, ok := cmd().(DirectRequestedMsg); !ok {
+		t.Fatalf("got %T, want DirectRequestedMsg", cmd())
+	}
+	if m.ctx.Err() != context.Canceled {
+		t.Fatalf("confirming a direct commit should cancel the model's own load context, got Err()=%v", m.ctx.Err())
 	}
 }
 

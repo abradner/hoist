@@ -351,6 +351,32 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintf(stderr, "hoist promote: --confirm-direct=%q does not match --to=%q; repeat the exact target env to confirm\n", *confirmDirect, *to)
 			return exitUsage
 		}
+		// Round-N finding (Codex, P2): DirectCommitGateStep — internal/engine/direct.go's own
+		// "sole enforcement point" for AGENTS.md invariant 5/6 — used to be constructed only
+		// after BuildPlan and the all-no-op fast path further down this function, so a
+		// --direct run against a production env whose plan happened to already be current
+		// exited 0 claiming success ("already current") without the gate ever running, and a
+		// resolution failure for a production target surfaced as an unrelated resolution
+		// error instead of the required refusal — either way masking the refusal AGENTS.md
+		// §4.5 promises "outright". Call the identical step here, first — before resolving
+		// digests, building the plan, or reaching the no-op fast path — so a production
+		// target is refused before anything else can mask or bypass it. Confirmed is always
+		// true here: reaching this point already required --confirm-direct to equal --to
+		// exactly, checked immediately above. Drive still runs this same step again below
+		// once steps is built (unreachable through Drive whenever this refuses, per the
+		// step's own doc comment) — this calls the one enforcement point twice, it does not
+		// add a second one (AGENTS.md §8, layered checks: the deletion test).
+		gate := engine.DirectCommitGateStep{ProductionEnvs: eff.cfg.Envs.Production, Confirmed: true}
+		obs, err := gate.Observe(context.Background(), &engine.PromotionState{TargetEnv: *to})
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+			return exitFailure
+		}
+		if obs.Blocked != "" {
+			blocked := &engine.BlockedError{Step: engine.StepDirectGate, Reason: obs.Blocked}
+			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(blocked.Error()))
+			return exitFailure
+		}
 	} else if eff.cfg == nil || eff.cfg.GitHub == "" {
 		fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file")
 		return exitUsage

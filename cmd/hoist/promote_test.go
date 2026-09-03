@@ -760,6 +760,53 @@ func TestPromoteDirectRefusedForConfiguredProductionEnv(t *testing.T) {
 	}
 }
 
+// TestPromoteDirectRefusedForConfiguredProductionEnvEvenWhenNoOp is finding 7's own regression
+// test (round N, Codex P2): the production gate used to be constructed only after BuildPlan and
+// the all-no-op fast path, so a --direct run against a production env whose plan happened to
+// already be current (TestPromoteNothingToDoIsANoOp's own setup: app-production's committed
+// content already matches app-staging's, pushed to origin) exited 0 claiming the no-op success
+// message without ever being refused. Direct mode must refuse a production env outright
+// (AGENTS.md §4.5) regardless of whether there would have been anything left to write.
+func TestPromoteDirectRefusedForConfiguredProductionEnvEvenWhenNoOp(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withProd := strings.Replace(string(data), "    promotable: [ghcr.io/example/]\n", "    promotable: [ghcr.io/example/]\n    envs:\n      production: [app-production]\n", 1)
+	if err := os.WriteFile(cfgPath, []byte(withProd), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make app-production already match app-staging, committed AND pushed — exactly
+	// TestPromoteNothingToDoIsANoOp's own no-op setup — so the plan built from it is all-NoOp.
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
+	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+	runGitHost(t, clone, "push", "-q", "origin", "main")
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit refusing production even though the plan is a no-op, got 0; stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must not report the no-op success message for a refused production target: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "app-production") || !strings.Contains(errOut.String(), "envs.production") {
+		t.Fatalf("stderr should name the env and cite envs.production: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created either: %+v", f.PRs())
+	}
+}
+
 // TestPromoteDirectRequiresConfirmFlag: --direct alone, without --confirm-direct, must be
 // refused as a usage error rather than silently proceeding.
 func TestPromoteDirectRequiresConfirmFlag(t *testing.T) {

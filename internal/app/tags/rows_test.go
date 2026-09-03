@@ -1,6 +1,7 @@
 package tags
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -154,12 +155,12 @@ func TestStagingMismatchReportsDifferingTag(t *testing.T) {
 		Pairs:      map[string]string{"app-staging": "app-production"},
 	}
 	repo := repoWithOccurrence("ghcr.io/example/app")
-	stagingEnv, stagingTag, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
+	stagingEnv, stagingTags, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
 	if !ok {
 		t.Fatal("expected a staging tag to compare against")
 	}
-	if stagingEnv != "app-staging" || stagingTag != "v1" {
-		t.Fatalf("got env=%q tag=%q, want app-staging/v1", stagingEnv, stagingTag)
+	if stagingEnv != "app-staging" || len(stagingTags) != 1 || stagingTags[0] != "v1" {
+		t.Fatalf("got env=%q tags=%v, want app-staging/[v1]", stagingEnv, stagingTags)
 	}
 }
 
@@ -187,6 +188,136 @@ func TestStagingMismatchFalseWhenStagingHasNoOccurrence(t *testing.T) {
 	repo := repoWithOccurrence("ghcr.io/example/other")
 	if _, _, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs); ok {
 		t.Fatal("staging has no occurrence of this image repo; nothing to compare")
+	}
+}
+
+// TestStagingMismatchDeterministicAcrossAmbiguousPairs is finding 1's regression test (round
+// N, Copilot): envs.Pairs is a map, and config.Validate never rejects two different source
+// envs both naming the same production env as their target (validateEnvs only rejects an
+// empty/self-paired src/dst, never a duplicate dst across distinct src keys) — so ranging
+// over it directly used to pick whichever source env Go's randomized map iteration visited
+// first, which can differ from call to call for the identical config. Calling StagingMismatch
+// many times against the same ambiguous Pairs map must always name the same (lexicographically
+// first) staging env, never flap between the two candidates.
+func TestStagingMismatchDeterministicAcrossAmbiguousPairs(t *testing.T) {
+	envs := config.EnvsConfig{
+		Production: []string{"app-production"},
+		Pairs: map[string]string{
+			"app-staging-z": "app-production",
+			"app-staging-a": "app-production",
+		},
+	}
+	repo := &gitops.Repo{
+		Envs: map[string]*gitops.Env{
+			"app-staging-a": {Name: "app-staging-a", Families: map[string]*gitops.Family{
+				"app": {Name: "app", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}}}},
+			}},
+			"app-staging-z": {Name: "app-staging-z", Families: map[string]*gitops.Family{
+				"app": {Name: "app", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v9"}}}},
+			}},
+		},
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		stagingEnv, _, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
+		if !ok {
+			t.Fatal("expected a match against one of the two ambiguous candidates")
+		}
+		seen[stagingEnv] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("StagingMismatch picked more than one staging env across repeated calls against the identical ambiguous config: %v — must be deterministic", seen)
+	}
+	if !seen["app-staging-a"] {
+		t.Fatalf("expected the deterministic pick to be the lexicographically-first candidate app-staging-a, got %v", seen)
+	}
+}
+
+// TestStagingMismatchCollectsAllDistinctTagsAcrossFamilies is findings 2/3's own regression
+// test (round N: Copilot flagged the map-iteration nondeterminism, Codex flagged the deeper
+// bug it was masking): the staging env genuinely carries two different tags for imageRepo
+// across two families, exactly the kind of disagreement gitops.BuildPlan's own
+// ChooseRef/WarnSourceDisagrees already surfaces for the analogous case among one env's
+// SOURCE occurrences (never blocking, only warning) — StagingMismatch must collect every
+// distinct tag rather than returning on the first occurrence a map iteration happened to
+// visit, so the caller (model.go's viewReady) can render the real disagreement instead of an
+// arbitrary pick that hides it.
+func TestStagingMismatchCollectsAllDistinctTagsAcrossFamilies(t *testing.T) {
+	envs := config.EnvsConfig{
+		Production: []string{"app-production"},
+		Pairs:      map[string]string{"app-staging": "app-production"},
+	}
+	repo := &gitops.Repo{
+		Envs: map[string]*gitops.Env{
+			"app-staging": {Name: "app-staging", Families: map[string]*gitops.Family{
+				"app-a": {Name: "app-a", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v2"}}}},
+				"app-b": {Name: "app-b", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}}}},
+			}},
+		},
+	}
+	stagingEnv, stagingTags, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if stagingEnv != "app-staging" {
+		t.Fatalf("stagingEnv = %q, want app-staging", stagingEnv)
+	}
+	want := []string{"v1", "v2"}
+	if !reflect.DeepEqual(stagingTags, want) {
+		t.Fatalf("stagingTags = %v, want %v (every distinct tag across both families, sorted)", stagingTags, want)
+	}
+}
+
+// TestStagingMismatchDedupesRepeatedTag confirms the same tag appearing in more than one
+// occurrence collapses to a single entry, rather than a conflict being reported where the
+// staging env's occurrences actually agree.
+func TestStagingMismatchDedupesRepeatedTag(t *testing.T) {
+	envs := config.EnvsConfig{
+		Production: []string{"app-production"},
+		Pairs:      map[string]string{"app-staging": "app-production"},
+	}
+	repo := &gitops.Repo{
+		Envs: map[string]*gitops.Env{
+			"app-staging": {Name: "app-staging", Families: map[string]*gitops.Family{
+				"app-a": {Name: "app-a", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}}}},
+				"app-b": {Name: "app-b", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}}}},
+			}},
+		},
+	}
+	_, stagingTags, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if !reflect.DeepEqual(stagingTags, []string{"v1"}) {
+		t.Fatalf("stagingTags = %v, want a single deduplicated [v1] — both families agree", stagingTags)
+	}
+}
+
+// TestStagingMismatchSkipsTaglessOccurrenceButFindsAnother is a byproduct fix of the same
+// change: the old code gave up entirely (returned ok=false) the moment the FIRST occurrence
+// it visited had no tag (a bare digest pin), even when a later occurrence of the same repo
+// did carry one — a map-iteration-order-dependent false negative. Collecting every occurrence
+// rather than stopping at the first now finds the tagged one regardless of which occurrence a
+// map iteration visits first.
+func TestStagingMismatchSkipsTaglessOccurrenceButFindsAnother(t *testing.T) {
+	envs := config.EnvsConfig{
+		Production: []string{"app-production"},
+		Pairs:      map[string]string{"app-staging": "app-production"},
+	}
+	repo := &gitops.Repo{
+		Envs: map[string]*gitops.Env{
+			"app-staging": {Name: "app-staging", Families: map[string]*gitops.Family{
+				"app-a": {Name: "app-a", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: ""}}}},
+				"app-b": {Name: "app-b", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}}}},
+			}},
+		},
+	}
+	_, stagingTags, ok := StagingMismatch(repo, "ghcr.io/example/app", "app-production", envs)
+	if !ok {
+		t.Fatal("expected the tagged occurrence to be found even though another occurrence has no tag")
+	}
+	if !reflect.DeepEqual(stagingTags, []string{"v1"}) {
+		t.Fatalf("stagingTags = %v, want [v1]", stagingTags)
 	}
 }
 
