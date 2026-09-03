@@ -137,6 +137,14 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		// several, without ever confirming the choice was actually unambiguous).
 		var obsErrs []string
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		// Bounded the same way runPromotions' own re-observe loop already is (round-6 finding,
+		// applied there but missed here): a hung forge/git call on one candidate must not stall
+		// `hoist resume --env` forever before it even selects an id.
+		if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, deadline)
+			defer cancel()
+		}
 		for _, st := range states {
 			if st.TargetEnv != *env {
 				continue

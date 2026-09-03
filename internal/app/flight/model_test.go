@@ -477,6 +477,20 @@ func TestPollIntervalUsesConfig(t *testing.T) {
 	}
 }
 
+// TestPollIntervalZeroValueFallsBackToDefault is round-9's regression: PollDurations{} (the zero
+// value app.go's current stub actually passes) must fall back to the same 2s default every
+// other step already gets, not return a literal 0 — tea.Tick(0, ...) fires immediately/tightly,
+// a real CPU-spin risk if a caller ever leaves CI/Approval unset (exactly what the doc comment
+// on PollDurations claims happens, but the code didn't actually do until this fix).
+func TestPollIntervalZeroValueFallsBackToDefault(t *testing.T) {
+	var poll PollDurations
+	for _, phase := range []engine.StepName{engine.StepCIGreen, engine.StepApproved} {
+		if got := pollInterval(poll, phase); got != 2*time.Second {
+			t.Errorf("pollInterval(zero value, %s) = %v, want the 2s default", phase, got)
+		}
+	}
+}
+
 // TestViewFixedSize checks View() at a fixed 100x30 terminal across a few step-states: mid-
 // CIGreen waiting, blocked with a reason, and fully done — matching plan/matrix's own
 // fixed-size, string-contains test style rather than a golden file (neither of those

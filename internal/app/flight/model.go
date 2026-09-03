@@ -382,12 +382,19 @@ func (m Model) hint() string {
 // every other step only ever waits on the interactive signing prompt or a single
 // merge/branch-delete retry).
 func pollInterval(poll PollDurations, phase engine.StepName) time.Duration {
+	const fallback = 2 * time.Second
 	switch phase {
 	case engine.StepCIGreen:
+		if poll.CI <= 0 {
+			return fallback
+		}
 		return poll.CI
 	case engine.StepApproved:
+		if poll.Approval <= 0 {
+			return fallback
+		}
 		return poll.Approval
 	default:
-		return 2 * time.Second
+		return fallback
 	}
 }
