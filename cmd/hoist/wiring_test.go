@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -245,6 +248,132 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 	}
 	if driveFn != nil {
 		t.Error("expected a nil DriveFunc alongside the refusal")
+	}
+}
+
+// TestTUIStartPromotionSkipsAllNoOpPlan is the TUI-path sibling of
+// promote_test.go's TestPromoteNothingToDoIsANoOp (PR #50 review finding #9): the all-NoOp
+// fast-path guard (anyRealEdit, checkNoOpAgainstBase) has only ever lived in runPromote's own
+// caller-side body, never inside buildPromotionForConfirm itself, so buildStartPromotion must
+// apply the identical guard before ever calling buildPromotionForConfirm — otherwise confirming
+// an already-current plan would still claim, build a worktree and save a real state file before
+// the commit step ever rejected the empty change, potentially blocking a real future promotion
+// to the same target env. This mirrors TestPromoteNothingToDoIsANoOp's own fixture mutation
+// (simulate the PR having already merged) and confirms startPromotion reports "already current"
+// with no PR opened and no state file left behind.
+func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
+	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := buildStartPromotion(eff, newGit, f, nil)
+	_, driveFn, err := start(context.Background(), plan)
+	if err == nil {
+		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
+	}
+	if !strings.Contains(err.Error(), "already current") {
+		t.Errorf("error should report the plan as already current, got: %v", err)
+	}
+	if driveFn != nil {
+		t.Error("expected a nil DriveFunc alongside the already-current refusal")
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created for a no-op plan: %+v", f.PRs())
+	}
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 0 {
+		t.Errorf("no state file should have been written for a no-op plan: %+v", states)
+	}
+}
+
+// TestTUIStartPromotionReleasesClaimWithoutDriving is PR #50 review finding #6 (Copilot +
+// Codex): buildPromotionForConfirm's own doc comment requires release to run once the
+// returned state's first successful save lands — that must not depend on engine.Drive ever
+// actually being called and reaching its own first per-step save; if the operator backs out
+// (Esc, abort, quit) before that happens, the claim must still be gone, not stuck on disk.
+// This deliberately never calls the first call's returned driveFn at all — standing in for
+// exactly that "backed out early" gap — then confirms a second confirm of the identical plan
+// still succeeds: proof the first call already released its claim, rather than leaving it for
+// engine.Drive's own save to release (which, per engine.Drive's own code, never even runs when
+// the very first step's Observe returns a plain error before Act is ever reached).
+func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := buildStartPromotion(eff, newGit, f, nil)
+	state1, driveFn1, err := start(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("first startPromotion call: %v", err)
+	}
+	if driveFn1 == nil {
+		t.Fatal("expected a non-nil DriveFunc for a real, driveable plan")
+	}
+	_ = driveFn1 // deliberately never called — see the test's own doc comment
+
+	state2, driveFn2, err := start(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("second startPromotion call failed — the first call's claim was not released before it ever returned driveFn: %v", err)
+	}
+	if state2.ID != state1.ID {
+		t.Errorf("second call's id = %q, want the same id %q (identical plan)", state2.ID, state1.ID)
+	}
+	_ = driveFn2
+}
+
+// TestStartAndReapWaitsOnLauncherProcess is PR #50 review finding #10 (Codex): Start alone
+// leaves a *exec.Cmd's process a zombie/unreaped once it exits — Go's os/exec never reaps a
+// Start-only process on its own, only Wait does — so defaultOpenBrowser's own launcher
+// (open/xdg-open/cmd) would otherwise accumulate one such process per o press for as long as
+// this long-running TUI keeps executing. Rather than launching a real browser (no test in this
+// repo launches a real browser or a process it doesn't own — see newPromoteFixture's own
+// comment), this uses the standard os/exec "helper process" idiom: re-exec this same test
+// binary as a trivial, near-instant subprocess it fully owns and controls, then confirms
+// startAndReap's background goroutine actually waited on it (the done channel fires) rather
+// than only starting it and returning.
+func TestStartAndReapWaitsOnLauncherProcess(t *testing.T) {
+	if os.Getenv("HOIST_WIRING_TEST_HELPER_PROCESS") == "1" {
+		// Acts as the launcher stand-in: exit immediately, doing nothing else.
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStartAndReapWaitsOnLauncherProcess$")
+	cmd.Env = append(os.Environ(), "HOIST_WIRING_TEST_HELPER_PROCESS=1")
+	done := make(chan struct{}, 1)
+	if err := startAndReap(cmd, done); err != nil {
+		t.Fatalf("startAndReap: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startAndReap never waited on the launcher process within 2s — it starts the process but does not reap it")
 	}
 }
 

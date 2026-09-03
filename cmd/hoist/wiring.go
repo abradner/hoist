@@ -48,6 +48,24 @@ func buildStartPromotion(eff effective, g git.Git, f forge.Forge, forgeErr error
 		if forgeErr != nil {
 			return engine.PromotionState{}, nil, forgeErr
 		}
+
+		// The same all-NoOp fast path runPromote's own body applies (promote.go, "changed"
+		// loop plus checkNoOpAgainstBase) before ever calling buildPromotionForConfirm —
+		// mirrored here rather than inherited from it, since buildPromotionForConfirm itself
+		// has never carried this guard (only runPromote's caller-side body does). Without it,
+		// confirming a plan whose ticked edits are all no-ops (every source ref already
+		// matches the target — invisible in the confirm screen's own diff, which already
+		// skips NoOp edits) would still claim, build a worktree and save a non-terminal state
+		// before the commit step ever rejected or blocked the empty change — a state file
+		// that could then block a real future promotion to the same target env (Codex review,
+		// PR #50).
+		if !anyRealEdit(p.Edits) {
+			if err := checkNoOpAgainstBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
+		}
+
 		s, release, err := buildPromotionForConfirm(ctx, eff, p, tuiBase, tuiOverrideCINone, g, f)
 		if err != nil {
 			return engine.PromotionState{}, nil, err
@@ -58,20 +76,29 @@ func buildStartPromotion(eff effective, g git.Git, f forge.Forge, forgeErr error
 			return engine.PromotionState{}, nil, err
 		}
 
-		// released and save mirror runPromote's own wrapper exactly (promote.go): the claim
-		// only needs to outlive the gap up to the first durable state write, since
-		// findInFlight's own re-observation of the real state file is what enforces
-		// invariant 5 for the rest of the (possibly hours-long) promotion.
-		released := false
+		// buildPromotionForConfirm's own doc comment: release must be called once the
+		// returned state's first successful save lands, never held for the whole promotion.
+		// runPromote's own body satisfies that with a defer spanning its single function call
+		// (promote.go) — a scope that also happens to release the claim even if
+		// engine.Drive's very first Observe fails before its own save is ever reached
+		// (engine.Drive returns a *StepError immediately on an Observe error, without calling
+		// save at all: see engine.Drive's own code, the Observe-error branch has no
+		// saveIfSet). The TUI has no equivalent enclosing scope — driving happens across many
+		// independent tea.Cmd calls over the flight screen's whole lifetime — so without this,
+		// an operator backing out (Esc, abort, quit) before engine.Drive's own first per-step
+		// save ever landed would leak the claim file forever (Copilot + Codex, PR #50: "release
+		// claim can leak if first engine.Drive Observe fails before any save"). Saving the
+		// initial state and releasing right here, before driveFn is ever returned to the
+		// flight screen, closes that gap the same way runPromote's defer does, just earlier —
+		// the claim's job (letting a future findInFlight scan see this promotion) is already
+		// done the moment this state file exists on disk.
+		if err := engine.SaveState(statePath, s); err != nil {
+			release()
+			return engine.PromotionState{}, nil, fmt.Errorf("writing initial promotion state: %w", err)
+		}
+		release()
 		save := func(st *engine.PromotionState) error {
-			if err := engine.SaveState(statePath, st); err != nil {
-				return err
-			}
-			if !released {
-				released = true
-				release()
-			}
-			return nil
+			return engine.SaveState(statePath, st)
 		}
 
 		// onWaiting is nil here: the interactive "waiting for signing approval" text
@@ -145,14 +172,37 @@ func browserCommand(goos, url string) (name string, args []string) {
 	}
 }
 
+// startAndReap starts cmd without blocking the caller, then waits for it in a background
+// goroutine so it never lingers as a zombie / unreaped process once it exits: Go's os/exec does
+// not do this on its own for a Start-only *exec.Cmd — only Wait (or Run, which calls it
+// internally) releases the resources an exited-but-unwaited process holds. Without this, a
+// caller that only ever calls Start (defaultOpenBrowser, below) would leak one such process per
+// call for as long as a long-running process like this TUI keeps executing (Codex review, PR
+// #50). done, when non-nil, is notified (a channel with capacity >= 1) once the background Wait
+// call returns; production callers pass nil — it exists purely so a test can observe that the
+// reap actually happened without racing a real process's own exit timing.
+func startAndReap(cmd *exec.Cmd, done chan<- struct{}) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+		if done != nil {
+			done <- struct{}{}
+		}
+	}()
+	return nil
+}
+
 // defaultOpenBrowser opens url in the operator's default browser (no new dependency, AGENTS.md
 // §4.7; e.g. github.com/pkg/browser is exactly this well-known exec.Command-per-platform idiom
 // in a package no heavier than browserCommand's dozen lines plus this one exec.Command call
-// already covers). Start, not Run: the browser process outlives this one and this call must not
-// block the TUI waiting for the user to close their browser tab.
+// already covers). Start, not Run, by way of startAndReap: the browser process outlives this
+// one and this call must not block the TUI waiting for the user to close their browser tab, but
+// the launcher (open/xdg-open/cmd) that hands off to it still gets reaped once it exits.
 func defaultOpenBrowser(url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
-	if err := exec.Command(name, args...).Start(); err != nil {
+	if err := startAndReap(exec.Command(name, args...), nil); err != nil {
 		return fmt.Errorf("opening %s in a browser: %w", url, err)
 	}
 	return nil

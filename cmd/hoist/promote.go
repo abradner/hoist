@@ -30,6 +30,20 @@ var (
 	newForge         = func(ownerRepo string) (forge.Forge, error) { return github.New(ownerRepo) }
 )
 
+// anyRealEdit reports whether edits contains at least one edit that is not a NoOp (the target
+// already carries exactly the planned reference) — the all-NoOp fast-path guard both runPromote
+// (below) and cmd/hoist/wiring.go's buildStartPromotion share, so a plan whose every edit is
+// already satisfied is recognized identically on the CLI and TUI paths rather than only where
+// each was written to check it.
+func anyRealEdit(edits []gitops.Edit) bool {
+	for _, e := range edits {
+		if !e.NoOp() {
+			return true
+		}
+	}
+	return false
+}
+
 // runPromote is `hoist promote`: builds the same gitops.Plan `hoist plan --dry-run` would
 // print, then drives internal/engine's four steps to actually commit it, push it and open a
 // PR. Named "promote" rather than "push": the command's whole point is the promotion — commit
@@ -152,14 +166,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return exitFailure
 	}
 
-	changed := false
-	for _, e := range plan.Edits {
-		if !e.NoOp() {
-			changed = true
-			break
-		}
-	}
-	if !changed {
+	if !anyRealEdit(plan.Edits) {
 		// An all-NoOp plan means "the target already carries the planned ref" — but Edit.NoOp
 		// only knows about the bytes gitops.Discover already read from the clone. Nothing
 		// downstream of here calls gitops.Apply/Verify (there is no worktree yet on this
