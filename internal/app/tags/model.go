@@ -70,16 +70,28 @@ type DirectRequestedMsg struct {
 	ImageRepo, Tag, Digest string
 }
 
+// listLoadedMsg and metaLoadedMsg both carry imageRepo, the picker instance that requested
+// them: loadCmd/fetchCmd close over m.imageRepo at the moment the command is created, and
+// onListLoaded/onMetaLoaded discard a result whose imageRepo doesn't match this model's own
+// current one. internal/app's root routes a message to whatever screen is currently on top of
+// its stack by type alone, not by which Model instance produced the tea.Cmd that resolves to
+// it — if an operator leaves this picker while its own list/meta commands are still in flight
+// and opens a picker for a different image repo (or reopens the same one, a fresh Model either
+// way), a stale result landing in the new picker would otherwise silently populate it with
+// another repo's rows/metadata (common tag names like "latest" make this look plausible rather
+// than obviously wrong).
 type listLoadedMsg struct {
-	regTags []string
-	gitTags []forge.GitTag
-	err     error
+	imageRepo string
+	regTags   []string
+	gitTags   []forge.GitTag
+	err       error
 }
 
 type metaLoadedMsg struct {
-	tag  string
-	meta registry.ImageMeta
-	err  error
+	imageRepo string
+	tag       string
+	meta      registry.ImageMeta
+	err       error
 }
 
 type keyMap struct {
@@ -169,23 +181,25 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) loadCmd() tea.Cmd {
 	listFn := m.listFn
+	imageRepo := m.imageRepo
 	return func() tea.Msg {
 		if listFn == nil {
-			return listLoadedMsg{err: fmt.Errorf("no registry configured for %s", "this repo")}
+			return listLoadedMsg{imageRepo: imageRepo, err: fmt.Errorf("no registry configured for %s", "this repo")}
 		}
 		regTags, gitTags, err := listFn(context.Background())
-		return listLoadedMsg{regTags: regTags, gitTags: gitTags, err: err}
+		return listLoadedMsg{imageRepo: imageRepo, regTags: regTags, gitTags: gitTags, err: err}
 	}
 }
 
 func (m Model) fetchCmd(tag string) tea.Cmd {
 	metaFn := m.metaFn
+	imageRepo := m.imageRepo
 	return func() tea.Msg {
 		if metaFn == nil {
-			return metaLoadedMsg{tag: tag, err: fmt.Errorf("no registry configured")}
+			return metaLoadedMsg{imageRepo: imageRepo, tag: tag, err: fmt.Errorf("no registry configured")}
 		}
 		meta, err := metaFn(context.Background(), tag)
-		return metaLoadedMsg{tag: tag, meta: meta, err: err}
+		return metaLoadedMsg{imageRepo: imageRepo, tag: tag, meta: meta, err: err}
 	}
 }
 
@@ -207,6 +221,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
+	if msg.imageRepo != m.imageRepo {
+		// A stale result from a picker this model is no longer (or never was) — discard it
+		// without touching any of this model's own state (see listLoadedMsg's own doc comment).
+		return m, nil
+	}
 	m.state = stateReady
 	if msg.err != nil {
 		m.err = msg.err
@@ -220,6 +239,10 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
+	if msg.imageRepo != m.imageRepo {
+		// Same stale-result guard as onListLoaded — see listLoadedMsg's own doc comment.
+		return m, nil
+	}
 	for i, r := range m.rows {
 		if r.Tag == msg.tag {
 			m.rows[i].MetaLoading = false
@@ -384,7 +407,35 @@ func (m Model) pageSize() int {
 	return 15
 }
 
-// fetchVisible fires MetaFunc for every row within pageSize of the cursor that isn't already
+// visibleWindow computes the half-open [start,end) slice of rows this screen keeps warm and
+// draws, centered on (or otherwise including) the cursor — the single source of truth both
+// fetchVisible (what gets a MetaFunc call) and viewReady (what actually gets rendered) share, so
+// the two can never drift apart (AGENTS.md §8, layered checks: one definition of "visible", not
+// two that can disagree about what's on screen). rows is the caller's own m.filtered() result,
+// passed in rather than recomputed here so a caller that already has it doesn't pay for it
+// twice.
+func (m Model) visibleWindow(rows []Row) (start, end int) {
+	if len(rows) == 0 {
+		return 0, 0
+	}
+	idx := IndexOf(rows, m.selectedTag)
+	if idx < 0 {
+		idx = 0
+	}
+	page := m.pageSize()
+	start = idx - page/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + page
+	if end > len(rows) {
+		end = len(rows)
+		start = max(0, end-page)
+	}
+	return start, end
+}
+
+// fetchVisible fires MetaFunc for every row within the current visibleWindow that isn't already
 // loaded or loading — AGENTS.md invariant 4's "fetch on demand as rows become visible/
 // selected", never every tag up front. Called after the list loads, on cursor movement, on a
 // filter change, and after a metadata load reorders the list (which can shift what's near the
@@ -394,20 +445,7 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 	if len(rows) == 0 {
 		return m, nil
 	}
-	idx := IndexOf(rows, m.selectedTag)
-	if idx < 0 {
-		idx = 0
-	}
-	page := m.pageSize()
-	start := idx - page/2
-	if start < 0 {
-		start = 0
-	}
-	end := start + page
-	if end > len(rows) {
-		end = len(rows)
-		start = max(0, end-page)
-	}
+	start, end := m.visibleWindow(rows)
 
 	byTag := make(map[string]int, len(m.rows))
 	for i, r := range m.rows {
@@ -500,8 +538,12 @@ func (m Model) viewReady() string {
 	if len(rows) == 0 {
 		b.WriteString("  (no matching tags)\n")
 	}
+	// Windowed to the same [start,end) fetchVisible uses (visibleWindow), so the cursor's row
+	// is always among what's drawn — moving the cursor past one screen's worth of rows must
+	// scroll the window with it, never leave the selected row off-screen (finding 5).
+	start, end := m.visibleWindow(rows)
 	dividerShown := false
-	for _, r := range rows {
+	for _, r := range rows[start:end] {
 		if m.mapped && !r.HasGitDate && !dividerShown {
 			b.WriteString(strings.Repeat("─", 4) + " unordered (no matching git tag) " + strings.Repeat("─", 4) + "\n")
 			dividerShown = true

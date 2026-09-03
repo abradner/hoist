@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +147,60 @@ func TestCursorMoveSelectsNextRow(t *testing.T) {
 	}
 }
 
+// TestViewWindowsAroundCursorPastFirstPage is finding 5's own regression test: the tag list has
+// no viewport if every row renders unconditionally, so the cursor can move off-screen. Builds a
+// mapped, deterministically-ordered (by git tag date, so Reorder never reshuffles it) list of
+// 30 tags at a small height (pageSize = max(10-4,5) = 6), confirming the initial view is
+// windowed (the last row is off-screen) and that moving the cursor to the last row scrolls the
+// window to bring it back into view while staying bounded (the first row scrolls away).
+func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
+	const n = 30
+	regTags := make([]string, n)
+	gitTags := make([]forge.GitTag, n)
+	metas := map[string]registry.ImageMeta{}
+	for i := 0; i < n; i++ {
+		tag := fmt.Sprintf("v%02d", i)
+		regTags[i] = tag
+		// Date increases with i, so DeriveRows (newest git-tag date first) sorts the rows as
+		// v29, v28, ..., v00 — a fixed order Reorder never touches (mapped=true is a no-op for
+		// it), so cursor movement by index is fully predictable regardless of meta-load timing.
+		date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, i)
+		gitTags[i] = forge.GitTag{Name: tag, Date: date}
+		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: date}
+	}
+	listFn := func(context.Context) ([]string, []forge.GitTag, error) { return regTags, gitTags, nil }
+	m := New("ghcr.io/example/app", "app-staging", true, false, "", "", false, listFn, fixedMetas(metas))
+	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
+	m = m.SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	if m.selectedTag != "v29" {
+		t.Fatalf("initial selection = %q, want v29 (newest git-tag date first)", m.selectedTag)
+	}
+
+	got := ansi.Strip(m.View())
+	if strings.Contains(got, "v00") {
+		t.Fatalf("initial view should be windowed to the viewport, but shows the last (oldest) row:\n%s", got)
+	}
+
+	// Move the cursor all the way to the last row — far past the first page.
+	for i := 0; i < n-1; i++ {
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.selectedTag != "v00" {
+		t.Fatalf("cursor should be on the last row after %d downs, got %q", n-1, m.selectedTag)
+	}
+	got = ansi.Strip(m.View())
+	if !strings.Contains(got, "v00") {
+		t.Fatalf("scrolling to the last row should bring it back into view:\n%s", got)
+	}
+	if strings.Contains(got, "v29") {
+		t.Fatalf("window should have scrolled away from the first row once the cursor left it:\n%s", got)
+	}
+}
+
 func TestEnterEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -253,6 +309,55 @@ func TestEscEmitsBackMsg(t *testing.T) {
 	}
 	if _, ok := cmd().(BackMsg); !ok {
 		t.Fatalf("got %T, want BackMsg", cmd())
+	}
+}
+
+// TestStaleListResultFromDifferentRepoIsDiscarded is finding 4's own regression test: a picker
+// left mid-flight for one image repo (its own listFn command captured but never delivered)
+// must not have that result land in a picker for a DIFFERENT image repo — internal/app's root
+// dispatches a message to whatever screen is on top of its stack by type alone, not by which
+// Model instance's command produced it, so without imageRepo-scoping a stale listLoadedMsg
+// would silently overwrite the new picker's own rows.
+func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
+	left := New("ghcr.io/example/other", "app-staging", false, false, "", "", false,
+		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"stale"}, nil, nil },
+		fixedMetas(nil))
+	staleMsg := left.loadCmd()()
+
+	current := readyModel(t, "app-staging", true, false)
+	beforeRows := append([]Row(nil), current.rows...)
+	beforeState := current.state
+
+	after, cmd := current.Update(staleMsg)
+	if cmd != nil {
+		t.Fatalf("a stale cross-repo result should be discarded silently, got a command: %v", cmd())
+	}
+	if !reflect.DeepEqual(after.rows, beforeRows) {
+		t.Fatalf("stale result from a different image repo mutated rows: got %+v, want unchanged %+v", after.rows, beforeRows)
+	}
+	if after.state != beforeState {
+		t.Fatalf("stale result changed state: got %v, want unchanged %v", after.state, beforeState)
+	}
+}
+
+// TestStaleMetaResultFromDifferentRepoIsDiscarded is metaLoadedMsg's own half of finding 4: a
+// stale per-tag metadata result tagged with a different imageRepo must not overwrite a row's
+// already-loaded metadata.
+func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
+	current := readyModel(t, "app-staging", true, false)
+	before := append([]Row(nil), current.rows...)
+
+	staleMsg := metaLoadedMsg{
+		imageRepo: "ghcr.io/example/other",
+		tag:       "v3",
+		meta:      registry.ImageMeta{Digest: "sha256:" + strings.Repeat("9", 64)},
+	}
+	after, cmd := current.Update(staleMsg)
+	if cmd != nil {
+		t.Fatalf("a stale cross-repo meta result should be discarded silently, got a command: %v", cmd())
+	}
+	if !reflect.DeepEqual(after.rows, before) {
+		t.Fatalf("stale meta result from a different image repo mutated rows: got %+v, want unchanged %+v", after.rows, before)
 	}
 }
 
