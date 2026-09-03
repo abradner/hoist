@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -182,7 +183,10 @@ func jobDetail(j *batchv1.Job) string {
 func cronJobDetail(cj *batchv1.CronJob) string {
 	last := "never"
 	if cj.Status.LastScheduleTime != nil {
-		last = cj.Status.LastScheduleTime.Format("2006-01-02T15:04:05Z")
+		// RFC3339, not a hardcoded "...Z" literal: a hardcoded Z claims UTC regardless of the
+		// time's actual zone, printing a false offset if the controller ever returns a non-UTC
+		// value. RFC3339's layout renders whatever zone the time actually carries.
+		last = cj.Status.LastScheduleTime.Format(time.RFC3339)
 	}
 	return fmt.Sprintf("active=%d last-scheduled=%s", len(cj.Status.Active), last)
 }

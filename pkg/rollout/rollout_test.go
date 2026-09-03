@@ -166,6 +166,34 @@ func TestJobLikeReportsJobAndCronJob(t *testing.T) {
 	}
 }
 
+// TestCronJobDetailReportsActualZoneNotHardcodedZ: cronJobDetail used to format
+// LastScheduleTime with a literal "...Z" suffix regardless of the time's real zone, so a
+// non-UTC value would print as if it were UTC — a truthfulness bug (Copilot, PR #51 round 2).
+// Mutant-verified: reverting to the hardcoded "2006-01-02T15:04:05Z" layout makes this fail
+// (the offset in the output no longer matches the fixture's own -07:00 zone).
+func TestCronJobDetailReportsActualZoneNotHardcodedZ(t *testing.T) {
+	loc := time.FixedZone("test", -7*60*60)
+	scheduled := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, loc))
+	cron := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app-production", Name: "nightly"},
+		Status:     batchv1.CronJobStatus{LastScheduleTime: &scheduled},
+	}
+	cs := fake.NewSimpleClientset(cron)
+	r := FromClientset(cs)
+
+	cst, err := r.JobLike(context.Background(), "app-production", "nightly", "CronJob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := scheduled.Format(time.RFC3339)
+	if !strings.Contains(cst.Detail, want) {
+		t.Errorf("CronJob detail = %q, want it to contain the real zone offset %q, not a hardcoded Z", cst.Detail, want)
+	}
+	if strings.Contains(cst.Detail, "05Z") {
+		t.Errorf("CronJob detail = %q, still claims UTC (Z) for a non-UTC time", cst.Detail)
+	}
+}
+
 // TestNewFromKubeconfigSelectsContext mirrors pkg/argo's own test of the same name: same
 // fixture shape, same TEST-NET-1 placeholders, confirming pkg/rollout follows the identical
 // client-go adaptor conventions pkg/k8s established (AGENTS.md §4.4/§4.6).

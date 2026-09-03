@@ -101,6 +101,33 @@ func TestGetUnparsableReconciledAtIsZeroNotError(t *testing.T) {
 	}
 }
 
+// TestGetReconciledAtWithFractionalSecondsParses pins down a real Go stdlib behavior this
+// package's own Parse call relies on: Copilot (PR #51 round 2) claimed status.reconciledAt
+// with fractional seconds (which Kubernetes/Argo CD commonly report) fails against
+// time.Parse(time.RFC3339, ...), silently zeroing ReconciledAt. Verified false by direct
+// testing: time.Parse is documented as lenient about a fractional-seconds suffix regardless of
+// whether the layout itself specifies one, so plain RFC3339 already parses this correctly — no
+// code change was made. This test exists so a future refactor that swaps in a stricter
+// parser (or a non-stdlib one) gets caught if it silently loses this tolerance.
+func TestGetReconciledAtWithFractionalSecondsParses(t *testing.T) {
+	reconciled := "2026-01-02T03:04:05.123456789Z"
+	app := newApp(map[string]any{"reconciledAt": reconciled})
+	dyn := newFakeDynamic(app)
+	a := FromDynamicClient(dyn)
+
+	st, err := a.Get(context.Background(), Application{Namespace: "argocd", Name: "app-production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := time.Parse(time.RFC3339Nano, reconciled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.ReconciledAt.Equal(want) {
+		t.Errorf("ReconciledAt = %v, want %v (parsed from a fractional-second timestamp)", st.ReconciledAt, want)
+	}
+}
+
 // TestGetMissingApplicationWrapsErrNotFound: a real 404 (wrong name, wrong namespace, or the
 // Application not created yet) must be distinguishable from every other error — the caller's
 // whole point in checking errors.Is(err, ErrNotFound) is to Block rather than retry forever.
