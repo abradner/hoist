@@ -2,8 +2,10 @@ package flight
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -79,13 +81,24 @@ type BackMsg struct{}
 // tickMsg fires the next poll iteration.
 type tickMsg struct{}
 
-// driveResultMsg is delivered once a driveCmd finishes.
+// driveResultMsg is delivered once a driveCmd finishes. gen is stamped with the issuing
+// Model's own generation (see nextGen and Model.gen) so onDriveResult can tell a result
+// belonging to THIS model instance apart from a stale one left over from another — see
+// onDriveResult's own doc comment for why that distinction matters.
 type driveResultMsg struct {
+	gen      uint64
 	state    engine.PromotionState
 	done     bool
 	statuses []engine.StepStatus
 	err      error
 }
+
+// nextGen hands out a unique generation number to every flight.Model constructed by New,
+// process-wide — see Model.gen's own doc comment for what it guards against. A plain atomic
+// counter is enough: it only ever needs to distinguish Model instances within one running
+// process (TUI state is never persisted or shared across processes, AGENTS.md §4.1), never to
+// be stable, meaningful, or unique across a restart.
+var nextGen atomic.Uint64
 
 // Model is the flight screen. It is a value: Update, SetSize and SetStyles return the
 // updated model, matching internal/app/plan and internal/app/matrix's convention.
@@ -94,12 +107,29 @@ type Model struct {
 	order []engine.StepName
 	rows  []Row
 	done  bool
+	// stopped is true once a driveFn call returned a non-retryable error (see retryableErr):
+	// scheduleTick is not called again automatically, though R still lets the operator retry
+	// by hand (mirroring hoist resume's own "re-run to retry" convention for a terminal
+	// failure — see onDriveResult's own doc comment for why this must not be done regardless
+	// of which step or error shape failed).
+	stopped bool
 
 	driveFn DriveFunc
 	poll    PollDurations
+	// deadlineAt is the one absolute instant poll.Deadline names for this flight screen's
+	// entire drive, computed once here rather than re-derived per poll — see driveCmd's own
+	// doc comment for why a fresh per-call timeout would let the wait outlive the deadline
+	// entirely. Zero when poll.Deadline <= 0 ("no bound at all", the existing convention).
+	deadlineAt time.Time
 	// busy is true while a driveCmd is in flight, so a tick landing mid-call and a manual R
 	// press can't both fire a second, overlapping DriveFunc call.
 	busy bool
+	// gen is this Model instance's own generation, stamped into every driveResultMsg its own
+	// driveCmd calls produce (see nextGen and onDriveResult) — the guard against a driveCmd
+	// issued by a DIFFERENT flight.Model instance (one the operator has since aborted, popped
+	// off the stack) still landing here and being silently adopted as this instance's own
+	// result once it eventually completes.
+	gen uint64
 
 	spinner spinner.Model
 	showLog bool
@@ -126,6 +156,13 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		driveFn: driveFn,
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
 		keys:    defaultKeyMap(),
+		gen:     nextGen.Add(1),
+	}
+	if poll.Deadline > 0 {
+		// One absolute deadline for this screen's whole drive, from the moment it starts —
+		// see driveCmd's own doc comment for why deriving a fresh timeout per poll instead
+		// would let the total wait outlive poll.Deadline indefinitely.
+		m.deadlineAt = time.Now().Add(poll.Deadline)
 	}
 	m.rows = DeriveRows(m.order, false, nil) // every step "not yet reached" until the first poll lands
 	if driveFn != nil {
@@ -151,29 +188,35 @@ func (m Model) Init() tea.Cmd {
 // git/the forge). state is captured by value at call time, so a concurrent Update never
 // races the copy this goroutine reads.
 //
-// The call is bounded by m.poll.Deadline, not left on context.Background(): without this, a
+// The call is bounded by m.deadlineAt, not left on context.Background(): without this, a
 // single hung network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout)
 // would block this goroutine — and therefore this screen's ability to ever show progress or
-// let the user act — forever, with no way to cancel. Deadline is generous (default 4h, the
-// same value cmd/hoist's own driveToCompletion bounds an entire promotion's wait by), so this
-// bounds one poll iteration by "the whole promotion's own budget" rather than a tighter
-// per-call figure this package has no config knob for — imperfect (ideally relative to when
-// the promotion started, not this call), but it turns "can hang forever" into "eventually
-// errors," which is the actual gap being closed.
+// let the user act — forever, with no way to cancel. m.deadlineAt is one absolute instant
+// computed once in New (poll.Deadline is generous, default 4h, the same value cmd/hoist's own
+// driveToCompletion bounds an entire promotion's wait by) — every poll's context shares that
+// same instant, bounded by the time remaining until it, rather than each call deriving its own
+// fresh poll.Deadline-length timeout from "now". A fresh-per-call timeout would let a promotion
+// stuck re-polling CI/approval (each individual wait returns well within the deadline, then
+// schedules another call with a brand new full-length timeout) outlive the configured deadline
+// indefinitely — cmd/hoist/drive.go's own driveToCompletion enforces exactly one deadline for
+// its whole wait (wrapped around ctx once, by its caller, before the retry loop starts), and
+// this screen must not silently offer a looser guarantee than the CLI's own (Codex review, PR
+// #50).
 func (m Model) driveCmd() tea.Cmd {
-	driveFn, state, deadline := m.driveFn, m.state, m.poll.Deadline
+	driveFn, state, deadlineAt := m.driveFn, m.state, m.deadlineAt
+	gen := m.gen
 	if driveFn == nil {
 		return nil
 	}
 	return func() tea.Msg {
 		ctx := context.Background()
-		if deadline > 0 {
+		if !deadlineAt.IsZero() {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, deadline)
+			ctx, cancel = context.WithDeadline(ctx, deadlineAt)
 			defer cancel()
 		}
 		next, done, statuses, err := driveFn(ctx, state)
-		return driveResultMsg{state: next, done: done, statuses: statuses, err: err}
+		return driveResultMsg{gen: gen, state: next, done: done, statuses: statuses, err: err}
 	}
 }
 
@@ -183,7 +226,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case driveResultMsg:
 		return m.onDriveResult(msg)
 	case tickMsg:
-		if m.busy || m.done || m.driveFn == nil {
+		if m.busy || m.done || m.stopped || m.driveFn == nil {
 			return m, nil
 		}
 		m.busy = true
@@ -208,16 +251,45 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// onDriveResult processes a driveCmd's result — but only if it actually belongs to this Model
+// instance. The root's message dispatch (internal/app/app.go's Update, the "forward everything
+// else to the top screen" default case) delivers a message to whichever screen is currently on
+// top by its concrete Go type alone; it has no notion of which screen instance actually issued
+// the tea.Cmd that produced it. A driveCmd already in flight for a flight.Model the operator has
+// since aborted (popped off the stack, see AbortMsg's own handling in app.go) can still complete
+// later and deliver one more driveResultMsg — which, without the msg.gen check below, a
+// different flight.Model now on top (driving a different promotion) would silently adopt as its
+// own: the wrong state and step statuses, while continuing to poll and save under THIS model's
+// own driveFn/state-file closure (PR #50 review finding #4). msg.gen (stamped by driveCmd from
+// m.gen at the point New constructed this instance) is the guard: a result whose gen doesn't
+// match is dropped outright, leaving every field — including busy — untouched, since it says
+// nothing about whether THIS instance's own driveCmd is still in flight.
 func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
+	if msg.gen != m.gen {
+		return m, nil
+	}
 	m.busy = false
 	if msg.err != nil {
-		// A plumbing hiccup (Known bug classes: a 404/permissions blip on Checks or
-		// Comments — see cmd/hoist/drive.go's retryableStep) must not stop the screen from
-		// ever polling again: show it and keep ticking at the same interval.
 		m.errNotice = redact.Strings(msg.err.Error())
+		if !retryableErr(msg.err) {
+			// A terminal failure — cmd/hoist/drive.go's own driveToCompletion only retries a
+			// *engine.StepError on StepCIGreen/StepApproved (Known bug classes: a transient
+			// 404/permissions hiccup on Checks/Comments); every other shape — a rejected push,
+			// a failed signing commit, ctx.DeadlineExceeded/Canceled included — is terminal
+			// there and returned immediately, never retried. Before this fix, onDriveResult
+			// scheduled another poll for literally any non-nil err, so this screen would
+			// silently repeat a terminal Act failure every ~2s until poll.Deadline elapsed
+			// instead of stopping and surfacing it as a real failure (Codex review, PR #50).
+			// R still lets the operator retry by hand (handleKey's own Reobserve case only
+			// gates on busy/done, not stopped) — mirroring hoist resume's "re-run to retry"
+			// convention for a promotion a killed process left mid-flight.
+			m.stopped = true
+			return m, nil
+		}
 		return m, m.scheduleTick()
 	}
 	m.errNotice = ""
+	m.stopped = false
 	m.state = msg.state
 	m.done = msg.done
 	m.rows = DeriveRows(m.order, m.done, msg.statuses)
@@ -225,6 +297,28 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, m.scheduleTick()
+}
+
+// retryableErr mirrors cmd/hoist/drive.go's driveToCompletion classification exactly: only a
+// *engine.StepError on StepCIGreen or StepApproved is worth retrying automatically (see
+// retryableStep below); every other error shape — including one that doesn't even parse as
+// *engine.StepError, such as a bare ctx.DeadlineExceeded/Canceled surfacing straight from
+// engine.Drive's own ctx.Err() check — is terminal from this screen's point of view too.
+func retryableErr(err error) bool {
+	var stepErr *engine.StepError
+	return errors.As(err, &stepErr) && retryableStep(stepErr.Step)
+}
+
+// retryableStep mirrors cmd/hoist/drive.go's own retryableStep exactly. It is duplicated
+// rather than imported for the same reason pollInterval below already is (cmd/hoist is package
+// main and cannot be imported from here): CIGreen and Approved are the only two steps whose
+// Observe calls out to a forge endpoint that can transiently 404/scope-error without the
+// underlying condition (CI status, an approval) actually being answerable yet; every other
+// step's error is terminal. A reviewer changing cmd/hoist/drive.go's own retryableStep should
+// double-check this copy stays in step with it, exactly as pollInterval's own doc comment
+// already asks for that function.
+func retryableStep(step engine.StepName) bool {
+	return step == engine.StepCIGreen || step == engine.StepApproved
 }
 
 // scheduleTick waits pollInterval's answer for whichever step is currently active before
@@ -364,6 +458,9 @@ func (m Model) logView() string {
 func (m Model) statusLeft() string {
 	if m.done {
 		return "promotion complete"
+	}
+	if m.stopped {
+		return "stopped: see error below"
 	}
 	return ""
 }
