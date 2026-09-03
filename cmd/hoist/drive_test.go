@@ -10,6 +10,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -118,5 +119,56 @@ func TestDriveToCompletionRetriesTransientRolloutErrors(t *testing.T) {
 	}
 	if len(ro.Calls) < 2 {
 		t.Fatalf("Rollout.Deployment called %d time(s), want at least 2 (proves the retry loop actually retried instead of returning after one call)", len(ro.Calls))
+	}
+}
+
+// TestDriveToCompletionDoesNotRetryArgoRefreshNotFound is Copilot's PR #51 review finding:
+// ArgoRefreshedStep.Observe already Blocks cleanly the moment its own Get call reports
+// argo.ErrNotFound, so that race (an Application deleted or moved) never reaches this loop as a
+// plain StepError at all — but Act's own Refresh call can independently discover the SAME
+// absence (a race between Observe succeeding and Act running moments later), and Drive always
+// wraps an Act error as a plain *StepError, with no way for Act to produce a *BlockedError of
+// its own. Before isNotFoundErr, that StepError's step name (StepArgoRefreshed) was on the
+// retryable list unconditionally, so this raced-Refresh case silently retried every poll.argo
+// interval instead of reporting immediately — this proves it does not: the fake's Refresh call
+// count stays at exactly one, and the loop returns right away rather than running out the clock
+// on ctx's deadline.
+func TestDriveToCompletionDoesNotRetryArgoRefreshNotFound(t *testing.T) {
+	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
+	s := &engine.PromotionState{
+		TargetEnv:     "app-production",
+		MergeSHA:      "deadbeef",
+		ArgoNamespace: "argocd",
+		ArgoApps:      []string{"app-app-production"},
+		History:       []engine.HistoryEntry{{Step: engine.StepMerged, At: time.Now().Add(-time.Minute)}},
+	}
+	fake := &argo.Fake{RefreshErr: argo.ErrNotFound}
+	// Observe's own Get must succeed and report "not yet reconciled" (never Blocked/Satisfied)
+	// so Drive actually proceeds to call Act — the race this test exercises only exists on the
+	// path through Act, not the one Observe already guards on its own.
+	fake.SetStatus(app, argo.Status{ReconciledAt: time.Now().Add(-time.Hour)})
+	steps := []engine.Step{engine.ArgoRefreshedStep{Argo: fake}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Argo: config.Duration(5 * time.Millisecond)}
+	start := time.Now()
+	err := driveToCompletion(ctx, steps, s, func(*engine.PromotionState) error { return nil }, poll, io.Discard)
+	elapsed := time.Since(start)
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want an immediate terminal error, not a retry loop that ran out the deadline", err)
+	}
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("driveToCompletion took %s, want well under the 200ms deadline (a genuine ErrNotFound must not be retried)", elapsed)
+	}
+	refreshCalls := 0
+	for _, c := range fake.Calls {
+		if strings.HasPrefix(c, "Refresh ") {
+			refreshCalls++
+		}
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("Refresh called %d time(s), want exactly 1 (a retry loop would call it again every poll.argo interval)", refreshCalls)
 	}
 }
