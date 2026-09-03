@@ -341,8 +341,8 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 		Pairs:      map[string]string{"app-staging": "app-production"},
 	}
 	tagsFn := func(string) (bool, tags.ListFunc, tags.MetaFunc) {
-		listFn := func(context.Context) ([]string, []forge.GitTag, error) {
-			return []string{"v202601010101"}, nil, nil
+		listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+			return []string{"v202601010101"}, nil, false, nil
 		}
 		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
 			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil

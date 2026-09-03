@@ -572,7 +572,7 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig) tags.BuildFunc {
 		}
 		reg, err := newRegistry(regCfg)
 		if err != nil {
-			failed := func(context.Context) ([]string, []forge.GitTag, error) { return nil, nil, err }
+			failed := func(context.Context) ([]string, []forge.GitTag, bool, error) { return nil, nil, false, err }
 			return false, failed, nil
 		}
 
@@ -591,21 +591,30 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig) tags.BuildFunc {
 			}
 		}
 
-		listFn := func(ctx context.Context) ([]string, []forge.GitTag, error) {
+		// listFn's own mapped return (finding 3, round 2) is this call's actually-observed
+		// answer, not the outer mapped closed over above: the outer value can already be false
+		// here (no config mapping, or newForge failed above), but it can also start true and
+		// still need to degrade below, once fc.Tags is actually asked and fails at runtime —
+		// the caller (internal/app/tags.Model.onListLoaded) trusts THIS return, every call,
+		// over whatever BuildFunc's own static mapped result said when the picker was opened.
+		listFn := func(ctx context.Context) ([]string, []forge.GitTag, bool, error) {
 			regTags, err := reg.Tags(ctx, imageRepo)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
 			if !mapped {
-				return regTags, nil, nil
+				return regTags, nil, false, nil
 			}
 			gitTags, err := fc.Tags(ctx)
 			if err != nil {
 				// Same degrade-not-fail call as above, now that the forge has actually been
-				// asked: the registry tags are still useful without git-tag ordering.
-				return regTags, nil, nil
+				// asked: the registry tags are still useful without git-tag ordering — and
+				// mapped=false here is what tells the caller to actually fall back to
+				// Created-based ordering (invariant 3), not merely to receive an empty git-tag
+				// list while still believing every row is "mapped but unmatched".
+				return regTags, nil, false, nil
 			}
-			return regTags, gitTags, nil
+			return regTags, gitTags, true, nil
 		}
 		metaFn := func(ctx context.Context, tag string) (registry.ImageMeta, error) {
 			ref, err := image.Parse(imageRepo + ":" + tag)

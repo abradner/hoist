@@ -18,22 +18,34 @@ import (
 	"github.com/abradner/hoist/pkg/registry"
 )
 
-// ListFunc lists ImageRepo's registry tags and, when the app repo mapping has an entry for
-// it, that app repo's own git tags with dates (pkg/forge). cmd/hoist builds this, wrapping
-// whichever registry client and (when configured) pkg/forge/github.Client this run already
-// built — this package never opens a registry or forge connection itself (AGENTS.md §4.8).
-// GitTags is always nil/empty when Mapped is false.
-type ListFunc func(ctx context.Context) (regTags []string, gitTags []forge.GitTag, err error)
+// ListFunc lists ImageRepo's registry tags and, when the app repo mapping has an entry for it
+// AND this call actually managed to fetch that app repo's own git tags with dates (pkg/forge),
+// mapped is true and gitTags carries them. cmd/hoist builds this, wrapping whichever registry
+// client and (when configured) pkg/forge/github.Client this run already built — this package
+// never opens a registry or forge connection itself (AGENTS.md §4.8).
+//
+// mapped is this call's own, actually-observed answer — never the config's static "is this
+// image repo mapped at all" fact alone (finding 3, round 2: cmd/hoist's config check can say
+// mapped, but the forge lookup this same call makes can still fail at runtime; a caller that
+// returned the config's static answer regardless left the model believing every tag had been
+// deliberately left out of a real git-tag match, rather than that ordering had fallen back to
+// registry Created entirely — invariant 3's fallback never actually engaging). GitTags is
+// always nil/empty when mapped is false, whichever reason made it false.
+type ListFunc func(ctx context.Context) (regTags []string, gitTags []forge.GitTag, mapped bool, err error)
 
 // MetaFunc fetches one tag's registry metadata, lazily, only for the row the picker currently
 // needs it for (New's own doc comment on laziness, AGENTS.md invariant 4).
 type MetaFunc func(ctx context.Context, tag string) (registry.ImageMeta, error)
 
 // BuildFunc is what internal/app.Model calls once per OpenTagsMsg to get imageRepo's own
-// ListFunc/MetaFunc and whether RepoConfig.Apps maps it to an app git repo. cmd/hoist builds
-// this, wrapping whichever registry client (and, when mapped, pkg/forge/github.Client) the
-// run already built — this package never opens either connection itself (AGENTS.md §4.8,
-// mirroring plan.ResolveFunc's own wiring).
+// ListFunc/MetaFunc and whether RepoConfig.Apps maps it to an app git repo — RepoConfig's own
+// static, config-known fact, used only as New's initial guess before the list has loaded.
+// ListFunc's own mapped return value (not this one) is what DeriveRows/Reorder actually use
+// once the list result arrives (see ListFunc's doc comment) — this one can be true while that
+// one later comes back false, when the config names a mapping but the forge lookup itself
+// fails at runtime. cmd/hoist builds this, wrapping whichever registry client (and, when
+// mapped, pkg/forge/github.Client) the run already built — this package never opens either
+// connection itself (AGENTS.md §4.8, mirroring plan.ResolveFunc's own wiring).
 type BuildFunc func(imageRepo string) (mapped bool, listFn ListFunc, metaFn MetaFunc)
 
 type state int
@@ -104,6 +116,7 @@ type listLoadedMsg struct {
 	gen       int64
 	regTags   []string
 	gitTags   []forge.GitTag
+	mapped    bool // this call's own observed answer — see ListFunc's doc comment.
 	err       error
 }
 
@@ -176,7 +189,10 @@ type Model struct {
 
 // New builds the tag picker for imageRepo, choosing a tag for target. mapped is whether
 // RepoConfig.Apps has an entry for imageRepo (a config-known fact, passed in rather than
-// inferred — see rows.go's DeriveRows). production is whether target is listed in
+// inferred — see rows.go's DeriveRows) — used only as the model's initial value until the
+// first list result arrives; onListLoaded then overwrites it with that call's own observed
+// mapped value (ListFunc's doc comment), since the config can say mapped while the forge
+// lookup itself still fails at runtime. production is whether target is listed in
 // envs.production, which gates the 'D' (direct commit) key entirely — the UI-side half of
 // AGENTS.md invariant 5; internal/engine.DirectCommitGateStep is the half that actually
 // matters. stagingEnv/stagingTag/hasMismatch are rows.StagingMismatch's own result, computed
@@ -217,8 +233,8 @@ func (m Model) loadCmd() tea.Cmd {
 		if listFn == nil {
 			return listLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s", "this repo")}
 		}
-		regTags, gitTags, err := listFn(context.Background())
-		return listLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, gitTags: gitTags, err: err}
+		regTags, gitTags, mapped, err := listFn(context.Background())
+		return listLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, gitTags: gitTags, mapped: mapped, err: err}
 	}
 }
 
@@ -265,6 +281,12 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		return m, nil
 	}
+	// msg.mapped is this call's own observed answer (ListFunc's doc comment), which supersedes
+	// New's constructor-time guess: the config can say this image repo is mapped while the
+	// forge lookup this same call made still fails at runtime (finding 3, round 2) — m.mapped
+	// must reflect that, or DeriveRows/Reorder below keep treating every row as "mapped but
+	// unmatched" instead of falling back to Created-based ordering as invariant 3 requires.
+	m.mapped = msg.mapped
 	m.rows = DeriveRows(msg.regTags, msg.gitTags, m.mapped)
 	if len(m.rows) > 0 {
 		m.selectedTag = m.rows[0].Tag

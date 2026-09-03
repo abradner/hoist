@@ -87,11 +87,11 @@ func readyModel(t *testing.T, target string, mapped, production bool) Model {
 		"v2": {Digest: "sha256:" + strings.Repeat("2", 64), Created: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
 		"v3": {Digest: "sha256:" + strings.Repeat("3", 64), Created: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
 	}
-	listFn := func(context.Context) ([]string, []forge.GitTag, error) {
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		if !mapped {
-			return regTags, nil, nil
+			return regTags, nil, false, nil
 		}
-		return regTags, gitTags, nil
+		return regTags, gitTags, true, nil
 	}
 	m := New("ghcr.io/example/app", target, mapped, production, "app-staging", "v1", target == "app-production", listFn, fixedMetas(metas))
 	m = m.SetSize(100, 30)
@@ -132,6 +132,59 @@ func TestUnmappedRepoNeverSetsHasGitDate(t *testing.T) {
 	}
 }
 
+// TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime is finding 3's own regression
+// test: a repo the config genuinely maps to an app repo (New's own mapped=true, exactly what
+// cmd/hoist's buildTagsFunc would pass from a real RepoConfig.Apps entry), but whose forge tag
+// lookup fails once the picker actually asks for it — ListFunc's own runtime mapped return is
+// false (cmd/hoist's own degrade-not-fail shape). DeriveRows/Reorder must fall back to
+// Created-based ordering (invariant 3's fallback), not leave rows in the registry's own
+// arbitrary order while mislabeling every row "mapped but unmatched" — the bug: cmd/hoist's
+// ListFunc left New's constructor-time mapped=true in effect even after the runtime failure,
+// so DeriveRows/Reorder never engaged the fallback at all.
+func TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime(t *testing.T) {
+	// Registry order deliberately differs from Created order, so a test that merely didn't
+	// crash couldn't pass by accident — only an actual Created-descending sort produces v1,
+	// v3, v2 from this input.
+	regTags := []string{"v1", "v2", "v3"}
+	metas := map[string]registry.ImageMeta{
+		"v1": {Digest: "sha256:" + strings.Repeat("1", 64), Created: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)},
+		"v2": {Digest: "sha256:" + strings.Repeat("2", 64), Created: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		"v3": {Digest: "sha256:" + strings.Repeat("3", 64), Created: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	// Mirrors cmd/hoist's buildTagsFunc: the forge lookup itself fails at runtime, so this
+	// call's own mapped return is false even though the config-known mapped param below is
+	// true (a real RepoConfig.Apps entry exists for this image repo).
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return regTags, nil, false, nil
+	}
+	m := New("ghcr.io/example/app", "app-staging", true /* config says mapped */, false, "", "", false, listFn, fixedMetas(metas))
+	m = m.SetSize(100, 30)
+	m = m.SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	if m.mapped {
+		t.Fatal("m.mapped must be overwritten false once the runtime forge lookup fails, not left at New's constructor-time true")
+	}
+	for _, r := range m.rows {
+		if r.HasGitDate {
+			t.Fatalf("a runtime forge failure must never leave a row's HasGitDate set: %+v", r)
+		}
+	}
+	got := make([]string, len(m.rows))
+	for i, r := range m.rows {
+		got[i] = r.Tag
+	}
+	want := []string{"v1", "v3", "v2"} // Created descending, NOT regTags' own [v1,v2,v3] order.
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rows should have fallen back to Created-based ordering: got %v, want %v", got, want)
+	}
+	if strings.Contains(m.View(), "unordered (no matching git tag)") {
+		t.Fatalf("the mapped-but-unmatched divider must not render once mapped has fallen back to false:\n%s", m.View())
+	}
+}
+
 func TestCursorMoveSelectsNextRow(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	if m.selectedTag != "v3" {
@@ -168,7 +221,7 @@ func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
 		gitTags[i] = forge.GitTag{Name: tag, Date: date}
 		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: date}
 	}
-	listFn := func(context.Context) ([]string, []forge.GitTag, error) { return regTags, gitTags, nil }
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
 	m := New("ghcr.io/example/app", "app-staging", true, false, "", "", false, listFn, fixedMetas(metas))
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
@@ -320,7 +373,7 @@ func TestEscEmitsBackMsg(t *testing.T) {
 // would silently overwrite the new picker's own rows.
 func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
 	left := New("ghcr.io/example/other", "app-staging", false, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"stale"}, nil, nil },
+		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"stale"}, nil, false, nil },
 		fixedMetas(nil))
 	staleMsg := left.loadCmd()()
 
@@ -371,7 +424,7 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
 	first := New(repo, "app-staging", true, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"stale-from-first"}, nil, nil },
+		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"stale-from-first"}, nil, false, nil },
 		fixedMetas(nil))
 	staleMsg := first.loadCmd()() // captured, never delivered — the operator backs out first.
 
@@ -405,7 +458,7 @@ func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
 	first := New(repo, "app-staging", true, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"v1"}, nil, nil },
+		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"v1"}, nil, false, nil },
 		fixedMetas(nil))
 	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
 
@@ -426,8 +479,8 @@ func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 
 func TestListErrorRendersInsteadOfHanging(t *testing.T) {
 	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, error) {
-			return nil, nil, errors.New("registry unreachable")
+		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+			return nil, nil, false, errors.New("registry unreachable")
 		},
 		nil)
 	m = drain(m, m.Init())
