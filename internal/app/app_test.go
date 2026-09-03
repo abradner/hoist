@@ -610,6 +610,84 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 	}
 }
 
+// TestBackingOutCancelsOutstandingBuild is Copilot's PR #50 final-round finding: buildGen alone
+// (the pre-existing guard) only ever stops an abandoned build's eventual RESULT from being
+// acted on — it does nothing to the goroutine itself, which used to run to completion
+// regardless, bounded only by poll.Deadline (often hours), potentially still claiming and
+// persisting a real, orphaned "in-flight" promotion long after the operator backed out and
+// moved on to something else. This proves plan.BackMsg actually interrupts the outstanding
+// startPromotion call's own context, not just its result.
+func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
+	gotErr := make(chan error, 1)
+	hung := func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		<-ctx.Done()
+		gotErr <- ctx.Err()
+		return engine.PromotionState{}, nil, ctx.Err()
+	}
+	promo := Promotion{Start: hung}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg produced no command")
+	}
+	go cmd()
+
+	m, _ = m.Update(plan.BackMsg{})
+	if m.(Model).buildCancel != nil {
+		t.Error("buildCancel should be cleared after BackMsg cancels it")
+	}
+
+	select {
+	case err := <-gotErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("build's own ctx.Err() = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backing out did not cancel the outstanding build's context within 2s")
+	}
+}
+
+// TestSupersedingStartMsgCancelsPreviousBuild is TestBackingOutCancelsOutstandingBuild's sibling
+// for the OTHER way a build gets abandoned: a second confirmation (a new plan.StartMsg) before
+// the first one's result ever arrives. The first call's own context must be cancelled too, not
+// merely left to run out its full poll.Deadline unwatched.
+func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
+	firstErr := make(chan error, 1)
+	callCount := 0
+	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		callCount++
+		if callCount == 1 {
+			<-ctx.Done()
+			firstErr <- ctx.Err()
+			return engine.PromotionState{}, nil, ctx.Err()
+		}
+		return engine.PromotionState{ID: "second"}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd1 := m.Update(msg)
+	if cmd1 == nil {
+		t.Fatal("first StartMsg produced no command")
+	}
+	go cmd1()
+
+	_, cmd2 := m.Update(msg)
+	if cmd2 == nil {
+		t.Fatal("second StartMsg produced no command")
+	}
+	// The second call's own result isn't this test's concern, only the first's cancellation.
+
+	select {
+	case err := <-firstErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("first build's own ctx.Err() = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a superseding StartMsg did not cancel the first build's context within 2s")
+	}
+}
+
 // TestFlightScreenSharesBuildDeadlineWithDrive is Copilot's PR #50 round-7 finding: flight.New
 // used to be handed the raw m.poll.Deadline and would start a FRESH poll.Deadline-length window
 // of its own from the moment it was constructed — after the build step (this StartMsg's own

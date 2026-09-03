@@ -116,6 +116,19 @@ type Model struct {
 	// same shape as flight.Model.gen/onDriveResult, one layer up the stack, guarding the
 	// analogous build step instead of the drive step.
 	buildGen uint64
+	// buildCancel cancels whichever startPromotion call buildGen currently names, or nil when
+	// none is outstanding. buildGen alone (above) only ever stops an abandoned/superseded
+	// build's RESULT from being acted on once it eventually arrives — it does nothing to the
+	// goroutine itself, which was bounded only by poll.Deadline (often hours) and so kept
+	// running its real network work (the claim-then-rescan one-in-flight scan in particular)
+	// to completion regardless of whether the operator had already moved on. Backing out
+	// (plan.BackMsg) or superseding (a second plan.StartMsg before the first's result lands)
+	// now calls this to interrupt that work promptly instead of leaving it to run unwatched
+	// (Copilot review, PR #50). It cannot undo a claim/state-save that had already completed
+	// before cancellation reached it — that narrow residual case leaves a real, resumable
+	// state file behind, the same as any other process-killed-mid-flight promotion already
+	// recovers from via `hoist resume`.
+	buildCancel context.CancelFunc
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -177,8 +190,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Abandon any startPromotion request this plan screen has outstanding — see
 		// Model.buildGen's own doc comment. Bumping unconditionally (whether or not a request
 		// is actually in flight) costs nothing: it only ever prevents an already-resolved or
-		// never-issued gen from matching again, never a live one.
+		// never-issued gen from matching again, never a live one. buildCancel actually
+		// interrupts it, rather than merely disowning its eventual result — see its own doc
+		// comment.
 		m.buildGen++
+		if m.buildCancel != nil {
+			m.buildCancel()
+			m.buildCancel = nil
+		}
 		return m.pop(), nil
 	case plan.StartMsg:
 		if msg.Mode == plan.ModeDirect {
@@ -206,6 +225,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		start, p, deadline := m.startPromotion, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
 		m.buildGen++
 		gen := m.buildGen
+		if m.buildCancel != nil {
+			// Superseding a build still outstanding from an earlier StartMsg — see
+			// Model.buildCancel's own doc comment: buildGen alone only disowns its eventual
+			// result, this actually interrupts the work.
+			m.buildCancel()
+		}
 		// deadlineAt is the one absolute instant this whole promotion's budget names, stamped
 		// here — before the build even starts — so the flight screen constructed below (once
 		// this build succeeds) can share it rather than starting a fresh poll.Deadline-length
@@ -214,20 +239,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if deadline > 0 {
 			deadlineAt = time.Now().Add(deadline)
 		}
+		// Bounded by deadlineAt, not left on context.Background() — the same reasoning as
+		// flight.Model.driveCmd's own bound: a single hung network call must not stall the
+		// plan screen forever with no way to cancel. Wrapped again with WithCancel so
+		// plan.BackMsg/a superseding StartMsg (above) can also interrupt it promptly, rather
+		// than leaving it to run unwatched for however long is left of poll.Deadline (Copilot
+		// review, PR #50) — cancel is stored on the model, not just deferred below, precisely
+		// so Update can reach it from a later message.
+		ctx := context.Background()
+		var cancelDeadline context.CancelFunc
+		if !deadlineAt.IsZero() {
+			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		m.buildCancel = cancel
 		return m, func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
 			// any conflicting promotion for this target env — so this runs off the
 			// Update call stack (AGENTS.md §4.3), exactly like plan.ResolveFunc's own
 			// loadCmd.
-			// Bounded by deadlineAt, not left on context.Background() — the same reasoning
-			// as flight.Model.driveCmd's own bound: a single hung network call must not
-			// stall the plan screen forever with no way to cancel.
-			ctx := context.Background()
-			if !deadlineAt.IsZero() {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithDeadline(ctx, deadlineAt)
-				defer cancel()
+			defer cancel()
+			if cancelDeadline != nil {
+				defer cancelDeadline()
 			}
 			state, driveFn, err := start(ctx, p)
 			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
@@ -238,9 +272,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one's result arrived), or the plan screen that issued it has since been
 			// popped away (plan.BackMsg above). Dropped outright, before either the
 			// error or the success branch below ever runs — see Model.buildGen's own
-			// doc comment.
+			// doc comment. m.buildCancel is left untouched: it belongs to whichever
+			// newer build actually superseded this one (or is already nil if this was
+			// abandoned via BackMsg instead), never to this stale result.
 			return m, nil
 		}
+		// This result belongs to the build m.buildCancel was guarding — it has finished
+		// (successfully or not), so there is nothing left for that cancel to interrupt.
+		m.buildCancel = nil
 		if msg.err != nil {
 			// A real in-flight conflict, missing github config, or a claim failure —
 			// shown as a notice on whatever screen is still on top (matrix or plan,
