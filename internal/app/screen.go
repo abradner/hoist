@@ -3,6 +3,7 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/ui"
@@ -56,4 +57,27 @@ func (s planScreen) SetSize(width, height int) Screen {
 
 func (s planScreen) SetStyles(st ui.Styles) Screen {
 	return planScreen{s.Model.SetStyles(st)}
+}
+
+// flightScreen adapts flight.Model the same way. It is pushed on top of the plan screen
+// when the operator confirms a plan (plan.StartMsg, handled in app.go). app.go currently
+// pushes it with a nil DriveFunc — read-only, not yet actually driving anything — since
+// internal/app has no repoFullName, CI/approval policy, or git/forge adaptor to build a real
+// engine.PromotionState from (cmd/hoist owns wiring that in, still a pending follow-up; see
+// app.go's own comment on its plan.StartMsg handler for the full reasoning).
+type flightScreen struct{ flight.Model }
+
+func (s flightScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s flightScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return flightScreen{m}, cmd
+}
+
+func (s flightScreen) SetSize(width, height int) Screen {
+	return flightScreen{s.Model.SetSize(width, height)}
+}
+
+func (s flightScreen) SetStyles(st ui.Styles) Screen {
+	return flightScreen{s.Model.SetStyles(st)}
 }

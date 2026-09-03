@@ -76,6 +76,23 @@ func (e *BlockedError) Error() string {
 // (e.g. "waiting for signing approval") and may retry later. It is not a failure.
 var ErrWaiting = errors.New("engine: waiting")
 
+// StepError wraps a plain (non-Blocked, non-Waiting) error a step's Observe or Act returned,
+// naming which step and which of the two failed. Added in M4 so a caller (the CLI's poll loop)
+// can tell a step apart before deciding whether the error is worth retrying — a Checks/Comments
+// call erroring on CIGreen or Approved (Known bug classes: a 404 or permissions hiccup, which
+// should be retried, not read as authoritative) looks very different from a git/GitHub
+// operation failing on an earlier step (terminal — waiting will not fix a broken git binary or
+// a rejected push). Error()'s text is unchanged from Drive's pre-M4 format ("<step>: observe: "
+// / "<step>: act: " prefix), so nothing that only inspected the message is affected.
+type StepError struct {
+	Step StepName
+	Op   string // "observe" or "act"
+	Err  error
+}
+
+func (e *StepError) Error() string { return fmt.Sprintf("%s: %s: %v", e.Step, e.Op, e.Err) }
+func (e *StepError) Unwrap() error { return e.Err }
+
 // HistoryEntry is one line of a promotion's audit trail: what Observe/Act found, and when.
 // History is informational only — Observe never reads it to decide anything (AGENTS.md
 // §4.1: the state file, History included, is an index of what to look at, never evidence of
@@ -99,7 +116,8 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 		}
 		obs, err := step.Observe(ctx, s)
 		if err != nil {
-			return fmt.Errorf("%s: observe: %w", step.Name(), err)
+			s.Phase = step.Name()
+			return &StepError{Step: step.Name(), Op: "observe", Err: err}
 		}
 		if obs.Blocked != "" {
 			s.Phase = step.Name()
@@ -115,9 +133,10 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 		}
 		if !obs.Satisfied {
 			if err := step.Act(ctx, s); err != nil {
+				s.Phase = step.Name()
 				appendHistory(s, step.Name(), "act failed: "+err.Error())
 				saveIfSet(s, save)
-				return fmt.Errorf("%s: act: %w", step.Name(), err)
+				return &StepError{Step: step.Name(), Op: "act", Err: err}
 			}
 			appendHistory(s, step.Name(), "acted")
 		} else {
@@ -131,6 +150,140 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 		}
 	}
 	return nil
+}
+
+// StepStatus is one step's re-observed state — never read from Phase, always from a fresh
+// Observe call. Returned by ObserveAll for a listing (`hoist resume`'s startup listing) or a
+// one-in-flight-per-target-env check (`hoist promote`'s refusal), neither of which should call
+// Act.
+type StepStatus struct {
+	Step StepName
+	Observation
+}
+
+// ObserveAll re-derives every step's Observation in order, stopping at the first that is not
+// cleanly Satisfied (Waiting or Blocked included) — the read-only half of what Drive does,
+// without ever calling Act. done reports whether every step was Satisfied; last is the
+// stopping point's own status (or the final step's, when done). A promotion is "in flight"
+// exactly when done is false: still has real work ahead of it, is waiting on something
+// external, or is blocked and needs operator attention — any of which means a second promotion
+// for the same target env must not start (AGENTS.md §4.1: re-observe, never trust the state
+// file's own Phase, for this question too).
+//
+// The last step is checked first, as a short-circuit: MergedStep's own Observe (merged AND its
+// branch deleted) is self-contained proof the whole promotion finished, and is deliberately the
+// only step whose Act *removes* something an earlier step's Observe depends on for its own
+// Satisfied condition (PushedStep's Observe requires the branch to still exist on origin — true
+// throughout the promotion, false forever after MergedStep's cleanup runs). Without this
+// short-circuit, ObserveAll would report a fully completed, cleaned-up promotion as stuck at
+// Pushed — wrong, and exactly backwards from what a one-in-flight-per-env check needs: it would
+// make a *finished* promotion block every future one for the same env, forever. Drive itself
+// never hits this, because it always calls Act (PushedStep's Act simply re-pushes and
+// re-converges — see the resume tests), but ObserveAll never calls Act, so it needs the
+// short-circuit instead.
+func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
+	var finalProbe *StepStatus
+	if n := len(steps); n > 0 {
+		final := steps[n-1]
+		obs, oerr := final.Observe(ctx, s)
+		if oerr != nil {
+			return false, StepStatus{Step: final.Name()}, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+		}
+		if obs.Satisfied {
+			return true, StepStatus{Step: final.Name(), Observation: obs}, nil
+		}
+		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
+	}
+	for i, step := range steps {
+		if err := ctx.Err(); err != nil {
+			return false, last, err
+		}
+		if finalProbe != nil && i == len(steps)-1 {
+			// Same step the short-circuit probe already observed above (round-6 regression:
+			// this doubled every final step's Observe — real remote/git work for MergedStep —
+			// on every findInFlight/promotions/resume --env call; Status already carries this
+			// fix, ObserveAll had not been given it) — reuse that Observation instead of
+			// calling Observe on it again.
+			last = *finalProbe
+		} else {
+			obs, oerr := step.Observe(ctx, s)
+			if oerr != nil {
+				return false, StepStatus{Step: step.Name()}, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+			}
+			last = StepStatus{Step: step.Name(), Observation: obs}
+		}
+		if last.Blocked != "" || last.Waiting || !last.Satisfied {
+			return false, last, nil
+		}
+	}
+	return true, last, nil
+}
+
+// Status is ObserveAll's sibling for a caller that needs to render every step's own
+// standing, not only the stopping point: the internal/app/flight screen's step list (glyph
+// per step, detail on whichever one is active) needs a StepStatus for each step already
+// passed as well as the one it stopped at, which ObserveAll's single "last" return cannot
+// carry. Status shares ObserveAll's two rules verbatim — the final-step short-circuit (see
+// ObserveAll's doc comment: MergedStep's own Observe is self-contained proof the whole
+// promotion finished, since PushedStep's Observe would otherwise falsely read as stuck once
+// Merged's own Act has deleted the branch it depends on) and the stopping rule (the first
+// step that is not cleanly Satisfied ends the walk) — only the shape of what is returned
+// differs: statuses accumulates one entry per step actually observed, in order, rather than
+// discarding every entry but the last.
+//
+// When the short-circuit fires, statuses is the single-element slice {final step's own
+// StepStatus} — deliberately not one entry per step, since re-observing every earlier step
+// individually is exactly what the short-circuit exists to avoid (an already-merged,
+// already-cleaned-up promotion would read PushedStep's Observe as false: the branch it
+// checks is gone). A caller rendering a fully done list (done == true) should treat every
+// step as done regardless of how many entries statuses carries, using the final entry only
+// for its Detail — see flight.DeriveRows.
+//
+// Otherwise, statuses holds exactly the steps Status reached: every entry before the last is
+// Satisfied (the walk only continues past a step that cleanly is), and the last entry is
+// the one Status stopped at — Blocked, Waiting, or plainly not yet Satisfied. A step whose
+// name never appears in statuses has not been reached at all this call. The short-circuit
+// probe above already called Observe once on the final step before the walk started
+// (needed to even know whether to short-circuit); when the walk isn't short-circuited it
+// reaches that same final step again in its own turn, but reuses the probe's Observation
+// there rather than calling Observe a second time — every poll that isn't yet fully done
+// would otherwise cost one extra, wasted remote call on the final step, every tick of the
+// flight screen's own poll loop (PR #39 review finding #3).
+func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
+	var finalProbe *StepStatus
+	if n := len(steps); n > 0 {
+		final := steps[n-1]
+		obs, oerr := final.Observe(ctx, s)
+		if oerr != nil {
+			return false, nil, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+		}
+		if obs.Satisfied {
+			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
+		}
+		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
+	}
+	for i, step := range steps {
+		if cerr := ctx.Err(); cerr != nil {
+			return false, statuses, cerr
+		}
+		var st StepStatus
+		if finalProbe != nil && i == len(steps)-1 {
+			// Same step the short-circuit probe already observed above; reuse that
+			// Observation instead of calling Observe on it again.
+			st = *finalProbe
+		} else {
+			obs, oerr := step.Observe(ctx, s)
+			if oerr != nil {
+				return false, statuses, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+			}
+			st = StepStatus{Step: step.Name(), Observation: obs}
+		}
+		statuses = append(statuses, st)
+		if st.Blocked != "" || st.Waiting || !st.Satisfied {
+			return false, statuses, nil
+		}
+	}
+	return true, statuses, nil
 }
 
 // appendHistory is the one place a HistoryEntry.Detail is ever written, and therefore the

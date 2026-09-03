@@ -2,8 +2,11 @@ package github
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,28 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
 )
+
+// paginate mimics GitHub's own pagination arithmetic against a fixed-size virtual dataset:
+// offset (page-1)*perPage, perPage items, clamped to items' bounds. Real tests for the
+// exact-at-bound sentinel request MUST route through this rather than keying a canned response
+// off the page number alone — a mock that ignores per_page and only special-cases "page ==
+// bound+1" cannot tell a correct per_page=100 sentinel from the broken per_page=1 one a prior
+// round shipped (both would get the same canned "empty" response), which is exactly how that
+// regression passed its own test once already (AGENTS.md §8 "watch the setup").
+func paginate(items []string, page, perPage int) []string {
+	start := (page - 1) * perPage
+	if start < 0 {
+		start = 0
+	}
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
+}
 
 // fakeTransport answers every request from a table keyed by "METHOD path", so these tests
 // never touch a real GitHub host — go-gh's own auth/keyring resolution is bypassed entirely
@@ -91,6 +116,29 @@ func TestFindPRByHeadBranch(t *testing.T) {
 	}
 	if pr.Number != 7 {
 		t.Fatalf("Number = %d, want 7", pr.Number)
+	}
+}
+
+// TestFindPRReadsMergedStateFromListEndpoint is round-6's regression: GitHub's list-pulls
+// endpoint (what FindPR actually calls) never includes a "merged" boolean field at all — only
+// "merged_at", a nullable timestamp. Decoding a merged PR's list-endpoint JSON with only the
+// "merged" field would always leave it at its zero value (false), so FindPR must also read
+// merged_at as an equally authoritative signal, or every re-observation of an already-merged PR
+// (exactly what happens right after a real merge deletes the branch) would misreport it as
+// still open.
+func TestFindPRReadsMergedStateFromListEndpoint(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/pulls": static(200, `[{"number": 7, "body": "x", "merged_at": "2026-09-03T00:00:00Z", "merge_commit_sha": "deadbeef"}]`),
+	})
+	pr, ok, err := c.FindPR(context.Background(), "hoist/app-production/abc", "")
+	if err != nil || !ok {
+		t.Fatalf("FindPR: ok=%v err=%v", ok, err)
+	}
+	if !pr.Merged {
+		t.Fatal("Merged = false for a PR whose list-endpoint response carries a non-nil merged_at")
+	}
+	if pr.MergeSHA != "deadbeef" {
+		t.Fatalf("MergeSHA = %q, want deadbeef", pr.MergeSHA)
 	}
 }
 
@@ -175,6 +223,7 @@ func TestChecksSummarizesRollup(t *testing.T) {
 			{"status": "completed", "conclusion": "failure"},
 			{"status": "in_progress", "conclusion": ""}
 		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
@@ -182,6 +231,171 @@ func TestChecksSummarizesRollup(t *testing.T) {
 	}
 	if sum.Total != 3 || sum.Success != 1 || sum.Failure != 1 || sum.Pending != 1 {
 		t.Fatalf("CheckSummary = %+v", sum)
+	}
+}
+
+// TestChecksTreatsSkippedAsItsOwnBucketNotSuccess is the P1 regression at the wire-parsing
+// layer: a "skipped" conclusion must land in Skipped, never folded into Success (the bug this
+// task fixes — see internal/engine's TestCIGreenSkippedRequiredCheckNeverSatisfies for the
+// gating-level regression).
+func TestChecksTreatsSkippedAsItsOwnBucketNotSuccess(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": [
+			{"name": "unit-tests", "status": "completed", "conclusion": "success"},
+			{"name": "integration-tests", "status": "completed", "conclusion": "skipped"}
+		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 2 || sum.Success != 1 || sum.Skipped != 1 || sum.Failure != 0 {
+		t.Fatalf("CheckSummary = %+v, want Total=2 Success=1 Skipped=1 Failure=0", sum)
+	}
+	if len(sum.SkippedNames) != 1 || sum.SkippedNames[0] != "integration-tests" {
+		t.Fatalf("SkippedNames = %v, want [integration-tests]", sum.SkippedNames)
+	}
+}
+
+// TestChecksPaginatesBeyondFirstPage is the P1 regression for "Checks doesn't paginate": a
+// commit with more than 100 check runs must have every page fetched, so a failure sitting only
+// on page 2 is still detected rather than silently invisible behind GitHub's per_page cap.
+func TestChecksPaginatesBeyondFirstPage(t *testing.T) {
+	page1 := make([]string, 100)
+	for i := range page1 {
+		page1[i] = `{"name": "job-` + fmt.Sprint(i) + `", "status": "completed", "conclusion": "success"}`
+	}
+	body1 := `{"check_runs": [` + strings.Join(page1, ",") + `]}`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			switch r.URL.Query().Get("page") {
+			case "1":
+				return 200, body1
+			case "2":
+				return 200, `{"check_runs": [{"name": "page-2-failure", "status": "completed", "conclusion": "failure"}]}`
+			default:
+				return 200, `{"check_runs": []}`
+			}
+		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 101 {
+		t.Fatalf("Total = %d, want 101 (100 on page 1 + 1 on page 2) — page 2 was never fetched", sum.Total)
+	}
+	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "page-2-failure" {
+		t.Fatalf("CheckSummary = %+v, want the page-2 failure detected", sum)
+	}
+}
+
+// TestChecksMoreThanBoundFailsClosed is the P1-adjacent hardening regression: a commit with
+// MORE check-runs than maxCheckRunPages*100 (every page up to the bound comes back full) must
+// fail with a clear error, never silently return a truncated CheckSummary — round 1's own
+// pagination fix moved the "only page 1 is fetched" bug to a further-out boundary
+// (maxCheckRunPages) rather than removing the failure mode; a pending or failed run sitting
+// just past that boundary must never be hidden behind a false "green".
+func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
+	fullPage := func(name string) string {
+		runs := make([]string, 100)
+		for i := range runs {
+			runs[i] = fmt.Sprintf(`{"name": "%s-%d", "status": "completed", "conclusion": "success"}`, name, i)
+		}
+		return `{"check_runs": [` + strings.Join(runs, ",") + `]}`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			// Every page, including the last one this loop is allowed to fetch, comes back
+			// completely full — there is no way to tell from here whether a page 11 exists,
+			// which is exactly the point: it must refuse to answer rather than guess "no".
+			return 200, fullPage("page-" + r.URL.Query().Get("page"))
+		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
+	})
+	_, err := c.Checks(context.Background(), "deadbeef")
+	if err == nil {
+		t.Fatal("expected an error when every page up to the bound comes back full, got nil")
+	}
+	if !strings.Contains(err.Error(), "deadbeef") || !strings.Contains(err.Error(), "10") {
+		t.Fatalf("error should name the sha and the page bound, got: %v", err)
+	}
+}
+
+// TestChecksExactlyAtBoundIsNotAnError is the false-positive regression for
+// TestChecksMoreThanBoundFailsClosed's own fix: a commit with EXACTLY maxCheckRunPages*100
+// check-runs also has its last allowed page come back completely full — the same signal a
+// truncated result gives — but there is no page 11, so this must NOT error. Checks resolves the
+// ambiguity with one extra sentinel request for page maxCheckRunPages+1, at the SAME per_page=100
+// every other page uses; this test backs the mock with a real, fixed-size virtual dataset and
+// computes each response via paginate's genuine GitHub-style (page-1)*per_page arithmetic — a
+// mock that instead special-cased "page == bound+1 => empty" regardless of per_page would not
+// have caught the round-4 regression this test is also guarding (a per_page=1 sentinel asks for
+// a different, earlier item and almost always finds something).
+func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
+	total := maxCheckRunPages * 100
+	items := make([]string, total)
+	for i := range items {
+		items[i] = fmt.Sprintf(`{"name": "run-%d", "status": "completed", "conclusion": "success"}`, i)
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": func(r *http.Request) (int, string) {
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			slice := paginate(items, page, perPage)
+			return 200, `{"check_runs": [` + strings.Join(slice, ",") + `]}`
+		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatalf("a commit with exactly %d check-runs must not be treated as truncated: %v", total, err)
+	}
+	if sum.Total != total {
+		t.Fatalf("Total = %d, want exactly %d", sum.Total, total)
+	}
+}
+
+// TestChecksFoldsInCommitStatuses is round-6's regression: a repository that reports CI through
+// the older Statuses API (or mixes a green check-run with a pending/failing status context)
+// must have that reflected in the gate, not just whichever mechanism this adaptor happened to
+// query first. A green check-run alongside a still-pending status must report Pending, not
+// Success; a failing status must be named in FailedNames the same way a failed check-run is.
+func TestChecksFoldsInCommitStatuses(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": [
+			{"name": "build", "status": "completed", "conclusion": "success"}
+		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": [
+			{"context": "ci/legacy-status", "state": "pending"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 2 || sum.Success != 1 || sum.Pending != 1 {
+		t.Fatalf("CheckSummary = %+v, want Total=2 Success=1 Pending=1 (the status context must not be ignored)", sum)
+	}
+}
+
+// TestChecksCommitStatusFailureIsNamed confirms a failing (or errored) commit status is folded
+// into Failure and FailedNames exactly like a failed check-run, never silently dropped.
+func TestChecksCommitStatusFailureIsNamed(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": []}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": [
+			{"context": "ci/legacy-status", "state": "failure"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "ci/legacy-status" {
+		t.Fatalf("CheckSummary = %+v, want the failing status context named in FailedNames", sum)
 	}
 }
 
@@ -206,6 +420,188 @@ func TestCommentsExcludesBots(t *testing.T) {
 	}
 	if comments[0].Author != "alex" || comments[1].Author != "some-org" {
 		t.Fatalf("Comments = %+v, want alex then some-org", comments)
+	}
+}
+
+// TestCommentsPaginatesBeyondFirstPage is the P1 regression for "Comments doesn't paginate": a
+// PR with more than 100 comments must have every page fetched, so an approve/reject sitting only
+// on page 2 is still found rather than silently invisible behind GitHub's per_page cap.
+func TestCommentsPaginatesBeyondFirstPage(t *testing.T) {
+	page1 := make([]string, 100)
+	for i := range page1 {
+		page1[i] = fmt.Sprintf(`{"id": %d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, i)
+	}
+	body1 := `[` + strings.Join(page1, ",") + `]`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			switch r.URL.Query().Get("page") {
+			case "1":
+				return 200, body1
+			case "2":
+				return 200, `[{"id": 999, "body": "hoist approve abc", "user": {"login": "bob", "type": "User"}}]`
+			default:
+				return 200, "[]"
+			}
+		},
+	})
+	comments, err := c.Comments(context.Background(), 7, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 101 {
+		t.Fatalf("Comments returned %d, want 101 (100 on page 1 + 1 on page 2) — page 2 was never fetched", len(comments))
+	}
+	if comments[100].Author != "bob" || comments[100].Body != "hoist approve abc" {
+		t.Fatalf("last comment = %+v, want bob's page-2 approval", comments[100])
+	}
+}
+
+// TestCommentsMoreThanBoundFailsClosed is Comments' half of the P1-adjacent hardening
+// regression (see TestChecksMoreThanBoundFailsClosed): a PR with MORE comments than
+// maxCommentPages*100 must fail with a clear error rather than silently return a truncated
+// list — a later approve or reject sitting just past the bound must never be invisible to
+// ApprovedStep's newest-match scan.
+func TestCommentsMoreThanBoundFailsClosed(t *testing.T) {
+	fullPage := func(page string) string {
+		items := make([]string, 100)
+		for i := range items {
+			items[i] = fmt.Sprintf(`{"id": %s%02d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, page, i)
+		}
+		return `[` + strings.Join(items, ",") + `]`
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			return 200, fullPage(r.URL.Query().Get("page"))
+		},
+	})
+	_, err := c.Comments(context.Background(), 7, time.Time{})
+	if err == nil {
+		t.Fatal("expected an error when every page up to the bound comes back full, got nil")
+	}
+	if !strings.Contains(err.Error(), "#7") || !strings.Contains(err.Error(), "10") {
+		t.Fatalf("error should name the PR and the page bound, got: %v", err)
+	}
+}
+
+// TestCommentsExactlyAtBoundIsNotAnError is Comments' half of the false-positive regression (see
+// TestChecksExactlyAtBoundIsNotAnError): a PR with EXACTLY maxCommentPages*100 comments must not
+// be treated as truncated just because its last allowed page came back full — Comments' own
+// sentinel request for the page past the bound, at the SAME per_page=100 every other page uses,
+// resolves it. As in the Checks test above, the mock is backed by a real, fixed-size virtual
+// dataset and computed via paginate's genuine (page-1)*per_page arithmetic, so a regression back
+// to a smaller per_page on just the sentinel request (round 4's actual bug: it asks for a
+// different, earlier item and almost always finds something) makes this fail rather than pass by
+// accident.
+func TestCommentsExactlyAtBoundIsNotAnError(t *testing.T) {
+	total := maxCommentPages * 100
+	items := make([]string, total)
+	for i := range items {
+		items[i] = fmt.Sprintf(`{"id": %d, "body": "noise", "user": {"login": "alice", "type": "User"}}`, i)
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			slice := paginate(items, page, perPage)
+			return 200, `[` + strings.Join(slice, ",") + `]`
+		},
+	})
+	comments, err := c.Comments(context.Background(), 7, time.Time{})
+	if err != nil {
+		t.Fatalf("a PR with exactly %d comments must not be treated as truncated: %v", total, err)
+	}
+	if len(comments) != total {
+		t.Fatalf("Comments returned %d, want exactly %d", len(comments), total)
+	}
+}
+
+func TestIsAllowedAuthorAcceptsWriteMaintainAndAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		permission string
+		want       bool
+	}{
+		{"admin", true},
+		{"maintain", true},
+		{"write", true},
+		{"triage", false},
+		{"read", false},
+		{"none", false},
+	} {
+		c := newTestClient(t, map[string]func(*http.Request) (int, string){
+			"GET /repos/example/gitops/collaborators/alice/permission": static(200, `{"permission":"`+tc.permission+`"}`),
+		})
+		got, err := c.IsAllowedAuthor(context.Background(), "alice")
+		if err != nil {
+			t.Fatalf("permission=%s: %v", tc.permission, err)
+		}
+		if got != tc.want {
+			t.Errorf("permission=%s: IsAllowedAuthor = %v, want %v", tc.permission, got, tc.want)
+		}
+	}
+}
+
+// TestIsAllowedAuthorFoldsNotFoundIntoFalse: a 404 (login is not a collaborator at all — the
+// ordinary outcome for a drive-by commenter on a public PR) must return (false, nil), not an
+// error — treating it as fatal would make any non-collaborator's comment error and block the
+// whole promotion whenever collaborators=true.
+func TestIsAllowedAuthorFoldsNotFoundIntoFalse(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/collaborators/random-commenter/permission": static(404, `{"message":"Not Found"}`),
+	})
+	got, err := c.IsAllowedAuthor(context.Background(), "random-commenter")
+	if err != nil {
+		t.Fatalf("expected a 404 to fold into (false, nil), got error: %v", err)
+	}
+	if got {
+		t.Fatal("IsAllowedAuthor = true for a 404 (not a collaborator)")
+	}
+}
+
+func TestIsAllowedAuthorSurfacesScopeGap(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/collaborators/mallory/permission": static(403, `{"message":"Must have push access"}`),
+	})
+	_, err := c.IsAllowedAuthor(context.Background(), "mallory")
+	if err == nil {
+		t.Fatal("expected the 403 to surface as an error, not fold into false")
+	}
+	if !strings.Contains(err.Error(), "repo scope") {
+		t.Fatalf("error %q does not name the likely scope gap", err.Error())
+	}
+}
+
+func TestMergePRSquashesAndReturnsFreshPR(t *testing.T) {
+	var gotBody string
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"PUT /repos/example/gitops/pulls/7/merge": func(r *http.Request) (int, string) {
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			return 200, `{"merged": true, "sha": "merge123"}`
+		},
+		"GET /repos/example/gitops/pulls/7": static(200, `{"number": 7, "merged": true, "merge_commit_sha": "merge123", "head": {"ref": "hoist/env/abc", "sha": "deadbeef"}}`),
+	})
+	pr, err := c.MergePR(context.Background(), 7, "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pr.Merged || pr.MergeSHA != "merge123" {
+		t.Fatalf("MergePR result = %+v", pr)
+	}
+	if !strings.Contains(gotBody, `"sha":"deadbeef"`) || !strings.Contains(gotBody, `"merge_method":"squash"`) {
+		t.Fatalf("merge request body = %s, want the expected head sha and squash method", gotBody)
+	}
+}
+
+// TestMergePRRefusesStaleHead is the named adversary, at the wire level: GitHub's own atomic
+// "merge iff head is X" answers a mismatched sha with 409, which must translate to
+// forge.ErrStaleHead — never a generic error a caller might mistake for something retryable.
+func TestMergePRRefusesStaleHead(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"PUT /repos/example/gitops/pulls/7/merge": static(409, `{"message":"Head branch was modified. Review and try the merge again."}`),
+	})
+	_, err := c.MergePR(context.Background(), 7, "stale-sha")
+	if err == nil || !errors.Is(err, forge.ErrStaleHead) {
+		t.Fatalf("expected forge.ErrStaleHead, got %v", err)
 	}
 }
 

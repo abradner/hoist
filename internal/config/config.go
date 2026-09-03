@@ -35,11 +35,12 @@ type RepoConfig struct {
 	AppsRoot      string            `yaml:"apps_root"`            // default cluster/apps
 	Promotable    []string          `yaml:"promotable,omitempty"` // image repo prefixes; replaces the CLI placeholder when set
 	Envs          EnvsConfig        `yaml:"envs"`
-	Approvers     []string          `yaml:"approvers,omitempty"` // M4
-	CI            CIConfig          `yaml:"ci"`                  // M4
-	Kube          KubeConfig        `yaml:"kube,omitempty"`      // M2
-	DigestSources []string          `yaml:"digest_sources"`      // M2; default pods, manifest, registry
-	Apps          map[string]string `yaml:"apps,omitempty"`      // image repo -> app git repo; M7
+	Approvers     []string          `yaml:"approvers,omitempty"`     // M4
+	Collaborators bool              `yaml:"collaborators,omitempty"` // M4: also accept a write-permission collaborator, per Forge.IsAllowedAuthor
+	CI            CIConfig          `yaml:"ci"`                      // M4
+	Kube          KubeConfig        `yaml:"kube,omitempty"`          // M2
+	DigestSources []string          `yaml:"digest_sources"`          // M2; default pods, manifest, registry
+	Apps          map[string]string `yaml:"apps,omitempty"`          // image repo -> app git repo; M7
 
 	// Dir is Path with ~ expanded and cleaned; Key is this entry's YAML path (repos[N]).
 	// Both are derived by Normalize.

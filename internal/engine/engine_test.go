@@ -56,3 +56,55 @@ func TestDriveRedactsRegisteredSecretInHistory(t *testing.T) {
 		t.Fatalf("History entry should carry the redaction marker, got %q", detail)
 	}
 }
+
+// TestStepErrorMessageContainsWrappedErrorText is the regression for a format-verb bug: Error()
+// used to build its message with fmt.Sprintf's %s verb against e.Err, a plain error value.
+// %s does correctly invoke Error() for a value satisfying the error interface (verified: this
+// exact construction, unchanged, does not reproduce "%!s(...)" garbage), but %v is the
+// conventional, defensive verb for formatting an error and was what the fix switched to — this
+// test pins the actual contract (the wrapped error's real message text appears verbatim in the
+// output), not the specific verb used to get there, so it stays meaningful regardless.
+func TestStepErrorMessageContainsWrappedErrorText(t *testing.T) {
+	const wrapped = "signing timed out after 120s waiting for interactive approval"
+	e := &StepError{Step: StepPushed, Op: "act", Err: fmt.Errorf("%s", wrapped)}
+	got := e.Error()
+	if !strings.Contains(got, wrapped) {
+		t.Fatalf("StepError.Error() = %q, want it to contain the wrapped error's message %q", got, wrapped)
+	}
+	if strings.Contains(got, "%!") {
+		t.Fatalf("StepError.Error() = %q, contains a malformed fmt verb", got)
+	}
+	const want = "pushed: act: " + wrapped
+	if got != want {
+		t.Fatalf("StepError.Error() = %q, want %q", got, want)
+	}
+}
+
+// TestObserveAllObservesFinalStepExactlyOnce is round-6's regression: ObserveAll had the same
+// double-observe bug Status was already fixed for (PR #39 review finding #3) — the short-circuit
+// probe on the final step, when not satisfied, got observed a SECOND time when the ordinary walk
+// reached it. Every not-yet-done call to findInFlight/hoist promotions/hoist resume --env (all
+// of which call ObserveAll, not Status) paid one extra, wasted remote/git call on the final step
+// — real work for MergedStep, which talks to the forge and fetches origin. Uses the same
+// observeCountingStub helper status_test.go already defines in this package.
+func TestObserveAllObservesFinalStepExactlyOnce(t *testing.T) {
+	calls := 0
+	steps := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepCommitted, obs: Observation{Satisfied: true}},
+		observeCountingStub{stepStub{name: StepMerged, obs: Observation{Satisfied: false, Detail: "not yet merged"}}, &calls},
+	}
+	done, last, err := ObserveAll(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: the final step reported not satisfied")
+	}
+	if calls != 1 {
+		t.Fatalf("final step's Observe called %d times, want exactly 1", calls)
+	}
+	if last.Step != StepMerged || last.Detail != "not yet merged" {
+		t.Fatalf("last = %+v, want the final step's own Observation", last)
+	}
+}

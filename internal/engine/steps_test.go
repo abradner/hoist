@@ -335,6 +335,74 @@ func TestPROpenedStepFindsByMarkerAcrossBranchRename(t *testing.T) {
 	}
 }
 
+// TestPROpenedStepRefusesPRWithWrongBase is the P2 regression for finding #2: a PR that
+// happens to share this promotion's exact head branch name but targets a different base (e.g.
+// someone manually opened a competing PR from the same branch name onto a different target)
+// must never be silently adopted as this promotion's own — that would go on to have MergedStep
+// squash-merge it into the wrong base while still reporting success. Observe must Blocked,
+// naming both bases, and must not set s.PR at all.
+func TestPROpenedStepRefusesPRWithWrongBase(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	f := &forge.Fake{}
+	step := PROpenedStep{Forge: f}
+
+	// Simulate a PR that already exists for this exact head branch name, but aimed at a
+	// different base than s.Base ("main") — as if opened by hand, or by a stale config change,
+	// never through this promotion's own Act.
+	if _, err := f.CreatePR(ctx(), forge.PRSpec{Title: "unrelated", Body: "unrelated", Head: s.Branch, Base: "not-" + s.Base}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected Blocked for a PR targeting a different base, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, s.Base) || !strings.Contains(obs.Blocked, "not-"+s.Base) {
+		t.Fatalf("Blocked reason should name both bases, got: %s", obs.Blocked)
+	}
+	if s.PR != nil {
+		t.Fatalf("a wrong-base PR must never be adopted onto s.PR, got %+v", s.PR)
+	}
+}
+
+// TestPROpenedStepRefusesClosedUnmergedPR is round-9's regression: FindPR's own state=all
+// query can return a PR someone closed WITHOUT merging (e.g. by hand on GitHub) — adopting it
+// as "found, therefore satisfied" would let CIGreen/Approved pass on a dead PR, then
+// MergedStep's merge call 405 forever, with this promotion stuck in flight and findInFlight
+// refusing every later promotion to the same env.
+func TestPROpenedStepRefusesClosedUnmergedPR(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	f := &forge.Fake{}
+	step := PROpenedStep{Forge: f}
+
+	pr, err := f.CreatePR(ctx(), forge.PRSpec{Title: "x", Body: "x", Head: s.Branch, Base: s.Base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.SetClosed(pr.Number, true)
+
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected Blocked for a closed-unmerged PR, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, "closed") {
+		t.Fatalf("Blocked reason should name the closed state, got: %s", obs.Blocked)
+	}
+	if s.PR != nil {
+		t.Fatalf("a closed-unmerged PR must never be adopted onto s.PR, got %+v", s.PR)
+	}
+}
+
 func TestPushedStepRetryableNetworkBlip(t *testing.T) {
 	fx := newFixture(t)
 	wt := filepath.Join(t.TempDir(), "wt")

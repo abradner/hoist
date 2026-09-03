@@ -272,6 +272,210 @@ func TestLsTreeBlobAndHashObjectAgree(t *testing.T) {
 	}
 }
 
+// TestIsAncestor exercises git.Git.IsAncestor directly against a real repo: the ancestor/self
+// cases IsAncestor must report true for, the non-ancestor case it must report false for (never
+// an error — a sibling branch's tip is a perfectly resolvable rev that just isn't an ancestor),
+// and the genuinely-unresolvable case it must report as a real error, never silently folded into
+// false. Added for M4 hardening finding #2 (round 3): MergedStep.Observe's revert-vs-superseded
+// distinction is exactly this method, so it earns its own direct coverage independent of
+// MergedStep's own (necessarily more indirect) tests in internal/engine.
+func TestIsAncestor(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	var g Exec
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/ancestor", "main"); err != nil {
+		t.Fatal(err)
+	}
+	base, ok, err := g.RevParse(ctx(), wt, "HEAD")
+	if err != nil || !ok {
+		t.Fatalf("RevParse HEAD: ok=%v err=%v", ok, err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child, err := g.Commit(ctx(), wt, "child\n", []string{"child.txt"}, 30*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if isAncestor, err := g.IsAncestor(ctx(), wt, base, child); err != nil || !isAncestor {
+		t.Fatalf("base should be an ancestor of child: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if isAncestor, err := g.IsAncestor(ctx(), wt, child, child); err != nil || !isAncestor {
+		t.Fatalf("a commit should be its own ancestor per git's own definition: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if isAncestor, err := g.IsAncestor(ctx(), wt, child, base); err != nil || isAncestor {
+		t.Fatalf("child must not be reported as an ancestor of base: isAncestor=%v err=%v", isAncestor, err)
+	}
+	if _, err := g.IsAncestor(ctx(), wt, "not-a-real-sha", child); err == nil {
+		t.Fatal("an unresolvable ancestor rev should be a real error, not a false negative")
+	}
+}
+
+// TestObjectExists is the direct real-git regression for MergedStep.mergeWasReverted's own
+// negative-path contract (round-9 finding: only exercised indirectly via engine-level tests
+// before this) — a well-formed but missing sha must be exists=false, err=nil (never treated as
+// a failure, since this is the ordinary "the base was reset past this commit" case), while a
+// genuinely malformed rev is a real error, so revert-detection logic can't silently regress
+// without a dedicated test in this package noticing.
+func TestObjectExists(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	head, ok, err := g.RevParse(ctx(), cloneDir, "HEAD")
+	if err != nil || !ok {
+		t.Fatalf("RevParse HEAD: ok=%v err=%v", ok, err)
+	}
+
+	if exists, err := g.ObjectExists(ctx(), cloneDir, head); err != nil || !exists {
+		t.Fatalf("HEAD should exist: exists=%v err=%v", exists, err)
+	}
+	const wellFormedButMissing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if exists, err := g.ObjectExists(ctx(), cloneDir, wellFormedButMissing); err != nil {
+		t.Fatalf("a well-formed but missing sha must not be a real error, got: %v", err)
+	} else if exists {
+		t.Fatal("a sha no commit in this repo ever produced must not report exists=true")
+	}
+	if _, err := g.ObjectExists(ctx(), cloneDir, "not-a-real-sha"); err == nil {
+		t.Fatal("a malformed rev should be a real error, not a false negative")
+	}
+}
+
+// TestFetchBranchMissingBranchReturnsNotOK is FetchBranch's real-git regression for classifying
+// a branch that plain does not exist on the remote: ok=false, err=nil, not a stderr-text match.
+// This exercises the real fix (an authoritative LsRemoteBranch re-check after the fetch errors)
+// end to end against genuine git, not a canned error string.
+func TestFetchBranchMissingBranchReturnsNotOK(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	sha, ok, err := g.FetchBranch(ctx(), cloneDir, "origin", "no-such-branch-ever-pushed")
+	if err != nil {
+		t.Fatalf("a genuinely missing branch should not be an error, got: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false for a missing branch, got sha=%q", sha)
+	}
+}
+
+// TestFetchBranchRealFailureIsNotMisclassifiedAsMissing is the discriminating half of that
+// regression: a fetch failure for a reason OTHER than "branch missing" (here, a remote name that
+// isn't configured at all, so both the fetch and the authoritative LsRemoteBranch re-check fail
+// the same way) must still surface as a real error — proving the fix classifies by asking the
+// remote, not by treating every fetch failure as "not found". A stderr-text match keyed on
+// git's specific "couldn't find remote ref" wording could not tell these two failures apart if
+// git's phrasing for "no such remote" ever happened to overlap; asking the remote directly can.
+func TestFetchBranchRealFailureIsNotMisclassifiedAsMissing(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	_, ok, err := g.FetchBranch(ctx(), cloneDir, "no-such-remote-configured", "main")
+	if err == nil {
+		t.Fatalf("a nonexistent remote should be a real error, not silently ok=false (ok=%v)", ok)
+	}
+	if ok {
+		t.Fatal("should never report ok=true alongside an error")
+	}
+}
+
+// TestDeleteRemoteBranchRealFailureIsNotMisclassifiedAsGone is DeleteRemoteBranch's counterpart
+// to TestFetchBranchRealFailureIsNotMisclassifiedAsMissing: a delete failure for a reason other
+// than "branch already gone" (a remote name that isn't configured, so the authoritative
+// LsRemoteBranch re-check also fails) must surface as a real error, not be silently swallowed as
+// idempotent success.
+func TestDeleteRemoteBranchRealFailureIsNotMisclassifiedAsGone(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	err := g.DeleteRemoteBranch(ctx(), cloneDir, "no-such-remote-configured", "some-branch")
+	if err == nil {
+		t.Fatal("a nonexistent remote should be a real error, not silently treated as already-gone")
+	}
+}
+
+// fakeGitTrapping writes a wrapper script at Exec.Bin that intercepts exactly one subcommand
+// for one branch name (emitting the fixed stderr text a stderr-string-matching implementation
+// used to key off) and delegates every other invocation — including the authoritative
+// LsRemoteBranch re-check the fix now performs — straight to the real git binary found on
+// PATH. This is what makes the two tests below actually discriminating: a real branch that
+// genuinely exists on origin, with git's OWN historical error text asserting the opposite,
+// proves the fix trusts LsRemoteBranch over the message rather than merely exercising a case
+// where both approaches happen to agree (a bad remote name fails identically either way, which
+// is not a discriminating test by itself).
+func fakeGitTrapping(t *testing.T, subcommand, branch, stderrMsg string) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
+	fake := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"" + subcommand + "\" ]; then\n" +
+		"  for a in \"$@\"; do\n" +
+		"    if [ \"$a\" = \"" + branch + "\" ]; then\n" +
+		"      echo \"" + stderrMsg + "\" >&2\n" +
+		"      exit 128\n" +
+		"    fi\n" +
+		"  done\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return fake
+}
+
+// TestFetchBranchTrustsLsRemoteOverMisleadingStderrText is the discriminating regression for
+// the string-matching fix: a branch that GENUINELY exists on origin, fetched through a git
+// wrapper that emits git's own historical "couldn't find remote ref" wording anyway (standing in
+// for a different git version/locale producing that same text for an unrelated reason), must
+// NOT be silently reported as missing. The pre-fix code matched that exact substring and would
+// have returned ok=false, err=nil here — truthfully wrong, since LsRemoteBranch (delegated to
+// real git by the wrapper) can see the branch is really there.
+func TestFetchBranchTrustsLsRemoteOverMisleadingStderrText(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	const branch = "genuinely-exists"
+	if err := runHost(t, cloneDir, "checkout", "-q", "-b", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "push", "-q", "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := fakeGitTrapping(t, "fetch", branch, "fatal: couldn't find remote ref refs/heads/"+branch)
+	g := Exec{Bin: fake}
+	_, ok, err := g.FetchBranch(ctx(), cloneDir, "origin", branch)
+	if err == nil {
+		t.Fatalf("a branch that genuinely exists must not be reported as missing just because git's stderr text says so (ok=%v)", ok)
+	}
+}
+
+// TestDeleteRemoteBranchTrustsLsRemoteOverMisleadingStderrText is DeleteRemoteBranch's
+// counterpart: a branch that is genuinely STILL on origin (the delete didn't really happen),
+// deleted through a wrapper that emits git's own historical "remote ref does not exist" wording
+// anyway, must not be silently reported as successfully deleted.
+func TestDeleteRemoteBranchTrustsLsRemoteOverMisleadingStderrText(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	const branch = "still-there"
+	if err := runHost(t, cloneDir, "checkout", "-q", "-b", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "push", "-q", "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := fakeGitTrapping(t, "push", branch, "error: unable to delete 'refs/heads/"+branch+"': remote ref does not exist")
+	g := Exec{Bin: fake}
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err == nil {
+		t.Fatal("a branch that genuinely still exists must not be reported as already-gone just because git's stderr text says so")
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || !ok {
+		t.Fatalf("sanity check: the branch should genuinely still be on origin, untouched: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestLsTreeBlobBeforeAnyCommit(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")
@@ -432,6 +636,36 @@ func TestCommitTimeoutKillsWholeProcessTree(t *testing.T) {
 	time.Sleep(3200 * time.Millisecond)
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("marker file exists — grandchild survived and completed its sleep (stat err=%v)", statErr)
+	}
+}
+
+// TestDeleteRemoteBranchIsIdempotent is MergedStep's own resume property at the git layer
+// (M4): deleting a branch that was already pushed succeeds, and deleting it again — a resumed
+// process re-attempting cleanup after a kill between merge and delete — must also succeed
+// rather than error on "already gone".
+func TestDeleteRemoteBranchIsIdempotent(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	branch := "hoist/app-production/cleanup"
+	var g Exec
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Push(ctx(), wt, "origin", branch); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || !ok {
+		t.Fatalf("sanity check: branch should exist before deletion: ok=%v err=%v", ok, err)
+	}
+
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil {
+		t.Fatalf("DeleteRemoteBranch: %v", err)
+	}
+	if _, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil || ok {
+		t.Fatalf("branch should be gone: ok=%v err=%v", ok, err)
+	}
+	if err := g.DeleteRemoteBranch(ctx(), cloneDir, "origin", branch); err != nil {
+		t.Fatalf("DeleteRemoteBranch (already gone) should be idempotent: %v", err)
 	}
 }
 

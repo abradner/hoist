@@ -155,3 +155,18 @@ func newState(fx fixture, worktreeDir string) *PromotionState {
 }
 
 func ctx() context.Context { return context.Background() }
+
+// mergeToBase simulates what a real forge merge actually does to the base branch: fast-forward
+// origin's tip of s.Base to s.CommitSHA. forge.Fake models a PR's merge state in memory only and
+// never touches real git, so any test that wants MergedStep's Observe to see the base as
+// genuinely caught up (past its M4 base-revalidation, finding #1: a historical "merged" record
+// alone is never proof the base still holds the promoted content) must call this — it is exactly
+// what a real GitHub squash-merge would have done to the same remote this promotion's own git
+// operations already point at.
+func mergeToBase(t *testing.T, s *PromotionState) {
+	t.Helper()
+	if s.CommitSHA == "" {
+		t.Fatal("mergeToBase: s.CommitSHA is empty — drive to at least CommittedStep first")
+	}
+	runHost(t, s.CloneDir, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Base)
+}

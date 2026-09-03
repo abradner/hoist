@@ -52,9 +52,47 @@ type Git interface {
 	// exist there. This is the one source of truth Observe uses for "has this been pushed"
 	// — never a locally cached belief.
 	LsRemoteBranch(ctx context.Context, cloneDir, remote, branch string) (sha string, ok bool, err error)
+	// FetchBranch fetches remote's current tip of branch into dir's local object database. It
+	// never touches dir's own checked-out branch, working tree or index (never a checkout,
+	// never a fast-forward of a local branch) — that is the guarantee callers actually depend
+	// on. It does update dir's remote-tracking ref for branch (refs/remotes/<remote>/<branch>),
+	// exactly as a plain `git fetch <remote> <branch>` always does; that is ordinary fetch
+	// behavior, not something this method avoids, and is not itself a problem for anything in
+	// this repo, which never trusts a remote-tracking ref as evidence without re-fetching it
+	// first. Reports the sha it fetched; ok=false when the ref does not exist on remote. Added
+	// in M4 for MergedStep's Observe: LsRemoteBranch alone reports a live sha over the network,
+	// but a subsequent LsTreeBlob/IsAncestor needs the sha's commit and tree objects actually
+	// present locally, which only a fetch (not ls-remote) provides — this repo otherwise never
+	// fetches at all (the worktree is branched from the clone's own local ref, on the stated
+	// assumption the clone already matches Base for the files a promotion touches; see doc.go).
+	// Verifying the base branch's *current* state against a historical merge record is the one
+	// place that assumption isn't good enough, because the whole point is to catch the base
+	// having moved on origin without the clone's local ref ever being told.
+	FetchBranch(ctx context.Context, dir, remote, branch string) (sha string, ok bool, err error)
 	// LsTreeBlob reports the blob hash of path in rev's tree, ok=false when rev cannot be
 	// resolved (nothing committed yet) or path is not present in it.
 	LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (blob string, ok bool, err error)
+	// IsAncestor reports whether ancestor is an ancestor of (or identical to) descendant in
+	// dir's object graph — `git merge-base --is-ancestor`, which git itself defines as true for
+	// a commit and itself, not just for a strict ancestor. Both revs must already be resolvable
+	// locally (a caller verifying a remote branch's tip should FetchBranch it first, the same
+	// way LsTreeBlob callers do). Added in M4 for MergedStep's Observe (finding #2, round 3):
+	// whether a promotion's own merge commit is still reachable from the base's current tip is
+	// the correct test for "did something revert past this merge", not a content/blob
+	// comparison — a later, legitimate commit that changes the very same paths (an ordinary
+	// re-promotion to the same env) moves the tip forward without ever making the earlier merge
+	// unreachable, while a real revert (reset, force-push, or a base rebuilt from an earlier
+	// point) does. An error here means ancestor or descendant could not be resolved at all (e.g.
+	// a truly unknown sha), not "not an ancestor" — that is ok=false, err=nil.
+	IsAncestor(ctx context.Context, dir, ancestor, descendant string) (isAncestor bool, err error)
+	// ObjectExists reports whether sha names an object this clone's own object database
+	// actually has (`git cat-file -e`), never a syntactic check. RevParse below cannot answer
+	// this: `git rev-parse --verify --quiet` on a well-formed 40-hex-character string returns it
+	// unchanged and "verified" even when no such object exists — it only validates that the
+	// string parses as a revision, not that the object is present. A caller checking whether a
+	// specific commit sha is genuinely resolvable in this clone (M4 hardening, MergedStep's
+	// mergeWasReverted) needs this method, not RevParse.
+	ObjectExists(ctx context.Context, dir, sha string) (bool, error)
 	// RevParse resolves rev to a commit sha inside worktreeDir, ok=false when rev cannot be
 	// resolved (e.g. HEAD before any commit exists). Added beyond the brief's listed shape:
 	// Observe needs to read the worktree's current HEAD without creating a commit to find
@@ -72,6 +110,15 @@ type Git interface {
 	// (something else moved the branch) is reported as an error distinguishable by the
 	// caller re-querying LsRemoteBranch — Push itself never retries with --force.
 	Push(ctx context.Context, worktreeDir, remote, branch string) error
+	// DeleteRemoteBranch deletes branch on remote (M4: MergedStep's cleanup after a successful
+	// merge). Deleting a branch that is already gone is not an error — idempotent the same way
+	// RemoveWorktree is, so a resumed MergedStep that already deleted the branch on an earlier,
+	// killed run can call this again safely. Added beyond the brief's listed shape (§4.7: a
+	// small, justified addition) rather than a new pkg/forge method, since branch deletion is
+	// exactly the same remote-ref operation Push already performs through the user's own git
+	// remote and SSH config — routing it through pkg/forge instead would need a GitHub API
+	// scope this repo does not otherwise require merging to need.
+	DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error
 	// HashObject returns the git blob hash content would have, without requiring it to be
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
@@ -99,6 +146,14 @@ type Git interface {
 	// promotion produced exactly one commit: a ref only ever has one tip, so LsRemoteBranch
 	// alone cannot distinguish one commit behind it from several.
 	Log(ctx context.Context, worktreeDir, revRange string) (shas []string, err error)
+	// CommitTime reports sha's real committer date, read from local git object data in dir
+	// (either cloneDir or a worktree sharing its object store — the object need only be
+	// reachable, not checked out). Added in M4 so ApprovedStep can anchor "was this comment
+	// posted after the code it approves" on the commit's own timestamp rather than the PR's
+	// CreatedAt: PR.CreatedAt is only a safe stand-in for that while other steps' checks
+	// happen to make an earlier PR on stale content unreachable (see steps_m4.go's doc
+	// comment); CommitTime lets Approved state that fact directly instead of leaning on it.
+	CommitTime(ctx context.Context, dir, sha string) (time.Time, error)
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -341,6 +396,36 @@ func (e Exec) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch strin
 	return fields[0], true, nil
 }
 
+// FetchBranch implements Git: fetches remote's branch and resolves FETCH_HEAD to the sha it
+// just fetched. dir's own checked-out branch, working tree and index are never touched — that
+// is the property callers actually rely on — but this is an ordinary `git fetch <remote>
+// <branch>`, and git's own default fetch refspec (`+refs/heads/*:refs/remotes/<remote>/*`)
+// opportunistically updates dir's remote-tracking ref for branch as a side effect, the same as
+// it would for any other fetch; that update is harmless here since nothing in this package ever
+// trusts a remote-tracking ref as evidence without fetching it fresh first, but it is real and
+// should not be described as "no local ref changes at all". "branch does not exist on remote at
+// all" is reported as ok=false, not an error — the same "not found, not broken" shape
+// LsRemoteBranch and RevParse use. That classification is decided by an authoritative
+// LsRemoteBranch re-check against the remote, never by matching text in git's stderr: git's
+// wording for "no such ref" varies across versions and locales, and pattern-matching it can
+// silently misclassify a real failure as "branch missing" (or the reverse).
+func (e Exec) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
+	if _, err := e.run(ctx, dir, "fetch", "--no-tags", "--quiet", remote, branch); err != nil {
+		if _, exists, lsErr := e.LsRemoteBranch(ctx, dir, remote, branch); lsErr == nil && !exists {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	sha, ok, err := e.RevParse(ctx, dir, "FETCH_HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, fmt.Errorf("git fetch %s %s: succeeded but FETCH_HEAD did not resolve", remote, branch)
+	}
+	return sha, true, nil
+}
+
 // LsTreeBlob implements Git.
 func (e Exec) LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (string, bool, error) {
 	out, err := e.run(ctx, worktreeDir, "ls-tree", rev, "--", path)
@@ -364,6 +449,38 @@ func (e Exec) LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (st
 		return "", false, fmt.Errorf("git ls-tree: unparseable output %q", out)
 	}
 	return fields[2], true, nil
+}
+
+// IsAncestor implements Git: `git merge-base --is-ancestor`, which exits 0 when ancestor is an
+// ancestor of (or identical to) descendant, 1 when it is not, and anything else (most commonly
+// 128, "not a valid object name") when either rev could not even be resolved — that last case is
+// reported as a real error, never silently folded into "not an ancestor", since a caller that
+// asked about the wrong sha deserves to know rather than be told a false negative.
+func (e Exec) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, dir, "merge-base", "--is-ancestor", ancestor, descendant)
+	switch {
+	case err == nil:
+		return true, nil
+	case exitCode == 1:
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// ObjectExists implements Git: `git cat-file -e`, which exits 0 when sha names an object
+// actually present in dir's object database and 1 when it does not (never treated as a
+// failure) — anything else is a genuine error worth surfacing.
+func (e Exec) ObjectExists(ctx context.Context, dir, sha string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, dir, "cat-file", "-e", sha)
+	switch {
+	case err == nil:
+		return true, nil
+	case exitCode == 1:
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // RevParse implements Git.
@@ -504,6 +621,24 @@ func (e Exec) Push(ctx context.Context, worktreeDir, remote, branch string) erro
 	return err
 }
 
+// DeleteRemoteBranch implements Git. It runs against cloneDir (not a worktree — this promotion
+// may have already removed its own worktree by the time cleanup runs; cloneDir always exists
+// and shares the same remotes). "Already gone" is treated as success, matching RemoveWorktree's
+// own idempotency rule — decided by an authoritative LsRemoteBranch re-check against the remote
+// after the delete errors, never by matching text in git's stderr (the same reasoning
+// FetchBranch's own doc comment gives: git's wording varies across versions and locales, and
+// string-matching it can silently misclassify a real failure as "already gone", or the reverse).
+func (e Exec) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error {
+	_, err := e.run(ctx, cloneDir, "push", remote, "--delete", branch)
+	if err == nil {
+		return nil
+	}
+	if _, exists, lsErr := e.LsRemoteBranch(ctx, cloneDir, remote, branch); lsErr == nil && !exists {
+		return nil
+	}
+	return err
+}
+
 // HashObject implements Git.
 func (e Exec) HashObject(ctx context.Context, worktreeDir string, content []byte) (string, error) {
 	cmd := exec.CommandContext(ctx, e.bin(), "-C", worktreeDir, "hash-object", "--stdin")
@@ -560,4 +695,19 @@ func (e Exec) WorktreeBranch(ctx context.Context, cloneDir, worktreeDir string) 
 		return "", false, nil
 	}
 	return entry.branch, true, nil
+}
+
+// CommitTime implements Git: sha's committer date (`%cI`, strict ISO 8601 — always includes
+// a UTC offset, so time.Parse(time.RFC3339, ...) is exact, never a local-timezone guess).
+func (e Exec) CommitTime(ctx context.Context, dir, sha string) (time.Time, error) {
+	out, err := e.run(ctx, dir, "show", "-s", "--format=%cI", sha)
+	if err != nil {
+		return time.Time{}, err
+	}
+	out = strings.TrimSpace(out)
+	t, err := time.Parse(time.RFC3339, out)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("git show --format=%%cI %s: unparseable committer date %q: %w", sha, out, err)
+	}
+	return t, nil
 }

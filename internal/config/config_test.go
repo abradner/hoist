@@ -33,6 +33,7 @@ repos:
       pairs: { app-staging: app-production }
       approval: { app-staging: comment }
     approvers: [me]
+    collaborators: true
     ci: { none: prompt, grace: 90s }
     kube: { context: my-cluster }
     digest_sources: [pods, registry]
@@ -67,6 +68,7 @@ func TestLoadFullFile(t *testing.T) {
 				Approval:   map[string]string{"app-staging": "comment", "app-production": "comment"},
 			},
 			Approvers:     []string{"me"},
+			Collaborators: true,
 			CI:            CIConfig{None: "prompt", Grace: Duration(90 * time.Second)},
 			Kube:          KubeConfig{Context: "my-cluster"},
 			DigestSources: []string{"pods", "registry"},

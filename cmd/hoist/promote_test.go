@@ -11,8 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -84,7 +86,13 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	runGitHost(t, "", "clone", "-q", origin, clone)
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	yaml := fmt.Sprintf("repos:\n  - name: gitops\n    path: %s\n    github: example/gitops\n    apps_root: cluster/apps\n    promotable: [ghcr.io/example/]\n", clone)
+	// ci.grace and poll.* are cut to a few milliseconds so a test exercising the full M4
+	// pipeline (CIGreen -> Approved -> Merged) against the fake forge's default "no checks
+	// reported" converges in-process instead of waiting out the real 3-minute/20-second
+	// production defaults; app-production isn't listed under envs.production here, so
+	// RepoConfig.Approval defaults it to "auto" and no approval comment is needed either.
+	yaml := fmt.Sprintf("repos:\n  - name: gitops\n    path: %s\n    github: example/gitops\n    apps_root: cluster/apps\n    promotable: [ghcr.io/example/]\n    ci:\n      none: green\n      grace: 5ms\n"+
+		"poll:\n  ci: 5ms\n  approval: 5ms\n  argo: 5ms\n  rollout: 5ms\n  deadline: 10s\n", clone)
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +106,21 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	return cfgPath, clone, fakeForge
 }
 
+// commitLine pulls the "  commit: <sha>" line runPromote/runResume print on success.
+func commitLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "  commit: "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// TestPromoteEndToEndThenResumeIsIdempotent drives a promotion all the way through the M4
+// pipeline (CIGreen -> Approved -> Merged, both auto-satisfied by this fixture's config: see
+// newPromoteFixture) in one `hoist promote` call, then re-runs the identical command — standing
+// in for a resumed/re-invoked process — and confirms it converges on the same commit and PR
+// rather than creating a second one of either (AGENTS.md invariant 4).
 func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
@@ -106,35 +129,201 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 	if got := run(args, &out, &errOut); got != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
 	}
-	if !strings.Contains(out.String(), "branch: hoist/app-production/") || !strings.Contains(out.String(), "PR: ") {
+	if !strings.Contains(out.String(), "branch: hoist/app-production/") || !strings.Contains(out.String(), "PR: ") || !strings.Contains(out.String(), "merged: ") {
 		t.Fatalf("stdout missing expected fields:\n%s", out.String())
 	}
 	if len(f.PRs()) != 1 {
 		t.Fatalf("expected exactly one PR, got %d", len(f.PRs()))
 	}
-	firstPR := f.PRs()[0].Number
+	firstPR := f.PRs()[0]
+	if !firstPR.Merged {
+		t.Fatalf("PR should be merged: %+v", firstPR)
+	}
+	firstCommit := commitLine(out.String())
+	if firstCommit == "" {
+		t.Fatalf("stdout missing a commit line:\n%s", out.String())
+	}
 
 	var g git.Exec
 	branchLine := strings.Split(out.String(), "\n")[1]
 	branch := strings.TrimSpace(strings.TrimPrefix(branchLine, "  branch:"))
-	sha1, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch)
-	if err != nil || !ok {
-		t.Fatalf("origin should have the branch: ok=%v err=%v", ok, err)
+	if _, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch); err != nil || ok {
+		t.Fatalf("origin should no longer have the merged branch: ok=%v err=%v", ok, err)
 	}
 
+	// Simulate what a real GitHub squash-merge would actually do: fast-forward origin's base
+	// branch to hold the promoted content. forge.Fake has no access to real git and never
+	// touches origin on its own, but MergedStep's Observe now revalidates origin/main's live
+	// tip against this promotion's own edits before trusting a historical merge record (M4
+	// hardening, finding #1) — without this, the second run below would find the base still at
+	// its pre-promotion content and correctly refuse to report success on stale evidence.
+	runGitHost(t, clone, "push", "-q", "origin", firstCommit+":refs/heads/main")
+
 	// Re-running the exact same command (simulating a resumed/re-invoked process) must not
-	// create a second branch, commit or PR.
+	// create a second commit or a second PR.
 	out.Reset()
 	errOut.Reset()
 	if got := run(args, &out, &errOut); got != 0 {
 		t.Fatalf("second run exit %d, want 0; stderr: %s", got, errOut.String())
 	}
-	if len(f.PRs()) != 1 || f.PRs()[0].Number != firstPR {
-		t.Fatalf("second run should reuse PR #%d, got %+v", firstPR, f.PRs())
+	if len(f.PRs()) != 1 || f.PRs()[0].Number != firstPR.Number {
+		t.Fatalf("second run should reuse PR #%d, got %+v", firstPR.Number, f.PRs())
 	}
-	sha2, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", branch)
-	if err != nil || !ok || sha2 != sha1 {
-		t.Fatalf("second run should not move the branch: %s -> %s (ok=%v err=%v)", sha1, sha2, ok, err)
+	if second := commitLine(out.String()); second != firstCommit {
+		t.Fatalf("second run produced a different commit: first %s, second %s", firstCommit, second)
+	}
+}
+
+// TestPromoteRefusesConflictAcquiredAfterTheFirstScan is round-4's regression for the
+// scan-then-claim ordering gap: the pre-claim findInFlight scan and engine.ClaimInFlight are not
+// one atomic operation, so a state file for a *different* id that only becomes visible after the
+// first scan already ran — but before this call proceeds — must still be caught. runPromote now
+// re-runs findInFlight a second time immediately after acquiring the claim, closing that window;
+// this test can't reproduce the exact multi-process timing (a second real `hoist promote`
+// pausing between its own scan and claim), but it does exercise the actual code path added for
+// it: a conflicting, non-terminal state file for a different id targeting the same env is
+// visible on disk throughout, and the whole `hoist promote` invocation must refuse — proving the
+// re-scan's error/conflict handling is wired correctly, not just present.
+func TestPromoteRefusesConflictAcquiredAfterTheFirstScan(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+
+	r, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A different id (a distinct digest set would derive its own id naturally; a fixed literal
+	// standing in for one here keeps this test independent of the fixture's exact image data),
+	// targeting the same env, left mid-flight (PROpened only, never approved) so ObserveAll
+	// reports it not-done.
+	const otherID = "other-in-flight-promotion"
+	wt, err := engine.WorktreeDir(otherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := engine.StatePath(otherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &engine.PromotionState{
+		ID:            otherID,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, otherID),
+		CloneDir:      clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(otherID, plan),
+		PRTitle:       engine.PRTitle(plan),
+		PRBody:        engine.RenderPRBody(otherID, plan),
+		Approval:      "comment",
+		Approvers:     []string{"alice"},
+		CINone:        "green",
+	}
+	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), other, nil); err != nil {
+		t.Fatalf("driving the other promotion to PROpened: %v", err)
+	}
+	if err := engine.SaveState(statePath, other); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected refusal with a conflicting in-flight promotion for the same env, got exit 0; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "still in flight") {
+		t.Fatalf("stderr should name the in-flight conflict, got: %s", errOut.String())
+	}
+	// Exactly one PR: the "other" mid-flight promotion's own, created by this test's own setup
+	// (driving it to PROpened) — the actual `run()` call above must refuse before ever getting
+	// far enough to open a second one for its own id.
+	if len(f.PRs()) != 1 || f.PRs()[0].HeadBranch != other.Branch {
+		t.Fatalf("expected exactly the other promotion's own PR and nothing more, got %+v", f.PRs())
+	}
+}
+
+// TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits is the sibling regression to
+// resume_test.go's TestResumeNeverStraddlesPolicyAcrossConfigEdits, at runPromote's OWN
+// in-place-retry path (re-invoking `hoist promote` for an id that already has a state file on
+// disk): that path restores History and the CI override from the existing state, but used to
+// populate CINone/CIGrace/Approval/Approvers/Collaborators fresh from CURRENT config every time
+// — the exact bug runResume was already fixed for, just at a sibling call site that was missed.
+// This starts a promotion under `approval: comment`, lets it sit waiting (no comment posted
+// yet), edits the config to `approval: auto` for the same env, then re-invokes `hoist promote`
+// with the identical --from/--to (same digests, so the same deterministic id, so the same state
+// file) and confirms it still enforces the ORIGINAL `comment` policy: without any approval
+// comment ever posted, the retry must NOT merge just because current config now says `auto`.
+func TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	withApprovers = strings.Replace(withApprovers, "deadline: 10s", "deadline: 2s", 1)
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval (no comment posted yet), got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	s := states[0]
+	if s.PR == nil {
+		t.Fatalf("expected a PR to already be open: %+v", s)
+	}
+	if s.Approval != "comment" || len(s.Approvers) != 1 || s.Approvers[0] != "alice" {
+		t.Fatalf("expected the original comment/alice policy persisted, got Approval=%q Approvers=%v", s.Approval, s.Approvers)
+	}
+
+	// The operator edits the config to a WEAKER policy (auto, no comment needed at all) while
+	// the promotion is still in flight.
+	changedApproval := strings.Replace(withApprovers, "app-production: comment", "app-production: auto", 1)
+	if changedApproval == withApprovers {
+		t.Fatal("approval replacement point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(changedApproval), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-invoke the EXACT SAME `hoist promote` command — same --from/--to, same digests, so the
+	// same deterministic id and the same existing state file — never `hoist resume`. This is
+	// runPromote's own retry path, not runResume's.
+	out.Reset()
+	errOut.Reset()
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("retry should still be waiting on alice's comment (never posted) under the ORIGINAL comment policy, got success: %s", out.String())
+	}
+	if strings.Contains(out.String(), "merged:") {
+		t.Fatalf("retry must not merge without a comment just because config now says auto: %s", out.String())
+	}
+	if len(f.PRs()) != 1 || f.PRs()[0].Merged {
+		t.Fatalf("the PR must still be unmerged: %+v", f.PRs())
 	}
 }
 

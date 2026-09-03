@@ -247,9 +247,18 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 // promotion touches — see doc.go — and is stable across any number of calls, committed or
 // not, which is what lets this be computed once and trusted from then on.
 func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (map[string]string, error) {
+	return expectedBlobsFromClone(ctx, c.Git, s.CloneDir, s.Edits)
+}
+
+// expectedBlobsFromClone is CommittedStep.expectedBlobs' logic, pulled out to a free function
+// so MergedStep (steps_m4.go) can compute the same thing against s.Base's live tip when it
+// needs to revalidate a historical merge record rather than trust it blind (M4 hardening) —
+// nothing here is CommittedStep-specific: it is a pure function of edits and the byte content
+// they're planned against, read from whatever cloneDir the caller names.
+func expectedBlobsFromClone(ctx context.Context, g git.Git, cloneDir string, edits []gitops.Edit) (map[string]string, error) {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
-	for _, e := range s.Edits {
+	for _, e := range edits {
 		if _, ok := byFile[e.File]; !ok {
 			files = append(files, e.File)
 		}
@@ -264,7 +273,7 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 		// would try to re-apply the edit on top of its own result and fail. The clone's
 		// content is what BuildPlan actually planned against (see doc.go's assumption that it
 		// matches Base) and is stable across any number of Observe calls, committed or not.
-		p, err := gitops.ResolvePath(s.CloneDir, f)
+		p, err := gitops.ResolvePath(cloneDir, f)
 		if err != nil {
 			return nil, err
 		}
@@ -282,7 +291,7 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 		// hash-object is pure content hashing; any repository works as the exec context, and
 		// the clone always exists by the time this runs (unlike the worktree, which the
 		// Branched step may not have created yet when Committed's own Observe runs first).
-		blob, err := c.Git.HashObject(ctx, s.CloneDir, after)
+		blob, err := g.HashObject(ctx, cloneDir, after)
 		if err != nil {
 			return nil, err
 		}
@@ -335,7 +344,15 @@ type PROpenedStep struct{ Forge forge.Forge }
 // Name implements Step.
 func (PROpenedStep) Name() StepName { return StepPROpened }
 
-// Observe implements Step.
+// Observe implements Step. A PR FindPR turns up by head branch name alone is only ever
+// adopted as this promotion's own once its base also matches s.Base (M4 hardening): the head
+// branch name is deterministic from the promotion id (BranchName), but nothing stops a second,
+// unrelated PR being opened from that exact same branch name onto a *different* base (someone
+// else's manual PR, or a stale one from a config change that moved TargetEnv's base) — adopting
+// that PR here would go on to have MergedStep squash-merge it into the wrong target while still
+// reporting success. Refusing to adopt is a Blocked, not a silent skip, so the operator sees
+// the conflict named rather than hoist quietly trying to open a second PR for the same branch
+// (which the forge would then itself refuse).
 func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	pr, ok, err := p.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
 	if err != nil {
@@ -343,6 +360,25 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 	}
 	if !ok {
 		return Observation{Satisfied: false}, nil
+	}
+	if pr.Base != s.Base {
+		return Observation{Blocked: fmt.Sprintf(
+			"found PR #%d for branch %s, but it targets base %q, not %q — refusing to adopt a PR aimed at a different base; resolve the conflicting PR manually",
+			pr.Number, s.Branch, pr.Base, s.Base,
+		)}, nil
+	}
+	if pr.Closed {
+		// Round-9 finding: FindPR's own state=all query can return a PR someone closed WITHOUT
+		// merging — adopting it as "found, therefore satisfied" would let CIGreen/Approved pass
+		// on a dead PR, then MergedStep's merge call 405s forever, with this promotion stuck
+		// "in flight" indefinitely (it never resolves to done, and findInFlight then refuses
+		// every later promotion to the same env). Block clearly instead — the same shape as the
+		// wrong-base case above — naming the closed PR so the operator can decide what to do
+		// (reopen it, or delete the branch/state and let a fresh promotion open a new one).
+		return Observation{Blocked: fmt.Sprintf(
+			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or delete this promotion's state file and re-run to open a fresh one",
+			pr.Number, s.Branch,
+		)}, nil
 	}
 	s.PR = &pr
 	return Observation{Satisfied: true, Detail: fmt.Sprintf("PR #%d already exists (%s)", pr.Number, pr.URL)}, nil
