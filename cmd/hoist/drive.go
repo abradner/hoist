@@ -9,9 +9,11 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // pollInterval picks the poll interval for whichever step Drive most recently stopped at
@@ -66,12 +68,21 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 				return err
 			}
 			var stepErr *engine.StepError
-			if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) {
+			if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) || isNotFoundErr(stepErr.Err) {
 				// Not a step this loop knows to be transient (Known bug classes: a 404/scope
 				// hiccup on CIGreen's Checks or Approved's Comments/IsAllowedAuthor calls) — a
 				// git/GitHub operation on an earlier step failing terminally (a rejected push, a
 				// broken git binary) will not fix itself by waiting, so report it immediately
-				// exactly as pre-M4 Drive callers did.
+				// exactly as pre-M4 Drive callers did. isNotFoundErr closes a gap retryableStep's
+				// own doc comment assumes doesn't exist: ArgoRefreshedStep/RolledOutStep's own
+				// Observe already Blocks cleanly on a missing Application/Deployment (never
+				// reaching here as a plain StepError at all), but their Act calls (Refresh, or
+				// any future write) can independently discover the same absence — a race between
+				// Observe and Act, an Application/Deployment deleted or moved in between — and
+				// Act has no way to produce a *BlockedError itself (Drive always wraps an Act
+				// error as a plain retryable-looking *StepError, engine.go's own Drive). Without
+				// this check, that race silently retries every poll.argo/poll.rollout interval
+				// instead of reporting Blocked immediately (Copilot review, PR #51).
 				return err
 			}
 			fmt.Fprintf(stderr, "hoist: %s (retrying)\n", redact.Strings(err.Error()))
@@ -95,6 +106,15 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 // step-specific ErrNotFound is handled by the step itself (Blocked, not an error reaching here at
 // all); only a genuinely transient error surfaces as a *StepError this function is asked about.
 // Every other step's error is terminal from this loop's point of view.
+// isNotFoundErr reports whether err is either Argo or rollout adaptor's own "the object is
+// genuinely gone" sentinel — a structural condition no amount of waiting resolves, never a
+// transient plumbing hiccup, regardless of which retryable step's Act call happened to surface
+// it (see retryableStep's own caller for why this matters: Observe already treats this the same
+// way, but Act has no way to produce a *BlockedError of its own).
+func isNotFoundErr(err error) bool {
+	return errors.Is(err, argo.ErrNotFound) || errors.Is(err, rollout.ErrNotFound)
+}
+
 func retryableStep(step engine.StepName) bool {
 	switch step {
 	case engine.StepCIGreen, engine.StepApproved,
