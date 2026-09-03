@@ -164,7 +164,23 @@ func (a ArgoRefreshedStep) Observe(ctx context.Context, s *PromotionState) (Obse
 	if len(apps) == 0 {
 		return Observation{Satisfied: true, Detail: "no Argo Application in this promotion's plan"}, nil
 	}
-	anchor, _ := mergedAt(s) // zero time if somehow absent; see this func's own doc comment
+	anchor, ok := mergedAt(s)
+	if !ok {
+		// s.MergeSHA is set (checked above), so mergedAt's own doc comment's invariant says
+		// this "should" never happen — but trusting that blindly is exactly the zero-means-
+		// cannot-determine trap: a zero-value anchor makes st.ReconciledAt.After(anchor) true
+		// for essentially any real timestamp, so a state that reaches here anyway (a legacy or
+		// otherwise inconsistent state file: MergeSHA persisted with no matching StepMerged
+		// History entry) would report every Application "already reconciled" with zero actual
+		// evidence a refresh ever landed after the merge (Copilot review). Block clearly,
+		// naming the inconsistency, rather than silently trusting a wait that can't happen
+		// (Satisfied: false would hang forever; Satisfied: true would be worse) or waiting
+		// indefinitely for History to grow an entry nothing here will ever add retroactively.
+		return Observation{Blocked: fmt.Sprintf(
+			"this promotion has a merge commit (%s) but no recorded Merged step in its own history — cannot anchor the Argo refresh check; investigate the state file manually",
+			s.MergeSHA,
+		)}, nil
+	}
 	var pending []string
 	for _, app := range apps {
 		st, err := a.Argo.Get(ctx, app)

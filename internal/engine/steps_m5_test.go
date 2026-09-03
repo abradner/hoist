@@ -95,6 +95,37 @@ func TestArgoRefreshedNotSatisfiedBeforeAnyMergeIsRecorded(t *testing.T) {
 	}
 }
 
+// TestArgoRefreshedBlocksWhenMergeHasNoHistoryAnchor is Copilot's PR #51 review finding:
+// Observe used to discard mergedAt's own ok return, trusting the zero time as an anchor
+// whenever s.MergeSHA is set but s.History carries no matching StepMerged entry (a legacy or
+// otherwise inconsistent state file — mergedAt's own doc comment assumes this "should never
+// happen" given MergeSHA's guard just above, but blindly trusting that is exactly the
+// zero-means-cannot-determine trap: almost any real ReconciledAt is "after" the zero time, so
+// every Application would report already-reconciled with zero actual evidence a refresh ever
+// landed after the merge). This proves the fix Blocks clearly instead, naming the
+// inconsistency, rather than silently reporting Satisfied on no evidence at all.
+func TestArgoRefreshedBlocksWhenMergeHasNoHistoryAnchor(t *testing.T) {
+	s := argoState()
+	s.History = nil // MergeSHA is set (argoState's own setup) but no StepMerged entry recorded
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp}, argo.Status{
+		ReconciledAt: time.Now(), // any real timestamp is "after" the zero-value anchor
+	})
+	obs, err := (ArgoRefreshedStep{Argo: a}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("Observe = %+v, want Blocked, not Satisfied on a zero-value anchor with no real evidence", obs)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("Observe = %+v, want a clear Blocked signal naming the missing history anchor", obs)
+	}
+	if len(a.Calls) != 0 {
+		t.Errorf("Argo should not even be consulted once the anchor itself is known to be untrustworthy: %v", a.Calls)
+	}
+}
+
 func TestArgoRefreshedNoAppsIsTriviallySatisfied(t *testing.T) {
 	s := argoState()
 	s.ArgoApps = nil

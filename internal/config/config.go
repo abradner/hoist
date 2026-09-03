@@ -370,8 +370,11 @@ func validateRepo(p *problems, r RepoConfig) {
 	}
 	// Normalize already defaults an omitted or explicitly-empty value to "argocd" (a plain
 	// YAML string can't distinguish the two — unlike DigestSources/Promotable, which are
-	// slices and so can), so only a genuinely non-empty-but-padded value ever reaches here;
-	// checkNoSurroundingWhitespace itself is a no-op on "".
+	// slices and so can) — this call always runs, on the default "argocd" exactly as much as
+	// on a genuinely user-supplied value; checkNoSurroundingWhitespace itself is simply a
+	// no-op on both an empty string and an already-unpadded one like "argocd", so only a
+	// genuinely padded value (user-supplied, since Normalize's own default is never padded)
+	// ever actually triggers a validation error here.
 	checkNoSurroundingWhitespace(p, k+".kube.argo_namespace", r.Kube.ArgoNamespace)
 	validateEnvs(p, k+".envs", r.Envs)
 	for i, a := range r.Approvers {
