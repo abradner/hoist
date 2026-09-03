@@ -114,6 +114,15 @@ type PromotionState struct {
 	// re-discovering which Application owns which family on every call, any more than it
 	// requires BuildPlan to re-run on every resume — Edits is exactly this same kind of
 	// carried, not re-derived, plan-time fact.
+	//
+	// A state file written before M5 added this field decodes it as empty, which is not the same
+	// thing as a promotion computed to touch no Application (round-1 review finding): a non-empty
+	// Edits with an empty ArgoApps is only possible for a state that predates ArgoAppNames ever
+	// running against it, since a real call against a non-empty edit set always yields at least
+	// one name or an error (see ArgoAppNames' own doc comment). cmd/hoist/resume.go's
+	// ensureArgoApps repairs exactly that case, once, the first time such a state is resumed after
+	// upgrading past M5 — everywhere else in this package, ArgoApps is read as carried, never
+	// recomputed.
 	ArgoApps []string
 }
 

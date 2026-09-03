@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
+	"github.com/abradner/hoist/pkg/gitops"
 )
 
 func TestPromotionsEmptyStateDir(t *testing.T) {
@@ -283,5 +286,177 @@ func TestResumeEnvSurfacesMissingRepoConfigInsteadOfSilentlyExcluding(t *testing
 	}
 	if !strings.Contains(errOut.String(), "not in the current config") {
 		t.Fatalf("expected the missing-config reason to be named, got: %s", errOut.String())
+	}
+}
+
+// TestResumeRebuildsArgoAppsForALegacyStateFile is round-1's regression for the ArgoApps gap:
+// PromotionState.ArgoApps (its own doc comment, internal/engine/state.go) was added in M5 and is
+// computed once when a promotion is first built — a state file saved before this field existed
+// decodes it as empty. Before this fix, an empty ArgoApps read as "this promotion's plan touches
+// no Argo Application" (ArgoRefreshedStep/ArgoSyncedStep's own `len(apps) == 0` shortcut), so
+// resuming such a state reported the promotion done without ever checking whether the
+// Application it edited actually synced — even while the fake Argo status this test configures
+// is deliberately still OutOfSync throughout.
+//
+// This drives a real promotion to a genuine "waiting on Argo to sync" stop — its own onMerge
+// hook below sets the Application's status to OutOfSync rather than newPromoteFixture's own
+// already-converged default (that default exists precisely so most tests don't have to reach
+// into Argo/rollout convergence at all; this one specifically needs a not-yet-synced moment to
+// still be observable after the merge, so it supplies its own) — confirms ArgoApps was correctly
+// populated at that point, then blanks it out to stand in for a pre-M5 state file and confirms
+// `hoist resume` still correctly keeps waiting, rather than reporting false success, because it
+// rebuilds ArgoApps before ever asking whether the promotion is done.
+func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A shorter poll.deadline than the fixture's default (not the fixture's own 10s, which
+	// would make this test needlessly slow), and poll.argo widened to LARGER than that deadline
+	// — deliberately, so driveToCompletion's outer loop calls engine.Drive at most once per run
+	// and then is purely sleeping (not mid-subprocess) when ctx's deadline fires. This matters
+	// because of a real, separate behavior of Drive/MergedStep/PushedStep this test would
+	// otherwise trip over: once MergedStep's Act has deleted the promotion's branch, a LATER
+	// Drive() call (Drive always re-observes every step from the top, its own doc comment) finds
+	// PushedStep's own Observe unsatisfied (the branch it checks on origin is gone) and re-pushes
+	// it, which in turn makes MergedStep's Observe see "branch not yet deleted" and re-run its
+	// own Act — a real, if harmless, re-push/re-merge-delete cycle on every poll tick once
+	// waiting at an Argo/rollout step after a real merge. That's out of scope for this fix (it's
+	// a pre-existing property of Drive's design, not anything ArgoApps-related), but left alone
+	// it would race this test's own subprocess calls against ctx's deadline, occasionally
+	// surfacing as a raw "signal: killed" error instead of the clean context.DeadlineExceeded
+	// this test asserts on. One poll.argo tick per run sidesteps it entirely.
+	shortDeadline := strings.NewReplacer(
+		"deadline: 10s", "deadline: 2s",
+		"argo: 5ms", "argo: 30s",
+	).Replace(string(data))
+	if shortDeadline == string(data) {
+		t.Fatal("fixture config shape changed; deadline/poll.argo replacement points not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(shortDeadline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originOut, err := exec.Command("git", "-C", clone, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatalf("reading the fixture clone's own origin: %v", err)
+	}
+	origin := strings.TrimSpace(string(originOut))
+
+	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
+	fakeArgo := &argo.Fake{}
+	wrapped := &mergeSimulatingForge{
+		Fake: f,
+		onMerge: func(mergeSHA string) {
+			// What a real GitHub squash-merge does to the base branch (mirroring
+			// newPromoteFixture's own onMerge) — but this test's own Argo status is
+			// deliberately left OutOfSync, unlike the shared fixture's already-converged
+			// default, so ArgoSyncedStep has something real to still be waiting on.
+			runGitHost(t, origin, "update-ref", "refs/heads/main", mergeSHA)
+			fakeArgo.SetStatus(app, argo.Status{
+				SyncStatus:   "OutOfSync",
+				SyncRevision: "some-earlier-commit",
+				HealthStatus: argo.HealthStatusHealthy,
+				ReconciledAt: time.Now().Add(time.Hour), // refreshed already; just not synced yet
+			})
+		},
+	}
+	prevForge, prevArgo := newForge, newArgo
+	newForge = func(string) (forge.Forge, error) { return wrapped, nil }
+	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	t.Cleanup(func() { newForge, newArgo = prevForge, prevArgo })
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the promotion to stop waiting on Argo sync (status is OutOfSync), got success: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "argo-synced") {
+		t.Fatalf("expected to be stopped at argo-synced, got: %s", errOut.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	s := states[0]
+	if s.MergeSHA == "" {
+		t.Fatal("expected MergedStep to have completed before the Argo steps run")
+	}
+	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "app-app-production" {
+		t.Fatalf("expected ArgoAppNames to have populated ArgoApps at build time, got %v", s.ArgoApps)
+	}
+
+	// Simulate a state file saved by a pre-M5 hoist: ArgoApps decodes as empty because the field
+	// did not exist yet, while everything else (Edits, MergeSHA, History) is exactly what a real
+	// in-flight promotion carries.
+	s.ArgoApps = nil
+	statePath, err := engine.StatePath(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.SaveState(statePath, s); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "resume", s.ID}, &out, &errOut); got == 0 {
+		t.Fatalf("expected resume to still wait on Argo sync (never falsely 'done') for a legacy state with empty ArgoApps, got success: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "argo-synced") {
+		t.Fatalf("expected resume to still be stopped at argo-synced (ArgoApps must have been rebuilt, not skipped), got: %s", errOut.String())
+	}
+
+	resumed, err := engine.LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resumed.ArgoApps) != 1 || resumed.ArgoApps[0] != "app-app-production" {
+		t.Fatalf("expected resume to have rebuilt ArgoApps, got %v", resumed.ArgoApps)
+	}
+}
+
+// TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone is ensureArgoApps' carve-out for the common
+// case (every post-M5 promotion): a state that already carries ArgoApps must never be
+// recomputed — state.go's own doc comment ("computed once ... then carried unchanged across
+// every resume") still governs. CloneDir/AppsRoot deliberately name a path that doesn't exist,
+// so a call into gitops.Discover here would fail loudly — proving this path never attempts one.
+func TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone(t *testing.T) {
+	s := &engine.PromotionState{
+		ArgoApps: []string{"already-set"},
+		Edits:    []gitops.Edit{{Occurrence: gitops.Occurrence{File: "cluster/apps/app-production/app/deployment.yaml"}}},
+		CloneDir: "/does/not/exist",
+	}
+	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
+	if err := ensureArgoApps(s, rc); err != nil {
+		t.Fatalf("ensureArgoApps = %v, want nil (already populated, must never attempt discovery)", err)
+	}
+	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "already-set" {
+		t.Fatalf("ArgoApps = %v, want left untouched", s.ArgoApps)
+	}
+}
+
+// TestEnsureArgoAppsLeavesGenuinelyEditlessStateAlone is ensureArgoApps' other carve-out: a
+// state with no Edits at all has nothing for ArgoAppNames to have ever found regardless of when
+// it was built (ArgoAppNames' own contract: it only ever produces an app name from an edit's own
+// directory) — an empty ArgoApps here is not evidence of a pre-M5 state, so this must not attempt
+// discovery either. Same deliberately-nonexistent CloneDir/AppsRoot as the sibling test above.
+func TestEnsureArgoAppsLeavesGenuinelyEditlessStateAlone(t *testing.T) {
+	s := &engine.PromotionState{
+		ArgoApps: nil,
+		Edits:    nil,
+		CloneDir: "/does/not/exist",
+	}
+	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
+	if err := ensureArgoApps(s, rc); err != nil {
+		t.Fatalf("ensureArgoApps = %v, want nil (no edits, nothing to rebuild)", err)
+	}
+	if s.ArgoApps != nil {
+		t.Fatalf("ArgoApps = %v, want nil", s.ArgoApps)
 	}
 }
