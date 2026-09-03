@@ -33,6 +33,37 @@ func runGitHost(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// mergeSimulatingForge wraps *forge.Fake so a successful MergePR also does what a real GitHub
+// squash-merge actually does to the world beyond the fake's own in-memory bookkeeping — forge.
+// Fake deliberately has no access to git (its own doc comment), so this bridge lives here, at
+// the one layer that has both: onMerge is called with the real MergeSHA MergePR just recorded.
+//
+// Two things depend on this, both invisible when MergedStep is the last step (M4 alone) but
+// exposed the moment anything (M5's Argo/rollout steps) runs after it in the same process:
+//  1. MergedStep.Observe's ancestry check (steps_m4.go) fetches origin/<base> fresh and
+//     requires the merge commit to be part of its real history — true instantly for a real
+//     GitHub merge, never true for the fake's bookkeeping alone. A single `hoist promote`
+//     invocation that has to poll past Merged (waiting on Argo/rollout to converge) re-Observes
+//     every step from the top on each poll tick, including Merged with pr.Merged now true —
+//     hitting this exact check.
+//  2. ArgoSyncedStep.Observe (steps_m5.go) compares the cluster's reported SyncRevision against
+//     s.MergeSHA, which is the real pushed commit sha (fake.go's own "M4 hardening finding #2":
+//     MergeSHA prefers a real, resolvable sha over its synthetic "merged-" placeholder whenever
+//     one was given) — a fixture that pre-configures a fake Argo status with a hardcoded
+//     SyncRevision can never match that real, only-known-at-runtime sha.
+type mergeSimulatingForge struct {
+	*forge.Fake
+	onMerge func(mergeSHA string)
+}
+
+func (m *mergeSimulatingForge) MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (forge.PR, error) {
+	pr, err := m.Fake.MergePR(ctx, prNumber, expectedHeadSHA)
+	if err == nil && m.onMerge != nil {
+		m.onMerge(pr.MergeSHA)
+	}
+	return pr, err
+}
+
 // newPromoteFixture builds a local bare "origin" and a clone of it shaped like a minimal
 // GitOps repo (one family, "app", older in app-production than app-staging) plus a config
 // file naming it, and points package-level newGit/newForge at a real local git and a fake
@@ -101,20 +132,14 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	}
 
 	fakeForge := &forge.Fake{}
-	// M5: pre-configured so ArgoRefreshedStep/ArgoSyncedStep/RolledOutStep are already
-	// satisfied the moment MergedStep lands — the forge Fake's own MergeSHA is deterministic
-	// here ("merged-" + HeadSHA, and HeadSHAs is never populated by this fixture, so HeadSHA
-	// is always ""; see pkg/forge/fake.go's MergePR), which is what lets this be wired up
-	// front rather than injected mid-run. The Application name matches this fixture's own
-	// wrapper() naming ("app-" + env); the namespace is the "argocd" default (this fixture's
-	// config never sets kube.argo_namespace).
+	// M5: Argo/rollout are wired to converge automatically once MergedStep actually lands,
+	// via mergeSimulatingForge's onMerge hook below (see its own doc comment for why a static
+	// pre-configured fake Argo status can't do this alone: ArgoSyncedStep compares against the
+	// real, only-known-at-merge-time MergeSHA). The Application name matches this fixture's
+	// own wrapper() naming ("app-" + env); the namespace is the "argocd" default (this
+	// fixture's config never sets kube.argo_namespace).
+	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
 	fakeArgo := &argo.Fake{}
-	fakeArgo.SetStatus(argo.Application{Namespace: "argocd", Name: "app-app-production"}, argo.Status{
-		SyncStatus:   argo.SyncStatusSynced,
-		SyncRevision: "merged-",
-		HealthStatus: argo.HealthStatusHealthy,
-		ReconciledAt: time.Now().Add(time.Hour), // safely after any anchor Drive will compute
-	})
 	fakeRollout := &rollout.Fake{}
 	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{
 		Namespace: "app-production",
@@ -122,10 +147,27 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + digestNew}},
 		Complete:  true,
 	})
+	wrappedForge := &mergeSimulatingForge{
+		Fake: fakeForge,
+		onMerge: func(mergeSHA string) {
+			// What a real GitHub squash-merge actually does to the base branch — the fake
+			// forge alone never touches git (pkg/forge/fake.go's own doc comment), so this
+			// bridges the two for the one test-fixture layer that can see both. mergeSHA's
+			// commit object already exists in origin (PushedStep pushed it there before
+			// Merged ever ran); this only needs to move the ref.
+			runGitHost(t, origin, "update-ref", "refs/heads/main", mergeSHA)
+			fakeArgo.SetStatus(app, argo.Status{
+				SyncStatus:   argo.SyncStatusSynced,
+				SyncRevision: mergeSHA,
+				HealthStatus: argo.HealthStatusHealthy,
+				ReconciledAt: time.Now().Add(time.Hour), // safely after any anchor Drive will compute
+			})
+		},
+	}
 
 	prevGit, prevForge, prevArgo, prevRollout := newGit, newForge, newArgo, newRollout
 	newGit = git.Exec{}
-	newForge = func(string) (forge.Forge, error) { return fakeForge, nil }
+	newForge = func(string) (forge.Forge, error) { return wrappedForge, nil }
 	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
 	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
 	t.Cleanup(func() { newGit, newForge, newArgo, newRollout = prevGit, prevForge, prevArgo, prevRollout })
@@ -178,13 +220,13 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 		t.Fatalf("origin should no longer have the merged branch: ok=%v err=%v", ok, err)
 	}
 
-	// Simulate what a real GitHub squash-merge would actually do: fast-forward origin's base
-	// branch to hold the promoted content. forge.Fake has no access to real git and never
-	// touches origin on its own, but MergedStep's Observe now revalidates origin/main's live
-	// tip against this promotion's own edits before trusting a historical merge record (M4
-	// hardening, finding #1) — without this, the second run below would find the base still at
-	// its pre-promotion content and correctly refuse to report success on stale evidence.
-	runGitHost(t, clone, "push", "-q", "origin", firstCommit+":refs/heads/main")
+	// newPromoteFixture's mergeSimulatingForge already fast-forwarded origin's base branch to
+	// firstCommit the moment the first run's own MergePR call succeeded — standing in for what
+	// a real GitHub squash-merge would do to the base branch immediately, synchronously.
+	// Without that, MergedStep's Observe (which revalidates origin/main's live tip against this
+	// promotion's own merge commit before trusting a historical merge record, M4 hardening
+	// finding #1) would find the base still at its pre-promotion content and correctly refuse
+	// to report success on stale evidence — exactly what the second run below exercises.
 
 	// Re-running the exact same command (simulating a resumed/re-invoked process) must not
 	// create a second commit or a second PR.

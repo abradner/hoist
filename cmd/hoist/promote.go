@@ -265,7 +265,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// the state file this process just wrote. Re-running the same scan now, while still holding
 	// the claim, closes that window: nothing else can win the claim while this check runs, and
 	// anything that raced into existence on disk between the first scan and now is caught here.
-	if conflict, status, ferr := findInFlight(ctx, newGit, f, a, ro, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
+	if conflict, status, ferr := findInFlight(ctx, newGit, f, eff.cfg.GitHub, plan.TargetEnv, id); ferr != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(ferr.Error()))
 		return exitFailure
 	} else if conflict != nil {
