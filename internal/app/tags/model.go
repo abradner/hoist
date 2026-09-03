@@ -492,10 +492,12 @@ func (m Model) visibleWindow(rows []Row) (start, end int) {
 }
 
 // fetchVisible fires MetaFunc for every row within the current visibleWindow that isn't already
-// loaded or loading — AGENTS.md invariant 4's "fetch on demand as rows become visible/
-// selected", never every tag up front. Called after the list loads, on cursor movement, on a
-// filter change, and after a metadata load reorders the list (which can shift what's near the
-// cursor for the unmapped/Created-sorted case).
+// loaded, loading, or settled with an error (finding 4: a prior MetaErr means this row's
+// Config call already failed once — never rescheduled without an explicit re-arm this round
+// chose not to add — see this function's own loop comment) — AGENTS.md invariant 4's "fetch on
+// demand as rows become visible/selected", never every tag up front. Called after the list
+// loads, on cursor movement, on a filter change, and after a metadata load reorders the list
+// (which can shift what's near the cursor for the unmapped/Created-sorted case).
 func (m Model) fetchVisible() (Model, tea.Cmd) {
 	rows := m.filtered()
 	if len(rows) == 0 {
@@ -510,7 +512,16 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range rows[start:end] {
 		i := byTag[r.Tag]
-		if m.rows[i].MetaLoaded || m.rows[i].MetaLoading {
+		// A row with MetaErr already set is settled, exactly like MetaLoaded — finding 4: a
+		// row whose Config call failed (a missing manifest, an unsupported platform, a
+		// temporarily unavailable registry) must not be rescheduled every time fetchVisible
+		// runs again (the cursor moving, a filter change, another row's own metadata landing
+		// and reordering the list), or it retries unboundedly for as long as the picker stays
+		// open and the row remains visible. No explicit retry action exists yet this round
+		// (the finding allows either shape) — a failed row simply stays settled, rendered via
+		// createdCell/digestCell's own "load failed"/"—" cases, until this Model is torn down
+		// and a fresh one (a new generation) is opened.
+		if m.rows[i].MetaLoaded || m.rows[i].MetaLoading || m.rows[i].MetaErr != nil {
 			continue
 		}
 		m.rows[i].MetaLoading = true

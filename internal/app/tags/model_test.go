@@ -269,6 +269,59 @@ func TestEnterEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
 	}
 }
 
+// TestFailedMetaFetchIsNotRetriedForever is finding 4's own regression test: a tag whose
+// Config call fails must be treated as settled, not rescheduled every time fetchVisible runs
+// again (cursor movement, a filter change, another row's metadata landing and reordering the
+// list) — without this, a missing manifest, an unsupported platform, or a temporarily
+// unavailable registry creates an unbounded, indefinite request loop for as long as the
+// picker stays open and the row remains visible.
+func TestFailedMetaFetchIsNotRetriedForever(t *testing.T) {
+	regTags := []string{"v1", "v2", "v3"}
+	var calls int
+	metaFn := func(_ context.Context, tag string) (registry.ImageMeta, error) {
+		calls++
+		if tag == "v3" {
+			return registry.ImageMeta{}, errors.New("manifest not found")
+		}
+		return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64)}, nil
+	}
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return regTags, nil, false, nil
+	}
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false, listFn, metaFn)
+	m = m.SetSize(100, 30)
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
+	}
+	i := IndexOf(m.rows, "v3")
+	if i < 0 {
+		t.Fatal("fixture precondition: v3 must be a row")
+	}
+	if m.rows[i].MetaErr == nil {
+		t.Fatal("fixture precondition: v3's Config call must have failed")
+	}
+	if m.rows[i].MetaLoading {
+		t.Fatal("a failed fetch must clear MetaLoading, not leave it stuck true")
+	}
+	callsAfterFirstSettle := calls
+
+	// Trigger fetchVisible again several times over, exactly as cursor movement, a filter
+	// change, or another row's own metadata landing would in the real picker — none of these
+	// may re-request v3's already-failed metadata.
+	for n := 0; n < 5; n++ {
+		var cmd tea.Cmd
+		m, cmd = m.fetchVisible()
+		m = drain(m, cmd)
+	}
+	if calls != callsAfterFirstSettle {
+		t.Fatalf("Config was called %d more time(s) for an already-failed row after 5 more fetchVisible passes — want exactly the original %d calls, no retries", calls-callsAfterFirstSettle, callsAfterFirstSettle)
+	}
+	if m.rows[IndexOf(m.rows, "v3")].MetaErr == nil {
+		t.Fatal("v3 should still carry its recorded error")
+	}
+}
+
 func TestFilterNarrowsRowsAndResetsCursor(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
