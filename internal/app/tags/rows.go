@@ -144,13 +144,21 @@ func ShortDigest(digest string) string {
 	return d
 }
 
-// StagingMismatch reports the paired staging env's own currently-running tag for imageRepo —
-// AGENTS.md invariant 4 / principle 5: informs, never blocks (mirroring plan.SkippedStaging's
-// shape for the plan screen's own production-skip warning). ok is false when target is not a
-// production env, has no paired staging env (envs.pairs has no source env whose value is
-// target — pairs maps source env -> target env, so the staging env is target's own key
-// there), that env has no occurrence of imageRepo, or its occurrence carries no tag to compare
-// (a bare digest pin, nothing to differ from).
+// StagingMismatch reports the paired staging env's own committed-manifest tag for imageRepo —
+// read from repo, the gitops repository's own parsed occurrences, never any live cluster or
+// Argo state (this package has no k8s/Argo read wired in at all — AGENTS.md §4.8 keeps that
+// connection, like every other, at cmd/hoist's layer, and none of it reaches here). Finding 5,
+// round 2: an earlier revision of this doc comment, and the text the caller (model.go's
+// viewReady) rendered from this result, both called this "currently running" — a false claim
+// about live state whenever Argo hasn't synced yet, a rollout is incomplete, or the live
+// workload otherwise differs from what's committed; both are corrected to say "committed
+// manifest tag" instead, matching what's actually being compared here. AGENTS.md invariant 4 /
+// principle 5: informs, never blocks (mirroring plan.SkippedStaging's shape for the plan
+// screen's own production-skip warning). ok is false when target is not a production env, has
+// no paired staging env (envs.pairs has no source env whose value is target — pairs maps
+// source env -> target env, so the staging env is target's own key there), that env has no
+// occurrence of imageRepo, or its occurrence carries no tag to compare (a bare digest pin,
+// nothing to differ from).
 func StagingMismatch(repo *gitops.Repo, imageRepo, target string, envs config.EnvsConfig) (stagingEnv, stagingTag string, ok bool) {
 	isProd := false
 	for _, p := range envs.Production {

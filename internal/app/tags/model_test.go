@@ -350,6 +350,30 @@ func TestFilterNarrowsRowsAndResetsCursor(t *testing.T) {
 // production target must never open the confirm dialog or emit DirectRequestedMsg — it is a
 // politeness notice only, since internal/engine.DirectCommitGateStep is what actually enforces
 // this (see DirectRequestedMsg's own doc comment).
+// TestStagingMismatchNoteDoesNotClaimLiveState is finding 5's own regression test: the paired
+// staging env's own tag shown here comes from the gitops repo's committed manifest occurrence
+// (rows.StagingMismatch), never any live cluster/Argo read — this package has no such
+// connection wired in at all. The rendered note must say so honestly ("committed manifest
+// tag") rather than claim the staging env is "currently running" that tag, which would be a
+// false claim about live state whenever Argo hasn't synced yet, a rollout is incomplete, or the
+// live workload otherwise differs from what's committed.
+func TestStagingMismatchNoteDoesNotClaimLiveState(t *testing.T) {
+	m := readyModel(t, "app-production", true, true)
+	if !m.hasStagingMismatch {
+		t.Fatal("fixture precondition: readyModel's own target==app-production shape must set hasStagingMismatch")
+	}
+	v := m.View()
+	if strings.Contains(v, "currently running") {
+		t.Fatalf("the staging note must never claim live state (\"currently running\"):\n%s", v)
+	}
+	if !strings.Contains(v, "committed manifest tag") {
+		t.Fatalf("the staging note should honestly describe a committed manifest value:\n%s", v)
+	}
+	if !strings.Contains(v, m.stagingEnv) || !strings.Contains(v, m.stagingTag) {
+		t.Fatalf("the staging note should still name the env and tag (%q, %q):\n%s", m.stagingEnv, m.stagingTag, v)
+	}
+}
+
 func TestDirectKeyNotOfferedForProduction(t *testing.T) {
 	m := readyModel(t, "app-production", true, true)
 	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})

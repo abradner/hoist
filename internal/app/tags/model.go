@@ -595,7 +595,14 @@ func (m Model) viewReady() string {
 		fmt.Fprintf(&b, "filter: %q (esc in filter mode to clear)\n", m.filterQuery)
 	}
 	if m.hasStagingMismatch {
-		b.WriteString(m.styles.Notice.Render(fmt.Sprintf("note: %s (paired staging) is currently running %s", m.stagingEnv, m.stagingTag)))
+		// "committed manifest tag", not "currently running" (finding 5, round 2): stagingTag
+		// comes from StagingMismatch, which reads only the gitops repo's own parsed
+		// occurrences — never live cluster or Argo state (this package has no such connection
+		// wired in at all, AGENTS.md §4.8). Argo not having synced yet, an incomplete rollout,
+		// or the live workload otherwise differing from git would make "currently running" a
+		// false claim about live state, precisely while the operator is deciding whether to
+		// bypass staging via direct mode.
+		b.WriteString(m.styles.Notice.Render(fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTag)))
 		b.WriteString("\n")
 	}
 	b.WriteString(m.tableHeader())
