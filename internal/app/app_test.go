@@ -610,6 +610,56 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 	}
 }
 
+// TestFlightScreenSharesBuildDeadlineWithDrive is Copilot's PR #50 round-7 finding: flight.New
+// used to be handed the raw m.poll.Deadline and would start a FRESH poll.Deadline-length window
+// of its own from the moment it was constructed — after the build step (this StartMsg's own
+// startPromotion call) had already spent some of the SAME configured budget. The CLI path wraps
+// build+drive under one ctx.WithTimeout, so the TUI's total wait exceeding poll.deadline is a
+// real divergence. This proves the opposite: a startPromotion call that consumes most of a tiny
+// deadline still leaves the flight screen's own drive call bounded by only whatever's left, not
+// a fresh full window — the drive call (which blocks forever on its own ctx.Done() otherwise)
+// must report context.DeadlineExceeded almost immediately, not after another full poll.Deadline.
+func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
+	const total = 200 * time.Millisecond
+	const buildSleep = 150 * time.Millisecond // leaves ~50ms of the budget for drive
+	hungDrive := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		<-ctx.Done()
+		return s, false, nil, ctx.Err()
+	}
+	promo := Promotion{
+		Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+			time.Sleep(buildSleep)
+			return engine.PromotionState{ID: "abcd1234"}, hungDrive, nil
+		},
+		Poll: flight.PollDurations{Deadline: total},
+	}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	m, cmd := m.Update(msg)
+	built := cmd() // runs Start's own buildSleep synchronously in this goroutine
+	m, fsInitCmd := m.Update(built)
+	if fsInitCmd == nil {
+		t.Fatal("pushing the flight screen produced no Init command")
+	}
+	batch, ok := fsInitCmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("flight screen's Init = %#v, want a 2-command batch (spinner tick, drive)", fsInitCmd())
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- batch[1]() }()
+	select {
+	case driveMsg := <-done:
+		m, _ = m.Update(driveMsg)
+		if v := plain(m); !strings.Contains(v, "deadline exceeded") {
+			t.Errorf("view missing a deadline-exceeded notice after the shared budget ran out:\n%s", v)
+		}
+	case <-time.After(120 * time.Millisecond): // comfortably above the ~50ms shared remainder,
+		// comfortably below a fresh, unshared 200ms window measured from roughly this same point
+		t.Fatal("flight screen's own drive call did not report the shared deadline in time — poll.Deadline was NOT shared with the build step")
+	}
+}
+
 // TestStartMsgErrorNoticeIsRedacted: buildPromotionForConfirm's error can embed a git/forge
 // transport message carrying a credential (a token in a remote URL, say) — the root notice must
 // scrub it the same way plan.Model.View and flight.Model.View already redact their own rendered

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -57,6 +58,15 @@ type promotionBuiltMsg struct {
 	state   engine.PromotionState
 	driveFn flight.DriveFunc
 	err     error
+	// deadlineAt is the one absolute instant m.poll.Deadline named at plan.StartMsg time — zero
+	// when there is no configured deadline at all. Carried through so the flight screen's own
+	// budget (Model.deadlineAt, driveCmd's own bound) shares this SAME instant rather than
+	// starting a fresh poll.Deadline-length window of its own once the build finishes: without
+	// this, the time this build step itself took (a real git/forge round trip, AGENTS.md §4.3)
+	// went uncounted against the operator's configured deadline, so the TUI's total wait could
+	// exceed poll.deadline even though the CLI path wraps build+drive under one ctx timeout
+	// (Copilot review).
+	deadlineAt time.Time
 }
 
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
@@ -196,23 +206,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		start, p, deadline := m.startPromotion, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
 		m.buildGen++
 		gen := m.buildGen
+		// deadlineAt is the one absolute instant this whole promotion's budget names, stamped
+		// here — before the build even starts — so the flight screen constructed below (once
+		// this build succeeds) can share it rather than starting a fresh poll.Deadline-length
+		// window of its own once the build finishes (promotionBuiltMsg's own doc comment).
+		var deadlineAt time.Time
+		if deadline > 0 {
+			deadlineAt = time.Now().Add(deadline)
+		}
 		return m, func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
 			// any conflicting promotion for this target env — so this runs off the
 			// Update call stack (AGENTS.md §4.3), exactly like plan.ResolveFunc's own
 			// loadCmd.
-			// Bounded by m.poll.Deadline, not left on context.Background() — the same
-			// reasoning as flight.Model.driveCmd's own bound: a single hung network
-			// call must not stall the plan screen forever with no way to cancel.
+			// Bounded by deadlineAt, not left on context.Background() — the same reasoning
+			// as flight.Model.driveCmd's own bound: a single hung network call must not
+			// stall the plan screen forever with no way to cancel.
 			ctx := context.Background()
-			if deadline > 0 {
+			if !deadlineAt.IsZero() {
 				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, deadline)
+				ctx, cancel = context.WithDeadline(ctx, deadlineAt)
 				defer cancel()
 			}
 			state, driveFn, err := start(ctx, p)
-			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err}
+			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
 		}
 	case promotionBuiltMsg:
 		if msg.gen != m.buildGen {
@@ -241,7 +259,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "promotion built with no error but no way to drive it (internal bug) — refusing to open a read-only flight screen"
 			return m, nil
 		}
-		fs := flightScreen{flight.New(msg.state, m.poll, msg.driveFn)}
+		// pollForFlight shares msg.deadlineAt's own absolute instant rather than handing
+		// flight.New the raw m.poll.Deadline it would otherwise recompute a fresh window
+		// from (time.Now() at THIS point, after the build already spent some of the
+		// budget) — Deadline becomes "however much of that instant is left", which is
+		// what actually keeps build+drive under one shared deadline, the same guarantee
+		// the CLI path gets for free from a single ctx.WithTimeout wrapping both.
+		pollForFlight := m.poll
+		if !msg.deadlineAt.IsZero() {
+			if remaining := time.Until(msg.deadlineAt); remaining > 0 {
+				pollForFlight.Deadline = remaining
+			} else {
+				// The build itself already consumed the whole budget (or overran it) —
+				// flight.New treats poll.Deadline <= 0 as "no deadline at all" (its own
+				// doc comment), which would be exactly backwards here: budget exhausted
+				// must fail fast, not grant a fresh unbounded window. A minimal positive
+				// duration keeps flight.New's own deadlineAt in the past (or effectively
+				// now), so the very first poll reports context.DeadlineExceeded instead.
+				pollForFlight.Deadline = time.Nanosecond
+			}
+		}
+		fs := flightScreen{flight.New(msg.state, pollForFlight, msg.driveFn)}
 		m = m.push(fs)
 		return m, fs.Init()
 	case flight.BackMsg:
