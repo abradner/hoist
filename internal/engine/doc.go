@@ -14,9 +14,12 @@ package engine
 // That gap — this package detecting the disagreement itself, before ever reaching Apply — is
 // closed one layer up: cmd/hoist's own runPromote calls checkCloneCurrentForBase right after
 // BuildPlan, unconditionally, comparing the clone's on-disk content (and what applying the
-// plan's own edits to it would produce) against --base's real current content, resolved the
-// same way pkg/git.Exec's own resolveBase resolves it for worktree creation (preferring
-// refs/remotes/origin/<base>). A mismatch on both comparisons refuses clearly, naming the file,
+// plan's own edits to it would produce) against --base's local remote-tracking content — this
+// check never fetches; it trusts refs/remotes/origin/<base> as last updated into this clone,
+// the same ref pkg/git.Exec's own resolveBase resolves for worktree creation, and the same
+// "as last fetched" limitation every other check in this codebase that reads a remote-tracking
+// ref without fetching first already carries. A mismatch on both comparisons refuses clearly,
+// naming the file,
 // before any worktree exists or any commit is attempted; a match against either — "the clone
 // agrees with base" or "base already carries exactly what this promotion would produce" (this
 // promotion's own prior push, on resume, or someone else reaching the identical end state) —

@@ -62,7 +62,7 @@ var (
 // ordinary, harmless direction: a local commit not yet pushed, or origin simply not yet fetched
 // into a clone that never needed to be), and per-file content is trusted exactly as before. Only
 // when origin's tip is NOT yet contained in local's history — origin has advanced independently
-// — does this function additionally compare each file against origin/base's real current blob;
+// — does this function additionally compare each file against origin/base's local remote-tracking blob (as last fetched into this clone, never fetched fresh by this check itself);
 // a mismatch there is refused unless it equals exactly what applying this promotion's own edits
 // to the clone's current content would produce (the resume-safety carve-out: that shape is this
 // exact promotion's own prior, successful direct-mode push, or any other route to the identical
@@ -142,7 +142,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		return fmt.Errorf("%s has uncommitted local changes not yet in %q for: %s — a plan built from that content can't be trusted; commit, stash or discard the local changes and re-run", cloneDir, base, strings.Join(dirty, ", "))
 	}
 	if len(stale) > 0 {
-		return fmt.Errorf("%s's local %q has fallen behind %s's real current content for: %s — likely a prior direct-mode promotion that moved %s without ever touching this checkout (AGENTS.md §4.6); update the clone (e.g. git fetch) and re-run", cloneDir, base, originRef, strings.Join(stale, ", "), originRef)
+		return fmt.Errorf("%s's local %q has fallen behind %s (as last fetched into this clone) for: %s — likely a prior direct-mode promotion that moved %s without ever touching this checkout (AGENTS.md §4.6); update the clone (e.g. git fetch) and re-run", cloneDir, base, originRef, strings.Join(stale, ", "), originRef)
 	}
 	return nil
 }
@@ -253,7 +253,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// gitops.Discover, above, read every occurrence's position and content from eff.repo's own
 	// disk — whatever was there at the moment this process started. Confirm that's still
-	// trustworthy relative to --base's real current content before trusting the plan built from
+	// trustworthy relative to --base's local remote-tracking content (as last fetched) before trusting the plan built from
 	// it at all: unconditionally, not only when the plan turns out all-no-op (checkNoOpAgainstBase's
 	// original, round-1 scope). A false "already current" from a stale no-op is this package's
 	// worst failure mode (nothing downstream calls gitops.Apply/Verify to catch it — no worktree
