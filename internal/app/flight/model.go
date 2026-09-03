@@ -283,6 +283,15 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 	// gets it too, matching how far the underlying promotion has actually progressed regardless
 	// of whether this particular poll ended cleanly.
 	m.state = msg.state
+	// m.done/m.rows are derived unconditionally too, before msg.err is classified — the same
+	// reasoning as m.state just above, extended: cmd/hoist/wiring.go's DriveFunc always calls
+	// engine.Status after engine.Drive regardless of whether Drive itself errored, so
+	// msg.statuses reflects the real, current step-by-step standing even on a failed poll.
+	// Before this fix, a failing poll left m.rows showing whatever the PREVIOUS successful
+	// poll (or the screen's own construction) had rendered — e.g. a PR already opened before a
+	// later step's Act failed would still show "PR: not yet opened" (PR #50 review, round 5).
+	m.done = msg.done
+	m.rows = DeriveRows(m.order, m.done, msg.statuses)
 	if msg.err != nil {
 		m.errNotice = redact.Strings(msg.err.Error())
 		if !retryableErr(msg.err) {
@@ -300,12 +309,20 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 			m.stopped = true
 			return m, nil
 		}
+		// A retryable error (the CIGreen/Approved transient-hiccup case) must clear m.stopped,
+		// not merely leave scheduleTick to fire: if this poll came from a manual R retry after
+		// an EARLIER, unrelated terminal stop (R bypasses the stopped gate — see its own
+		// comment above), m.stopped was still true from that prior stop, and the automatic
+		// tick this call schedules would immediately be suppressed by the same m.stopped gate
+		// (line ~229's busy||done||stopped||driveFn==nil check) the moment it fires — silently
+		// breaking automatic re-polling from here on, even though this particular error is
+		// exactly the transient kind that's supposed to keep retrying on its own (Copilot
+		// review, PR #50 round 5).
+		m.stopped = false
 		return m, m.scheduleTick()
 	}
 	m.errNotice = ""
 	m.stopped = false
-	m.done = msg.done
-	m.rows = DeriveRows(m.order, m.done, msg.statuses)
 	if m.done {
 		return m, nil
 	}
