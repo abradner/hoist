@@ -37,6 +37,12 @@ type PR struct {
 	Merged     bool
 	MergeSHA   string
 	CreatedAt  time.Time
+	// Closed is true for a PR someone closed WITHOUT merging (GitHub's own "state": "closed"
+	// with Merged still false) — a dead PR a merge call can never succeed against (a real 405).
+	// FindPR's query (state=all, so a renamed-branch/body-marker fallback can still find a
+	// promotion's own history) can return one of these, so a caller adopting a found PR must
+	// check this explicitly rather than assuming "found" means "usable."
+	Closed bool
 }
 
 // CheckSummary is the combined check-run AND commit-status rollup for one commit sha (GitHub

@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestFakeCreateThenFindByBranch(t *testing.T) {
@@ -62,6 +63,38 @@ func TestFakeRefusesSecondOpenPRForSameHead(t *testing.T) {
 	}
 	if len(f.PRs()) != 1 {
 		t.Fatalf("PRs() = %d, want exactly 1", len(f.PRs()))
+	}
+}
+
+// TestFakeCommentsSortsRegardlessOfAddOrder is round-9's regression: Comments' own doc comment
+// promises "oldest first", matching the real adaptor, but the implementation used to just
+// return whatever order AddComment calls happened to populate — a test adding comments
+// out-of-chronological-order (or a future concurrent AddComment) would silently get them back
+// unsorted, which could mask a real "last valid comment wins" bug at the ApprovedStep layer
+// (a fake that doesn't actually enforce ordering proves nothing about that logic).
+func TestFakeCommentsSortsRegardlessOfAddOrder(t *testing.T) {
+	f := &Fake{}
+	pr, err := f.CreatePR(context.Background(), PRSpec{Head: "hoist/env/abc", Base: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+	oldest := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	middle := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	// Added deliberately out of order: newest first, then oldest, then middle.
+	f.AddComment(pr.Number, Comment{ID: 3, Body: "newest", CreatedAt: newest})
+	f.AddComment(pr.Number, Comment{ID: 1, Body: "oldest", CreatedAt: oldest})
+	f.AddComment(pr.Number, Comment{ID: 2, Body: "middle", CreatedAt: middle})
+
+	got, err := f.Comments(context.Background(), pr.Number, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("Comments = %+v, want 3", got)
+	}
+	if got[0].Body != "oldest" || got[1].Body != "middle" || got[2].Body != "newest" {
+		t.Fatalf("Comments not sorted oldest-first despite being added out of order: %+v", got)
 	}
 }
 

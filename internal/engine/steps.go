@@ -367,6 +367,19 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 			pr.Number, s.Branch, pr.Base, s.Base,
 		)}, nil
 	}
+	if pr.Closed {
+		// Round-9 finding: FindPR's own state=all query can return a PR someone closed WITHOUT
+		// merging — adopting it as "found, therefore satisfied" would let CIGreen/Approved pass
+		// on a dead PR, then MergedStep's merge call 405s forever, with this promotion stuck
+		// "in flight" indefinitely (it never resolves to done, and findInFlight then refuses
+		// every later promotion to the same env). Block clearly instead — the same shape as the
+		// wrong-base case above — naming the closed PR so the operator can decide what to do
+		// (reopen it, or delete the branch/state and let a fresh promotion open a new one).
+		return Observation{Blocked: fmt.Sprintf(
+			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or delete this promotion's state file and re-run to open a fresh one",
+			pr.Number, s.Branch,
+		)}, nil
+	}
 	s.PR = &pr
 	return Observation{Satisfied: true, Detail: fmt.Sprintf("PR #%d already exists (%s)", pr.Number, pr.URL)}, nil
 }

@@ -81,6 +81,7 @@ type prResponse struct {
 	Number         int        `json:"number"`
 	HTMLURL        string     `json:"html_url"`
 	Body           string     `json:"body"`
+	State          string     `json:"state"`
 	Merged         bool       `json:"merged"`
 	MergedAt       *time.Time `json:"merged_at"`
 	MergeCommitSHA string     `json:"merge_commit_sha"`
@@ -95,15 +96,21 @@ type prResponse struct {
 }
 
 func toPR(r prResponse) forge.PR {
+	merged := r.Merged || r.MergedAt != nil
 	return forge.PR{
 		Number:     r.Number,
 		URL:        r.HTMLURL,
 		HeadBranch: r.Head.Ref,
 		HeadSHA:    r.Head.SHA,
 		Base:       r.Base.Ref,
-		Merged:     r.Merged || r.MergedAt != nil,
-		MergeSHA:   r.MergeCommitSHA,
-		CreatedAt:  r.CreatedAt,
+		Merged:     merged,
+		// Closed-without-merging: GitHub's "state" is "closed" but this PR never merged — a
+		// dead PR (round-9 finding: FindPR's own state=all query can return one of these, and a
+		// caller that adopts it as "found, therefore satisfied" would try to merge a PR whose
+		// merge call always 405s).
+		Closed:    r.State == "closed" && !merged,
+		MergeSHA:  r.MergeCommitSHA,
+		CreatedAt: r.CreatedAt,
 	}
 }
 

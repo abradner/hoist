@@ -370,6 +370,39 @@ func TestPROpenedStepRefusesPRWithWrongBase(t *testing.T) {
 	}
 }
 
+// TestPROpenedStepRefusesClosedUnmergedPR is round-9's regression: FindPR's own state=all
+// query can return a PR someone closed WITHOUT merging (e.g. by hand on GitHub) — adopting it
+// as "found, therefore satisfied" would let CIGreen/Approved pass on a dead PR, then
+// MergedStep's merge call 405 forever, with this promotion stuck in flight and findInFlight
+// refusing every later promotion to the same env.
+func TestPROpenedStepRefusesClosedUnmergedPR(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	f := &forge.Fake{}
+	step := PROpenedStep{Forge: f}
+
+	pr, err := f.CreatePR(ctx(), forge.PRSpec{Title: "x", Body: "x", Head: s.Branch, Base: s.Base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.SetClosed(pr.Number, true)
+
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("expected Blocked for a closed-unmerged PR, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, "closed") {
+		t.Fatalf("Blocked reason should name the closed state, got: %s", obs.Blocked)
+	}
+	if s.PR != nil {
+		t.Fatalf("a closed-unmerged PR must never be adopted onto s.PR, got %+v", s.PR)
+	}
+}
+
 func TestPushedStepRetryableNetworkBlip(t *testing.T) {
 	fx := newFixture(t)
 	wt := filepath.Join(t.TempDir(), "wt")

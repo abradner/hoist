@@ -160,6 +160,19 @@ func (f *Fake) Comments(_ context.Context, prNumber int, since time.Time) ([]Com
 			out = append(out, c)
 		}
 	}
+	// Sorted here rather than trusting caller insertion order: the doc comment above promises
+	// "oldest first", matching the real adaptor's own ordering, but a test populating
+	// CommentsByPR out of chronological order (or a future concurrent AddComment) would
+	// otherwise silently return them in whatever order they happened to land — this can mask a
+	// real "last valid comment wins" bug at the ApprovedStep layer, since a fake in the wrong
+	// order proves nothing about that logic's actual correctness. Tie-broken by ID, mirroring
+	// isNewerComment's own tie-break rule in internal/engine/steps_m4.go.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -256,6 +269,19 @@ func (f *Fake) SetBase(prNumber int, base string) {
 	for i := range f.prs {
 		if f.prs[i].Number == prNumber {
 			f.prs[i].Base = base
+			return
+		}
+	}
+}
+
+// SetClosed is the test-only hook standing in for an operator closing a PR on GitHub without
+// merging it (round-9 finding: PROpenedStep must refuse to adopt one of these as satisfied).
+func (f *Fake) SetClosed(prNumber int, closed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.prs {
+		if f.prs[i].Number == prNumber {
+			f.prs[i].Closed = closed
 			return
 		}
 	}
