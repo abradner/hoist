@@ -315,11 +315,22 @@ func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
-	if m.confirming {
-		return m.updateConfirm(msg)
-	}
+	// filtering keeps its own Esc handling (clears the filter, stays on this screen) — checked
+	// first, unaffected by the confirm fix below.
 	if m.filtering {
 		return m.updateFilter(msg)
+	}
+	// confirming previously fell straight into updateConfirm, which only ever handled Enter —
+	// Esc was silently swallowed by huh's own widget update, trapping the operator in the
+	// confirm dialog despite the status bar's own "esc back" hint (round-3 finding). Checked
+	// here, before updateConfirm, so Esc actually leaves — matching how a key press this
+	// screen doesn't otherwise special-case already falls through to Back below.
+	if m.confirming {
+		if key.Matches(msg, m.keys.Back) {
+			m.confirming = false
+			return m, func() tea.Msg { return BackMsg{} }
+		}
+		return m.updateConfirm(msg)
 	}
 	if key.Matches(msg, m.keys.Back) {
 		return m, func() tea.Msg { return BackMsg{} }

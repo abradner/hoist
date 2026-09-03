@@ -431,6 +431,29 @@ func TestDirectConfirmDeclineEmitsNothing(t *testing.T) {
 	}
 }
 
+// TestEscDuringConfirmEmitsBackMsg is round-6's regression: the status bar advertises "esc
+// back" even while the direct-mode confirm dialog is open, but updateConfirm only ever
+// special-cased Enter — Esc fell straight into huh's own widget update and was silently
+// swallowed, trapping the operator in the confirm dialog with no way out via the advertised
+// key.
+func TestEscDuringConfirmEmitsBackMsg(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	if !m.confirming {
+		t.Fatal("D on a non-production target should open the confirm dialog")
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd == nil {
+		t.Fatal("expected a command for Esc while confirming")
+	}
+	if _, ok := cmd().(BackMsg); !ok {
+		t.Fatalf("got %T, want BackMsg", cmd())
+	}
+	if m.confirming {
+		t.Fatal("confirming should be cleared once Esc is handled")
+	}
+}
+
 func TestEscEmitsBackMsg(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
