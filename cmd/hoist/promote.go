@@ -38,38 +38,45 @@ var (
 
 // checkCloneCurrentForBase confirms, for every distinct file the plan's edits reference, that
 // planning against the clone's (cloneDir's) on-disk content — exactly what gitops.Discover and
-// BuildPlan already read, above, to build this plan — is still trustworthy. Two independent
-// questions, both about content this package cannot repair directly (AGENTS.md §4.6 forbids
-// ever bringing cloneDir's own checked-out files up to date via `git reset --hard`/`merge
-// --ff-only` — that would touch "the user's own checked-out branch, working tree or index" even
-// when that checkout happens to be on base itself — so a mismatch is only ever refused, never
-// silently fixed):
+// BuildPlan already read, above, to build this plan — still matches what a brand-new
+// promotion's worktree will actually be built from. Two independent questions, neither of which
+// this package can repair directly (AGENTS.md §4.6 forbids ever bringing cloneDir's own
+// checked-out files up to date via `git reset --hard`/`merge --ff-only` — that would touch "the
+// user's own checked-out branch, working tree or index" even when that checkout happens to be on
+// base itself — so a mismatch is only ever refused, never silently fixed):
 //
-//  1. Is cloneDir's disk clean relative to what it has actually committed on base? (This check's
-//     original, round-1 scope: an uncommitted local edit means the plan was built from content
-//     nothing else will ever see.)
-//  2. Has cloneDir's own local base branch fallen behind origin/base without either side
-//     noticing? This is finding 1's own gap: direct mode (AGENTS.md M6) advances
-//     refs/remotes/origin/<base> without ever touching cloneDir's own checked-out branch — so a
-//     clone that looks perfectly clean against its own local base can still be planning against
-//     content a prior direct-mode promotion (to this same file, from anywhere) has since moved
-//     past.
+//  1. Is cloneDir's disk clean relative to what its local base branch has actually committed?
+//     (This check's original, round-1 scope: an uncommitted local edit means the plan was built
+//     from content nothing in git — local or origin — has ever recorded.)
+//  2. Does the local base branch's own committed content agree with origin/<base>'s CURRENT
+//     tip — fetched fresh by this function itself, first, via the same git.Git.FetchBranch
+//     direct mode's own publish step already calls? A stale remote-tracking ref used to be this
+//     function's own gap (round 5, finding 1: nothing ever fetched before this ran, so
+//     "as last fetched" was unbounded staleness, not a documented limitation) — closed here by
+//     never trusting a cached ref at all.
 //
-// Question 2 is answered directionally, not by blob equality alone: IsAncestor tells whether
-// origin/base's tip is already contained in local base's history. When it is — local is caught
-// up with, or ahead of, everything origin currently shows — a difference is never a sign of
-// missed drift, only of something local knows about that hasn't been pushed outward yet (an
-// ordinary, harmless direction: a local commit not yet pushed, or origin simply not yet fetched
-// into a clone that never needed to be), and per-file content is trusted exactly as before. Only
-// when origin's tip is NOT yet contained in local's history — origin has advanced independently
-// — does this function additionally compare each file against origin/base's local remote-tracking blob (as last fetched into this clone, never fetched fresh by this check itself);
-// a mismatch there is refused unless it equals exactly what applying this promotion's own edits
-// to the clone's current content would produce (the resume-safety carve-out: that shape is this
-// exact promotion's own prior, successful direct-mode push, or any other route to the identical
-// end state — not foreign drift — and Drive's own re-observation, AGENTS.md §4.1, is what
-// correctly reports it done rather than this function refusing a legitimate resume).
+// Question 2 runs unconditionally, never gated by which side is "ahead": pkg/git.Exec.Worktree's
+// own resolveBase prefers origin/<base> over the local branch of the same name whenever that ref
+// exists, full stop — it does not care whether local is behind, caught up, or itself ahead with
+// an unpushed commit. A previous revision of this function trusted local's bytes whenever local
+// was ahead of (or equal to) origin, which was exactly backwards (round 5, finding 2): an
+// unpushed local commit changing a planned file is just as untrustworthy as origin having moved
+// independently, because the worktree this promotion actually commits into is seeded from origin,
+// not from that unpushed local content, regardless. A mismatch is refused unless it equals
+// exactly what applying this promotion's own edits to the clone's current content would produce
+// (the resume-safety carve-out: that shape is this exact promotion's own prior, successful
+// direct-mode push, or any other route to the identical end state — not foreign drift — and
+// Drive's own re-observation, AGENTS.md §4.1, is what correctly reports it done rather than this
+// function refusing a legitimate resume).
 func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
-	localSHA, localOK, err := g.RevParse(ctx, cloneDir, base)
+	if err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
+		return fmt.Errorf("fetching origin/%s to confirm the clone is current: %w", base, err)
+	}
+
+	// localOK is deliberately ignored: base's own local branch not resolving at all is caught
+	// per-file below (LsTreeBlob against base fails, which the dirty bucket already treats as
+	// untrustworthy) — nothing here needs it as a bool in its own right.
+	localSHA, _, err := g.RevParse(ctx, cloneDir, base)
 	if err != nil {
 		return err
 	}
@@ -78,13 +85,13 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	if err != nil {
 		return err
 	}
-	originAhead := false
-	if localOK && originOK && localSHA != originSHA {
-		caughtUp, err := g.IsAncestor(ctx, cloneDir, originSHA, localSHA)
-		if err != nil {
-			return err
-		}
-		originAhead = !caughtUp
+	// targetRef is exactly what pkg/git.Exec.Worktree's own resolveBase would build a brand-new
+	// promotion branch from: origin/<base> whenever that ref exists at all — the bare local
+	// branch name only when there is none to prefer (no "origin" remote configured, or nothing
+	// ever fetched from it — some tests construct exactly that; resolveBase's own fallback).
+	targetRef, targetSHA := base, localSHA
+	if originOK {
+		targetRef, targetSHA = originRef, originSHA
 	}
 
 	byFile := map[string][]gitops.Edit{}
@@ -117,10 +124,17 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		}
 		if !ok || curBlob != localBlob {
 			dirty = append(dirty, f)
-			continue // already refusing this file; no need to also check it against origin.
+			continue // already refusing this file; no need to also check it against the target.
 		}
-		if !originAhead {
-			continue
+		if targetRef == base {
+			continue // no origin/<base> ref exists at all: the local branch IS the target.
+		}
+		targetBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, targetRef, f)
+		if err != nil {
+			return err
+		}
+		if ok && targetBlob == curBlob {
+			continue // local already matches what the worktree will actually be built from.
 		}
 		after, err := gitops.ApplyBytes(cur, byFile[f])
 		if err != nil {
@@ -130,11 +144,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		if err != nil {
 			return err
 		}
-		originBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, originRef, f)
-		if err != nil {
-			return err
-		}
-		if !ok || (originBlob != curBlob && originBlob != afterBlob) {
+		if !ok || targetBlob != afterBlob {
 			stale = append(stale, f)
 		}
 	}
@@ -142,9 +152,26 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		return fmt.Errorf("%s has uncommitted local changes not yet in %q for: %s — a plan built from that content can't be trusted; commit, stash or discard the local changes and re-run", cloneDir, base, strings.Join(dirty, ", "))
 	}
 	if len(stale) > 0 {
-		return fmt.Errorf("%s's local %q has fallen behind %s (as last fetched into this clone) for: %s — likely a prior direct-mode promotion that moved %s without ever touching this checkout (AGENTS.md §4.6); update the clone (e.g. git fetch) and re-run", cloneDir, base, originRef, strings.Join(stale, ", "), originRef)
+		// Deliberately one neutral phrasing regardless of which side is "ahead": a directional
+		// word ("fallen behind", "has an unpushed commit") would be wrong exactly when local and
+		// origin have each moved independently (a real divergence, not a simple lead/lag) — this
+		// question no longer cares which direction the mismatch runs, only that it exists, so
+		// the message doesn't claim a direction the mechanism itself doesn't distinguish.
+		return fmt.Errorf(
+			"%s's local %q (%s) disagrees with %s (%s) — which is what a new promotion's worktree is actually built from — for: %s; reconcile (fetch/push as appropriate) and re-run",
+			cloneDir, base, shortRev(localSHA), targetRef, shortRev(targetSHA), strings.Join(stale, ", "),
+		)
 	}
 	return nil
+}
+
+// shortRev truncates a commit sha for a readable error message; used only for display.
+func shortRev(sha string) string {
+	const n = 12
+	if len(sha) > n {
+		return sha[:n]
+	}
+	return sha
 }
 
 func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
@@ -253,12 +280,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// gitops.Discover, above, read every occurrence's position and content from eff.repo's own
 	// disk — whatever was there at the moment this process started. Confirm that's still
-	// trustworthy relative to --base's local remote-tracking content (as last fetched) before trusting the plan built from
-	// it at all: unconditionally, not only when the plan turns out all-no-op (checkNoOpAgainstBase's
-	// original, round-1 scope). A false "already current" from a stale no-op is this package's
-	// worst failure mode (nothing downstream calls gitops.Apply/Verify to catch it — no worktree
-	// exists yet on that path); a real edit built from stale content deserves this clearer,
-	// earlier answer too, rather than only a confusing verification failure deep in the engine.
+	// trustworthy relative to --base's origin tip — fetched fresh by checkCloneCurrentForBase
+	// itself, never a cached ref — before trusting the plan built from it at all: unconditionally,
+	// not only when the plan turns out all-no-op (checkNoOpAgainstBase's original, round-1
+	// scope). A false "already current" from a stale no-op is this package's worst failure mode
+	// (nothing downstream calls gitops.Apply/Verify to catch it — no worktree exists yet on that
+	// path); a real edit built from stale content deserves this clearer, earlier answer too,
+	// rather than only a confusing verification failure deep in the engine.
 	if err := checkCloneCurrentForBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure

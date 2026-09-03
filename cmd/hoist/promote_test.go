@@ -329,15 +329,18 @@ func TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
 
 // TestPromoteNothingToDoIsANoOp exercises runPromote's own "every edit is already a no-op"
 // guard directly: after the first promotion's PR is merged conceptually (here: after the
-// content already matches, committed so the clone is clean relative to --base), promoting the
-// same pair again with the same source content must report success without touching git or
-// the forge at all.
+// content already matches, committed AND PUSHED so the clone agrees with origin/main — a real
+// merge advances origin, not just the local checkout, and checkCloneCurrentForBase now compares
+// against a freshly-fetched origin/<base> unconditionally, so this simulation must actually push
+// to be honest), promoting the same pair again with the same source content must report success
+// without touching git or the forge at all.
 func TestPromoteNothingToDoIsANoOp(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	// Make app-production already match app-staging directly on the clone (simulating the PR
-	// having merged), bypassing the engine entirely. Commit it — the honest no-op case is
-	// "already current AND the clone is clean", never an uncommitted local edit (that's
-	// TestPromoteNoOpRefusesDirtyClone below).
+	// having merged), bypassing the engine entirely. Commit AND push it — the honest no-op case
+	// is "already current AND the clone agrees with origin", never an uncommitted local edit
+	// (that's TestPromoteNoOpRefusesDirtyClone below) nor an unpushed local-only commit (that
+	// would be finding 2's own stale case, TestPromoteRefusesUnpushedLocalCommitAheadOfOrigin).
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
 	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
@@ -346,6 +349,7 @@ func TestPromoteNothingToDoIsANoOp(t *testing.T) {
 	}
 	runGitHost(t, clone, "add", ".")
 	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+	runGitHost(t, clone, "push", "-q", "origin", "main")
 
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
 	var out, errOut bytes.Buffer
@@ -493,11 +497,170 @@ func TestPromoteSecondDirectPromotionSeesFirstsPushedContent(t *testing.T) {
 	if strings.Contains(out.String(), "already current") {
 		t.Fatalf("must never report false success against stale content: %s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "fallen behind") || !strings.Contains(errOut.String(), prodPath) {
+	if !strings.Contains(errOut.String(), "disagrees with") || !strings.Contains(errOut.String(), prodPath) {
 		t.Fatalf("stderr should name the stale file and explain why: %s", errOut.String())
 	}
 	if len(f.PRs()) != 0 {
 		t.Fatalf("no PR should ever be involved in direct mode: %+v", f.PRs())
+	}
+}
+
+// originURL reads the "origin" remote's URL out of a git dir — used by tests that need to reach
+// origin directly (a second, independent clone) without hoist itself ever touching it.
+func originURL(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git remote get-url origin: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestPromoteFetchesOriginFreshBeforeTrustingClone is round 5's finding 1 regression test:
+// checkCloneCurrentForBase used to trust cloneDir's own refs/remotes/origin/<base> exactly as it
+// stood since the initial `git clone` — never fetching it fresh itself — so origin advancing via
+// any route OTHER than a prior hoist-driven promotion (which happened to fetch as a side effect
+// of its own direct-mode push) went entirely undetected. Here a second, independent clone of the
+// SAME origin pushes directly — no hoist command, no fetch, ever touches the primary clone in
+// between — and the primary clone's own cached remote-tracking ref is left exactly as stale as
+// the day it was cloned. Only this function's own fresh fetch can catch it.
+//
+// Mutant-verified: removing the g.FetchBranch call at the top of checkCloneCurrentForBase makes
+// this test fail — the promotion proceeds (wrongly reporting a branch/PR) instead of refusing,
+// because the cached ref still agrees with the clone's own untouched local content.
+func TestPromoteFetchesOriginFreshBeforeTrustingClone(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	origin := originURL(t, clone)
+
+	// A second clone — standing in for a colleague, or any other route to origin that isn't
+	// this hoist invocation — pushes a change to the very file this promotion will touch,
+	// entirely independent of, and unobserved by, the primary clone.
+	second := filepath.Join(t.TempDir(), "second-clone")
+	runGitHost(t, "", "clone", "-q", origin, second)
+	digestAdvanced := "sha256:" + strings.Repeat("3", 64)
+	prodPath := "cluster/apps/app-production/app/deployment.yaml"
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v9@" + digestAdvanced + "\n"
+	if err := os.WriteFile(filepath.Join(second, prodPath), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, second, "add", ".")
+	runGitHost(t, second, "commit", "-q", "-m", "someone else advances origin directly")
+	runGitHost(t, second, "push", "-q", "origin", "main")
+
+	// The primary clone's own cached refs/remotes/origin/main is untouched — nothing here has
+	// fetched it since newPromoteFixture's own initial clone.
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit refusing content the fresh fetch should have caught, got 0; stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must never report false success against content only a fresh fetch reveals: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), prodPath) {
+		t.Fatalf("stderr should name the file the second clone advanced: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
+
+// TestPromoteRefusesUnpushedLocalCommitAheadOfOrigin is round 5's finding 2 regression test: the
+// clone's local main branch carries a commit changing the production file that origin does NOT
+// have (an ordinary unpushed local commit — no direct-mode promotion involved at all). The
+// previous checkCloneCurrentForBase trusted local's bytes whenever local was ahead of (or equal
+// to) origin, unconditionally — but pkg/git.Exec.Worktree's own resolveBase prefers origin/<base>
+// over the local branch whenever that ref exists, regardless of which side is ahead, so the
+// worktree a real promotion would actually commit into is seeded from origin — which does not
+// have this unpushed change. Planning from local's ahead-of-origin bytes is exactly the mismatch
+// this check exists to catch.
+//
+// Mutant-verified: reintroducing the old "local is ahead/caught up, trust its bytes
+// unconditionally" branch makes this test fail — the promotion proceeds (or fails later with a
+// confusing gitops.Apply mismatch) instead of refusing clearly up front.
+func TestPromoteRefusesUnpushedLocalCommitAheadOfOrigin(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	prodPath := "cluster/apps/app-production/app/deployment.yaml"
+	digestLocalAhead := "sha256:" + strings.Repeat("4", 64)
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v9@" + digestLocalAhead + "\n"
+	if err := os.WriteFile(filepath.Join(clone, prodPath), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "an ordinary unpushed local commit")
+	// Deliberately never pushed: origin/main still shows the fixture's original digest.
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	got := run(args, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected a non-zero exit refusing to plan from an unpushed local-ahead commit, got 0; stdout: %s", out.String())
+	}
+	if strings.Contains(out.String(), "already current") {
+		t.Fatalf("must never report false success while local is ahead of origin on the planned file: %s", out.String())
+	}
+	// The refusal must come from checkCloneCurrentForBase itself, up front — not from a worktree
+	// ever being created and gitops.Apply discovering the mismatch three steps later. The two
+	// are distinguishable: only checkCloneCurrentForBase's own message names the file alongside
+	// "disagrees with ... worktree is actually built from"; engine.CommittedStep's Apply failure
+	// instead says "the file changed after the plan was built" and no branch/worktree name ever
+	// should have been derived at all.
+	if !strings.Contains(errOut.String(), prodPath) || !strings.Contains(errOut.String(), "disagrees with") {
+		t.Fatalf("stderr should be checkCloneCurrentForBase's own clear, up-front refusal naming the file: %s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "changed after the plan was built") {
+		t.Fatalf("must refuse before ever reaching gitops.Apply, not rely on its downstream mismatch error: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
+
+// TestPromoteDirectResumeRecognizesOwnPriorPush is the resume-safety carve-out's own regression
+// test at the cmd/hoist level (the carve-out's mechanism moved with round 5's redesign, but the
+// property it protects — a killed-and-resumed direct-mode promotion recognizing its own prior
+// success rather than refusing itself as foreign drift — must still hold): running the identical
+// direct-mode promotion twice must succeed both times and never push a second, redundant commit.
+// cloneDir's own disk is never advanced by direct mode (it only ever moves origin/<base>), so the
+// second run's plan is built from the same "stale" disk content as the first — the carve-out is
+// exactly what recognizes that applying this promotion's own edits to that content reproduces
+// origin's current tip exactly, rather than mistaking it for someone else's drift.
+func TestPromoteDirectResumeRecognizesOwnPriorPush(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}
+
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("first direct promotion: exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+
+	var g git.Exec
+	sha1, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("origin/main should exist after the first push: ok=%v err=%v", ok, err)
+	}
+
+	// Re-running the identical promotion — simulating a killed-and-resumed process, or simply a
+	// re-invocation after the fact — must recognize origin/main already carries exactly this
+	// promotion's own content, not refuse it as foreign drift, and must not push a second,
+	// redundant commit.
+	out.Reset()
+	errOut.Reset()
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("resumed direct promotion: exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(out.String(), "pushed straight to main (direct mode, no PR)") {
+		t.Fatalf("resumed run should report the same direct-mode outcome: %s", out.String())
+	}
+	sha2, ok, err := g.LsRemoteBranch(context.Background(), clone, "origin", "main")
+	if err != nil || !ok || sha2 != sha1 {
+		t.Fatalf("resumed run should not move origin/main again: %s -> %s (ok=%v err=%v)", sha1, sha2, ok, err)
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("direct mode must never open a PR, got %+v", f.PRs())
 	}
 }
 
