@@ -1,11 +1,15 @@
 package app
 
 import (
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -23,6 +27,15 @@ type Model struct {
 	promotable []string
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
+
+	// notice is a transient, root-level message shown below the top screen — currently only
+	// used for flight.OpenPRMsg/AbortMsg (see their cases in Update): neither has a real
+	// handler wired in yet (cmd/hoist's own URL-opener and abort mechanism are documented
+	// follow-up work, per PR #39's own report), so this is the "don't silently drop it"
+	// feedback until that wiring lands (PR #39 review finding #1). Cleared on the next
+	// keypress, mirroring every screen's own per-keypress notice convention (matrix.Model,
+	// plan.Model, flight.Model all clear theirs the same way).
+	notice string
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -63,6 +76,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.styles = ui.NewStyles(msg.IsDark())
 		return m.each(func(s Screen) Screen { return s.SetStyles(m.styles) }), nil
 	case tea.KeyPressMsg:
+		m.notice = ""
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -77,6 +91,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, ps.Init()
 	case plan.BackMsg:
 		return m.pop(), nil
+	case plan.StartMsg:
+		// internal/app has no repoFullName (RepoConfig.GitHub), CI/approval policy,
+		// CloneDir/WorktreeDir/Base, or concrete git.Git/forge.Forge adaptor to build a
+		// real engine.PromotionState or flight.DriveFunc from here — cmd/hoist owns wiring
+		// that in (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule; see
+		// internal/engine/identity.go's DeriveID, template.go's RenderPRBody/
+		// RenderCommitMessage, and cmd/hoist/promote.go for what building the real thing
+		// actually takes). This pushes the flight screen with only what StartMsg carries
+		// and a nil DriveFunc, so it renders read-only (every step "not yet reached", no
+		// ticking) until that wiring lands — proving the navigation shape without
+		// fabricating an ID or branch name this package cannot derive correctly.
+		fs := flightScreen{flight.New(engine.PromotionState{
+			SourceEnv: msg.Source,
+			TargetEnv: msg.Target,
+		}, config.PollConfig{}, nil)}
+		m = m.push(fs)
+		return m, fs.Init()
+	case flight.BackMsg:
+		return m.pop(), nil
+	case flight.OpenPRMsg:
+		// cmd/hoist has not wired a real "open this URL in the operator's browser"
+		// mechanism into internal/app yet (documented follow-up work, per PR #39's own
+		// report) — until it does, silently dropping this message would make the o key
+		// look like it did nothing. Surface the URL instead (PR #39 review finding #1).
+		m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
+		return m, nil
+	case flight.AbortMsg:
+		// Same principle as OpenPRMsg above: no real abort mechanism (closing the PR,
+		// deleting the branch) is wired in yet, so surface a clear notice rather than
+		// silently eating the x keypress (PR #39 review finding #1). flight.Model itself
+		// now refuses to emit this message at all for an empty/read-only promotion (finding
+		// #2), so msg.ID here is always a real, non-empty id.
+		m.notice = fmt.Sprintf("abort not wired yet for promotion %s", msg.ID)
+		return m, nil
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -89,11 +137,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the top screen in the alternate screen buffer.
+// View renders the top screen in the alternate screen buffer, with the root's own transient
+// notice (see Model.notice) appended below it when one is set.
 func (m Model) View() tea.View {
 	content := ""
 	if n := len(m.stack); n > 0 {
 		content = m.stack[n-1].View()
+	}
+	if m.notice != "" {
+		content += "\n" + m.styles.Notice.Render(m.notice)
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true

@@ -12,7 +12,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
+	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -158,6 +160,94 @@ func TestPromotePushesPlanScreen(t *testing.T) {
 	m, _ = m.Update(backCmd())
 	if n := len(m.(Model).stack); n != 1 {
 		t.Errorf("esc did not pop back to the matrix: stack has %d screens", n)
+	}
+}
+
+// TestStartMsgPushesFlightScreen: plan.StartMsg (emitted when the operator confirms a plan)
+// pushes internal/app/flight on top of whatever screen sent it. internal/app has no
+// repoFullName, CI/approval policy, or git.Git/forge.Forge adaptor to build a real
+// engine.PromotionState or flight.DriveFunc from yet (see app.go's own comment on this
+// handler) — this only proves the navigation wiring: the flight screen renders read-only
+// (every step not-yet-reached, R shows the read-only notice) and esc (flight.BackMsg) pops
+// it back. The pushed screen's Init() is nil here: a nil driveFn (this stub's own shape)
+// means there is nothing to animate or observe, so Init correctly returns nil rather than
+// starting a spinner tick chain with nothing ever busy to render it (PR #39 review finding
+// #5) — this is not "the push produced no command", it's the read-only screen correctly
+// having nothing to do at start.
+func TestStartMsgPushesFlightScreen(t *testing.T) {
+	m := sized(t)
+	msg := plan.StartMsg{Source: "app-staging", Target: "app-production"}
+	tm, cmd := m.Update(msg)
+	m = tm
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after StartMsg, want 2", n)
+	}
+	if cmd != nil {
+		t.Errorf("StartMsg's push produced a command for a read-only (nil driveFn) flight screen, want nil: %#v", cmd())
+	}
+	if v := plain(m); !strings.Contains(v, "app-staging -> app-production") {
+		t.Errorf("flight screen view missing the envs:\n%s", v)
+	}
+
+	m, rCmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if rCmd != nil {
+		t.Error("R on a read-only (nil driveFn) flight screen produced a command")
+	}
+	if v := plain(m); !strings.Contains(v, "nothing to re-observe") {
+		t.Errorf("flight screen missing the read-only notice after R:\n%s", v)
+	}
+
+	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd == nil {
+		t.Fatal("esc on the flight screen produced no command")
+	}
+	if _, ok := backCmd().(flight.BackMsg); !ok {
+		t.Fatalf("esc's command yields %T, want flight.BackMsg", backCmd())
+	}
+	m, _ = m.Update(backCmd())
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("esc did not pop the flight screen: stack has %d screens", n)
+	}
+}
+
+// TestFlightOpenPRMsgShowsNotice: PR #39 review finding #1 — the root previously dropped
+// flight.OpenPRMsg silently (no case in Update at all), so pressing o did nothing visible
+// once cmd/hoist eventually wires a real DriveFunc in. Until a real URL-opener is wired in,
+// the root must show a visible notice naming the URL instead of a silent no-op.
+func TestFlightOpenPRMsgShowsNotice(t *testing.T) {
+	m := sized(t)
+	m, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if cmd != nil {
+		t.Error("OpenPRMsg produced a command")
+	}
+	if v := plain(m); !strings.Contains(v, "https://example.invalid/pr/1") {
+		t.Errorf("view missing the open-PR notice:\n%s", v)
+	}
+}
+
+// TestFlightAbortMsgShowsNotice mirrors TestFlightOpenPRMsgShowsNotice for x/AbortMsg.
+func TestFlightAbortMsgShowsNotice(t *testing.T) {
+	m := sized(t)
+	m, cmd := m.Update(flight.AbortMsg{ID: "abcd1234"})
+	if cmd != nil {
+		t.Error("AbortMsg produced a command")
+	}
+	if v := plain(m); !strings.Contains(v, "abcd1234") {
+		t.Errorf("view missing the abort notice:\n%s", v)
+	}
+}
+
+// TestRootNoticeClearsOnNextKeypress: the root's own notice is transient, same convention as
+// every screen's own notice field — it should not linger forever once the operator moves on.
+func TestRootNoticeClearsOnNextKeypress(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if !strings.Contains(plain(m), "not wired yet") {
+		t.Fatal("setup: notice not shown after OpenPRMsg")
+	}
+	m, _ = press(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if strings.Contains(plain(m), "not wired yet") {
+		t.Error("root notice still shown after a later keypress")
 	}
 }
 

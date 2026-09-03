@@ -86,6 +86,26 @@ const (
 // type in its own Update switch — screens still never import app (AGENTS.md §4.8).
 type BackMsg struct{}
 
+// StartMsg is emitted when the operator confirms this plan (Enter, in stateReady) —
+// whichever ticked repos are selected should now start driving as a promotion. It carries
+// plan-shaped data only: this package has no repoFullName (RepoConfig.GitHub), no CI/
+// approval policy, and no git.Git/forge.Forge adaptor to build a real
+// engine.PromotionState or a flight.DriveFunc from (AGENTS.md §4.3/§4.8 — a screen never
+// imports those adaptor packages). The root recognizes StartMsg by concrete type
+// (AGENTS.md §4.8) and pushes internal/app/flight; see internal/app/app.go's own handler
+// for exactly what it can and cannot build yet, and internal/engine/identity.go
+// (DeriveID) and template.go (RenderPRBody, RenderCommitMessage) for what a real
+// PromotionState needs beyond what StartMsg carries here.
+type StartMsg struct {
+	Plan    gitops.Plan
+	Outcome ResolveOutcome
+	Mode    string
+	// Ticked is the repo set the operator selected in the multiSelect, unmodified — the
+	// same set recomputeDiff already filters Plan.Edits by.
+	Ticked         []string
+	Source, Target string
+}
+
 // loadedMsg is delivered once the async discovery+resolution+BuildPlan cmd finishes.
 type loadedMsg struct {
 	plan    gitops.Plan
@@ -324,8 +344,15 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	m.notice = ""
 	switch {
 	case key.Matches(kmsg, m.keys.Enter):
-		m.notice = "promotion lands in M3"
-		return m, nil
+		if len(m.ticked) == 0 {
+			m.notice = "nothing ticked to promote"
+			return m, nil
+		}
+		ticked := append([]string(nil), m.ticked...)
+		plan, outcome, mode, source, target := m.plan, m.outcome, m.mode, m.source, m.target
+		return m, func() tea.Msg {
+			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target}
+		}
 	case key.Matches(kmsg, m.keys.Mode):
 		if IsProduction(m.target, m.envs) {
 			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env (AGENTS.md §4.5)", m.target)

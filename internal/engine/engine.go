@@ -208,6 +208,73 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 	return true, last, nil
 }
 
+// Status is ObserveAll's sibling for a caller that needs to render every step's own
+// standing, not only the stopping point: the internal/app/flight screen's step list (glyph
+// per step, detail on whichever one is active) needs a StepStatus for each step already
+// passed as well as the one it stopped at, which ObserveAll's single "last" return cannot
+// carry. Status shares ObserveAll's two rules verbatim — the final-step short-circuit (see
+// ObserveAll's doc comment: MergedStep's own Observe is self-contained proof the whole
+// promotion finished, since PushedStep's Observe would otherwise falsely read as stuck once
+// Merged's own Act has deleted the branch it depends on) and the stopping rule (the first
+// step that is not cleanly Satisfied ends the walk) — only the shape of what is returned
+// differs: statuses accumulates one entry per step actually observed, in order, rather than
+// discarding every entry but the last.
+//
+// When the short-circuit fires, statuses is the single-element slice {final step's own
+// StepStatus} — deliberately not one entry per step, since re-observing every earlier step
+// individually is exactly what the short-circuit exists to avoid (an already-merged,
+// already-cleaned-up promotion would read PushedStep's Observe as false: the branch it
+// checks is gone). A caller rendering a fully done list (done == true) should treat every
+// step as done regardless of how many entries statuses carries, using the final entry only
+// for its Detail — see flight.DeriveRows.
+//
+// Otherwise, statuses holds exactly the steps Status reached: every entry before the last is
+// Satisfied (the walk only continues past a step that cleanly is), and the last entry is
+// the one Status stopped at — Blocked, Waiting, or plainly not yet Satisfied. A step whose
+// name never appears in statuses has not been reached at all this call. The short-circuit
+// probe above already called Observe once on the final step before the walk started
+// (needed to even know whether to short-circuit); when the walk isn't short-circuited it
+// reaches that same final step again in its own turn, but reuses the probe's Observation
+// there rather than calling Observe a second time — every poll that isn't yet fully done
+// would otherwise cost one extra, wasted remote call on the final step, every tick of the
+// flight screen's own poll loop (PR #39 review finding #3).
+func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
+	var finalProbe *StepStatus
+	if n := len(steps); n > 0 {
+		final := steps[n-1]
+		obs, oerr := final.Observe(ctx, s)
+		if oerr != nil {
+			return false, nil, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+		}
+		if obs.Satisfied {
+			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
+		}
+		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
+	}
+	for i, step := range steps {
+		if cerr := ctx.Err(); cerr != nil {
+			return false, statuses, cerr
+		}
+		var st StepStatus
+		if finalProbe != nil && i == len(steps)-1 {
+			// Same step the short-circuit probe already observed above; reuse that
+			// Observation instead of calling Observe on it again.
+			st = *finalProbe
+		} else {
+			obs, oerr := step.Observe(ctx, s)
+			if oerr != nil {
+				return false, statuses, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+			}
+			st = StepStatus{Step: step.Name(), Observation: obs}
+		}
+		statuses = append(statuses, st)
+		if st.Blocked != "" || st.Waiting || !st.Satisfied {
+			return false, statuses, nil
+		}
+	}
+	return true, statuses, nil
+}
+
 // appendHistory is the one place a HistoryEntry.Detail is ever written, and therefore the
 // last boundary before it is persisted to the state file on disk (SaveState marshals History
 // verbatim). A step's Act error can embed a registered credential verbatim — pkg/git's own

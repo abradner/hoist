@@ -285,6 +285,53 @@ func TestEscReturnsToMatrix(t *testing.T) {
 	}
 }
 
+// TestEnterEmitsStartMsg: confirming a plan with at least one ticked repo emits StartMsg
+// naming the plan, outcome, mode, ticked set and envs — the root's cue to push
+// internal/app/flight (AGENTS.md §4.8: a screen requests navigation by emitting its own
+// concrete type).
+func TestEnterEmitsStartMsg(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if len(m.ticked) == 0 {
+		t.Fatal("setup: fixture produced no tickable rows")
+	}
+	wantTicked := append([]string(nil), m.ticked...)
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter produced no command")
+	}
+	msg, ok := cmd().(StartMsg)
+	if !ok {
+		t.Fatalf("enter's command yields %T, want StartMsg", cmd())
+	}
+	if msg.Source != "app-staging" || msg.Target != "app-production" {
+		t.Errorf("StartMsg source/target = %s/%s, want app-staging/app-production", msg.Source, msg.Target)
+	}
+	if msg.Mode != ModePR {
+		t.Errorf("StartMsg.Mode = %q, want %q", msg.Mode, ModePR)
+	}
+	if !equalSets(msg.Ticked, wantTicked) {
+		t.Errorf("StartMsg.Ticked = %v, want %v", msg.Ticked, wantTicked)
+	}
+	if len(msg.Plan.Edits) == 0 {
+		t.Error("StartMsg.Plan carries no edits")
+	}
+}
+
+// TestEnterWithNothingTickedShowsNotice: unticking every row and pressing enter must not
+// emit StartMsg for an empty promotion — it shows a notice instead.
+func TestEnterWithNothingTickedShowsNotice(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m.ticked = nil
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("enter with nothing ticked produced a command: %v", cmd())
+	}
+	if !strings.Contains(m.notice, "nothing ticked") {
+		t.Errorf("notice = %q, want it to mention nothing ticked", m.notice)
+	}
+}
+
 // TestSkipStagingWarning: promoting straight to a production env that is not the source's
 // configured pair shows the warning, never blocks (AGENTS.md §4.5).
 func TestSkipStagingWarning(t *testing.T) {
