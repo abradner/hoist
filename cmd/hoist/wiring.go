@@ -160,8 +160,8 @@ var browserOpener = defaultOpenBrowser
 // defaultOpenBrowser's own doc comment). rundll32's FileProtocolHandler entry point takes the
 // URL as a single opaque argument and never invokes a shell, so no such splitting can happen
 // (Copilot, PR #50 round 4). Any other GOOS falls back to xdg-open's Unix convention rather than
-// erroring outright, on the theory that a BSD or other Unix hoist is only run on is more likely
-// to have xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS
+// erroring outright, on the theory that a BSD or other Unix system hoist happens to run on is
+// more likely to have xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS
 // itself) is the seam wiring_test.go uses to exercise every branch on every OS, without a build
 // tag per branch and without ever calling exec.Command in a test (no test in this repo launches
 // a real browser).
