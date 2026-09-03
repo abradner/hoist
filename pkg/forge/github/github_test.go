@@ -119,6 +119,29 @@ func TestFindPRByHeadBranch(t *testing.T) {
 	}
 }
 
+// TestFindPRReadsMergedStateFromListEndpoint is round-6's regression: GitHub's list-pulls
+// endpoint (what FindPR actually calls) never includes a "merged" boolean field at all — only
+// "merged_at", a nullable timestamp. Decoding a merged PR's list-endpoint JSON with only the
+// "merged" field would always leave it at its zero value (false), so FindPR must also read
+// merged_at as an equally authoritative signal, or every re-observation of an already-merged PR
+// (exactly what happens right after a real merge deletes the branch) would misreport it as
+// still open.
+func TestFindPRReadsMergedStateFromListEndpoint(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/pulls": static(200, `[{"number": 7, "body": "x", "merged_at": "2026-09-03T00:00:00Z", "merge_commit_sha": "deadbeef"}]`),
+	})
+	pr, ok, err := c.FindPR(context.Background(), "hoist/app-production/abc", "")
+	if err != nil || !ok {
+		t.Fatalf("FindPR: ok=%v err=%v", ok, err)
+	}
+	if !pr.Merged {
+		t.Fatal("Merged = false for a PR whose list-endpoint response carries a non-nil merged_at")
+	}
+	if pr.MergeSHA != "deadbeef" {
+		t.Fatalf("MergeSHA = %q, want deadbeef", pr.MergeSHA)
+	}
+}
+
 func TestFindPRFallsBackToBodyMarkerSearch(t *testing.T) {
 	calls := map[string]int{}
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
@@ -200,6 +223,7 @@ func TestChecksSummarizesRollup(t *testing.T) {
 			{"status": "completed", "conclusion": "failure"},
 			{"status": "in_progress", "conclusion": ""}
 		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
@@ -220,6 +244,7 @@ func TestChecksTreatsSkippedAsItsOwnBucketNotSuccess(t *testing.T) {
 			{"name": "unit-tests", "status": "completed", "conclusion": "success"},
 			{"name": "integration-tests", "status": "completed", "conclusion": "skipped"}
 		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
@@ -253,6 +278,7 @@ func TestChecksPaginatesBeyondFirstPage(t *testing.T) {
 				return 200, `{"check_runs": []}`
 			}
 		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
@@ -287,6 +313,7 @@ func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
 			// which is exactly the point: it must refuse to answer rather than guess "no".
 			return 200, fullPage("page-" + r.URL.Query().Get("page"))
 		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	_, err := c.Checks(context.Background(), "deadbeef")
 	if err == nil {
@@ -320,6 +347,7 @@ func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
 			slice := paginate(items, page, perPage)
 			return 200, `{"check_runs": [` + strings.Join(slice, ",") + `]}`
 		},
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
 	sum, err := c.Checks(context.Background(), "deadbeef")
 	if err != nil {
@@ -327,6 +355,47 @@ func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
 	}
 	if sum.Total != total {
 		t.Fatalf("Total = %d, want exactly %d", sum.Total, total)
+	}
+}
+
+// TestChecksFoldsInCommitStatuses is round-6's regression: a repository that reports CI through
+// the older Statuses API (or mixes a green check-run with a pending/failing status context)
+// must have that reflected in the gate, not just whichever mechanism this adaptor happened to
+// query first. A green check-run alongside a still-pending status must report Pending, not
+// Success; a failing status must be named in FailedNames the same way a failed check-run is.
+func TestChecksFoldsInCommitStatuses(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": [
+			{"name": "build", "status": "completed", "conclusion": "success"}
+		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": [
+			{"context": "ci/legacy-status", "state": "pending"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 2 || sum.Success != 1 || sum.Pending != 1 {
+		t.Fatalf("CheckSummary = %+v, want Total=2 Success=1 Pending=1 (the status context must not be ignored)", sum)
+	}
+}
+
+// TestChecksCommitStatusFailureIsNamed confirms a failing (or errored) commit status is folded
+// into Failure and FailedNames exactly like a failed check-run, never silently dropped.
+func TestChecksCommitStatusFailureIsNamed(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": []}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": [
+			{"context": "ci/legacy-status", "state": "failure"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "ci/legacy-status" {
+		t.Fatalf("CheckSummary = %+v, want the failing status context named in FailedNames", sum)
 	}
 }
 

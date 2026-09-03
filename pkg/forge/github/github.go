@@ -66,13 +66,25 @@ type prPayload struct {
 	Base  string `json:"base"`
 }
 
+// prResponse decodes both the single-PR endpoint (GET .../pulls/{n}) and the list endpoint
+// (GET .../pulls, used by FindPR) — but GitHub's two endpoints do not report merge state the
+// same way: the single-PR response has a real "merged" boolean, while a list-endpoint item has
+// none at all (decoding it always leaves Merged at its zero value, false) and instead carries
+// "merged_at", a nullable timestamp, non-nil exactly when the PR is merged. toPR below treats
+// either signal as authoritative — never trusting "merged" alone, since FindPR's callers (every
+// re-observation of an already-open PR) go through the list endpoint, and a merged PR read that
+// way would otherwise always report Merged=false. Round-6 finding: after a successful merge
+// deletes the branch, the next Observe re-read the PR via FindPR, saw Merged=false from this
+// exact gap, and — with the branch now gone — misclassified a completed promotion as still
+// stuck at Pushed, blocking every future promotion to that env.
 type prResponse struct {
-	Number         int       `json:"number"`
-	HTMLURL        string    `json:"html_url"`
-	Body           string    `json:"body"`
-	Merged         bool      `json:"merged"`
-	MergeCommitSHA string    `json:"merge_commit_sha"`
-	CreatedAt      time.Time `json:"created_at"`
+	Number         int        `json:"number"`
+	HTMLURL        string     `json:"html_url"`
+	Body           string     `json:"body"`
+	Merged         bool       `json:"merged"`
+	MergedAt       *time.Time `json:"merged_at"`
+	MergeCommitSHA string     `json:"merge_commit_sha"`
+	CreatedAt      time.Time  `json:"created_at"`
 	Head           struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
@@ -89,7 +101,7 @@ func toPR(r prResponse) forge.PR {
 		HeadBranch: r.Head.Ref,
 		HeadSHA:    r.Head.SHA,
 		Base:       r.Base.Ref,
-		Merged:     r.Merged,
+		Merged:     r.Merged || r.MergedAt != nil,
 		MergeSHA:   r.MergeCommitSHA,
 		CreatedAt:  r.CreatedAt,
 	}
@@ -168,6 +180,19 @@ type checkRunsResponse struct {
 	CheckRuns []checkRun `json:"check_runs"`
 }
 
+// commitStatus is one entry of GitHub's older Statuses API (repos/.../commits/{sha}/status) —
+// a separate rollup from check-runs above, used by CI systems that predate (or simply still
+// use) the Statuses API instead of Checks. State is one of "success", "pending", "failure" or
+// "error"; Context is the status's own name (equivalent to a check-run's Name).
+type commitStatus struct {
+	State   string `json:"state"`
+	Context string `json:"context"`
+}
+
+type combinedStatusResponse struct {
+	Statuses []commitStatus `json:"statuses"`
+}
+
 // maxCheckRunPages bounds Checks' pagination: 10 pages of 100 (1000 check runs) is far beyond
 // any real CI matrix this tool will ever gate on, while still keeping a pathological rollup from
 // paging forever — the same defensive-bound shape as maxSearchPages for FindPR's fallback scan.
@@ -233,8 +258,22 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 			)
 		}
 	}
+	// Commit statuses (the older Statuses API) are a genuinely separate CI reporting mechanism
+	// from check-runs above — a repository can report through either, or both at once, and
+	// they are never merged server-side. Fetched here as a second, independent rollup and
+	// folded into the same CheckSummary: a repo whose real CI reports only through statuses
+	// (or mixes a green check-run with a pending/failing status context) must gate on it too,
+	// not just whichever one this adaptor happened to query first (Known bug classes:
+	// "querying check-runs alone, so a status-only or mixed CI reports green/none when the
+	// repository's real gate is still pending or failing").
+	var combined combinedStatusResponse
+	statusPath := fmt.Sprintf("repos/%s/%s/commits/%s/status", c.owner, c.repo, sha)
+	if err := c.rest.DoWithContext(ctx, http.MethodGet, statusPath, nil, &combined); err != nil {
+		return forge.CheckSummary{}, translateErr("listing commit statuses", err)
+	}
+
 	var s forge.CheckSummary
-	s.Total = len(runs)
+	s.Total = len(runs) + len(combined.Statuses)
 	for _, r := range runs {
 		name := r.Name
 		if name == "" {
@@ -249,6 +288,21 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 			s.Skipped++
 			s.SkippedNames = append(s.SkippedNames, redact.Strings(name))
 		default:
+			s.Failure++
+			s.FailedNames = append(s.FailedNames, redact.Strings(name))
+		}
+	}
+	for _, st := range combined.Statuses {
+		name := st.Context
+		if name == "" {
+			name = "(unnamed status)"
+		}
+		switch st.State {
+		case "pending":
+			s.Pending++
+		case "success":
+			s.Success++
+		default: // "failure", "error", or anything else unrecognized — never silently green
 			s.Failure++
 			s.FailedNames = append(s.FailedNames, redact.Strings(name))
 		}

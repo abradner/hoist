@@ -246,3 +246,17 @@ func (f *Fake) SetHeadSHA(prNumber int, sha string) {
 		}
 	}
 }
+
+// SetBase is the test-only hook standing in for another actor retargeting a PR's base after
+// this promotion last observed it — the same rare, real race MergedStep's own success-path base
+// check (round-6 hardening) exists to catch (mirrors SetHeadSHA's own stale-head test hook).
+func (f *Fake) SetBase(prNumber int, base string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.prs {
+		if f.prs[i].Number == prNumber {
+			f.prs[i].Base = base
+			return
+		}
+	}
+}

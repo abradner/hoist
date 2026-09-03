@@ -506,6 +506,16 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 				return fmt.Errorf("merging PR #%d: %w", s.PR.Number, err)
 			}
 		} else {
+			// Round-6 finding: a successful MergePR response was accepted without re-checking
+			// its base, unlike the lost-response recovery path just above, which already does.
+			// If another actor retargeted the PR between this step's own Observe (which
+			// validated s.PR.Base) and this MergePR call, GitHub's atomic "merge iff head is X"
+			// guard can still succeed — the head is unchanged, only the base moved — merging
+			// this promotion's content into a base hoist was never configured to touch. Refuse
+			// rather than accept the response and clean up as if this were the intended target.
+			if pr.Base != s.Base {
+				return fmt.Errorf("merged PR #%d, but its base is %q, not the configured %q — something retargeted this PR between observing it and merging; the merge itself cannot be undone, investigate manually", s.PR.Number, pr.Base, s.Base)
+			}
 			s.PR = &pr
 		}
 		s.MergeSHA = s.PR.MergeSHA

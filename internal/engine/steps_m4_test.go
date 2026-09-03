@@ -567,6 +567,37 @@ func TestMergedRefusesPRWithWrongBase(t *testing.T) {
 	}
 }
 
+// TestMergedRefusesSuccessfulMergeIntoRetargetedBase is round-6's regression: the recovery path
+// for a LOST MergePR response already re-checks the freshly observed PR's base before accepting
+// it as this promotion's own success (TestMergedRefusesPRWithWrongBase's sibling, one call
+// earlier) — but the ordinary SUCCESS path (MergePR returns a PR with no error at all) accepted
+// it unconditionally. If another actor retargeted the PR between this step's own Observe (which
+// validated the base) and this Act call, GitHub's atomic "merge iff head is X" guard can still
+// succeed — the head is unchanged, only the base moved — merging this promotion's content into a
+// base hoist was never configured to touch, and (before this fix) Act would proceed to delete
+// the branch and report success anyway.
+func TestMergedRefusesSuccessfulMergeIntoRetargetedBase(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	step := MergedStep{Forge: f, Git: git.Exec{}}
+
+	// Simulate another actor retargeting the PR (e.g. via the GitHub UI) after this promotion's
+	// own Observe already validated its base, but before this Act call reaches MergePR.
+	f.SetBase(s.PR.Number, "not-"+s.Base)
+
+	err := step.Act(ctx(), s)
+	if err == nil {
+		t.Fatal("expected an error when the merge succeeds into a retargeted base, got nil")
+	}
+	if !strings.Contains(err.Error(), s.Base) || !strings.Contains(err.Error(), "not-"+s.Base) {
+		t.Fatalf("error should name both the configured and the actual base, got: %v", err)
+	}
+	if s.MergeSHA != "" {
+		t.Fatalf("must not record a MergeSHA for a merge into the wrong base, got %q", s.MergeSHA)
+	}
+}
+
 // TestMergedDetectsBaseRevertedAfterMerge is the P1 regression for finding #1: a promotion
 // merges successfully (base advances to hold the promoted content, PR.Merged becomes true), but
 // later someone resets the base branch directly — outside hoist — backward past this

@@ -208,3 +208,80 @@ func TestResumeEnvSurfacesObservationErrorInsteadOfSilentlyExcluding(t *testing.
 		t.Fatalf("expected the affected candidate's id to be named, got: %s", errOut.String())
 	}
 }
+
+// TestResumeEnvSurfacesMissingRepoConfigInsteadOfSilentlyExcluding is round-6's regression: a
+// state file naming a repo that has since been removed (or renamed) in config was silently
+// `continue`'d past — bypassing the exact obsErrs mechanism the sibling test above already
+// proves works for a transient observation error — which could misleadingly report "no
+// in-flight promotion" (this being the only candidate) rather than surfacing that the candidate
+// couldn't be confirmed at all.
+func TestResumeEnvSurfacesMissingRepoConfigInsteadOfSilentlyExcluding(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	withApprovers = strings.Replace(withApprovers, "deadline: 10s", "deadline: 2s", 1)
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval, got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	id := states[0].ID
+	// The fake forge is never reached on this path — the repo is removed from config entirely
+	// before resume runs, so no forge client is ever built for this candidate.
+
+	// Remove the repo from config entirely, as if it had been deleted or renamed — the promotion
+	// state file itself still names the old RepoFullName. Truncate to just the top-level
+	// "repos: []" key rather than matching an exact literal, which would be fragile against
+	// fixture changes.
+	idx := strings.Index(withApprovers, "repos:")
+	if idx == -1 {
+		t.Fatal("fixture config shape changed; no repos: key found")
+	}
+	pollIdx := strings.Index(withApprovers, "poll:")
+	if pollIdx == -1 {
+		t.Fatal("fixture config shape changed; no poll: key found")
+	}
+	noRepo := withApprovers[:idx] + "repos: []\n" + withApprovers[pollIdx:]
+	if err := os.WriteFile(cfgPath, []byte(noRepo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	got := run([]string{"--config", cfgPath, "resume", "--env", "app-production"}, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("expected failure when the only candidate's repo is no longer in config, got success: %s", out.String())
+	}
+	if strings.Contains(errOut.String(), "no in-flight promotion targets") {
+		t.Fatalf("must not report 'no in-flight promotion' when the real reason is a missing repo config, got: %s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), id) {
+		t.Fatalf("expected the affected candidate's id to be named, got: %s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "not in the current config") {
+		t.Fatalf("expected the missing-config reason to be named, got: %s", errOut.String())
+	}
+}

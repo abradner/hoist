@@ -182,6 +182,7 @@ type StepStatus struct {
 // re-converges — see the resume tests), but ObserveAll never calls Act, so it needs the
 // short-circuit instead.
 func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
+	var finalProbe *StepStatus
 	if n := len(steps); n > 0 {
 		final := steps[n-1]
 		obs, oerr := final.Observe(ctx, s)
@@ -191,17 +192,27 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 		if obs.Satisfied {
 			return true, StepStatus{Step: final.Name(), Observation: obs}, nil
 		}
+		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for _, step := range steps {
+	for i, step := range steps {
 		if err := ctx.Err(); err != nil {
 			return false, last, err
 		}
-		obs, oerr := step.Observe(ctx, s)
-		if oerr != nil {
-			return false, StepStatus{Step: step.Name()}, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+		if finalProbe != nil && i == len(steps)-1 {
+			// Same step the short-circuit probe already observed above (round-6 regression:
+			// this doubled every final step's Observe — real remote/git work for MergedStep —
+			// on every findInFlight/promotions/resume --env call; Status already carries this
+			// fix, ObserveAll had not been given it) — reuse that Observation instead of
+			// calling Observe on it again.
+			last = *finalProbe
+		} else {
+			obs, oerr := step.Observe(ctx, s)
+			if oerr != nil {
+				return false, StepStatus{Step: step.Name()}, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+			}
+			last = StepStatus{Step: step.Name(), Observation: obs}
 		}
-		last = StepStatus{Step: step.Name(), Observation: obs}
-		if obs.Blocked != "" || obs.Waiting || !obs.Satisfied {
+		if last.Blocked != "" || last.Waiting || !last.Satisfied {
 			return false, last, nil
 		}
 	}

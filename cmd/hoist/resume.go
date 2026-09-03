@@ -134,6 +134,13 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 			}
 			rc, ok := repoConfigFor(cfg, st.RepoFullName)
 			if !ok {
+				// A state naming a repo no longer in config (removed, or renamed since this
+				// promotion started) is exactly the same "can't confirm" case obsErrs already
+				// exists for below — silently skipping it here would let `resume --env`
+				// misleadingly report "no in-flight promotion" (one candidate) or resolve to a
+				// different match without ever establishing that choice was unambiguous
+				// (several candidates, one of which is unconfirmable).
+				obsErrs = append(obsErrs, fmt.Sprintf("%s: repo %q is not in the current config; restore it or name this promotion's id explicitly", st.ID, st.RepoFullName))
 				continue
 			}
 			f, ferr := newForge(rc.GitHub)

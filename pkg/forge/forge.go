@@ -39,10 +39,14 @@ type PR struct {
 	CreatedAt  time.Time
 }
 
-// CheckSummary is the check-run rollup for one commit sha. FailedNames lists the check-run
-// names (not empty run titles) that concluded in something other than
-// success/neutral/skipped/queued-as-not-run, so CIGreenStep can name which checks failed rather
-// than just reporting a count (M4).
+// CheckSummary is the combined check-run AND commit-status rollup for one commit sha (GitHub
+// reports CI through two genuinely separate mechanisms — check-runs and the older Statuses API
+// — and a repository can use either or both; an implementation must query and fold in both,
+// never just one). FailedNames lists the name of every check-run or status context (not empty
+// run titles) that concluded in something other than success/neutral, so CIGreenStep can name
+// which checks failed rather than just reporting a count (M4). Skipped has no equivalent among
+// commit statuses (the Statuses API has no "skipped" state) — SkippedNames only ever names
+// check-runs.
 //
 // Skipped is its own bucket, not folded into Success: a `skipped` conclusion means the check
 // never actually ran (a path filter, a conditional job) — GitHub reports it the same way whether
