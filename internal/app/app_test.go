@@ -22,6 +22,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -203,16 +204,24 @@ func TestStartMsgWithNoStartPromotionShowsNotice(t *testing.T) {
 // StartPromotionFunc off the Update call stack (it can talk to a real git remote/forge, so it
 // must not run directly inside Update — mirrors plan.ResolveFunc's own loadCmd), and a
 // successful promotionBuiltMsg then pushes the flight screen with the real state and
-// DriveFunc it returned — no more nil, no more a bare {SourceEnv, TargetEnv}.
+// DriveFunc it returned — no more nil, no more a bare {SourceEnv, TargetEnv}. The fake driveFn
+// is a trivial non-nil stub, never nil: a real StartPromotionFunc success always builds one
+// (wiring.go's buildStartPromotion never returns a nil driveFn alongside a nil error), and a
+// nil driveFn here would now hit the promotionBuiltMsg nil-driveFn guard (Copilot's PR #50
+// finding — see TestPromotionBuiltMsgNilDriveFnShowsNotice) instead of exercising this test's
+// actual subject, the successful push.
 func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	called := false
+	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		return s, true, nil, nil
+	}
 	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		if p.SourceEnv != "app-staging" || p.TargetEnv != "app-production" {
 			t.Errorf("startPromotion called with unexpected plan: %+v", p)
 		}
-		return wantState, nil, nil
+		return wantState, stubDriveFn, nil
 	}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
@@ -237,6 +246,107 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	}
 	if v := plain(m); !strings.Contains(v, "app-staging -> app-production") || !strings.Contains(v, wantState.ID) {
 		t.Errorf("flight screen view missing the real state's envs/id:\n%s", v)
+	}
+}
+
+// TestStartMsgFiltersToTickedRepos is PR #50 review finding #2: plan.StartMsg.Ticked is the
+// repo subset the operator actually left checked (the same set plan.Model.recomputeDiff
+// already filters the confirm screen's own diff by), but msg.Plan carries BuildPlan's full,
+// unfiltered edit set. Without filterTicked, startPromotion would be called with every edit
+// in the plan — including a repo the operator explicitly unticked and never saw in the
+// confirmed diff — and would commit it anyway. This proves only the ticked repo's edit
+// reaches startPromotion, never the unticked one.
+func TestStartMsgFiltersToTickedRepos(t *testing.T) {
+	keep := image.Ref{Repo: "ghcr.io/example/keep", Tag: "v2"}
+	drop := image.Ref{Repo: "ghcr.io/example/drop", Tag: "v2"}
+	edits := []gitops.Edit{
+		{Occurrence: gitops.Occurrence{Ref: image.Ref{Repo: keep.Repo, Tag: "v1"}}, New: keep},
+		{Occurrence: gitops.Occurrence{Ref: image.Ref{Repo: drop.Repo, Tag: "v1"}}, New: drop},
+	}
+	var gotPlan gitops.Plan
+	called := false
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		called = true
+		gotPlan = p
+		return engine.PromotionState{ID: "abcd1234"}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{
+		Plan:   gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production", Edits: edits},
+		Mode:   plan.ModePR,
+		Ticked: []string{keep.Repo},
+		Source: "app-staging",
+		Target: "app-production",
+	}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("StartMsg produced no command")
+	}
+	cmd()
+	if !called {
+		t.Fatal("the command never called the wired startPromotion")
+	}
+	if len(gotPlan.Edits) != 1 {
+		t.Fatalf("startPromotion called with %d edits, want exactly 1 (only the ticked repo): %+v", len(gotPlan.Edits), gotPlan.Edits)
+	}
+	if got := gotPlan.Edits[0].Ref.Repo; got != keep.Repo {
+		t.Errorf("startPromotion's one edit is for repo %q, want the ticked repo %q", got, keep.Repo)
+	}
+}
+
+// TestStartMsgRefusesDirectModeNotWired is PR #50 review finding #3: direct mode's real
+// step-selection machinery (M6/PR #43's engine.DirectCommitStep) is not present on this
+// branch — buildStartPromotion (cmd/hoist/wiring.go) always builds engine.AllSteps regardless
+// of what the operator chose, and StartPromotionFunc's signature carries no Mode at all. A
+// StartMsg confirmed with Mode: plan.ModeDirect must therefore never reach startPromotion —
+// silently driving PR mode instead would mean the confirm screen told the operator "commit
+// straight to the branch, no PR" and then opened one anyway.
+func TestStartMsgRefusesDirectModeNotWired(t *testing.T) {
+	called := false
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		called = true
+		return engine.PromotionState{}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	before := len(m.(Model).stack)
+	msg := plan.StartMsg{
+		Plan:   gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"},
+		Mode:   plan.ModeDirect,
+		Source: "app-staging",
+		Target: "app-production",
+	}
+	m, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Errorf("direct-mode StartMsg produced a command: %#v", cmd())
+	}
+	if called {
+		t.Error("startPromotion was called for a direct-mode confirm the TUI cannot honor yet")
+	}
+	if n := len(m.(Model).stack); n != before {
+		t.Errorf("stack changed from %d to %d screens for a refused direct-mode confirm", before, n)
+	}
+	if v := plain(m); !strings.Contains(v, "direct mode") {
+		t.Errorf("view missing the direct-mode-not-wired notice:\n%s", v)
+	}
+}
+
+// TestPromotionBuiltMsgNilDriveFnShowsNotice is Copilot's PR #50 review finding: a
+// promotionBuiltMsg with err == nil but driveFn == nil (a contract violation by whatever built
+// it) must not silently push a read-only flight screen — that would reintroduce exactly the
+// pre-wiring stub behavior this PR exists to remove, with no visible sign anything is wrong.
+func TestPromotionBuiltMsgNilDriveFnShowsNotice(t *testing.T) {
+	m := sized(t)
+	before := len(m.(Model).stack)
+	msg := promotionBuiltMsg{state: engine.PromotionState{ID: "abcd1234"}, driveFn: nil, err: nil}
+	m, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Errorf("nil-driveFn promotionBuiltMsg produced a command: %#v", cmd())
+	}
+	if n := len(m.(Model).stack); n != before {
+		t.Errorf("stack changed from %d to %d screens; a nil driveFn must not push the flight screen", before, n)
+	}
+	if v := plain(m); !strings.Contains(v, "no way to drive it") {
+		t.Errorf("view missing the nil-driveFn notice:\n%s", v)
 	}
 }
 

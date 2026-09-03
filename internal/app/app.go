@@ -26,8 +26,11 @@ import (
 // a real git remote and forge (AGENTS.md §4.3) — exactly like plan.ResolveFunc.
 //
 // A non-nil error means the plan cannot start right now (a real in-flight conflict, missing
-// github config, a claim failure) and is shown as a notice on whichever screen popped up
-// plan.StartMsg, rather than pushing the flight screen at all.
+// github config, a claim failure, or every ticked edit already being a no-op — see
+// cmd/hoist/wiring.go's own anyRealEdit guard) and is shown as a notice on whichever screen
+// popped up plan.StartMsg, rather than pushing the flight screen at all. p is expected to
+// already be filtered to the operator's ticked selection (see filterTicked below) — this type
+// itself carries no notion of "ticked", only whatever Plan the caller hands it.
 type StartPromotionFunc func(ctx context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error)
 
 // Promotion groups everything New needs to actually drive a confirmed plan and act on the
@@ -139,6 +142,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case plan.BackMsg:
 		return m.pop(), nil
 	case plan.StartMsg:
+		if msg.Mode == plan.ModeDirect {
+			// Direct mode's real step-selection machinery (an engine.Step set that commits
+			// straight to the target env's base branch, no PR — M6/PR #43, not merged into
+			// this branch) does not exist anywhere in this codebase yet: buildStartPromotion
+			// (cmd/hoist/wiring.go) always builds engine.AllSteps regardless of what the
+			// operator chose, and StartPromotionFunc's own signature has no Mode parameter to
+			// carry the choice through even if it did. Silently driving PR mode here would
+			// mean the confirm screen told the operator "commit straight to the default
+			// branch, no PR" and then opened one anyway — a lie the operator has no way to
+			// notice until the PR shows up. Until M6 lands, refuse honestly instead: a clear
+			// notice, no call to startPromotion at all, so the plan screen (still on top)
+			// lets the operator switch back to PR mode (m) and confirm that instead.
+			m.notice = fmt.Sprintf("direct mode isn't wired up in the TUI yet (M6 not merged): confirming would open a PR for %s -> %s instead, not commit straight to the branch — press m to switch back to PR mode", msg.Source, msg.Target)
+			return m, nil
+		}
 		if m.startPromotion == nil {
 			// Mirrors ResolveFunc's own nil convention: a caller that hasn't wired
 			// cmd/hoist's adaptor in gets a clear notice instead of a nil-pointer panic,
@@ -146,7 +164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "starting a promotion is not wired up"
 			return m, nil
 		}
-		start, p, deadline := m.startPromotion, msg.Plan, m.poll.Deadline
+		start, p, deadline := m.startPromotion, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
 		return m, func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
@@ -172,6 +190,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// whichever popped up plan.StartMsg) rather than crashing or silently
 			// pushing a broken flight screen.
 			m.notice = fmt.Sprintf("could not start promotion: %v", msg.err)
+			return m, nil
+		}
+		if msg.driveFn == nil {
+			// StartPromotionFunc's own doc comment says a non-nil error is the only signal
+			// that a plan cannot start; a nil error together with a nil driveFn is a
+			// contract violation by whatever built this msg (a bug in cmd/hoist's own
+			// adaptor), not a state this screen should silently paper over by pushing a
+			// read-only flight screen — that would reintroduce exactly the pre-wiring stub
+			// behavior this PR exists to remove, with no visible sign anything is wrong.
+			m.notice = "promotion built with no error but no way to drive it (internal bug) — refusing to open a read-only flight screen"
 			return m, nil
 		}
 		fs := flightScreen{flight.New(msg.state, m.poll, msg.driveFn)}
@@ -264,6 +292,33 @@ func (m Model) pop() Model {
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
 	return m
+}
+
+// filterTicked narrows p's Edits down to only the repos the operator actually ticked before
+// confirming — the same set plan.Model.recomputeDiff already filters the confirm screen's own
+// diff by (internal/app/plan/rows.go's RenderDiff: "if !ticked[e.Ref.Repo] ... continue").
+// Without this, plan.StartMsg's Plan field carries every edit BuildPlan produced regardless of
+// what the operator unticked (plan.Model never mutates m.plan itself — only the rendered diff
+// and m.ticked track the selection), so a real promotion would commit every repo in the plan,
+// including ones the confirm screen's own diff never showed as changing (Codex review, PR
+// #50). Edits for a repo not in ticked are dropped entirely — never downgraded to a NoOp or
+// moved into Untouched — mirroring RenderDiff's own treatment of the identical set, so the
+// commit message/PR body engine.RenderCommitMessage/RenderPRBody render from p.Edits (both key
+// off Edit.New.Repo, cmd/hoist's internal/engine/template.go) describe exactly what the
+// operator saw and confirmed, nothing more.
+func filterTicked(p gitops.Plan, ticked []string) gitops.Plan {
+	keep := make(map[string]bool, len(ticked))
+	for _, r := range ticked {
+		keep[r] = true
+	}
+	edits := make([]gitops.Edit, 0, len(p.Edits))
+	for _, e := range p.Edits {
+		if keep[e.Ref.Repo] {
+			edits = append(edits, e)
+		}
+	}
+	p.Edits = edits
+	return p
 }
 
 // each applies f to every screen, copying the stack.
