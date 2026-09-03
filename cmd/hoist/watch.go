@@ -50,8 +50,18 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 		fmt.Fprintf(stderr, "hoist watch: %v\n", err)
 		return exitFailure
 	}
-	if eff.repo == "" || *app == "" {
+	if eff.repo == "" && *app == "" {
 		fmt.Fprintln(stderr, "hoist watch: --repo and --app are required")
+		fs.Usage()
+		return exitUsage
+	}
+	if eff.repo == "" {
+		fmt.Fprintln(stderr, "hoist watch: --repo is required (no configured repo to default to)")
+		fs.Usage()
+		return exitUsage
+	}
+	if *app == "" {
+		fmt.Fprintln(stderr, "hoist watch: --app is required")
 		fs.Usage()
 		return exitUsage
 	}
