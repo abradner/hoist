@@ -450,7 +450,9 @@ func TestEscEmitsBackMsg(t *testing.T) {
 // would silently overwrite the new picker's own rows.
 func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
 	left := New("ghcr.io/example/other", "app-staging", false, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"stale"}, nil, false, nil },
+		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+			return []string{"stale"}, nil, false, nil
+		},
 		fixedMetas(nil))
 	staleMsg := left.loadCmd()()
 
@@ -501,7 +503,9 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
 	first := New(repo, "app-staging", true, false, "", "", false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"stale-from-first"}, nil, false, nil },
+		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+			return []string{"stale-from-first"}, nil, false, nil
+		},
 		fixedMetas(nil))
 	staleMsg := first.loadCmd()() // captured, never delivered — the operator backs out first.
 
