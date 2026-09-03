@@ -361,6 +361,69 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 	}
 }
 
+// TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded is finding 2's own regression test
+// (round 2 — round 1's fix scoped stale results by imageRepo alone, which cannot distinguish a
+// closed-and-reopened picker for the SAME repo from the picker it replaced, since the reopened
+// instance's imageRepo is by definition identical). The operator opens a picker for repo X,
+// its list command is still in flight when they back out, and they immediately reopen a NEW
+// picker for the identical repo X. The FIRST instance's stale result must never land on the
+// second, even though msg.imageRepo == current.imageRepo trivially holds for both.
+func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
+	const repo = "ghcr.io/example/app"
+	first := New(repo, "app-staging", true, false, "", "", false,
+		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"stale-from-first"}, nil, nil },
+		fixedMetas(nil))
+	staleMsg := first.loadCmd()() // captured, never delivered — the operator backs out first.
+
+	// Reopen: a brand new Model for the identical repo, exactly as internal/app's root would
+	// construct on a fresh 'd' keypress.
+	second := readyModel(t, "app-staging", true, false)
+	if first.imageRepo != second.imageRepo {
+		t.Fatalf("fixture precondition: both instances must share imageRepo %q, got %q and %q", repo, first.imageRepo, second.imageRepo)
+	}
+	if first.generation == second.generation {
+		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.generation)
+	}
+	beforeRows := append([]Row(nil), second.rows...)
+	beforeState := second.state
+
+	after, cmd := second.Update(staleMsg)
+	if cmd != nil {
+		t.Fatalf("a stale same-repo result from a closed-and-reopened picker should be discarded silently, got a command: %v", cmd())
+	}
+	if !reflect.DeepEqual(after.rows, beforeRows) {
+		t.Fatalf("stale result from the first (closed) instance mutated the reopened picker's rows: got %+v, want unchanged %+v", after.rows, beforeRows)
+	}
+	if after.state != beforeState {
+		t.Fatalf("stale result changed state: got %v, want unchanged %v", after.state, beforeState)
+	}
+}
+
+// TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded is metaLoadedMsg's own half of the
+// same regression: a stale per-tag metadata result from a closed-and-reopened same-repo instance
+// must not overwrite the reopened picker's already-loaded (or loading) row metadata.
+func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
+	const repo = "ghcr.io/example/app"
+	first := New(repo, "app-staging", true, false, "", "", false,
+		func(context.Context) ([]string, []forge.GitTag, error) { return []string{"v1"}, nil, nil },
+		fixedMetas(nil))
+	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
+
+	second := readyModel(t, "app-staging", true, false)
+	if first.generation == second.generation {
+		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.generation)
+	}
+	before := append([]Row(nil), second.rows...)
+
+	after, cmd := second.Update(staleMsg)
+	if cmd != nil {
+		t.Fatalf("a stale same-repo meta result should be discarded silently, got a command: %v", cmd())
+	}
+	if !reflect.DeepEqual(after.rows, before) {
+		t.Fatalf("stale meta result from the first (closed) instance mutated the reopened picker's rows: got %+v, want unchanged %+v", after.rows, before)
+	}
+}
+
 func TestListErrorRendersInsteadOfHanging(t *testing.T) {
 	m := New("ghcr.io/example/app", "app-staging", false, false, "", "", false,
 		func(context.Context) ([]string, []forge.GitTag, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -70,18 +71,37 @@ type DirectRequestedMsg struct {
 	ImageRepo, Tag, Digest string
 }
 
-// listLoadedMsg and metaLoadedMsg both carry imageRepo, the picker instance that requested
-// them: loadCmd/fetchCmd close over m.imageRepo at the moment the command is created, and
-// onListLoaded/onMetaLoaded discard a result whose imageRepo doesn't match this model's own
-// current one. internal/app's root routes a message to whatever screen is currently on top of
-// its stack by type alone, not by which Model instance produced the tea.Cmd that resolves to
-// it — if an operator leaves this picker while its own list/meta commands are still in flight
-// and opens a picker for a different image repo (or reopens the same one, a fresh Model either
-// way), a stale result landing in the new picker would otherwise silently populate it with
-// another repo's rows/metadata (common tag names like "latest" make this look plausible rather
-// than obviously wrong).
+// nextGeneration hands out this process's next tag-picker generation id. Package-level and
+// monotonically increasing (never reused, never reset) so that every Model instance New ever
+// constructs — for the same image repo or a different one — gets a value no other instance,
+// past or future, ever holds. See generation's own doc comment on Model for why imageRepo alone
+// cannot serve this purpose.
+var nextGeneration atomic.Int64
+
+// listLoadedMsg and metaLoadedMsg both carry imageRepo and gen, the picker instance that
+// requested them: loadCmd/fetchCmd close over m.imageRepo and m.generation at the moment the
+// command is created, and onListLoaded/onMetaLoaded discard a result whose gen doesn't match
+// this model's own current one. internal/app's root routes a message to whatever screen is
+// currently on top of its stack by type alone, not by which Model instance produced the
+// tea.Cmd that resolves to it — if an operator leaves this picker while its own list/meta
+// commands are still in flight and opens a picker for a different image repo, a stale result
+// landing in the new picker would otherwise silently populate it with another repo's
+// rows/metadata (common tag names like "latest" make this look plausible rather than obviously
+// wrong).
+//
+// gen, not imageRepo, is what actually discriminates instances: imageRepo scopes only by
+// REPOSITORY, and two picker instances for the SAME repo are common — closing this picker while
+// its commands are still in flight, then immediately reopening a new picker for the identical
+// repo, gives the new instance the identical imageRepo value. A stale result from the OLD
+// instance would still land on the NEW one under an imageRepo-only check (this was finding 2's
+// round-1 gap: the fix for cross-repo leaks scoped by imageRepo alone, and this doc comment
+// used to claim — incorrectly — that reopening a model was isolated by repo alone). gen is
+// assigned fresh by New for every instance regardless of repo, so it discriminates same-repo
+// reopens exactly as it discriminates cross-repo ones; imageRepo is kept on these messages for
+// context/debugging only, not as part of the discard decision.
 type listLoadedMsg struct {
 	imageRepo string
+	gen       int64
 	regTags   []string
 	gitTags   []forge.GitTag
 	err       error
@@ -89,6 +109,7 @@ type listLoadedMsg struct {
 
 type metaLoadedMsg struct {
 	imageRepo string
+	gen       int64
 	tag       string
 	meta      registry.ImageMeta
 	err       error
@@ -116,6 +137,14 @@ type Model struct {
 	target     string
 	mapped     bool // RepoConfig.Apps has an entry for imageRepo
 	production bool
+
+	// generation uniquely identifies this Model instance, assigned once by New from
+	// nextGeneration. Two instances for the SAME imageRepo (closing this picker while its
+	// commands are still in flight, then immediately reopening a new picker for the identical
+	// repo) get different generations — imageRepo alone cannot tell them apart, since a
+	// reopened picker's imageRepo is, by definition, identical to the one it replaced. See
+	// listLoadedMsg/metaLoadedMsg's own doc comment.
+	generation int64
 
 	stagingEnv, stagingTag string
 	hasStagingMismatch     bool
@@ -160,6 +189,7 @@ func New(imageRepo, target string, mapped, production bool, stagingEnv, stagingT
 		target:             target,
 		mapped:             mapped,
 		production:         production,
+		generation:         nextGeneration.Add(1),
 		stagingEnv:         stagingEnv,
 		stagingTag:         stagingTag,
 		hasStagingMismatch: hasStagingMismatch,
@@ -182,24 +212,26 @@ func (m Model) Init() tea.Cmd {
 func (m Model) loadCmd() tea.Cmd {
 	listFn := m.listFn
 	imageRepo := m.imageRepo
+	gen := m.generation
 	return func() tea.Msg {
 		if listFn == nil {
-			return listLoadedMsg{imageRepo: imageRepo, err: fmt.Errorf("no registry configured for %s", "this repo")}
+			return listLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s", "this repo")}
 		}
 		regTags, gitTags, err := listFn(context.Background())
-		return listLoadedMsg{imageRepo: imageRepo, regTags: regTags, gitTags: gitTags, err: err}
+		return listLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, gitTags: gitTags, err: err}
 	}
 }
 
 func (m Model) fetchCmd(tag string) tea.Cmd {
 	metaFn := m.metaFn
 	imageRepo := m.imageRepo
+	gen := m.generation
 	return func() tea.Msg {
 		if metaFn == nil {
-			return metaLoadedMsg{imageRepo: imageRepo, tag: tag, err: fmt.Errorf("no registry configured")}
+			return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, err: fmt.Errorf("no registry configured")}
 		}
 		meta, err := metaFn(context.Background(), tag)
-		return metaLoadedMsg{imageRepo: imageRepo, tag: tag, meta: meta, err: err}
+		return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, meta: meta, err: err}
 	}
 }
 
@@ -221,9 +253,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
-	if msg.imageRepo != m.imageRepo {
-		// A stale result from a picker this model is no longer (or never was) — discard it
-		// without touching any of this model's own state (see listLoadedMsg's own doc comment).
+	if msg.gen != m.generation {
+		// A stale result from a picker instance this model is not (a closed-and-reopened
+		// picker for the same repo, or a different repo entirely) — discard it without
+		// touching any of this model's own state (see listLoadedMsg's own doc comment; gen,
+		// not imageRepo, is what actually discriminates instances here).
 		return m, nil
 	}
 	m.state = stateReady
@@ -239,7 +273,7 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
-	if msg.imageRepo != m.imageRepo {
+	if msg.gen != m.generation {
 		// Same stale-result guard as onListLoaded — see listLoadedMsg's own doc comment.
 		return m, nil
 	}
