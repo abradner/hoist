@@ -299,6 +299,31 @@ func TestLoadCacheRejectsDigestMismatchInFile(t *testing.T) {
 	}
 }
 
+// TestLoadCacheRejectsTrailingGarbageAfterValidJSON is finding 6's own regression test:
+// json.Decoder.Decode only consumes the first valid JSON value from a stream and silently
+// accepts non-whitespace bytes after it, so a cache file holding valid JSON immediately
+// followed by garbage would otherwise be treated as a hit, violating loadCache's own documented
+// "not valid JSON -> miss" contract.
+func TestLoadCacheRejectsTrailingGarbageAfterValidJSON(t *testing.T) {
+	isolateCache(t)
+	digest := "sha256:" + fixedHex()
+	if err := saveCache(ImageMeta{Digest: digest, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := cacheFile(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := []byte(`{"digest":"` + digest + `","created":"2020-01-01T00:00:00Z"}`)
+	data := append(append([]byte{}, valid...), []byte(" garbage-not-json")...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadCache(digest); ok {
+		t.Fatal("valid JSON followed by trailing garbage must be a cache miss, not a hit on the first value alone")
+	}
+}
+
 func TestSaveCacheThenLoadCacheRoundTrips(t *testing.T) {
 	isolateCache(t)
 	digest := "sha256:" + fixedHex()

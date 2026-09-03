@@ -92,6 +92,15 @@ func loadCache(digest string) (ImageMeta, bool) {
 	if err != nil {
 		return ImageMeta{}, false
 	}
+	// json.Decoder.Decode only consumes the first valid JSON value from the stream and
+	// silently ignores non-whitespace bytes after it — a file holding valid JSON immediately
+	// followed by garbage (a truncated concurrent rewrite, a corrupted append) would otherwise
+	// decode "successfully" and read as a cache hit, violating this function's own documented
+	// "not valid JSON -> miss" contract. json.Valid requires the whole byte slice to be exactly
+	// one JSON value, so it catches trailing garbage a bare Decode would miss.
+	if !json.Valid(data) {
+		return ImageMeta{}, false
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var c cachedMeta

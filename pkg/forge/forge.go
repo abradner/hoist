@@ -124,11 +124,13 @@ type Forge interface {
 	// caller must re-check FindPR before concluding a merge failed outright (a killed process
 	// cannot always tell whether its own call landed server-side).
 	MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (PR, error)
-	// Tags lists every git tag on this forge's repo, each with the date of the commit it
-	// points to. Added for M6: the tag picker prefers the app repo's own git tags for
-	// ordering registry tags by recency (AGENTS.md invariant 3) over the registry's own
-	// unordered, timestamp-free tag list (AGENTS.md §6.1 item 3). Order is unspecified —
-	// callers sort by Date themselves; a repo with no tags returns an empty slice, not an
-	// error.
+	// Tags lists this forge's repo's git tags, each with the date of the commit it points to
+	// — bounded, not exhaustive: an adaptor may cap how many it returns rather than crawl an
+	// unbounded tag list in full (pkg/forge/github's own Client.Tags stops after
+	// maxTagPages*100 = 300 tags today). Added for M6: the tag picker prefers the app repo's
+	// own git tags for ordering registry tags by recency (AGENTS.md invariant 3) over the
+	// registry's own unordered, timestamp-free tag list (AGENTS.md §6.1 item 3). Order is
+	// unspecified — callers sort by Date themselves; a repo with no tags returns an empty
+	// slice, not an error.
 	Tags(ctx context.Context) ([]GitTag, error)
 }
