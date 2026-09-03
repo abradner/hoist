@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -351,6 +352,93 @@ func TestRolledOutNeverGatesOnJobsOrCronJobs(t *testing.T) {
 	}
 	if !strings.Contains(obs.Detail, "migrate") {
 		t.Errorf("Detail = %q, want the Job still reported", obs.Detail)
+	}
+}
+
+// TestRolledOutMissingDeploymentBlocks is round-1's regression: a Deployment this promotion
+// edited but which no longer exists on the cluster (rollout.ErrNotFound) used to be returned as
+// a generic StepError indistinguishable from a plumbing failure — this must instead Block,
+// naming the Deployment, mirroring ArgoRefreshedStep/ArgoSyncedStep's own errorsIsNotFound
+// handling of a missing Application just above in this file.
+func TestRolledOutMissingDeploymentBlocks(t *testing.T) {
+	s := argoState()
+	s.Edits = []gitops.Edit{deploymentEdit("app", "ghcr.io/example/app:v2@sha256:"+strings.Repeat("1", 64))}
+	ro := &rollout.Fake{DeploymentErr: fmt.Errorf("reading Deployment app-production/app: %w", rollout.ErrNotFound)}
+	obs, err := (RolledOutStep{Rollout: ro}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" || !strings.Contains(obs.Blocked, "app") {
+		t.Errorf("Observe = %+v, want Blocked naming the missing Deployment", obs)
+	}
+}
+
+// TestRolledOutDeploymentTransientErrorIsReturnedNotSwallowed mirrors
+// TestArgoRefreshedTransientErrorIsReturnedNotSwallowed: a non-ErrNotFound error reading a
+// Deployment (a connection reset, say) must still surface as a plain error for the CLI's poll
+// loop to retry — never swallowed into Blocked or a false Observation.
+func TestRolledOutDeploymentTransientErrorIsReturnedNotSwallowed(t *testing.T) {
+	s := argoState()
+	s.Edits = []gitops.Edit{deploymentEdit("app", "ghcr.io/example/app:v2@sha256:"+strings.Repeat("1", 64))}
+	ro := &rollout.Fake{DeploymentErr: errors.New("transient: connection reset")}
+	_, err := (RolledOutStep{Rollout: ro}).Observe(ctx(), s)
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Errorf("Observe err = %v, want the transient error surfaced (never swallowed into Blocked/false)", err)
+	}
+}
+
+// TestRolledOutJobLikeMissingIsReportedNotBlocking is round-1's regression: a Job/CronJob this
+// promotion touched but which is already gone (a short ttlSecondsAfterFinished, or an Argo hook's
+// deletion policy — rollout.ErrNotFound) used to hard-error the whole Observe, contradicting this
+// step's own doc comment that Jobs/CronJobs are "listed, never gated on" (invariant 4). It must
+// instead become a report line and let a Deployment that itself finished rolling out still
+// satisfy the step.
+func TestRolledOutJobLikeMissingIsReportedNotBlocking(t *testing.T) {
+	s := argoState()
+	s.Edits = []gitops.Edit{
+		deploymentEdit("app", "ghcr.io/example/app:v2@sha256:"+strings.Repeat("1", 64)),
+		{Occurrence: gitops.Occurrence{File: "cluster/apps/app-production/app/migrate-job.yaml", Kind: "Job", Name: "migrate"}},
+	}
+	ro := &rollout.Fake{}
+	ro.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Images:   []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@sha256:" + strings.Repeat("1", 64)}},
+		Complete: true,
+	})
+	ro.JobLikeErr = fmt.Errorf("reading Job app-production/migrate: %w", rollout.ErrNotFound)
+	obs, err := (RolledOutStep{Rollout: ro}).Observe(ctx(), s)
+	if err != nil || !obs.Satisfied {
+		t.Fatalf("Observe = %+v, %v; want satisfied — a missing Job must never gate", obs, err)
+	}
+	if !strings.Contains(obs.Detail, "migrate") {
+		t.Errorf("Detail = %q, want the Job still reported (even though it could not be checked)", obs.Detail)
+	}
+}
+
+// TestRolledOutJobLikeTransientErrorIsReportedNotBlocking is the sibling case: a transient error
+// reading a Job/CronJob (not ErrNotFound) must ALSO become a report line, never a hard error that
+// gates the whole promotion — the report-only contract (invariant 4) draws no distinction between
+// "gone" and "couldn't check right now" for a Job/CronJob, unlike the Deployment case above.
+func TestRolledOutJobLikeTransientErrorIsReportedNotBlocking(t *testing.T) {
+	s := argoState()
+	s.Edits = []gitops.Edit{
+		deploymentEdit("app", "ghcr.io/example/app:v2@sha256:"+strings.Repeat("1", 64)),
+		{Occurrence: gitops.Occurrence{File: "cluster/apps/app-production/app/migrate-job.yaml", Kind: "Job", Name: "migrate"}},
+	}
+	ro := &rollout.Fake{}
+	ro.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Images:   []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@sha256:" + strings.Repeat("1", 64)}},
+		Complete: true,
+	})
+	ro.JobLikeErr = errors.New("transient: connection reset")
+	obs, err := (RolledOutStep{Rollout: ro}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe err = %v, want nil (a transient JobLike error must become a report line, never a hard error)", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("Observe = %+v, want satisfied — a Job hoist could not even check must never gate", obs)
+	}
+	if !strings.Contains(obs.Detail, "connection reset") {
+		t.Errorf("Detail = %q, want the transient error reported so the operator can see it", obs.Detail)
 	}
 }
 

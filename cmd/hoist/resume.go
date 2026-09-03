@@ -15,6 +15,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
@@ -46,6 +47,39 @@ func repoConfigFor(cfg *config.Config, repoFullName string) (config.RepoConfig, 
 		}
 	}
 	return config.RepoConfig{}, false
+}
+
+// ensureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
+// decoding an older file leaves the field empty (round-1 review finding), and
+// ArgoRefreshedStep/ArgoSyncedStep both take their `len(apps) == 0` "no Argo Application in this
+// promotion's plan" success path on an empty ArgoApps — so an upgraded, already-in-flight
+// promotion could be reported complete having never actually checked the Application it edited.
+//
+// An empty ArgoApps alongside a non-empty Edits is unambiguous evidence of exactly that: engine.
+// ArgoAppNames' own contract (see its doc comment) means a real call against a non-empty edit set
+// can never itself return an empty, non-error slice — every edit's directory maps to exactly one
+// family/Application, or the call errors naming the orphan edit. So this only ever fires for a
+// state genuinely predating ArgoApps' introduction, never for a fresh, post-M5 promotion that
+// legitimately touches no Argo Application (which also has no Edits at all, since BuildPlan
+// produces edits only from what an env's own families declare).
+//
+// s.ArgoApps is otherwise left untouched — state.go's own doc comment ("computed once ... then
+// carried unchanged across every resume") still governs every other case, matching Edits/
+// CommitMessage/PRTitle/PRBody's own carried-not-recomputed treatment.
+func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
+	if len(s.ArgoApps) > 0 || len(s.Edits) == 0 {
+		return nil
+	}
+	r, err := gitops.Discover(s.CloneDir, rc.AppsRoot)
+	if err != nil {
+		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
+	}
+	apps, err := engine.ArgoAppNames(r, s.TargetEnv, s.Edits)
+	if err != nil {
+		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
+	}
+	s.ArgoApps = apps
+	return nil
 }
 
 // runPromotions is `hoist promotions`: lists every promotion state file under
@@ -96,6 +130,10 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 		a, ro, err := buildArgoRollout(rc)
 		if err != nil {
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build an Argo/rollout client: %s)\n", s.ID, s.TargetEnv, redact.Strings(err.Error()))
+			continue
+		}
+		if err := ensureArgoApps(s, rc); err != nil {
+			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
 			continue
 		}
 		done, status, err := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), s)
@@ -194,6 +232,10 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building Argo/rollout clients: %v", st.ID, ferr))
 				continue
 			}
+			if ferr := ensureArgoApps(st, rc); ferr != nil {
+				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
+				continue
+			}
 			done, _, oerr := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), st)
 			if oerr != nil {
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
@@ -261,12 +303,19 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 	// here means ArgoRefreshedStep/ArgoSyncedStep keep finding them; a stale value would instead
 	// fail loudly (Application not found) rather than misjudge anything quietly. So, unlike the
 	// M4 fields, it's re-read from the current config on every resume, same as a fresh `hoist
-	// promote` would compute it (AGENTS.md §4.9). ArgoApps does not follow either rule — it is a
-	// structural fact about the plan already committed to, exactly like Edits, which this
-	// function also never recomputes.
+	// promote` would compute it (AGENTS.md §4.9). ArgoApps does not follow either rule either — it
+	// is a structural fact about the plan already committed to, exactly like Edits, and this
+	// function does not recompute it for a state that already carries it. The one exception is
+	// ensureArgoApps just below: a state file written before M5 added the field never had a
+	// chance to carry it at all, which is a gap in "already committed to", not an instance of it
+	// (round-1 review finding — see ensureArgoApps' own doc comment).
 	s.ArgoNamespace = rc.Kube.ArgoNamespace
 	if *overrideCINone {
 		s.CINoneOverride = true
+	}
+	if err := ensureArgoApps(s, rc); err != nil {
+		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
+		return exitFailure
 	}
 
 	statePath, err := engine.StatePath(s.ID)

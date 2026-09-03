@@ -31,6 +31,28 @@ package engine
 // sees a stale reconciledAt and Acts (refreshes) again. Argo's refresh is idempotent by design
 // (a second request while one is already in flight is a no-op to the controller), so this costs
 // an extra API call, never a second real action.
+//
+// A residual gap, raised and confirmed in round-1 review but deliberately not fixed here: the
+// "guaranteed to be no earlier than the real merge event" claim above holds by causality (the
+// merge must have already happened, on GitHub's own servers, before this process's Observe can
+// see pr.Merged==true over the network) but the anchor's *value* is this process's own
+// operator-machine clock reading at that moment (time.Now()), not GitHub's or the cluster's. If
+// that machine's clock reads ahead of the Argo controller's, a genuinely-processed refresh can
+// still appear stale (reconciledAt.Before(anchor)) after it has actually landed, so Observe
+// re-Acts every poll.argo tick until real time catches up to the skewed anchor or poll.deadline
+// gives up — annoying (repeated, harmless Refresh calls; still never a false Satisfied, still
+// bounded by the deadline, so still in the "wasteful but must not be treated as broken" bucket
+// above) but a worse wait than clock skew ought to cost. The persisted anchor is also, in this
+// shape, local History evidence standing in for whether the remote action occurred, which is in
+// tension with AGENTS.md §4.1's "re-observe, never remember" in spirit even though nothing here
+// trusts it as proof of completion (only as a lower bound on wait time). Closing this properly
+// means anchoring on a value the *forge* stamps (e.g. the merged PR's own server-side merge
+// timestamp) instead of a local wall clock — pkg/forge.PR carries no such field today (only
+// CreatedAt), so doing this right is a real, multi-package change (PR.MergedAt on the forge
+// interface, the GitHub adaptor, the fake, and a new PromotionState field with the same
+// legacy-decode question ArgoApps already has, see state.go) — bigger than a review-round fix,
+// and worse to rush than to track. Tracked as
+// https://github.com/abradner/hoist/issues/53.
 import (
 	"context"
 	"errors"
@@ -277,18 +299,26 @@ func groupEditsByWorkload(edits []gitops.Edit) (deployments map[string][]deploym
 	return deployments, jobLikes
 }
 
+// containerKey identifies one container slot within a Deployment's live spec — a typed
+// alternative to a [2]any map key (round-1 review finding: unsafe and easy to misuse for no
+// benefit over a two-field struct).
+type containerKey struct {
+	name string
+	init bool
+}
+
 // imageMismatches reports, for one Deployment's current rollout.DeploymentStatus, every wanted
 // occurrence whose current image does not yet match — a container this promotion wrote that is
 // missing from the live spec entirely counts as a mismatch too (it means the Deployment's own
 // shape has drifted from what the plan assumed, not that the promotion is done).
 func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []string {
-	current := make(map[[2]any]string, len(ds.Images))
+	current := make(map[containerKey]string, len(ds.Images))
 	for _, img := range ds.Images {
-		current[[2]any{img.Name, img.Init}] = img.Image
+		current[containerKey{img.Name, img.Init}] = img.Image
 	}
 	var out []string
 	for _, w := range wants {
-		got, ok := current[[2]any{w.Container, w.Init}]
+		got, ok := current[containerKey{w.Container, w.Init}]
 		if !ok {
 			out = append(out, fmt.Sprintf("%s: container not found in the live spec", w.Container))
 			continue
@@ -304,7 +334,18 @@ func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []stri
 // in every occurrence it wrote and its rollout is complete by kubectl's own definition
 // (invariant 4). A rollout that has exceeded its own progress deadline Blocks, the same
 // immediacy ArgoSyncedStep applies to Degraded health — retrying will not fix a deployment
-// that is never coming up. Jobs and CronJobs this promotion touched are listed, never gated on.
+// that is never coming up. A missing Deployment (rollout.ErrNotFound) Blocks the same way,
+// naming the Deployment — mirroring ArgoRefreshedStep/ArgoSyncedStep's own errorsIsNotFound
+// handling of a missing Application, for the same reason: retrying cannot make a deleted object
+// reappear, and a generic plumbing error would read as "something is broken" rather than "this
+// object is gone" (round-1 review finding). Any other error reading a Deployment (a transient
+// API hiccup) still propagates as a plain error, for the CLI's poll loop to retry.
+//
+// Jobs and CronJobs this promotion touched are listed, never gated on: any error reading one
+// (not found — a short ttlSecondsAfterFinished or an Argo hook's deletion policy can GC a Job
+// before this Observe gets to it — or transient) becomes a report line and the loop continues,
+// rather than a hard error that would gate the whole promotion on a status this step's own
+// contract says it never gates on (round-1 review finding).
 type RolledOutStep struct{ Rollout rollout.Rollout }
 
 // Name implements Step.
@@ -327,6 +368,10 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	for _, name := range names {
 		ds, err := r.Rollout.Deployment(ctx, s.TargetEnv, name)
 		if err != nil {
+			if errors.Is(err, rollout.ErrNotFound) {
+				blocked = append(blocked, fmt.Sprintf("Deployment %s/%s not found", s.TargetEnv, name))
+				continue
+			}
 			return Observation{}, fmt.Errorf("checking rollout of Deployment %s/%s: %w", s.TargetEnv, name, err)
 		}
 		mismatches := imageMismatches(ds, deployments[name])
@@ -350,7 +395,12 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	for _, jl := range jobLikes {
 		js, err := r.Rollout.JobLike(ctx, s.TargetEnv, jl.Name, jl.Kind)
 		if err != nil {
-			return Observation{}, fmt.Errorf("checking %s %s/%s: %w", jl.Kind, s.TargetEnv, jl.Name, err)
+			// Report-only (this step's own doc comment, invariant 4): a Job/CronJob hoist
+			// cannot even read (GC'd, or a transient API error) is surfaced as a report line,
+			// never as a Blocked/hard-error that would gate the whole promotion on a status
+			// this step never gates on (round-1 review finding).
+			jobReports = append(jobReports, fmt.Sprintf("%s %s: could not check (%s)", jl.Kind, jl.Name, err))
+			continue
 		}
 		jobReports = append(jobReports, fmt.Sprintf("%s %s: %s", jl.Kind, jl.Name, js.Detail))
 	}

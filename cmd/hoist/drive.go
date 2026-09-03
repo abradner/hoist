@@ -84,12 +84,25 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 	}
 }
 
-// retryableStep is CIGreen and Approved: the only two steps whose Observe calls out to a forge
-// endpoint (Checks, Comments, IsAllowedAuthor) that can transiently 404 or scope-error without
-// the underlying condition (CI status, an approval) actually being answerable yet. Every other
-// step's error is terminal from this loop's point of view.
+// retryableStep is CIGreen, Approved, and the three M5 polling steps (ArgoRefreshed, ArgoSynced,
+// RolledOut): the steps whose Observe calls out to a remote (a forge endpoint for the first two;
+// the Kubernetes API for the Argo/rollout adaptors) that can transiently 404, scope-error or
+// connection-reset without the underlying condition (CI status, an approval, an Application's
+// or Deployment's status) actually being answerable yet. The M5 steps are exactly the same shape
+// of problem CIGreen/Approved were already carved out for (round-1 review finding: a single
+// connection reset or API timeout reading an Argo Application or Deployment status must not exit
+// `promote`/`resume` outright when poll.argo/poll.rollout exist precisely to keep trying) — a
+// step-specific ErrNotFound is handled by the step itself (Blocked, not an error reaching here at
+// all); only a genuinely transient error surfaces as a *StepError this function is asked about.
+// Every other step's error is terminal from this loop's point of view.
 func retryableStep(step engine.StepName) bool {
-	return step == engine.StepCIGreen || step == engine.StepApproved
+	switch step {
+	case engine.StepCIGreen, engine.StepApproved,
+		engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut:
+		return true
+	default:
+		return false
+	}
 }
 
 // findInFlight looks for a promotion state other than skipID targeting repoFullName/targetEnv
