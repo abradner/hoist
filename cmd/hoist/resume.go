@@ -66,6 +66,16 @@ func repoConfigFor(cfg *config.Config, repoFullName string) (config.RepoConfig, 
 // s.ArgoApps is otherwise left untouched — state.go's own doc comment ("computed once ... then
 // carried unchanged across every resume") still governs every other case, matching Edits/
 // CommitMessage/PRTitle/PRBody's own carried-not-recomputed treatment.
+//
+// s.ArgoNamespace gets the identical treatment in the same pass, for the identical reason: a
+// pre-M5 state file decodes it as the empty string too (the field didn't exist yet), and
+// argoApplications() builds an argo.Application with whatever s.ArgoNamespace holds verbatim —
+// an empty namespace fails Argo.Get's own input validation outright ("application needs a
+// namespace"), rather than merely under-reporting like an empty ArgoApps does. Both fields are
+// always set together at construction time for every post-M5 promotion (promote.go), so "ArgoApps
+// is empty and Edits is not" is exactly as unambiguous a legacy signal for ArgoNamespace as it is
+// for ArgoApps itself — this function's own name stays ensureArgoApps since Applications remain
+// the primary concern, but it now closes both gaps a legacy state can have (Copilot review).
 func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 	if len(s.ArgoApps) > 0 || len(s.Edits) == 0 {
 		return nil
@@ -79,6 +89,7 @@ func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
 	}
 	s.ArgoApps = apps
+	s.ArgoNamespace = rc.Kube.ArgoNamespace
 	return nil
 }
 
