@@ -390,11 +390,17 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "app-app-production" {
 		t.Fatalf("expected ArgoAppNames to have populated ArgoApps at build time, got %v", s.ArgoApps)
 	}
+	if s.ArgoNamespace == "" {
+		t.Fatal("expected ArgoNamespace to have been populated at build time")
+	}
 
-	// Simulate a state file saved by a pre-M5 hoist: ArgoApps decodes as empty because the field
-	// did not exist yet, while everything else (Edits, MergeSHA, History) is exactly what a real
-	// in-flight promotion carries.
+	// Simulate a state file saved by a pre-M5 hoist: ArgoApps AND ArgoNamespace decode as empty
+	// because neither field existed yet, while everything else (Edits, MergeSHA, History) is
+	// exactly what a real in-flight promotion carries. An empty ArgoNamespace alone (Copilot
+	// review) fails Argo.Get's own input validation outright, a sharper failure than ArgoApps'
+	// own "reports done too early" gap — both must be rebuilt together.
 	s.ArgoApps = nil
+	s.ArgoNamespace = ""
 	statePath, err := engine.StatePath(s.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +424,9 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	}
 	if len(resumed.ArgoApps) != 1 || resumed.ArgoApps[0] != "app-app-production" {
 		t.Fatalf("expected resume to have rebuilt ArgoApps, got %v", resumed.ArgoApps)
+	}
+	if resumed.ArgoNamespace == "" {
+		t.Fatal("expected resume to have rebuilt ArgoNamespace too, got empty")
 	}
 }
 
