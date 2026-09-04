@@ -12,11 +12,9 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // tuiBase and tuiOverrideCINone are the defaults the TUI's own confirm path uses for
@@ -38,7 +36,7 @@ const (
 // whole run); forgeErr is newForge's own error building f, deferred to here (rather than
 // failing runTUI outright) since a repo with no github configured never needs f at all — see
 // the eff.cfg check below, which reports that more specific case first.
-func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
+func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error) app.StartPromotionFunc {
 	return func(ctx context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
 		if eff.cfg == nil || eff.cfg.GitHub == "" {
 			// The same check runPromote itself makes before ever calling
@@ -68,12 +66,6 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
 		}
 
-		if clusterErr != nil {
-			// The Argo/Deployment adaptors the drive below needs, deferred to here exactly like
-			// forgeErr above: a session that only ever browses the matrix never opens a cluster
-			// connection, and should not fail to start because one could not be built.
-			return engine.PromotionState{}, nil, clusterErr
-		}
 		// Recomputed per confirm rather than once in runTUI: it is derived from p.TargetEnv,
 		// which is whatever plan the operator just confirmed.
 		argoApps, err := engine.ArgoAppNames(r, p.TargetEnv, p.Edits)
@@ -121,14 +113,17 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// need a way to deliver a message mid-driveCmd, which this brief does not add) — the
 		// flight screen's own spinner keeps animating for the whole Act call regardless, so
 		// the operator still sees the screen is busy, just without that specific wording.
-		// engine.AllSteps, the full ten, not engine.CoreSteps' seven: flight.StepOrder already
-		// lists ArgoRefreshed/ArgoSynced/RolledOut and its own tests pin RolledOut as the last
-		// row it renders, so a TUI-confirmed promotion that stopped at Merged would leave three
-		// steps displayed as never-reached forever while the CLI drove the same promotion to
-		// completion. (CoreSteps exists for findInFlight's own, different reason — scoping the
-		// one-in-flight check so a merged-but-still-converging promotion does not block a new
-		// one — and is not the right list here.)
-		steps := engine.AllSteps(g, f, a, ro, nil)
+		// engine.CoreSteps, the seven M4 already drove, not M5's full ten. The flight screen
+		// renders all ten (flight.StepOrder), so M5's three show as never-reached and the
+		// operator finishes the promotion with `hoist resume` — deliberately, for now.
+		// Driving them from here needs more than passing AllSteps: flight.retryableStep
+		// classifies only CIGreen/Approved as retryable, so a transient Kubernetes Get would
+		// stop the flight dead instead of polling again, and buildPollDurations carries neither
+		// poll.argo nor poll.rollout, so flight.pollInterval would fall back to its 2s default
+		// and hammer the API regardless of what the operator configured. Wiring all three
+		// together is its own piece of work, tracked as a follow-up issue rather than smuggled
+		// into M5's rebase (Codex review, PR #51; issue #64).
+		steps := engine.CoreSteps(g, f, nil)
 
 		driveFn := func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 			next := cur

@@ -10,23 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 )
-
-// tuiStartPromotion builds buildStartPromotion the way runTUI itself does, including the
-// Argo/Deployment adaptors the flight screen's own engine.AllSteps drive needs — taken from
-// newArgo/newRollout, which newPromoteFixture has already pointed at its fakes, so a test wires
-// exactly what production wires rather than a differently-shaped stand-in.
-func tuiStartPromotion(t *testing.T, eff effective, r *gitops.Repo, f forge.Forge) app.StartPromotionFunc {
-	t.Helper()
-	a, _, argoErr := newArgo("")
-	ro, _, rolloutErr := newRollout("")
-	return buildStartPromotion(eff, r, newGit, f, nil, a, ro, errors.Join(argoErr, rolloutErr))
-}
 
 // buildEffForFixture loads cfgPath (built by newPromoteFixture) and resolves it into the
 // effective value runTUI itself would build for the TUI, standing in for
@@ -107,7 +94,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := tuiStartPromotion(t, eff, r, f)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	state, driveFn, err := start(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
@@ -215,7 +202,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := tuiStartPromotion(t, eff, r, f)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
@@ -252,7 +239,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := tuiStartPromotion(t, eff, r, f)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
@@ -297,7 +284,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := tuiStartPromotion(t, eff, r, f)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
@@ -343,7 +330,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := tuiStartPromotion(t, eff, r, f)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	state1, driveFn1, err := start(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)

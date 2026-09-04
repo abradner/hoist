@@ -505,18 +505,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		githubRepo = eff.cfg.GitHub
 	}
 	f, forgeErr := newForge(githubRepo)
-	// The Argo/Deployment adaptors, built once alongside f and deferred the same way (see
-	// buildStartPromotion). The flight screen drives engine.AllSteps, whose last three steps
-	// need them; kubeContext is resolved from the selected repo the same way resolutionOptions
-	// does it for the plan screen's own digest resolution.
-	kubeContext := ""
-	if eff.cfg != nil {
-		kubeContext = eff.cfg.Kube.Context
-	}
-	a, _, argoErr := newArgo(kubeContext)
-	ro, _, rolloutErr := newRollout(kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
+		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,

@@ -256,29 +256,34 @@ type StepStatus struct {
 // probe, aimed one step earlier (at Merged rather than the last step, since Merged's own Observe
 // is the self-contained proof either way) — see Drive's own doc comment.
 func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
-	var finalProbe *StepStatus
-	if n := len(steps); n > 0 {
-		final := steps[n-1]
-		obs, oerr := final.Observe(ctx, s)
+	start, probedIdx, probed := 0, -1, Observation{}
+	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil {
-			return false, StepStatus{Step: final.Name()}, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+			return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), oerr)
 		}
-		if obs.Satisfied {
-			return true, StepStatus{Step: final.Name(), Observation: obs}, nil
+		switch {
+		case obs.Satisfied && mi == len(steps)-1:
+			return true, StepStatus{Step: steps[mi].Name(), Observation: obs}, nil
+		case obs.Satisfied:
+			// Everything up to and including the merge is proven; the steps after it are not,
+			// so the walk resumes at them rather than reporting done here.
+			start = mi + 1
+			last = StepStatus{Step: steps[mi].Name(), Observation: obs}
+		default:
+			probedIdx, probed = mi, obs
 		}
-		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for i, step := range steps {
+	for i := start; i < len(steps); i++ {
+		step := steps[i]
 		if err := ctx.Err(); err != nil {
 			return false, last, err
 		}
-		if finalProbe != nil && i == len(steps)-1 {
-			// Same step the short-circuit probe already observed above (round-6 regression:
-			// this doubled every final step's Observe — real remote/git work for MergedStep —
-			// on every findInFlight/promotions/resume --env call; Status already carries this
-			// fix, ObserveAll had not been given it) — reuse that Observation instead of
-			// calling Observe on it again.
-			last = *finalProbe
+		if i == probedIdx {
+			// Same step the probe already observed above (round-6 regression: this doubled
+			// MergedStep's Observe — real remote/git work — on every
+			// findInFlight/promotions/resume --env call) — reuse that Observation.
+			last = StepStatus{Step: step.Name(), Observation: probed}
 		} else {
 			obs, oerr := step.Observe(ctx, s)
 			if oerr != nil {
@@ -339,27 +344,35 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // driveToCompletion, which retries the identical shape of failure when Drive's own Observe hits
 // it directly (Codex review, PR #50 round 4).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
-	var finalProbe *StepStatus
-	if n := len(steps); n > 0 {
-		final := steps[n-1]
-		obs, oerr := final.Observe(ctx, s)
+	start, probedIdx, probed := 0, -1, Observation{}
+	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil {
-			return false, nil, &StepError{Step: final.Name(), Op: "observe", Err: oerr}
+			return false, nil, &StepError{Step: steps[mi].Name(), Op: "observe", Err: oerr}
 		}
-		if obs.Satisfied {
-			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
+		switch {
+		case obs.Satisfied && mi == len(steps)-1:
+			return true, []StepStatus{{Step: steps[mi].Name(), Observation: obs}}, nil
+		case obs.Satisfied:
+			// Everything up to and including the merge is proven; the steps after it are not.
+			// The merge's own status is kept so a caller rendering per-step glyphs still shows
+			// it done (flight.DeriveRows keys by step name, so a partial slice is safe).
+			start = mi + 1
+			statuses = append(statuses, StepStatus{Step: steps[mi].Name(), Observation: obs})
+		default:
+			probedIdx, probed = mi, obs
 		}
-		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for i, step := range steps {
+	for i := start; i < len(steps); i++ {
+		step := steps[i]
 		if cerr := ctx.Err(); cerr != nil {
 			return false, statuses, cerr
 		}
 		var st StepStatus
-		if finalProbe != nil && i == len(steps)-1 {
-			// Same step the short-circuit probe already observed above; reuse that
-			// Observation instead of calling Observe on it again.
-			st = *finalProbe
+		if i == probedIdx {
+			// Same step the probe already observed above; reuse that Observation instead of
+			// calling Observe on it again.
+			st = StepStatus{Step: step.Name(), Observation: probed}
 		} else {
 			obs, oerr := step.Observe(ctx, s)
 			if oerr != nil {
