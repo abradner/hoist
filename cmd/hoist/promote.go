@@ -508,6 +508,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 
 	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps)
+	// Recorded from this invocation's own flag, not carried from any prior state: like
+	// --override-ci-none, an operator re-running with (or without) --direct is asking for that
+	// mode now. DirectCommitGateStep re-derives the production refusal independently either
+	// way, so this only ever selects the step list, never relaxes a gate.
+	if s != nil {
+		s.Direct = *direct
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure

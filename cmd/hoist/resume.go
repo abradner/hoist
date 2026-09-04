@@ -329,6 +329,18 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		return exitFailure
 	}
 
+	if s.Direct {
+		// A direct promotion has no branch on origin and no PR, so re-driving it through
+		// AllSteps below would find PushedStep unsatisfied, push s.Branch, and open a PR —
+		// converting the promotion into exactly the shape the operator chose --direct to
+		// avoid, with two real writes before anyone noticed (Codex review, PR #43).
+		// `hoist promote --direct` is already the resume path for this mode: the id is
+		// deterministic (§4.1), so re-running it against the same plan re-observes this same
+		// state and carries on through DirectSteps from wherever it actually stopped.
+		fmt.Fprintf(stderr, "hoist resume: promotion %s was started with --direct, which resume cannot re-drive (it would push a branch and open a PR). Re-run `hoist promote --direct --confirm-direct=%s` for the same plan instead — the id is deterministic, so it resumes this promotion rather than starting a second one.\n", s.ID, s.TargetEnv)
+		return exitFailure
+	}
+
 	statePath, err := engine.StatePath(s.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist resume: %v\n", err)

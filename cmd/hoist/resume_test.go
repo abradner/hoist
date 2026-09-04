@@ -474,3 +474,65 @@ func TestEnsureArgoAppsLeavesGenuinelyEditlessStateAlone(t *testing.T) {
 		t.Fatalf("ArgoApps = %v, want nil", s.ArgoApps)
 	}
 }
+
+// TestResumeRefusesADirectPromotionRatherThanOpeningAPR is the regression for the P1 Codex found
+// on PR #43: a --direct promotion commits straight to --base and pushes nothing to s.Branch, but
+// PromotionState carried no record of that, so `hoist resume` re-drove it through engine.AllSteps
+// like any PR promotion — PushedStep found s.Branch missing on origin and pushed it, then
+// PROpenedStep opened a PR. Two real writes, producing exactly the shape --direct exists to
+// avoid. PromotionState.Direct now records the mode and resume refuses rather than guessing.
+func TestResumeRefusesADirectPromotionRatherThanOpeningAPR(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Name some OTHER env as production, so app-production is definitively non-production and
+	// DirectCommitGateStep allows the direct commit (the gate is the production list itself,
+	// never the --direct flag — internal/engine/direct.go).
+	withEnvs := strings.Replace(string(data),
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    envs:\n      production: [somewhere-else]\n",
+		1)
+	if withEnvs == string(data) {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withEnvs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production",
+		"--direct", "--confirm-direct", "app-production"}
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("direct promote failed: %s / %s", out.String(), errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("direct mode must not open a PR: %+v", f.PRs())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	s := states[0]
+	if !s.Direct {
+		t.Fatalf("the direct run's state must record Direct: %+v", s)
+	}
+
+	// The actual regression: resuming it must refuse, not re-drive it as a PR promotion.
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "resume", s.ID}, &out, &errOut); got == 0 {
+		t.Fatalf("expected resume to refuse a direct promotion, got success: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "--direct") {
+		t.Errorf("refusal should name --direct and point at the promote path, got: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("resume must not have opened a PR for a direct promotion: %+v", f.PRs())
+	}
+}
