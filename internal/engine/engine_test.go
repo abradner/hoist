@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -130,7 +131,7 @@ func TestDriveSkipsPushedAndMergedOncePastMergedOnAPriorPass(t *testing.T) {
 	}
 	s := &PromotionState{Phase: StepArgoSynced}
 
-	if err := Drive(ctx(), steps, s, nil); err != ErrWaiting {
+	if err := Drive(ctx(), steps, s, nil); !errors.Is(err, ErrWaiting) {
 		t.Fatalf("expected ErrWaiting, got %v", err)
 	}
 	if s.Phase != StepArgoSynced {
@@ -168,7 +169,7 @@ func TestDriveDoesNotShortCircuitBeforeMergedIsFirstReached(t *testing.T) {
 	}
 	s := &PromotionState{Phase: StepApproved}
 
-	if err := Drive(ctx(), steps, s, nil); err != ErrWaiting {
+	if err := Drive(ctx(), steps, s, nil); !errors.Is(err, ErrWaiting) {
 		t.Fatalf("expected ErrWaiting, got %v", err)
 	}
 	if s.Phase != StepCIGreen {

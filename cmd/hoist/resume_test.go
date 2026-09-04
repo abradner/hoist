@@ -312,27 +312,27 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A shorter poll.deadline than the fixture's default (not the fixture's own 10s, which
-	// would make this test needlessly slow), and poll.argo widened to LARGER than that deadline
-	// — deliberately, so driveToCompletion's outer loop calls engine.Drive at most once per run
-	// and then is purely sleeping (not mid-subprocess) when ctx's deadline fires. This matters
-	// because of a real, separate behavior of Drive/MergedStep/PushedStep this test would
-	// otherwise trip over: once MergedStep's Act has deleted the promotion's branch, a LATER
-	// Drive() call (Drive always re-observes every step from the top, its own doc comment) finds
-	// PushedStep's own Observe unsatisfied (the branch it checks on origin is gone) and re-pushes
-	// it, which in turn makes MergedStep's Observe see "branch not yet deleted" and re-run its
-	// own Act — a real, if harmless, re-push/re-merge-delete cycle on every poll tick once
-	// waiting at an Argo/rollout step after a real merge. That's out of scope for this fix (it's
-	// a pre-existing property of Drive's design, not anything ArgoApps-related), but left alone
-	// it would race this test's own subprocess calls against ctx's deadline, occasionally
-	// surfacing as a raw "signal: killed" error instead of the clean context.DeadlineExceeded
-	// this test asserts on. One poll.argo tick per run sidesteps it entirely.
-	shortDeadline := strings.NewReplacer(
-		"deadline: 10s", "deadline: 2s",
-		"argo: 5ms", "argo: 30s",
-	).Replace(string(data))
+	// A shorter poll.deadline than the fixture's default (not the fixture's own 10s, which would
+	// make this test needlessly slow). poll.argo is deliberately left at the fixture's own 5ms,
+	// so driveToCompletion's outer loop calls engine.Drive many times across the Argo wait rather
+	// than once — which is the point: those repeated post-merge Drive calls are exactly what
+	// Drive's Merged short-circuit (internal/engine/engine.go) exists for, so this test doubles
+	// as its end-to-end proof against a real git remote, alongside the unit-level coverage in
+	// engine_test.go.
+	//
+	// Before that short-circuit existed, this test had to widen poll.argo to LARGER than the
+	// deadline to force exactly one Drive call per run. Without that dodge, every later Drive
+	// re-observed from the top, found PushedStep unsatisfied (MergedStep's Act had deleted the
+	// branch it looks for on origin), re-pushed it, and so made MergedStep's own Observe see
+	// "branch not yet deleted" and re-run its Act — a re-push/re-delete cycle of real git
+	// subprocesses on every tick, which raced this test's own subprocess calls against ctx's
+	// deadline and occasionally surfaced as a raw "signal: killed" instead of the clean
+	// context.DeadlineExceeded asserted below. The short-circuit skips Branched..Merged entirely
+	// once a prior pass has reached Merged, so those ticks now do no git work at all and the
+	// widening is no longer needed.
+	shortDeadline := strings.Replace(string(data), "deadline: 10s", "deadline: 2s", 1)
 	if shortDeadline == string(data) {
-		t.Fatal("fixture config shape changed; deadline/poll.argo replacement points not found")
+		t.Fatal("fixture config shape changed; poll.deadline replacement point not found")
 	}
 	if err := os.WriteFile(cfgPath, []byte(shortDeadline), 0o644); err != nil {
 		t.Fatal(err)
