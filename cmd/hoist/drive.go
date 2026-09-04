@@ -9,9 +9,11 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // pollInterval picks the poll interval for whichever step Drive most recently stopped at
@@ -26,6 +28,12 @@ func pollInterval(poll config.PollConfig, phase engine.StepName) time.Duration {
 		return time.Duration(poll.CI)
 	case engine.StepApproved:
 		return time.Duration(poll.Approval)
+	case engine.StepArgoRefreshed, engine.StepArgoSynced:
+		// Both wait on Argo CD's own reconcile loop (refresh landing, then sync/health
+		// converging) — the same remote, so the same knob.
+		return time.Duration(poll.Argo)
+	case engine.StepRolledOut:
+		return time.Duration(poll.Rollout)
 	default:
 		// Branched/Committed/Pushed/PROpened/Merged only ever wait on the interactive signing
 		// prompt (handled separately via onWaiting) or a single merge/branch-delete retry — a
@@ -60,12 +68,21 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 				return err
 			}
 			var stepErr *engine.StepError
-			if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) {
+			if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) || isNotFoundErr(stepErr.Err) {
 				// Not a step this loop knows to be transient (Known bug classes: a 404/scope
 				// hiccup on CIGreen's Checks or Approved's Comments/IsAllowedAuthor calls) — a
 				// git/GitHub operation on an earlier step failing terminally (a rejected push, a
 				// broken git binary) will not fix itself by waiting, so report it immediately
-				// exactly as pre-M4 Drive callers did.
+				// exactly as pre-M4 Drive callers did. isNotFoundErr closes a gap retryableStep's
+				// own doc comment assumes doesn't exist: ArgoRefreshedStep/RolledOutStep's own
+				// Observe already Blocks cleanly on a missing Application/Deployment (never
+				// reaching here as a plain StepError at all), but their Act calls (Refresh, or
+				// any future write) can independently discover the same absence — a race between
+				// Observe and Act, an Application/Deployment deleted or moved in between — and
+				// Act has no way to produce a *BlockedError itself (Drive always wraps an Act
+				// error as a plain retryable-looking *StepError, engine.go's own Drive). Without
+				// this check, that race silently retries every poll.argo/poll.rollout interval
+				// instead of reporting Blocked immediately (Copilot review, PR #51).
 				return err
 			}
 			fmt.Fprintf(stderr, "hoist: %s (retrying)\n", redact.Strings(err.Error()))
@@ -78,12 +95,34 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 	}
 }
 
-// retryableStep is CIGreen and Approved: the only two steps whose Observe calls out to a forge
-// endpoint (Checks, Comments, IsAllowedAuthor) that can transiently 404 or scope-error without
-// the underlying condition (CI status, an approval) actually being answerable yet. Every other
-// step's error is terminal from this loop's point of view.
+// retryableStep is CIGreen, Approved, and the three M5 polling steps (ArgoRefreshed, ArgoSynced,
+// RolledOut): the steps whose Observe calls out to a remote (a forge endpoint for the first two;
+// the Kubernetes API for the Argo/rollout adaptors) that can transiently 404, scope-error or
+// connection-reset without the underlying condition (CI status, an approval, an Application's
+// or Deployment's status) actually being answerable yet. The M5 steps are exactly the same shape
+// of problem CIGreen/Approved were already carved out for (round-1 review finding: a single
+// connection reset or API timeout reading an Argo Application or Deployment status must not exit
+// `promote`/`resume` outright when poll.argo/poll.rollout exist precisely to keep trying) — a
+// step-specific ErrNotFound is handled by the step itself (Blocked, not an error reaching here at
+// all); only a genuinely transient error surfaces as a *StepError this function is asked about.
+// Every other step's error is terminal from this loop's point of view.
+// isNotFoundErr reports whether err is either Argo or rollout adaptor's own "the object is
+// genuinely gone" sentinel — a structural condition no amount of waiting resolves, never a
+// transient plumbing hiccup, regardless of which retryable step's Act call happened to surface
+// it (see retryableStep's own caller for why this matters: Observe already treats this the same
+// way, but Act has no way to produce a *BlockedError of its own).
+func isNotFoundErr(err error) bool {
+	return errors.Is(err, argo.ErrNotFound) || errors.Is(err, rollout.ErrNotFound)
+}
+
 func retryableStep(step engine.StepName) bool {
-	return step == engine.StepCIGreen || step == engine.StepApproved
+	switch step {
+	case engine.StepCIGreen, engine.StepApproved,
+		engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut:
+		return true
+	default:
+		return false
+	}
 }
 
 // findInFlight looks for a promotion state other than skipID targeting repoFullName/targetEnv
@@ -93,6 +132,21 @@ func retryableStep(step engine.StepName) bool {
 // found is nil when no conflicting in-flight promotion exists. An error re-observing a
 // candidate is treated conservatively — reported rather than silently skipped — since a
 // promotion this call can't verify is done must not be treated as safely finished.
+//
+// Deliberately observes only engine.CoreSteps (through Merged), not the full engine.AllSteps —
+// this is a considered call, not an oversight. Invariant 5 exists to prevent exactly one thing:
+// two promotions racing to create separate branches/PRs/merges for the same target env (a real
+// git/forge conflict). That risk is fully retired the moment a merge lands — a second promotion
+// for the same env gets its own id, its own branch and its own PR (§4.1's deterministic id is
+// keyed on the image set, so a later promotion for the same env necessarily differs), so nothing
+// about this promotion's own Argo refresh/sync or rollout convergence can still collide with it.
+// Blocking a brand-new promotion until a prior one's rollout finishes converging would be a
+// tightening with no matching risk to justify it — Argo/rollout convergence can run long (a slow
+// or stuck Deployment), and there is no reason a legitimate follow-up promotion for the same env
+// (e.g. a hotfix) should have to wait on it. `hoist promote`/`hoist resume` still drive every
+// promotion through the full ten steps via AllSteps (below) — only this in-flight check stops
+// short. See TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending in inflight_test.go for the
+// scenario this guards.
 func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
 	states, err := engine.ListStates()
 	if err != nil {
@@ -102,7 +156,7 @@ func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, t
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.AllSteps(g, f, nil), prev)
+		done, last, oerr := engine.ObserveAll(ctx, engine.CoreSteps(g, f, nil), prev)
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}

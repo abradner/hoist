@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 const repoFullName = "example/gitops"
@@ -169,4 +171,35 @@ func mergeToBase(t *testing.T, s *PromotionState) {
 		t.Fatal("mergeToBase: s.CommitSHA is empty — drive to at least CommittedStep first")
 	}
 	runHost(t, s.CloneDir, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Base)
+}
+
+// satisfiedRollout builds a rollout.Fake pre-configured so every Deployment edits touches
+// already reports its image matching and its rollout complete — the "nothing left to
+// converge" baseline the M4-era convergence tests need now that RolledOutStep is part of
+// AllSteps (M5), without any of them needing to know M5's own mechanics. namespace is the
+// promotion's TargetEnv, which is also the Deployment's own namespace (gitops.Env's doc
+// comment: the destination namespace a family's Application deploys into).
+func satisfiedRollout(namespace string, edits []gitops.Edit) *rollout.Fake {
+	f := &rollout.Fake{}
+	byName := map[string][]rollout.ContainerImage{}
+	for _, e := range edits {
+		if e.Kind != "Deployment" {
+			continue
+		}
+		byName[e.Name] = append(byName[e.Name], rollout.ContainerImage{
+			Name:  e.Container,
+			Init:  strings.Contains(e.Path, "initContainers"),
+			Image: e.New.String(),
+		})
+	}
+	for name, imgs := range byName {
+		f.SetDeployment(namespace, name, rollout.DeploymentStatus{
+			Namespace: namespace,
+			Name:      name,
+			Images:    imgs,
+			Complete:  true,
+			Detail:    fmt.Sprintf("deployment %q successfully rolled out", name),
+		})
+	}
+	return f
 }

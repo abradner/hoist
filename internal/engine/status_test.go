@@ -198,6 +198,64 @@ func TestStatusPropagatesObserveError(t *testing.T) {
 	}
 }
 
+// TestStatusObserveErrorIsStepError is PR #50 round-4 review finding #6 (Codex):
+// internal/app/flight.Model's retry classifier (retryableErr) only ever retries a *StepError
+// naming StepCIGreen or StepApproved — the exact shape cmd/hoist/drive.go's own
+// driveToCompletion already retries when Drive's Observe hits the identical transient failure
+// directly. Before this fix, Status wrapped an Observe error with a bare fmt.Errorf, which
+// errors.As(err, &StepError{}) never matches, so a transient Checks/Comments hiccup on the
+// immediately-following Status call (in cmd/hoist/wiring.go's own DriveFunc, right after Drive
+// itself had already observed the same step successfully) permanently stopped the flight
+// screen's polling instead of being retried like the CLI path. This proves Status's own error —
+// both from the ordinary walk and from the final-step short-circuit probe — is a *StepError
+// naming the actual step and "observe", with the underlying error still reachable via
+// errors.Is/Unwrap exactly as before.
+func TestStatusObserveErrorIsStepError(t *testing.T) {
+	t.Run("mid-walk", func(t *testing.T) {
+		wantErr := errors.New("GET /repos/.../check-runs: 404")
+		steps := []Step{
+			stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+			stepStub{name: StepCIGreen, err: wantErr},
+			stepStub{name: StepPushed, obs: Observation{Satisfied: false}},
+		}
+		_, _, err := Status(ctx(), steps, &PromotionState{})
+		var stepErr *StepError
+		if !errors.As(err, &stepErr) {
+			t.Fatalf("err = %v (%T), want it to be a *StepError", err, err)
+		}
+		if stepErr.Step != StepCIGreen {
+			t.Errorf("StepError.Step = %q, want %q", stepErr.Step, StepCIGreen)
+		}
+		if stepErr.Op != "observe" {
+			t.Errorf("StepError.Op = %q, want %q", stepErr.Op, "observe")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Errorf("error = %v, want it to still wrap %v", err, wantErr)
+		}
+	})
+	t.Run("final-step short-circuit", func(t *testing.T) {
+		wantErr := errors.New("GET /repos/.../pulls/1: 404")
+		steps := []Step{
+			stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+			stepStub{name: StepApproved, err: wantErr},
+		}
+		_, _, err := Status(ctx(), steps, &PromotionState{})
+		var stepErr *StepError
+		if !errors.As(err, &stepErr) {
+			t.Fatalf("err = %v (%T), want it to be a *StepError", err, err)
+		}
+		if stepErr.Step != StepApproved {
+			t.Errorf("StepError.Step = %q, want %q", stepErr.Step, StepApproved)
+		}
+		if stepErr.Op != "observe" {
+			t.Errorf("StepError.Op = %q, want %q", stepErr.Op, "observe")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Errorf("error = %v, want it to still wrap %v", err, wantErr)
+		}
+	})
+}
+
 // observeCountingStub wraps a stepStub and counts how many times Observe is called on it —
 // used by TestStatusObservesFinalStepExactlyOnce to prove the final step's Observe is not
 // called a second time when the walk reaches it (PR #39 review finding #3), rather than only
@@ -255,5 +313,68 @@ func TestStatusEmptySteps(t *testing.T) {
 	}
 	if len(statuses) != 0 {
 		t.Errorf("statuses = %v, want empty", statuses)
+	}
+}
+
+// TestObserveAllDoesNotReportDoneOnRolledOutAloneAfterMerge is the regression for the P1 Codex
+// found on PR #51: the ObserveAll/Status short-circuit was written when MergedStep was the last
+// step, where "final step satisfied" and "the merge is proven" were the same statement. M5
+// appended ArgoRefreshed/ArgoSynced/RolledOut, and RolledOutStep reports Satisfied as soon as
+// MergeSHA is set for a promotion whose edits touch no Deployment at all (a Job/CronJob-only
+// promotion — see RolledOutStep.Observe's own no-gated-Deployments path). Anchored on the last
+// step, that made the whole promotion read as done the instant it merged, with Argo sync never
+// checked: `hoist promotions` and `hoist resume --env` would both misreport it, and a genuinely
+// OutOfSync Application would never be waited on. Anchoring on StepMerged instead keeps the
+// short-circuit's real guarantee (PushedStep cannot be re-observed once Merged's Act deleted the
+// branch) while still evaluating everything after the merge.
+func TestObserveAllDoesNotReportDoneOnRolledOutAloneAfterMerge(t *testing.T) {
+	steps := []Step{
+		stepStub{name: StepPushed, obs: Observation{Satisfied: false, Detail: "branch gone: merged and cleaned up"}},
+		stepStub{name: StepMerged, obs: Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
+		stepStub{name: StepArgoSynced, obs: Observation{Waiting: true, Detail: "waiting for argo to sync"}},
+		stepStub{name: StepRolledOut, obs: Observation{Satisfied: true, Detail: "no gated Deployments"}},
+	}
+	done, last, err := ObserveAll(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: ArgoSynced is still waiting, and RolledOut being satisfied on its own proves nothing about it")
+	}
+	if last.Step != StepArgoSynced || !last.Waiting {
+		t.Fatalf("last = %+v, want the ArgoSynced step it actually stopped at", last)
+	}
+}
+
+// The Status sibling of the case above, plus the statuses-shape guarantee flight.DeriveRows
+// relies on: the merge's own entry is kept when the walk skips ahead past it, so a caller
+// rendering per-step glyphs still shows Merged as done rather than never-reached.
+func TestStatusSkipsPastMergedButStillWalksTheStepsAfterIt(t *testing.T) {
+	observedPushed := false
+	steps := []Step{
+		observeTrackingStub{stepStub{name: StepPushed, obs: Observation{Satisfied: false}}, &observedPushed},
+		stepStub{name: StepMerged, obs: Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
+		stepStub{name: StepArgoSynced, obs: Observation{Waiting: true, Detail: "waiting for argo to sync"}},
+		stepStub{name: StepRolledOut, obs: Observation{Satisfied: true}},
+	}
+	done, statuses, err := Status(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: ArgoSynced is still waiting")
+	}
+	if observedPushed {
+		t.Error("Status re-observed PushedStep: the merge probe should still skip everything before it")
+	}
+	var names []StepName
+	for _, st := range statuses {
+		names = append(names, st.Step)
+	}
+	if len(statuses) != 2 || statuses[0].Step != StepMerged || statuses[1].Step != StepArgoSynced {
+		t.Fatalf("statuses = %v, want [Merged, ArgoSynced]: the merge's own entry kept, then the step it stopped at", names)
+	}
+	if !statuses[0].Satisfied {
+		t.Errorf("statuses[0] = %+v, want the merge recorded as satisfied", statuses[0])
 	}
 }

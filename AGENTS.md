@@ -301,43 +301,54 @@ login (`pkg/forge/github`, via `go-gh` — never a token flag or env var), wait 
 (`ci.none` policy for a PR reporting no checks at all), wait for the human approval comment
 (`hoist approve <id>`, or immediately for an env whose approval mode is `auto`), then squash-merge
 and delete the branch — refusing the merge if the PR's head has moved since this promotion last
-pushed it. Every step re-observes the worktree/remote/forge before acting (§4.1), so killing the
-process and re-running the identical command is safe and resumes rather than duplicating; a state
-file under `$XDG_STATE_HOME/hoist/promotions/<id>.json` is kept purely as a human-readable index
-(History), never consulted to decide what already happened. A plan whose edits are all no-ops
-prints "already current" and exits 0 without touching git or the forge. `promote` refuses to start
-a second promotion for a target env that already has a non-terminal one in flight (re-observed,
-not read from the state file's own recorded phase). Before that state file exists, a short-lived
-claim file (`engine.ClaimInFlight`) closes the race between two concurrent `promote` invocations
-that both start before either has written state; a claim conflict is never auto-resolved (an
-earlier, more automatic design kept reintroducing the same reclaim race — see `claim.go`'s package
-doc) — the error names the claimant's age and the claim file's path, and recovery from a genuinely
-abandoned one (the owning process was killed) is deleting that file by hand. `hoist promotions`
-lists every promotion state
-file with its phase re-observed the same way, and `hoist resume <id>` (or `hoist resume --env
-<target-env>`) re-drives one from wherever `Observe` actually finds it — the CLI's own poll loop
-(`internal/config`'s `poll` section) is what does the actual waiting on CI/approval, never a
-`Step`'s own `Act`. `promote` also takes `--direct` (M6): commit straight to `--base` instead of
+pushed it — then (M5) asks Argo CD to refresh (the `argocd.argoproj.io/refresh` annotation, §4.7),
+waits for `status.sync.revision`/`status.sync.status`/`status.health.status` to agree with the
+merge, and watches every Deployment this promotion edited roll out (`pkg/argo`, `pkg/rollout`,
+driven through the Kubernetes API alone — no Argo API server, no Argo token, no `k8s.io/kubectl`
+import). Every step re-observes the worktree/remote/forge/cluster before acting (§4.1), so killing
+the process and re-running the identical command is safe and resumes rather than duplicating; a
+state file under `$XDG_STATE_HOME/hoist/promotions/<id>.json` is kept purely as a human-readable
+index (History), never consulted to decide what already happened. A plan whose edits are all
+no-ops prints "already current" and exits 0 without touching git or the forge. `promote` refuses to
+start a second promotion for a target env that already has a non-terminal one in flight
+(re-observed, not read from the state file's own recorded phase). Before that state file exists, a
+short-lived claim file (`engine.ClaimInFlight`) closes the race between two concurrent `promote`
+invocations that both start before either has written state; a claim conflict is never
+auto-resolved (an earlier, more automatic design kept reintroducing the same reclaim race — see
+`claim.go`'s package doc) — the error names the claimant's age and the claim file's path, and
+recovery from a genuinely abandoned one (the owning process was killed) is deleting that file by
+hand. `hoist promotions` lists every promotion state file with its phase re-observed the same way,
+and `hoist resume <id>` (or `hoist resume --env <target-env>`) re-drives one from wherever
+`Observe` actually finds it — the CLI's own poll loop (`internal/config`'s `poll` section,
+`poll.argo`/`poll.rollout` from M5 on) is what does the actual waiting on CI/approval/Argo/rollout,
+never a `Step`'s own `Act`. `promote` also takes `--direct` (M6): commit straight to `--base` instead of
 opening a PR, driving `internal/engine.DirectSteps` (branch, commit, then push straight to
-`--base` — no separate branch left on origin, no PR) rather than `Steps`. `--direct` requires
-both a configured repo (`repos[].envs.production` must be known — a flags-only run has no such
-list, and `promote` refuses `--direct` outright rather than treat "unconfigured" as "every env is
-non-production") and `--confirm-direct=<env>`, a second, distinct flag the operator must also
-pass, repeating `--to`'s exact value as the confirming argument (refused if it doesn't match) —
-the CLI's equivalent of the TUI tag picker's keypress + `huh.Confirm` gesture. Neither flag is
-itself the gate: `internal/engine.DirectCommitGateStep` independently refuses any env listed in
-`envs.production` regardless of what the CLI or the TUI believed (§4.5, invariant 5 in the M6
-milestone), checked before any planning fast path (including the all-no-op short circuit) can
-report success. `mise exec -- go
-run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
-`q` quits, `?` help; `p`/`P` plan a promotion, `d` opens the tag picker — `internal/app/tags`,
-M6 — for the current cell's first-party image, listing the registry's own tags with
-created/digest columns, preferring the mapped app repo's git tag dates for ordering when
-`repos[].apps` names one; the picker's own `D` key walks through the same keypress-then-confirm
-gesture as `--direct`/`--confirm-direct`, but nothing in the TUI drives an actual commit yet —
-`hoist promote` is still the only write path). Golden files under `testdata/golden/` regenerate
-with `mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan ./internal/app/tags
--update`; the fixture repo is `testdata/repo` (synthetic, placeholder-only — §4.4).
+`--base` — no separate branch left on origin, no PR) rather than the full pipeline above; it
+stops at that push and does not drive Argo or rollout (issue #66). `--direct` requires both a
+configured repo (`repos[].envs.production` must be known — a flags-only run has no such list,
+and `promote` refuses `--direct` outright rather than treat "unconfigured" as "every env is
+non-production") and `--confirm-direct=<env>`, a second, distinct flag repeating `--to`'s exact
+value as the confirming argument (refused if it doesn't match) — the CLI's equivalent of the
+TUI tag picker's keypress + `huh.Confirm` gesture. Neither flag is itself the gate:
+`internal/engine.DirectCommitGateStep` independently refuses any env listed in
+`envs.production` regardless of what the CLI or the TUI believed (§4.5), checked before any
+planning fast path (including the all-no-op short circuit) can report success. `hoist watch --app <name>` (M5) is a read-only companion, independent
+of any promotion: it prints one Application's current sync/health/revision and the rollout
+progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
+the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
+`poll.argo`/`poll.rollout` is tighter; it never calls `Refresh` — only `Get`/`Deployment`/`JobLike`
+— since watching is not promoting. `mise exec -- go
+run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (`q` quits,
+`?` help; `d` opens the tag picker — `internal/app/tags`, M6 — for the current cell's first-party
+image, listing the registry's own tags with created/digest columns, preferring the mapped app
+repo's git tag dates for ordering when `repos[].apps` names one, and its own `D` key walks the
+same keypress-then-confirm gesture as `--direct`/`--confirm-direct`); browsing the matrix and the
+plan/confirm screen it opens into is read-only, but confirming a
+plan there (Enter on the confirm screen) now drives a real promotion exactly like `promote`
+above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same
+`internal/engine` pipeline. Golden files under `testdata/golden/` regenerate with
+`mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan ./internal/app/tags -update`; the fixture repo is `testdata/repo`
+(synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
 

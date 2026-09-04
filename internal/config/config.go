@@ -16,13 +16,35 @@ import (
 
 // Config is the whole file. File and Found are set by Load, never read from YAML.
 type Config struct {
-	Repos      []RepoConfig     `yaml:"repos,omitempty"`
-	Registries []RegistryConfig `yaml:"registries,omitempty"`
-	Poll       PollConfig       `yaml:"poll"`
+	Repos       []RepoConfig      `yaml:"repos,omitempty"`
+	Registries  []RegistryConfig  `yaml:"registries,omitempty"`
+	Poll        PollConfig        `yaml:"poll"`
+	Preferences PreferencesConfig `yaml:"preferences"`
 
 	// File is the path Load read, or looked for. Found reports whether it existed.
 	File  string `yaml:"-"`
 	Found bool   `yaml:"-"`
+}
+
+// PreferencesConfig is operator-facing UX behavior — how hoist itself behaves for this
+// operator, as distinct from Repos/Registries/Poll's own promotion-pipeline policy. Unlike
+// those, every field here has a purely local, no-network-effect default that's safe to change
+// on a whim; nothing here is checked against a repo or forge.
+type PreferencesConfig struct {
+	// OpenPR controls what pressing o on the flight screen does with a promotion's PR URL
+	// (flight.OpenPRMsg, cmd/hoist/wiring.go): "launch" attempts to open it in a browser and
+	// stays silent on success (M4's original behavior, for a desktop session with one to
+	// open into); "display" only ever shows the URL as text (for a headless/SSH session with
+	// no browser to launch into at all — see AGENTS.md's own note on this); "both" attempts
+	// the launch AND always shows the URL as text regardless of outcome, so a copy/paste
+	// fallback exists even on a desktop session where launching usually just works. Default
+	// "both": it never regresses the desktop case (launch is still attempted) and never
+	// leaves a headless session with nothing to act on.
+	OpenPR string `yaml:"open_pr"`
+	// BrowserLaunchTimeout bounds one "launch" attempt (cmd/hoist/wiring.go's runLauncher) —
+	// see its own doc comment for why this bounds the LAUNCHER's exit, not the browser
+	// window's own lifetime, and is safe to leave short. Default 5s.
+	BrowserLaunchTimeout Duration `yaml:"browser_launch_timeout"`
 }
 
 // RepoConfig describes one GitOps repository. Only Path is ever required, and only when
@@ -63,9 +85,20 @@ type CIConfig struct {
 	Grace Duration `yaml:"grace"` // how long to wait for checks to appear; default 3m
 }
 
-// KubeConfig names the kubeconfig context hoist reads pods from (M2).
+// KubeConfig names the kubeconfig context hoist reads pods from (M2), and, from M5, where
+// Argo CD's own Application custom resources live on that cluster.
 type KubeConfig struct {
 	Context string `yaml:"context,omitempty"`
+	// ArgoNamespace is the namespace Argo CD Application custom resources live in — the
+	// control-plane namespace (conventionally "argocd"), which is a different thing from
+	// spec.destination.namespace (the workload's own target env: see gitops.Env's doc
+	// comment, and every family's Application wrapper in this repo's own fixtures, which sets
+	// metadata.namespace: argocd distinctly from spec.destination.namespace). pkg/argo's
+	// invariant 1 requires this be confirmed from config rather than assumed a fixed
+	// "argocd" — Normalize fills the "argocd" default so it need not be spelled out in every
+	// config file, but the value driving pkg/argo always came from here, never a hardcoded
+	// literal in pkg/argo itself.
+	ArgoNamespace string `yaml:"argo_namespace,omitempty"`
 }
 
 // RegistryConfig is the credential chain for one image repo prefix.
@@ -116,12 +149,22 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 
 // Defaults for the optional knobs, applied by Normalize.
 const (
-	DefaultAppsRoot = "cluster/apps"
-	DefaultCINone   = "green"
-	DefaultCIGrace  = Duration(3 * time.Minute)
+	DefaultAppsRoot      = "cluster/apps"
+	DefaultCINone        = "green"
+	DefaultCIGrace       = Duration(3 * time.Minute)
+	DefaultArgoNamespace = "argocd"
 
 	ApprovalComment = "comment"
 	ApprovalAuto    = "auto"
+
+	// OpenPRLaunch, OpenPRDisplay, OpenPRBoth are PreferencesConfig.OpenPR's allowed values —
+	// see its own doc comment for what each means.
+	OpenPRLaunch  = "launch"
+	OpenPRDisplay = "display"
+	OpenPRBoth    = "both"
+
+	DefaultOpenPR               = OpenPRBoth
+	DefaultBrowserLaunchTimeout = Duration(5 * time.Second)
 )
 
 var (
@@ -233,6 +276,9 @@ func (c *Config) Normalize() error {
 		if r.DigestSources == nil {
 			r.DigestSources = append([]string(nil), defaultDigestSources...)
 		}
+		if r.Kube.ArgoNamespace == "" {
+			r.Kube.ArgoNamespace = DefaultArgoNamespace
+		}
 		// §4.5: a production env is gated by the magic comment unless the file says
 		// otherwise for that env by name. Non-production envs default to auto and are
 		// answered by Approval, since their names are not known at load time.
@@ -260,6 +306,10 @@ func (c *Config) Normalize() error {
 	fill(&c.Poll.Argo, defaultPoll.Argo)
 	fill(&c.Poll.Rollout, defaultPoll.Rollout)
 	fill(&c.Poll.Deadline, defaultPoll.Deadline)
+	if c.Preferences.OpenPR == "" {
+		c.Preferences.OpenPR = DefaultOpenPR
+	}
+	fill(&c.Preferences.BrowserLaunchTimeout, DefaultBrowserLaunchTimeout)
 	return nil
 }
 
@@ -330,6 +380,10 @@ func (c *Config) Validate() error {
 			p.add("poll."+name, "must be a positive duration, got %s", d)
 		}
 	}
+	validateEnum(p, "preferences.open_pr", c.Preferences.OpenPR, OpenPRLaunch, OpenPRDisplay, OpenPRBoth)
+	if c.Preferences.BrowserLaunchTimeout <= 0 {
+		p.add("preferences.browser_launch_timeout", "must be a positive duration, got %s", c.Preferences.BrowserLaunchTimeout)
+	}
 	return errors.Join(sortedErrs(p.errs)...)
 }
 
@@ -353,6 +407,14 @@ func validateRepo(p *problems, r RepoConfig) {
 			}
 		}
 	}
+	// Normalize already defaults an omitted or explicitly-empty value to "argocd" (a plain
+	// YAML string can't distinguish the two — unlike DigestSources/Promotable, which are
+	// slices and so can) — this call always runs, on the default "argocd" exactly as much as
+	// on a genuinely user-supplied value; checkNoSurroundingWhitespace itself is simply a
+	// no-op on both an empty string and an already-unpadded one like "argocd", so only a
+	// genuinely padded value (user-supplied, since Normalize's own default is never padded)
+	// ever actually triggers a validation error here.
+	checkNoSurroundingWhitespace(p, k+".kube.argo_namespace", r.Kube.ArgoNamespace)
 	validateEnvs(p, k+".envs", r.Envs)
 	for i, a := range r.Approvers {
 		if strings.TrimSpace(a) == "" {

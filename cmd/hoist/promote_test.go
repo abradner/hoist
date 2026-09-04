@@ -10,12 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // runGitHost runs git directly for fixture setup that is not itself part of what's under
@@ -28,6 +31,37 @@ func runGitHost(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
+}
+
+// mergeSimulatingForge wraps *forge.Fake so a successful MergePR also does what a real GitHub
+// squash-merge actually does to the world beyond the fake's own in-memory bookkeeping — forge.
+// Fake deliberately has no access to git (its own doc comment), so this bridge lives here, at
+// the one layer that has both: onMerge is called with the real MergeSHA MergePR just recorded.
+//
+// Two things depend on this, both invisible when MergedStep is the last step (M4 alone) but
+// exposed the moment anything (M5's Argo/rollout steps) runs after it in the same process:
+//  1. MergedStep.Observe's ancestry check (steps_m4.go) fetches origin/<base> fresh and
+//     requires the merge commit to be part of its real history — true instantly for a real
+//     GitHub merge, never true for the fake's bookkeeping alone. A single `hoist promote`
+//     invocation that has to poll past Merged (waiting on Argo/rollout to converge) re-Observes
+//     every step from the top on each poll tick, including Merged with pr.Merged now true —
+//     hitting this exact check.
+//  2. ArgoSyncedStep.Observe (steps_m5.go) compares the cluster's reported SyncRevision against
+//     s.MergeSHA, which is the real pushed commit sha (fake.go's own "M4 hardening finding #2":
+//     MergeSHA prefers a real, resolvable sha over its synthetic "merged-" placeholder whenever
+//     one was given) — a fixture that pre-configures a fake Argo status with a hardcoded
+//     SyncRevision can never match that real, only-known-at-runtime sha.
+type mergeSimulatingForge struct {
+	*forge.Fake
+	onMerge func(mergeSHA string)
+}
+
+func (m *mergeSimulatingForge) MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (forge.PR, error) {
+	pr, err := m.Fake.MergePR(ctx, prNumber, expectedHeadSHA)
+	if err == nil && m.onMerge != nil {
+		m.onMerge(pr.MergeSHA)
+	}
+	return pr, err
 }
 
 // newPromoteFixture builds a local bare "origin" and a clone of it shaped like a minimal
@@ -98,10 +132,45 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	}
 
 	fakeForge := &forge.Fake{}
-	prevGit, prevForge := newGit, newForge
+	// M5: Argo/rollout are wired to converge automatically once MergedStep actually lands,
+	// via mergeSimulatingForge's onMerge hook below (see its own doc comment for why a static
+	// pre-configured fake Argo status can't do this alone: ArgoSyncedStep compares against the
+	// real, only-known-at-merge-time MergeSHA). The Application name matches this fixture's
+	// own wrapper() naming ("app-" + env); the namespace is the "argocd" default (this
+	// fixture's config never sets kube.argo_namespace).
+	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
+	fakeArgo := &argo.Fake{}
+	fakeRollout := &rollout.Fake{}
+	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Namespace: "app-production",
+		Name:      "app",
+		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + digestNew}},
+		Complete:  true,
+	})
+	wrappedForge := &mergeSimulatingForge{
+		Fake: fakeForge,
+		onMerge: func(mergeSHA string) {
+			// What a real GitHub squash-merge actually does to the base branch — the fake
+			// forge alone never touches git (pkg/forge/fake.go's own doc comment), so this
+			// bridges the two for the one test-fixture layer that can see both. mergeSHA's
+			// commit object already exists in origin (PushedStep pushed it there before
+			// Merged ever ran); this only needs to move the ref.
+			runGitHost(t, origin, "update-ref", "refs/heads/main", mergeSHA)
+			fakeArgo.SetStatus(app, argo.Status{
+				SyncStatus:   argo.SyncStatusSynced,
+				SyncRevision: mergeSHA,
+				HealthStatus: argo.HealthStatusHealthy,
+				ReconciledAt: time.Now().Add(time.Hour), // safely after any anchor Drive will compute
+			})
+		},
+	}
+
+	prevGit, prevForge, prevArgo, prevRollout := newGit, newForge, newArgo, newRollout
 	newGit = git.Exec{}
-	newForge = func(string) (forge.Forge, error) { return fakeForge, nil }
-	t.Cleanup(func() { newGit, newForge = prevGit, prevForge })
+	newForge = func(string) (forge.Forge, error) { return wrappedForge, nil }
+	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
+	t.Cleanup(func() { newGit, newForge, newArgo, newRollout = prevGit, prevForge, prevArgo, prevRollout })
 
 	return cfgPath, clone, fakeForge
 }
@@ -151,13 +220,13 @@ func TestPromoteEndToEndThenResumeIsIdempotent(t *testing.T) {
 		t.Fatalf("origin should no longer have the merged branch: ok=%v err=%v", ok, err)
 	}
 
-	// Simulate what a real GitHub squash-merge would actually do: fast-forward origin's base
-	// branch to hold the promoted content. forge.Fake has no access to real git and never
-	// touches origin on its own, but MergedStep's Observe now revalidates origin/main's live
-	// tip against this promotion's own edits before trusting a historical merge record (M4
-	// hardening, finding #1) — without this, the second run below would find the base still at
-	// its pre-promotion content and correctly refuse to report success on stale evidence.
-	runGitHost(t, clone, "push", "-q", "origin", firstCommit+":refs/heads/main")
+	// newPromoteFixture's mergeSimulatingForge already fast-forwarded origin's base branch to
+	// firstCommit the moment the first run's own MergePR call succeeded — standing in for what
+	// a real GitHub squash-merge would do to the base branch immediately, synchronously.
+	// Without that, MergedStep's Observe (which revalidates origin/main's live tip against this
+	// promotion's own merge commit before trusting a historical merge record, M4 hardening
+	// finding #1) would find the base still at its pre-promotion content and correctly refuse
+	// to report success on stale evidence — exactly what the second run below exercises.
 
 	// Re-running the exact same command (simulating a resumed/re-invoked process) must not
 	// create a second commit or a second PR.
@@ -324,6 +393,69 @@ func TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits(t *testing.T) {
 	}
 	if len(f.PRs()) != 1 || f.PRs()[0].Merged {
 		t.Fatalf("the PR must still be unmerged: %+v", f.PRs())
+	}
+}
+
+// TestPromoteRetryKeepsPersistedBase is the sibling regression to
+// TestPromoteRetryNeverStraddlesPolicyAcrossConfigEdits, for --base specifically (Copilot
+// review): buildPromotionForConfirm restored every OTHER policy field (CINone, Approval, ...)
+// from a previously-persisted state, but always overwrote s.Base from the CURRENT --base flag
+// regardless — a retry (or the TUI's own implicit default) passing a different --base than the
+// promotion originally started with would silently redirect an already-started promotion,
+// disagreeing with the PR/worktree it already built against. This starts a promotion under
+// --base main, lets it sit waiting on approval (never posted), retries with a DIFFERENT --base
+// value (one that doesn't even need to exist as a real branch — the fix must never let it reach
+// a real git operation) and confirms the persisted state still names "main".
+func TestPromoteRetryKeepsPersistedBase(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(data)
+	withApprovers := strings.Replace(original,
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    approvers: [alice]\n    envs:\n      approval:\n        app-production: comment\n",
+		1)
+	if withApprovers == original {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withApprovers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "main"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected the first promote to stop waiting on approval (no comment posted yet), got success: %s", out.String())
+	}
+
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected exactly one promotion state, got %d", len(states))
+	}
+	if states[0].Base != "main" {
+		t.Fatalf("expected the first run to persist Base=main, got %q", states[0].Base)
+	}
+
+	// Retry with a DIFFERENT --base — one that need not even exist as a real branch, since the
+	// fix must restore the persisted value before anything git-related ever sees it.
+	retryArgs := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "some-other-branch-that-does-not-exist"}
+	out.Reset()
+	errOut.Reset()
+	if got := run(retryArgs, &out, &errOut); got == 0 {
+		t.Fatalf("retry should still be waiting on alice's comment, got success: %s", out.String())
+	}
+
+	states, err = engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].Base != "main" {
+		t.Fatalf("retry with a different --base must not overwrite the persisted Base; got states=%+v", states)
 	}
 }
 

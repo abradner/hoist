@@ -87,6 +87,43 @@ type PromotionState struct {
 	// MergeSHA is the squash-merge commit sha, once MergedStep's Act (or a re-observed
 	// already-merged PR) reports one.
 	MergeSHA string
+
+	// The M5 fields below are the same two categories steps_m5.go's three new steps need,
+	// alongside the M4 fields above: a config-sourced fact re-read on resume (ArgoNamespace),
+	// and a structural fact about the plan already committed to, computed once and carried
+	// rather than recomputed (ArgoApps, like Edits/CommitMessage/PRTitle/PRBody).
+
+	// ArgoNamespace is where this promotion's target env's Argo Application custom resources
+	// live on the cluster (RepoConfig.Kube.ArgoNamespace) — never spec.destination.namespace,
+	// which TargetEnv already names (see pkg/argo's package doc). Read once when the
+	// promotion is built and re-read on `hoist resume` from the current config, UNLIKE
+	// CINone/CIGrace/Approval/Approvers/Collaborators just above: those gate decisions against
+	// historical events (an already-recorded approval/CI comment) and must never straddle two
+	// policies mid-flight, but ArgoNamespace only names where a live Get lands — re-reading it
+	// lets `hoist resume` follow the Applications if an operator moves them to a different
+	// namespace mid-flight, and a stale value would fail loudly (Application not found) rather
+	// than silently misjudge anything (see cmd/hoist/resume.go's runResume for the same
+	// reasoning at the call site).
+	ArgoNamespace string
+	// ArgoApps is the distinct, sorted set of Argo Application names (in TargetEnv) whose
+	// family directory contains at least one of Edits' files — computed once, from
+	// gitops.Discover's own Family->Application mapping, by ArgoAppNames when the promotion is
+	// first built (see its doc comment), then carried unchanged across every resume. AGENTS.md
+	// §4.1's "the world is the state" governs the Argo *status* ArgoRefreshedStep/
+	// ArgoSyncedStep re-derive from a fresh Get on every Observe; it does not require
+	// re-discovering which Application owns which family on every call, any more than it
+	// requires BuildPlan to re-run on every resume — Edits is exactly this same kind of
+	// carried, not re-derived, plan-time fact.
+	//
+	// A state file written before M5 added this field decodes it as empty, which is not the same
+	// thing as a promotion computed to touch no Application (round-1 review finding): a non-empty
+	// Edits with an empty ArgoApps is only possible for a state that predates ArgoAppNames ever
+	// running against it, since a real call against a non-empty edit set always yields at least
+	// one name or an error (see ArgoAppNames' own doc comment). cmd/hoist/resume.go's
+	// ensureArgoApps repairs exactly that case, once, the first time such a state is resumed after
+	// upgrading past M5 — everywhere else in this package, ArgoApps is read as carried, never
+	// recomputed.
+	ArgoApps []string
 }
 
 // StateDir is $XDG_STATE_HOME/hoist, else ~/.local/state/hoist — the XDG rule on every

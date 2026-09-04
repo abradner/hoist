@@ -15,6 +15,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -55,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge (resumable; see AGENTS.md §4.1)\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable; see AGENTS.md §4.1)\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
 	}
@@ -97,6 +98,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPromotions(fs.Args()[1:], cfg, stdout, stderr)
 	case "resume":
 		return runResume(fs.Args()[1:], cfg, stdout, stderr)
+	case "watch":
+		return runWatch(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
 		return runConfig(fs.Args()[1:], cfg, stdout, stderr)
 	default:
@@ -491,8 +494,27 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		envs = eff.cfg.Envs
 	}
 	resolveFn := buildResolveFunc(cfg, eff.cfg, eff.promotable)
+
+	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
+	// reused for every promotion the operator confirms in this TUI session, mirroring
+	// newGit/newForge's own package-level reuse across a single runPromote call. newForge is
+	// called even when eff.cfg is nil or has no GitHub configured (github.New("") fails fast
+	// on the owner/name parse alone, before ever touching gh's own auth or the network) so
+	// buildStartPromotion always has a forge value to close over; its own eff.cfg check runs
+	// first and reports the missing-config case before this error would ever matter.
+	githubRepo := ""
+	if eff.cfg != nil {
+		githubRepo = eff.cfg.GitHub
+	}
+	f, forgeErr := newForge(githubRepo)
+	promo := app.Promotion{
+		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr),
+		Poll:       buildPollDurations(cfg.Poll),
+		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
+		OpenPRMode: cfg.Preferences.OpenPR,
+	}
 	tagsFn := buildTagsFunc(cfg, eff.cfg)
-	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, tagsFn), tea.WithOutput(stdout)).Run(); err != nil {
+	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
