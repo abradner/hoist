@@ -1,0 +1,6 @@
+hoist tags: ghcr.io/example/app -> app-staging                      revision: — (pkg/migrate, later)
+  TAG                            CREATED                   DIGEST         REV
+> v3                             2026-03-01 00:00          333333333333   —
+  v2                             2026-02-01 00:00          222222222222   —
+  v1                             2026-01-01 00:00          111111111111   —
+                                                ↑/↓ move · / filter · enter select · D direct commit

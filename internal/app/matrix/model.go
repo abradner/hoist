@@ -3,6 +3,7 @@ package matrix
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -22,6 +23,7 @@ const maxCellWidth = 40
 // updated model.
 type Model struct {
 	repo          *gitops.Repo
+	promotable    []string
 	matrix        Table
 	tbl           table.Model
 	styles        ui.Styles
@@ -37,7 +39,7 @@ type Model struct {
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the status bar.
@@ -47,7 +49,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
@@ -58,6 +60,7 @@ func defaultKeyMap() keyMap {
 		Right:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "source env")),
 		Promote:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "plan promotion")),
 		PromoteAs: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "plan promotion to…")),
+		DeployNew: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy new image")),
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
@@ -73,14 +76,27 @@ type OpenPlanMsg struct {
 	Force  bool
 }
 
+// OpenTagsMsg is emitted when the operator asks to pick a new tag for the current cell (d,
+// "deploy new image" — M6's tag picker, internal/app/tags). ImageRepo is the first (sorted)
+// first-party image repo the current family runs in CurrentEnv — a cell backed by more than
+// one first-party image repo picks just that one; this milestone's picker is scoped to a
+// single image repo per screen (AGENTS.md §8 "building structure where no convention is
+// stated is a decision": no prior screen picks among several image repos in one cell, so this
+// is the proposal, not an established pattern — a follow-up can add that chooser if a family
+// with several first-party images turns out to need it).
+type OpenTagsMsg struct {
+	ImageRepo, Target string
+}
+
 // New builds the screen for a discovered repo. promotable lists the first-party image repo
 // prefixes (see Compute). The model has no size until SetSize is called.
 func New(repo *gitops.Repo, promotable []string) Model {
 	m := Model{
-		repo:   repo,
-		matrix: Compute(repo, promotable),
-		keys:   defaultKeyMap(),
-		help:   help.New(),
+		repo:       repo,
+		promotable: promotable,
+		matrix:     Compute(repo, promotable),
+		keys:       defaultKeyMap(),
+		help:       help.New(),
 	}
 	// The table's own up/down bindings are replaced so the screen owns the key vocabulary.
 	km := table.DefaultKeyMap()
@@ -129,11 +145,56 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, func() tea.Msg { return OpenPlanMsg{Source: source, Force: true} }
+		case key.Matches(msg, m.keys.DeployNew):
+			env := m.CurrentEnv()
+			if env == "" {
+				m.notice = "no environments discovered"
+				return m, nil
+			}
+			repo := m.currentImageRepo(env)
+			if repo == "" {
+				m.notice = "no first-party image in this cell"
+				return m, nil
+			}
+			return m, func() tea.Msg { return OpenTagsMsg{ImageRepo: repo, Target: env} }
 		}
 	}
 	var cmd tea.Cmd
 	m.tbl, cmd = m.tbl.Update(msg)
 	return m, cmd
+}
+
+// currentImageRepo is the first (sorted) first-party image repo the focused row's family
+// runs in env, "" when the family has none there (absent cell, third-party-only, or no rows
+// at all) — OpenTagsMsg's own doc comment explains the "first, not a chooser" simplification.
+func (m Model) currentImageRepo(env string) string {
+	row := m.tbl.Cursor()
+	if row < 0 || row >= len(m.matrix.Rows) {
+		return ""
+	}
+	family := m.matrix.Rows[row].Family
+	e, ok := m.repo.Envs[env]
+	if !ok {
+		return ""
+	}
+	fam, ok := e.Families[family]
+	if !ok {
+		return ""
+	}
+	var repos []string
+	seen := map[string]bool{}
+	for _, o := range fam.Occurrences {
+		if !isFirstParty(o.Ref.Repo, m.promotable) || seen[o.Ref.Repo] {
+			continue
+		}
+		seen[o.Ref.Repo] = true
+		repos = append(repos, o.Ref.Repo)
+	}
+	if len(repos) == 0 {
+		return ""
+	}
+	sort.Strings(repos)
+	return repos[0]
 }
 
 // CurrentEnv is the env the column cursor is on, "" when the repo has none.
@@ -178,6 +239,18 @@ func (m Model) Cursor() int { return m.tbl.Cursor() }
 
 // Matrix is the computed matrix the screen shows.
 func (m Model) Matrix() Table { return m.matrix }
+
+// WithNotice sets the status-bar notice shown on this screen, exactly as the screen's own key
+// handling already does internally (Update's "no environments discovered"/"no first-party image
+// in this cell" cases) — exported so the root can surface an honest message on the matrix after
+// popping back to it from another screen whose own message it chose not to act on (AGENTS.md §4.8
+// pattern: the screen names the transition, the root decides what it means; this is the root
+// telling the operator what that decision actually was, via the screen it already owns showing
+// it, rather than silently discarding the message).
+func (m Model) WithNotice(notice string) Model {
+	m.notice = notice
+	return m
+}
 
 func (m Model) layout() Model {
 	if m.width <= 0 || m.height <= 0 {

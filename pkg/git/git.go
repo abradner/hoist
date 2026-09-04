@@ -119,6 +119,18 @@ type Git interface {
 	// remote and SSH config — routing it through pkg/forge instead would need a GitHub API
 	// scope this repo does not otherwise require merging to need.
 	DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error
+	// PushHeadTo pushes worktreeDir's current HEAD directly onto remote's remoteBranch, even
+	// when remoteBranch is not the name of any branch checked out in worktreeDir. Direct mode
+	// (AGENTS.md M6) uses this to land a promotion's own commit straight on a target env's
+	// base branch (e.g. "main") without ever checking that name out in a second worktree:
+	// git refuses to check out a branch that is already checked out elsewhere, and the base
+	// branch is, by far the common case, exactly what the user's own clone already has
+	// checked out in its primary worktree. Pushing HEAD (a commit, not a branch ref) as the
+	// source side of the refspec sidesteps that entirely — the promotion's own worktree stays
+	// on its own distinct local branch (BranchedStep's normal hoist/<env>/<id> name), and only
+	// the remote ref named remoteBranch ever moves. Like Push, a rejected non-fast-forward
+	// push is reported as an error and never retried with --force.
+	PushHeadTo(ctx context.Context, worktreeDir, remote, remoteBranch string) error
 	// HashObject returns the git blob hash content would have, without requiring it to be
 	// committed or even written to the object database. Used to precompute ExpectedBlobs
 	// from a planned edit's "after" bytes before any commit exists.
@@ -154,6 +166,15 @@ type Git interface {
 	// happen to make an earlier PR on stale content unreachable (see steps_m4.go's doc
 	// comment); CommitTime lets Approved state that fact directly instead of leaning on it.
 	CommitTime(ctx context.Context, dir, sha string) (time.Time, error)
+	// WorktreeAtRef creates a throwaway, detached linked worktree of cloneDir at dir, checked
+	// out at ref exactly as it resolves right now — no branch is created, reused or advanced,
+	// unlike Worktree. The caller owns dir and must call RemoveWorktree once done reading from
+	// it; dir is meant to be read from and discarded within one invocation, never reused across
+	// a restart. Added for direct mode's own discovery/planning pass (cmd/hoist/promote.go): it
+	// reads a fresh, uncommitted snapshot of origin/<base>'s current tree — never cloneDir's own
+	// checked-out branch or working files (AGENTS.md §4.6) — so direct mode never has to trust
+	// cloneDir's local disk being current with origin/<base> the way discovery historically has.
+	WorktreeAtRef(ctx context.Context, cloneDir, dir, ref string) error
 }
 
 // ErrTimeout marks a Commit that did not return within its timeout — most often the
@@ -244,7 +265,11 @@ func (e Exec) Worktree(ctx context.Context, cloneDir, worktreeDir, branch, base 
 	if branchExists {
 		args = []string{"worktree", "add", worktreeDir, branch}
 	} else {
-		args = []string{"worktree", "add", "-b", branch, worktreeDir, base}
+		baseRef, err := e.resolveBase(ctx, cloneDir, base)
+		if err != nil {
+			return err
+		}
+		args = []string{"worktree", "add", "-b", branch, worktreeDir, baseRef}
 	}
 	if _, err := e.run(ctx, cloneDir, args...); err != nil {
 		// A concurrent invocation of the exact same promotion may have won the race to
@@ -366,7 +391,13 @@ func resolvePath(p string) string {
 }
 
 func (e Exec) localBranchExists(ctx context.Context, cloneDir, branch string) (bool, error) {
-	_, exitCode, err := e.runRaw(ctx, cloneDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return e.refExists(ctx, cloneDir, "refs/heads/"+branch)
+}
+
+// refExists reports whether ref (a full ref name, e.g. "refs/heads/main" or
+// "refs/remotes/origin/main") resolves in cloneDir.
+func (e Exec) refExists(ctx context.Context, cloneDir, ref string) (bool, error) {
+	_, exitCode, err := e.runRaw(ctx, cloneDir, "show-ref", "--verify", "--quiet", ref)
 	switch {
 	case err == nil:
 		return true, nil
@@ -377,6 +408,32 @@ func (e Exec) localBranchExists(ctx context.Context, cloneDir, branch string) (b
 	default:
 		return false, err
 	}
+}
+
+// resolveBase picks what a brand-new promotion branch is created from: the remote-tracking ref
+// (refs/remotes/origin/<base>) when one exists, over the bare local branch name of the same
+// name. AGENTS.md principle 2 ("re-observe, never remember") applies to Base too — a local
+// branch can lag origin's actual current tip, most reliably once direct mode (AGENTS.md M6)
+// starts committing straight to origin's base branch: §4.6 forbids ever moving the user's own
+// local branch of that name directly, so the remote-tracking ref is the only locally-cached
+// view of Base direct mode is allowed to keep current. In the common case that ref is already
+// current for free — a plain `git push` to a ref covered by origin's default fetch refspec
+// updates the corresponding remote-tracking ref as a standard side effect, so direct mode's own
+// push (PushHeadTo) already leaves it pointing at what was just pushed without any extra step;
+// FetchBranch exists as a belt-and-suspenders refresh for the rest (someone else's push through
+// a different clone entirely, or a remote whose fetch refspec doesn't cover this side effect).
+// Falling back to the bare name keeps every existing caller working in a repo with no "origin"
+// remote configured at all, or one nothing has ever pushed to or fetched from (some tests
+// construct exactly that).
+func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, error) {
+	ok, err := e.refExists(ctx, cloneDir, "refs/remotes/origin/"+base)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return "origin/" + base, nil
+	}
+	return base, nil
 }
 
 // LsRemoteBranch implements Git.
@@ -639,6 +696,13 @@ func (e Exec) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch s
 	return err
 }
 
+// PushHeadTo implements Git.
+func (e Exec) PushHeadTo(ctx context.Context, worktreeDir, remote, remoteBranch string) error {
+	ref := "HEAD:refs/heads/" + remoteBranch
+	_, err := e.run(ctx, worktreeDir, "push", remote, ref)
+	return err
+}
+
 // HashObject implements Git.
 func (e Exec) HashObject(ctx context.Context, worktreeDir string, content []byte) (string, error) {
 	cmd := exec.CommandContext(ctx, e.bin(), "-C", worktreeDir, "hash-object", "--stdin")
@@ -682,6 +746,17 @@ func (e Exec) Log(ctx context.Context, worktreeDir, revRange string) ([]string, 
 		}
 	}
 	return shas, sc.Err()
+}
+
+// WorktreeAtRef implements Git.
+func (e Exec) WorktreeAtRef(ctx context.Context, cloneDir, dir, ref string) error {
+	if err := guardDisposablePath(cloneDir, dir); err != nil {
+		return err
+	}
+	if _, err := e.run(ctx, cloneDir, "worktree", "add", "--detach", dir, ref); err != nil {
+		return fmt.Errorf("git worktree add --detach %s %s: %w", dir, ref, err)
+	}
+	return nil
 }
 
 // WorktreeBranch implements Git.

@@ -10,6 +10,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -76,9 +77,11 @@ type promotionBuiltMsg struct {
 }
 
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
-// what a screen needs to open the plan screen (internal/app/plan) without app.New having
-// to be called again — the repo, the promotable prefixes, the envs config (pairs,
-// production) and the digest-resolution adaptor (nil in "digest sources: none" mode).
+// what a screen needs to open the plan screen (internal/app/plan) or the tag picker
+// (internal/app/tags) without app.New having to be called again — the repo, the promotable
+// prefixes, the envs config (pairs, production), the digest-resolution adaptor (nil in
+// "digest sources: none" mode) and the tag-picker's own registry/forge adaptor (nil runs the
+// picker with no data source at all, reported as its own error state rather than a panic).
 type Model struct {
 	stack         []Screen
 	styles        ui.Styles
@@ -88,6 +91,7 @@ type Model struct {
 	promotable []string
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
+	tagsFn     tags.BuildFunc
 
 	// startPromotion, poll, openURL and openPRMode are Promotion's fields, unpacked here —
 	// see Promotion's own doc comment for what each one is and why a nil Start/OpenURL
@@ -143,9 +147,11 @@ type Model struct {
 // takes). envs is the selected repo's envs config (production, pairs), zero-valued when
 // there is none. resolveFn is what the plan screen calls to resolve digests; nil runs it in
 // "digest sources: none" mode throughout. promo is what confirming a plan and driving the
-// flight screen need — see Promotion's own doc comment. The theme starts dark and is
-// replaced when the terminal reports its background.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion) Model {
+// flight screen need — see Promotion's own doc comment. tagsFn is what the tag-picker screen
+// calls to list and fetch registry/forge data for one image repo; nil opens the picker with no
+// data source (it reports the resulting error itself, same as a resolveFn failure does for
+// plan). The theme starts dark and is replaced when the terminal reports its background.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion, tagsFn tags.BuildFunc) Model {
 	m := Model{
 		styles:         ui.NewStyles(true),
 		repo:           repo,
@@ -156,6 +162,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		poll:           promo.Poll,
 		openURL:        promo.OpenURL,
 		openPRMode:     promo.OpenPRMode,
+		tagsFn:         tagsFn,
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
@@ -183,8 +190,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		m.notice = ""
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			// Round 5, finding 3: this used to quit unconditionally, before the top screen's
+			// own key handling ever saw the press — so typing "q" into the tag picker's filter
+			// (or a huh field's own "/" filter, plan.Model.CapturesText) quit the whole program
+			// instead of typing. Falls through to the normal forward-to-screen code below
+			// whenever the top screen reports it's mid-text-entry; ctrl+c above is unaffected
+			// and always quits.
+			if !m.capturesText() {
+				return m, tea.Quit
+			}
 		}
 	case matrix.OpenPlanMsg:
 		target := ""
@@ -403,6 +420,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
 		return m, nil
+	case matrix.OpenTagsMsg:
+		var mapped bool
+		var listFn tags.ListFunc
+		var metaFn tags.MetaFunc
+		if m.tagsFn != nil {
+			mapped, listFn, metaFn = m.tagsFn(msg.ImageRepo)
+		}
+		production := plan.IsProduction(msg.Target, m.envs)
+		stagingEnv, stagingTags, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
+		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, mapped, production, stagingEnv, stagingTags, hasMismatch, listFn, metaFn)}
+		m = m.push(ts)
+		return m, ts.Init()
+	case tags.BackMsg:
+		return m.pop(), nil
+	case tags.SelectedMsg:
+		// This milestone's picker stops at reporting the operator's choice (SelectedMsg's own
+		// doc comment): no screen in this codebase drives a write yet (hoist promote is
+		// CLI-only). Round-N finding: silently popping back to the matrix here used to leave
+		// no trace that the selection did nothing — an operator who pressed enter expecting a
+		// promotion to start would see the matrix again with no explanation. Say so plainly
+		// instead of claiming (by silence) that something happened.
+		m = m.pop()
+		return m.withMatrixNotice(fmt.Sprintf(
+			"%s:%s selected, but the tag picker only reports the choice today — nothing was written (hoist promote is still the only write path)",
+			msg.ImageRepo, msg.Tag,
+		)), nil
+	case tags.DirectRequestedMsg:
+		// Same honesty gap, direct-mode side: DirectRequestedMsg is only emitted once the
+		// operator has completed the keypress + huh.Confirm gesture invariant 5 requires
+		// (tags.DirectRequestedMsg's own doc comment) — a real, deliberate confirmation, not a
+		// stray keypress. Popping back to the matrix with no notice would let the operator
+		// believe a direct commit just happened when nothing wires this message to an actual
+		// write yet (see internal/app/tags' own package doc and AGENTS.md §8 "building
+		// structure where no convention is stated is a decision": wiring this into a real
+		// write path is out of this PR's scope — a separate PR already wires the pair-
+		// promotion confirm path into a real start function and explicitly defers this one).
+		m = m.pop()
+		return m.withMatrixNotice(fmt.Sprintf(
+			"direct commit to %s:%s was confirmed, but nothing wires the TUI to an actual write yet — no commit was made (use hoist promote --direct instead)",
+			msg.ImageRepo, msg.Tag,
+		)), nil
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -455,6 +513,44 @@ func (m Model) pop() Model {
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
 	return m
+}
+
+// withMatrixNotice sets notice on the matrix screen, wherever it actually sits in the stack —
+// today always the bottom, and (after tags.SelectedMsg/DirectRequestedMsg's own pop above)
+// always the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
+// screen, always directly onto the matrix. A no-op if the matrix isn't on the stack at all.
+//
+// Round-N finding (Copilot): an earlier revision of this function only ever checked
+// m.stack[top], so the doc comment's "wherever it sits in the stack" was true only by the
+// current stack shape's own invariant (matrix is always at the position this checked), not
+// because the code actually searched for it — a claim the mechanism didn't itself deliver
+// (AGENTS.md principle 1). Searching the whole stack, rather than the top slot alone, makes
+// the claim true unconditionally: it costs one more loop over a stack that is never more than
+// a few screens deep, and it means a future screen shape (a third screen pushed between the
+// matrix and a tags screen, say) degrades to "notice still lands on the matrix" instead of
+// "notice silently vanishes".
+func (m Model) withMatrixNotice(notice string) Model {
+	for i, s := range m.stack {
+		ms, ok := s.(matrixScreen)
+		if !ok {
+			continue
+		}
+		stack := append([]Screen(nil), m.stack...)
+		stack[i] = matrixScreen{ms.WithNotice(notice)}
+		m.stack = stack
+		return m
+	}
+	return m
+}
+
+// capturesText reports whether the top screen is currently mid-text-entry (see Screen.
+// CapturesText's own doc comment) — false when the stack is empty, matching how View/Update
+// already treat an empty stack as "nothing to defer to".
+func (m Model) capturesText() bool {
+	if len(m.stack) == 0 {
+		return false
+	}
+	return m.stack[len(m.stack)-1].CapturesText()
 }
 
 // filterTicked narrows p's Edits down to only the repos the operator actually ticked before

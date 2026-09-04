@@ -49,6 +49,10 @@ type Registry interface {
 	// Tags lists the tags of repo, sorted; registries return them in no useful order
 	// (AGENTS.md §6.1).
 	Tags(ctx context.Context, repo string) ([]string, error)
+	// Config returns ref's image metadata — digest, Created, Labels — read from its config
+	// blob (config.go). Added for M6's tag picker: a picker column needs more than Head's
+	// bare digest, and needs it per candidate tag without a second, hand-rolled client.
+	Config(ctx context.Context, ref image.Ref) (ImageMeta, error)
 }
 
 // PerRepo is implemented by a Registry that keeps a separate underlying Registry — its

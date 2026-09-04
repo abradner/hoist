@@ -78,6 +78,16 @@ type Comment struct {
 	CreatedAt  time.Time
 }
 
+// GitTag is one git tag on the forge as Tags reports it: the tag name and the date of the
+// commit it points to. Date is deliberately the *commit's* date, not an annotated tag
+// object's own creation date — "when was this released" (M6's tag-ordering use, AGENTS.md
+// invariant 3) means when the code was committed, not when someone got around to tagging it,
+// and a lightweight tag has no object date to read anyway.
+type GitTag struct {
+	Name string
+	Date time.Time
+}
+
 // Forge is the seam between internal/engine and the code host. Every adaptor (pkg/forge/github,
 // and Fake for tests) implements the same interface, so internal/engine never knows which one
 // it is talking to.
@@ -114,4 +124,13 @@ type Forge interface {
 	// caller must re-check FindPR before concluding a merge failed outright (a killed process
 	// cannot always tell whether its own call landed server-side).
 	MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (PR, error)
+	// Tags lists this forge's repo's git tags, each with the date of the commit it points to
+	// — bounded, not exhaustive: an adaptor may cap how many it returns rather than crawl an
+	// unbounded tag list in full (pkg/forge/github's own Client.Tags stops after
+	// maxTagPages*100 = 300 tags today). Added for M6: the tag picker prefers the app repo's
+	// own git tags for ordering registry tags by recency (AGENTS.md invariant 3) over the
+	// registry's own unordered, timestamp-free tag list (AGENTS.md §6.1 item 3). Order is
+	// unspecified — callers sort by Date themselves; a repo with no tags returns an empty
+	// slice, not an error.
+	Tags(ctx context.Context) ([]GitTag, error)
 }

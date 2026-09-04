@@ -605,6 +605,70 @@ func TestMergePRRefusesStaleHead(t *testing.T) {
 	}
 }
 
+func TestTagsResolvesEachCommitDate(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/tags":       static(200, `[{"name":"v1"},{"name":"v2"}]`),
+		"GET /repos/example/gitops/commits/v1": static(200, `{"commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}`),
+		"GET /repos/example/gitops/commits/v2": static(200, `{"commit":{"committer":{"date":"2026-02-01T00:00:00Z"}}}`),
+	})
+	got, err := c.Tags(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Tags = %+v, want 2", got)
+	}
+	want := map[string]time.Time{
+		"v1": time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		"v2": time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+	for _, gt := range got {
+		if !gt.Date.Equal(want[gt.Name]) {
+			t.Errorf("tag %s date = %s, want %s", gt.Name, gt.Date, want[gt.Name])
+		}
+	}
+}
+
+func TestTagsPaginatesUpToTheBound(t *testing.T) {
+	handlers := map[string]func(*http.Request) (int, string){}
+	page1 := make([]string, 100)
+	for i := 0; i < 100; i++ {
+		name := fmt.Sprintf("v%d", i)
+		page1[i] = fmt.Sprintf(`{"name":%q}`, name)
+		handlers["GET /repos/example/gitops/commits/"+name] = static(200, `{"commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}`)
+	}
+	handlers["GET /repos/example/gitops/commits/vlast"] = static(200, `{"commit":{"committer":{"date":"2026-02-01T00:00:00Z"}}}`)
+	pages := map[string]int{}
+	handlers["GET /repos/example/gitops/tags"] = func(r *http.Request) (int, string) {
+		pages[r.URL.Query().Get("page")]++
+		if r.URL.Query().Get("page") == "2" {
+			return 200, `[{"name":"vlast"}]`
+		}
+		return 200, "[" + strings.Join(page1, ",") + "]"
+	}
+	c := newTestClient(t, handlers)
+	got, err := c.Tags(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 101 {
+		t.Fatalf("Tags returned %d entries, want 101 (100 from page 1 + 1 from page 2)", len(got))
+	}
+	if pages["2"] == 0 {
+		t.Fatal("expected Tags to request page 2 after a full (100-entry) page 1")
+	}
+}
+
+func TestTagsErrorsClearlyOnAFailedCommitLookup(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/tags":       static(200, `[{"name":"v1"}]`),
+		"GET /repos/example/gitops/commits/v1": static(404, `{"message":"Not Found"}`),
+	})
+	if _, err := c.Tags(context.Background()); err == nil {
+		t.Fatal("expected an error when a tag's commit date cannot be resolved")
+	}
+}
+
 func TestNewRejectsMalformedRepo(t *testing.T) {
 	for _, bad := range []string{"", "noSlash", "owner/", "/name", "owner/a/b"} {
 		if _, err := New(bad); err == nil {

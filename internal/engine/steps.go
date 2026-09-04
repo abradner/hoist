@@ -238,24 +238,35 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 }
 
 // expectedBlobs computes, once, what each edited file's blob hash will be once the plan's
-// edits are applied — read from the user's own clone (s.CloneDir), via the same
-// gitops.ApplyBytes M1/M2 already use, so ExpectedBlobs never drifts from what Apply itself
-// would write. It deliberately never reads the worktree here: once this promotion has
-// committed, the worktree's copy already holds the *after* content, and a second call (a
-// fresh PromotionState's first Observe, in particular) would try to re-apply the edit on top
-// of its own result and fail. The clone is assumed to match Base for the files this
-// promotion touches — see doc.go — and is stable across any number of calls, committed or
-// not, which is what lets this be computed once and trusted from then on.
+// edits are applied — read from the user's own clone (s.CloneDir) by default. See
+// ComputeExpectedBlobs's own doc comment for the read source and why it matters; cmd/hoist's
+// direct-mode planning calls ComputeExpectedBlobs directly, against a different, fresher
+// directory, and passes the result in via s.ExpectedBlobs before Drive ever starts — this
+// method's own lazy "if empty, compute from CloneDir" path (Observe/Act, both unchanged below)
+// is simply never reached in that case.
 func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (map[string]string, error) {
-	return expectedBlobsFromClone(ctx, c.Git, s.CloneDir, s.Edits)
+	return ComputeExpectedBlobs(ctx, c.Git, s.CloneDir, s.Edits)
 }
 
-// expectedBlobsFromClone is CommittedStep.expectedBlobs' logic, pulled out to a free function
-// so MergedStep (steps_m4.go) can compute the same thing against s.Base's live tip when it
-// needs to revalidate a historical merge record rather than trust it blind (M4 hardening) —
-// nothing here is CommittedStep-specific: it is a pure function of edits and the byte content
-// they're planned against, read from whatever cloneDir the caller names.
-func expectedBlobsFromClone(ctx context.Context, g git.Git, cloneDir string, edits []gitops.Edit) (map[string]string, error) {
+// ComputeExpectedBlobs computes what each edited file's blob hash will be once edits are
+// applied, reading "before" bytes from dir via the same gitops.ApplyBytes/Verify M1/M2 already
+// use (AGENTS.md invariant 3), so the result never drifts from what gitops.Apply itself would
+// write for the same input. It deliberately never reads a worktree that might already hold this
+// promotion's own commit: a second call against one (a fresh PromotionState's first Observe, in
+// particular) would try to re-apply the edit on top of its own result and fail — dir must be
+// something that reflects the pre-edit state and stays that way across any number of calls.
+//
+// CommittedStep.expectedBlobs (Observe/Act, both unchanged) calls this with dir = s.CloneDir —
+// the PR flow's own long-standing choice, validated ahead of time by cmd/hoist's
+// checkCloneCurrentForBase, which refuses to start the engine at all when the clone disagrees
+// with origin/<base>. Direct mode cannot lean on that same validate-and-refuse dance for the
+// files it never even knew to look at (a new occurrence origin/<base> gained that the clone's
+// own disk never had — round-N finding): cmd/hoist's own direct-mode planning instead calls
+// this directly against a throwaway snapshot of origin/<base>'s actual current tree (see
+// discoverAtFreshBase in cmd/hoist/promote.go) and passes the result into PromotionState.
+// ExpectedBlobs up front, so CommittedStep's own lazy computation from CloneDir is never
+// reached for a direct-mode promotion at all.
+func ComputeExpectedBlobs(ctx context.Context, g git.Git, dir string, edits []gitops.Edit) (map[string]string, error) {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
 	for _, e := range edits {
@@ -267,19 +278,20 @@ func expectedBlobsFromClone(ctx context.Context, g git.Git, cloneDir string, edi
 	sort.Strings(files)
 	out := make(map[string]string, len(files))
 	for _, f := range files {
-		// Read "before" from the user's own clone, never from the worktree: once this
-		// promotion has committed, the worktree's copy already holds the "after" content, and
-		// re-reading it here (on a fresh PromotionState that has not yet rev-parsed HEAD)
-		// would try to re-apply the edit on top of its own result and fail. The clone's
-		// content is what BuildPlan actually planned against (see doc.go's assumption that it
-		// matches Base) and is stable across any number of Observe calls, committed or not.
-		p, err := gitops.ResolvePath(cloneDir, f)
+		// Read "before" from dir, never from the worktree: once this promotion has committed,
+		// the worktree's copy already holds the "after" content, and re-reading it here (on a
+		// fresh PromotionState that has not yet rev-parsed HEAD) would try to re-apply the edit
+		// on top of its own result and fail. dir's content is what BuildPlan actually planned
+		// against (see doc.go's assumption that it matches Base, or — for direct mode — a fresh
+		// snapshot of origin/<base> itself) and is stable across any number of Observe calls,
+		// committed or not.
+		p, err := gitops.ResolvePath(dir, f)
 		if err != nil {
 			return nil, err
 		}
 		before, err := os.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf("reading %s from the clone: %w", f, err)
+			return nil, fmt.Errorf("reading %s from %s: %w", f, dir, err)
 		}
 		after, err := gitops.ApplyBytes(before, byFile[f])
 		if err != nil {
@@ -289,9 +301,9 @@ func expectedBlobsFromClone(ctx context.Context, g git.Git, cloneDir string, edi
 			return nil, err
 		}
 		// hash-object is pure content hashing; any repository works as the exec context, and
-		// the clone always exists by the time this runs (unlike the worktree, which the
-		// Branched step may not have created yet when Committed's own Observe runs first).
-		blob, err := g.HashObject(ctx, cloneDir, after)
+		// dir always exists by the time this runs (unlike the worktree, which the Branched
+		// step may not have created yet when Committed's own Observe runs first).
+		blob, err := g.HashObject(ctx, dir, after)
 		if err != nil {
 			return nil, err
 		}

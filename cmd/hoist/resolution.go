@@ -215,6 +215,17 @@ func (m *multiRegistry) Tags(ctx context.Context, repo string) ([]string, error)
 	return r.Tags(ctx, repo)
 }
 
+// Config implements registry.Registry, routed by ref.Repo exactly like Head and Tags above —
+// M6's tag picker is exactly the "direct caller that skips resolve" those two already
+// anticipated.
+func (m *multiRegistry) Config(ctx context.Context, ref image.Ref) (registry.ImageMeta, error) {
+	r := m.ForRepo(ref.Repo)
+	if r == nil {
+		return registry.ImageMeta{}, fmt.Errorf("registry: no registry configured for %s", ref.Repo)
+	}
+	return r.Config(ctx, ref)
+}
+
 func (m *multiRegistry) AuthSourceUsed() string {
 	clients := m.distinctClients()
 	if len(clients) == 1 {

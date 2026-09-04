@@ -18,6 +18,9 @@ type Fake struct {
 	mu sync.Mutex
 
 	HeadSHAs map[string]string
+	// GitTags is what Tags returns; TagsErr, when set, is returned instead.
+	GitTags []GitTag
+	TagsErr error
 	// CreateErr and FindErr, when set, are returned by every call to the matching method.
 	CreateErr error
 	FindErr   error
@@ -236,6 +239,17 @@ func (f *Fake) MergePR(_ context.Context, prNumber int, expectedHeadSHA string) 
 		return f.prs[i], nil
 	}
 	return PR{}, fmt.Errorf("forge: no PR #%d", prNumber)
+}
+
+// Tags implements Forge.
+func (f *Fake) Tags(_ context.Context) ([]GitTag, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "Tags")
+	if f.TagsErr != nil {
+		return nil, f.TagsErr
+	}
+	return append([]GitTag(nil), f.GitTags...), nil
 }
 
 // PRs returns a snapshot of every PR the fake has created, for a test asserting "exactly one

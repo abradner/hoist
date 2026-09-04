@@ -59,10 +59,17 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// before the commit step ever rejected or blocked the empty change — a state file
 		// that could then block a real future promotion to the same target env (Codex review,
 		// PR #50).
+		// M6 replaced checkNoOpAgainstBase (all-no-op path only) with checkCloneCurrentForBase,
+		// which is strictly stronger and runs unconditionally: gitops.Discover read this plan's
+		// occurrences off eff.repo's own disk, so it is worth confirming that disk is still
+		// current against --base's freshly fetched origin tip before trusting ANY plan built
+		// from it, not only one that happens to come out all-no-op. runPromote does exactly
+		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
+		// disagree about when a plan is trustworthy.
+		if err := checkCloneCurrentForBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
+			return engine.PromotionState{}, nil, err
+		}
 		if !anyRealEdit(p.Edits) {
-			if err := checkNoOpAgainstBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
-				return engine.PromotionState{}, nil, err
-			}
 			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
 		}
 

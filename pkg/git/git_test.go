@@ -141,6 +141,67 @@ func TestWorktreeRecoversFromStaleDirectory(t *testing.T) {
 	}
 }
 
+// TestWorktreeAtRefChecksOutDetachedSnapshot is WorktreeAtRef's own regression test (added for
+// cmd/hoist's direct-mode discoverAtFreshBase): the snapshot must reflect ref's actual content —
+// not the clone's own checked-out branch — and must not create or advance any branch, local or
+// remote (a plain detached checkout), and RemoveWorktree must clean it up completely, leaving no
+// trace in cloneDir's own worktree registry.
+func TestWorktreeAtRefChecksOutDetachedSnapshot(t *testing.T) {
+	cloneDir, originDir := newTestRepo(t)
+	var g Exec
+
+	// A second, independent commit lands on origin, never touching cloneDir's own checkout.
+	other := filepath.Join(t.TempDir(), "other")
+	if err := runHost(t, "", "clone", originDir, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "add", "second.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "commit", "-m", "second commit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.FetchBranch(ctx(), cloneDir, "origin", "main"); err != nil {
+		t.Fatalf("FetchBranch: %v", err)
+	}
+
+	snap := filepath.Join(t.TempDir(), "snap")
+	if err := g.WorktreeAtRef(ctx(), cloneDir, snap, "origin/main"); err != nil {
+		t.Fatalf("WorktreeAtRef: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snap, "second.txt")); err != nil {
+		t.Fatalf("snapshot should carry the second commit's file (from origin, never cloneDir's own branch): %v", err)
+	}
+	// cloneDir's own checked-out branch is completely untouched (AGENTS.md §4.6): the primary
+	// worktree still shows only the original seed file.
+	if _, err := os.Stat(filepath.Join(cloneDir, "second.txt")); !os.IsNotExist(err) {
+		t.Fatalf("cloneDir's own checkout must not be touched, stat err = %v", err)
+	}
+
+	// The snapshot is detached, not a branch: `git symbolic-ref` fails on a detached HEAD.
+	cmd := exec.Command("git", "-C", snap, "symbolic-ref", "-q", "HEAD")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("WorktreeAtRef should leave the snapshot on a detached HEAD, not a branch")
+	}
+
+	if err := g.RemoveWorktree(ctx(), cloneDir, snap); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	branch, ok, err := g.WorktreeBranch(ctx(), cloneDir, snap)
+	if err != nil {
+		t.Fatalf("WorktreeBranch: %v", err)
+	}
+	if ok {
+		t.Fatalf("snapshot should no longer be registered after RemoveWorktree, got branch=%q", branch)
+	}
+}
+
 func TestWorktreeThenCommitSurvivesReuse(t *testing.T) {
 	cloneDir, originDir := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")
@@ -187,6 +248,86 @@ func TestWorktreeThenCommitSurvivesReuse(t *testing.T) {
 		t.Fatalf("Push (idempotent): %v", err)
 	}
 	_ = originDir
+}
+
+// TestWorktreeBranchesFromRemoteTrackingWhenLocalBaseIsStale is direct mode's own §4.6-safe
+// staleness fix (AGENTS.md M6, internal/engine/direct.go's DirectPushedStep): cloneDir's own
+// local "main" is never advanced by anything hoist does directly, but origin/main can move —
+// simulating exactly what a direct-mode push does, from a different worktree sharing the same
+// clone, without ever going through cloneDir itself. Worktree's new-branch path must pick up
+// that advance via FetchBranch's own remote-tracking ref, never by moving cloneDir's own local
+// "main" — proven here by asserting both: the new worktree's history includes the commit that
+// only ever reached origin, AND cloneDir's own refs/heads/main is byte-for-byte unchanged
+// throughout (the AGENTS.md §4.6 guarantee this mechanism must never trade away for the fix).
+func TestWorktreeBranchesFromRemoteTrackingWhenLocalBaseIsStale(t *testing.T) {
+	cloneDir, originDir := newTestRepo(t)
+	var g Exec
+
+	localMainBefore, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok {
+		t.Fatalf("RevParse local main: ok=%v err=%v", ok, err)
+	}
+
+	// Someone/something else — direct mode's own push, from a different worktree of this same
+	// clone, in real use — advances origin/main without ever touching cloneDir's own local main.
+	other := filepath.Join(t.TempDir(), "other-clone")
+	if err := runHost(t, "", "clone", originDir, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, other, "commit", "--allow-empty", "-m", "advances origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", other, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	advancedSHA := strings.TrimSpace(string(out))
+	if err := runHost(t, other, "push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	// cloneDir's own local main must still be exactly what it was — nothing here has touched
+	// it yet.
+	stillOld, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok || stillOld != localMainBefore {
+		t.Fatalf("local main should be untouched before FetchBranch: got %q ok=%v err=%v, want %q", stillOld, ok, err, localMainBefore)
+	}
+
+	if _, _, err := g.FetchBranch(ctx(), cloneDir, "origin", "main"); err != nil {
+		t.Fatalf("FetchBranch: %v", err)
+	}
+
+	// FetchBranch must never move the local branch of the same name (AGENTS.md §4.6): only
+	// the remote-tracking ref may change.
+	afterFetch, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok || afterFetch != localMainBefore {
+		t.Fatalf("FetchBranch moved cloneDir's own local main: got %q, want unchanged %q (ok=%v err=%v)", afterFetch, localMainBefore, ok, err)
+	}
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-staging/newpromo", "main"); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	shas, err := g.Log(ctx(), wt, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range shas {
+		if s == advancedSHA {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("new worktree's history %v should include the commit only origin/main has (%s) — it branched from a stale view of Base", shas, advancedSHA)
+	}
+
+	// cloneDir's own local main must still never have been touched, even after all this.
+	final, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok || final != localMainBefore {
+		t.Fatalf("cloneDir's own local main must never be touched by any of this: got %q, want %q (ok=%v err=%v)", final, localMainBefore, ok, err)
+	}
 }
 
 func TestPushRejectsNonFastForwardConflict(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/ui"
 )
 
@@ -17,6 +18,15 @@ type Screen interface {
 	View() string
 	SetSize(width, height int) Screen
 	SetStyles(ui.Styles) Screen
+	// CapturesText reports whether the screen is currently in a mode where an ordinary
+	// letter key like "q" is text the operator is typing — a filter query, a huh field's own
+	// "/" filter — rather than a command. The root's global quit binding (app.go's Update)
+	// checks this before treating "q" as quit, and only forwards the key to the screen as
+	// usual when it's true; ctrl+c is unaffected and always quits (round 5, finding 3: the
+	// global binding used to run unconditionally, before any screen's own key handling ever
+	// saw the press, so typing "q" into the tag picker's filter box quit the whole program
+	// instead of typing). A screen with no such mode returns false unconditionally.
+	CapturesText() bool
 }
 
 // matrixScreen adapts matrix.Model, whose methods return the concrete type, to Screen. Each
@@ -38,6 +48,9 @@ func (s matrixScreen) SetStyles(st ui.Styles) Screen {
 	return matrixScreen{s.Model.SetStyles(st)}
 }
 
+// CapturesText implements Screen: the matrix has no text-entry mode of its own.
+func (s matrixScreen) CapturesText() bool { return false }
+
 // planScreen adapts plan.Model the same way. It is pushed on top of the matrix when the
 // operator asks to plan a promotion (matrix.OpenPlanMsg, handled in app.go) — the first
 // screen doc.go's "pop arrives with the first screen that opens on top of the matrix" was
@@ -58,6 +71,10 @@ func (s planScreen) SetSize(width, height int) Screen {
 func (s planScreen) SetStyles(st ui.Styles) Screen {
 	return planScreen{s.Model.SetStyles(st)}
 }
+
+// CapturesText implements Screen, delegating to plan.Model's own query of whichever huh field
+// (envSelect or multiSelect) is currently active — see plan.Model.CapturesText's own doc comment.
+func (s planScreen) CapturesText() bool { return s.Model.CapturesText() }
 
 // flightScreen adapts flight.Model the same way. It is pushed on top of the plan screen
 // when the operator confirms a plan (plan.StartMsg, handled in app.go). app.go currently
@@ -81,3 +98,29 @@ func (s flightScreen) SetSize(width, height int) Screen {
 func (s flightScreen) SetStyles(st ui.Styles) Screen {
 	return flightScreen{s.Model.SetStyles(st)}
 }
+
+// CapturesText implements Screen: the flight screen has no text-entry mode of its own.
+func (s flightScreen) CapturesText() bool { return false }
+
+// tagsScreen adapts tags.Model the same way. It is pushed on top of the matrix when the
+// operator asks to pick a new tag (matrix.OpenTagsMsg, handled in app.go).
+type tagsScreen struct{ tags.Model }
+
+func (s tagsScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s tagsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return tagsScreen{m}, cmd
+}
+
+func (s tagsScreen) SetSize(width, height int) Screen {
+	return tagsScreen{s.Model.SetSize(width, height)}
+}
+
+func (s tagsScreen) SetStyles(st ui.Styles) Screen {
+	return tagsScreen{s.Model.SetStyles(st)}
+}
+
+// CapturesText implements Screen, delegating to tags.Model's own filtering flag — see
+// tags.Model.CapturesText's own doc comment.
+func (s tagsScreen) CapturesText() bool { return s.Model.CapturesText() }

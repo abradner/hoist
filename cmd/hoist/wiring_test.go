@@ -274,6 +274,11 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 	}
 	runGitHost(t, clone, "add", ".")
 	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+	// Push it too: a merged PR lands on origin, not only in someone's local clone. Without
+	// this the fixture leaves the clone ahead of origin/main, which is exactly the stale-clone
+	// state checkCloneCurrentForBase (M6) now refuses before any plan is trusted — so the test
+	// would stop at that refusal and never reach the all-no-op path it exists to check.
+	runGitHost(t, clone, "push", "-q", "origin", "main")
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {

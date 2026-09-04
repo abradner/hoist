@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 
@@ -329,6 +330,129 @@ func TestEnterWithNothingTickedShowsNotice(t *testing.T) {
 	}
 	if !strings.Contains(m.notice, "nothing ticked") {
 		t.Errorf("notice = %q, want it to mention nothing ticked", m.notice)
+	}
+}
+
+// TestFilterModeEngagesAndCapturesText proves buildMultiSelect's own huh.Field.WithKeyMap call
+// actually did what round 5's finding 3 investigation found missing: pressing "/" against the
+// ready screen's multiSelect now reaches huh's own filter-typing mode (GetFiltering flips true),
+// and CapturesText reports that live, exactly as tags.Model.CapturesText reports its own
+// m.filtering — the root needs this so it doesn't treat a "q" typed into the filter query as its
+// own global quit key (see app.go's own regression test for the tag picker's side of the same
+// bug). Before the WithKeyMap wiring, "/" didn't even reach huh's filter — this is what would
+// regress (CapturesText silently going back to always-false) if that wiring were ever removed.
+func TestFilterModeEngagesAndCapturesText(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if m.CapturesText() {
+		t.Fatal("CapturesText should be false before any key is pressed")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if !m.multiSelect.GetFiltering() {
+		t.Fatal("multiSelect should be filtering after \"/\": WithKeyMap wiring did not reach huh's own filter mode")
+	}
+	if !m.CapturesText() {
+		t.Fatal("CapturesText should be true while the multiSelect is filtering")
+	}
+	// Esc is deliberately not exercised here: this screen's own Update treats Esc as its Back
+	// key unconditionally, before ever consulting CapturesText or forwarding to the active
+	// field (unlike tags.Model, which checks m.filtering first) — a pre-existing gap outside
+	// this fix's scope (WithKeyMap wiring, not Esc routing), so filtering here can only be
+	// closed by typing enter, not by asserting an esc-driven exit this screen doesn't support.
+}
+
+// TestDownMovesMultiSelectCursor proves the same WithKeyMap wiring reaches ordinary
+// navigation, not just filtering: Down against a freshly built multiSelect used to move
+// nothing at all (round 5 finding 3 — every keymap-gated mode on these fields was inert, not
+// only "/"). huh doesn't expose the field's own cursor directly, so this drives it indirectly
+// through Toggle ("x"): Down then "x" must toggle a DIFFERENT row than "x" alone at the initial
+// cursor position, which is only possible if Down actually moved the cursor first.
+//
+// This also exercises a second, independent gap the WithKeyMap fix alone did not close:
+// buildMultiSelect's huh.NewMultiSelect().Value(&m.ticked) captures the address of m.ticked as
+// it exists on ONE particular Model copy (the value inside onLoaded's own stack frame, at the
+// moment buildMultiSelect runs) — but Model is a value threaded through a chain of value-receiver
+// methods that each return a fresh copy (New's own doc comment on the convention), so every
+// Update after that point runs against a copy whose own m.ticked field is a different piece of
+// memory than the one the accessor still points at. huh's own Toggle handling stayed internally
+// consistent (View() and multiSelect.GetValue() agree with each other), but writes made through
+// that accessor never reached the traveling m.ticked — the exact case Toggle needs, since
+// updateReady reads m.ticked (not the field) for the notice check and StartMsg.Ticked. Confirmed
+// directly before adding the fix below: after WithKeyMap alone, pressing "x" visibly unchecked a
+// row in multiSelect.View() while m.ticked (and equalSets(before, m.ticked) below) stayed
+// unchanged. updateReady now re-reads m.ticked from m.multiSelect.GetValue() after every Update
+// call, which is what makes this test — and the real screen — see the toggle at all.
+func TestDownMovesMultiSelectCursor(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if len(m.rows) < 2 {
+		t.Fatalf("fixture has %d selectable rows, want at least 2 for this test to be meaningful", len(m.rows))
+	}
+	before := append([]string(nil), m.ticked...)
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+
+	if equalSets(before, m.ticked) {
+		t.Fatal("ticked set unchanged after down+x: Toggle never reached the field (keymap still unwired?)")
+	}
+	// Untoggling the very first row (no Down) must differ from untoggling whatever Down landed
+	// on above, or this test can't actually distinguish "Down moved the cursor" from "x toggled
+	// row 0 regardless of Down".
+	m2 := readyModel(t, config.EnvsConfig{})
+	m2, _ = m2.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if equalSets(m.ticked, m2.ticked) {
+		t.Fatal("down+x toggled the same row as x alone: Down does not appear to move the cursor")
+	}
+}
+
+// TestEnvSelectResyncsTargetFromField proves updateSelectEnv's own resync line (the envSelect
+// twin of TestDownMovesMultiSelectCursor's multiSelect finding): buildEnvSelect's
+// huh.NewSelect().Value(&m.target) has the identical accessor-into-a-value-copy gap, so Down
+// moving the highlighted candidate updates the field's own accessor without that write ever
+// reaching the traveling m.target — the field the "enter" handler above actually reads to decide
+// whether to advance past stateSelectEnv and which target to resolve against. The real
+// testdata/repo fixture only has two envs (app-staging/app-production), so TargetsFor never
+// offers more than one candidate to promote "app-staging" to — not enough to move Down onto a
+// different value through the normal New()/buildEnvSelect() path. This builds a Select with two
+// options directly (same construction buildEnvSelect uses: Options + Value + WithKeyMap) and
+// drives it through updateSelectEnv itself, which is what's actually under test here.
+func TestEnvSelectResyncsTargetFromField(t *testing.T) {
+	var target string
+	sel := huh.NewSelect[string]().
+		Options(huh.NewOption("app-a", "app-a"), huh.NewOption("app-b", "app-b")).
+		Value(&target)
+	sel.WithKeyMap(huh.NewDefaultKeyMap())
+
+	m := Model{state: stateSelectEnv, envSelect: sel, target: target}
+	if m.target != "app-a" {
+		t.Fatalf("target = %q, want app-a selected by construction before any key press", m.target)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.target != "app-b" {
+		t.Fatalf("target = %q after down, want app-b: updateSelectEnv did not resync m.target from the field's own GetValue()", m.target)
+	}
+}
+
+// TestBuildEnvSelectWiresFiltering exercises buildEnvSelect itself (unlike
+// TestEnvSelectResyncsTargetFromField's own hand-built Select, used there only because the
+// fixture repo doesn't have enough envs to move Down onto a different candidate) — proving the
+// real construction path's own WithKeyMap call, not just the resync line, actually reaches huh's
+// filter mode. Filtering doesn't need a second candidate to be observable, so it works even
+// though this fixture's TargetsFor("app-staging") only ever offers one.
+func TestBuildEnvSelectWiresFiltering(t *testing.T) {
+	r := discoverFixture(t)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, nil)
+	if m.state != stateSelectEnv {
+		t.Fatalf("state = %v, want stateSelectEnv", m.state)
+	}
+	if m.CapturesText() {
+		t.Fatal("CapturesText should be false before any key is pressed")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if !m.envSelect.GetFiltering() {
+		t.Fatal("envSelect should be filtering after \"/\": buildEnvSelect's own WithKeyMap call did not reach huh's filter mode")
+	}
+	if !m.CapturesText() {
+		t.Fatal("CapturesText should be true while envSelect is filtering")
 	}
 }
 

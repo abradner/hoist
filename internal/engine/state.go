@@ -34,9 +34,17 @@ type PromotionState struct {
 	ExpectedBlobs                          map[string]string // repo-relative path -> expected git blob hash after Apply
 	CommitSHA, PushedSHA                   string
 	PR                                     *forge.PR
-	Phase                                  StepName // an index/hint only — Observe never trusts it, see AGENTS.md §4.1
-	History                                []HistoryEntry
-	GeneratedAt                            time.Time
+	// Direct records that this promotion was started with --direct (M6): committed straight to
+	// Base with no branch pushed to origin and no PR. Every other field is identical between
+	// the two modes and nothing else can tell them apart after the fact — DirectPushedStep
+	// pushes to Base, so Branch is set but was never pushed, which is indistinguishable from a
+	// PR promotion that died before PushedStep ran. Without this field, resuming a direct
+	// promotion re-observes it through AllSteps, finds Branch missing on origin, and pushes it
+	// and opens a PR — the exact thing the operator asked not to happen (Codex review, PR #43).
+	Direct      bool
+	Phase       StepName // an index/hint only — Observe never trusts it, see AGENTS.md §4.1
+	History     []HistoryEntry
+	GeneratedAt time.Time
 
 	// CloneDir is the user's own clone (--repo). WorktreeDir is the linked worktree this
 	// promotion's own steps operate in, under $XDG_CACHE_HOME/hoist/worktrees/<id>. Base is

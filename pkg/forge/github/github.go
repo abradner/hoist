@@ -487,6 +487,59 @@ func (c *Client) getPR(ctx context.Context, prNumber int) (forge.PR, error) {
 	return toPR(resp), nil
 }
 
+// maxTagPages bounds Tags' pagination the same way maxSearchPages bounds FindPR's fallback
+// scan: 3 pages of 100 (300 tags) is generous for a single-operator tool's app repos and
+// keeps a tag-heavy repo from turning one picker-open into an unbounded crawl.
+const maxTagPages = 3
+
+type tagResponse struct {
+	Name string `json:"name"`
+}
+
+// commitDateResponse is the one field Tags needs from GET .../commits/{ref}: the ref's own
+// commit reference accepts a tag name directly (GitHub resolves an annotated tag object to
+// its underlying commit for this endpoint, so this works identically for lightweight and
+// annotated tags without this package resolving the tag object itself).
+type commitDateResponse struct {
+	Commit struct {
+		Committer struct {
+			Date time.Time `json:"date"`
+		} `json:"committer"`
+	} `json:"commit"`
+}
+
+// Tags implements forge.Forge: every tag on the repo, with the date of the commit it points
+// to. This is N+1 requests (one to list tags, one per tag to read its commit date — GitHub's
+// tag-list endpoint reports a commit SHA but no date, and the M6 brief's own case for this
+// method is exactly "the registry has no dates, the git history does") — acceptable for a
+// single-operator tool's own app repos, bounded by maxTagPages, and only ever called when the
+// tag picker actually needs ordering for a mapped image repo, not on every plan.
+func (c *Client) Tags(ctx context.Context) ([]forge.GitTag, error) {
+	var all []tagResponse
+	for page := 1; page <= maxTagPages; page++ {
+		q := url.Values{"per_page": {"100"}, "page": {fmt.Sprint(page)}}
+		path := fmt.Sprintf("repos/%s/%s/tags?%s", c.owner, c.repo, q.Encode())
+		var batch []tagResponse
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &batch); err != nil {
+			return nil, translateErr("listing tags", err)
+		}
+		all = append(all, batch...)
+		if len(batch) < 100 {
+			break
+		}
+	}
+	out := make([]forge.GitTag, 0, len(all))
+	for _, t := range all {
+		var commit commitDateResponse
+		path := fmt.Sprintf("repos/%s/%s/commits/%s", c.owner, c.repo, url.PathEscape(t.Name))
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &commit); err != nil {
+			return nil, translateErr("resolving the commit date for tag "+t.Name, err)
+		}
+		out = append(out, forge.GitTag{Name: t.Name, Date: commit.Commit.Committer.Date})
+	}
+	return out, nil
+}
+
 // translateErr turns a go-gh HTTPError into a message actionable for AGENTS.md §6.1's "gh
 // CLI's own token scopes" gotcha: a 403/404 here is exactly what a `repo`-scope gap looks
 // like, indistinguishable at the wire level from "doesn't exist" — surface both possibilities
