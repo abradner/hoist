@@ -313,26 +313,31 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A shorter poll.deadline than the fixture's default (not the fixture's own 10s, which would
-	// make this test needlessly slow). poll.argo is deliberately left at the fixture's own 5ms,
-	// so driveToCompletion's outer loop calls engine.Drive many times across the Argo wait rather
-	// than once — which is the point: those repeated post-merge Drive calls are exactly what
-	// Drive's Merged short-circuit (internal/engine/engine.go) exists for, so this test doubles
-	// as its end-to-end proof against a real git remote, alongside the unit-level coverage in
-	// engine_test.go.
+	// make this test needlessly slow), and poll.argo widened to LARGER than that deadline so
+	// driveToCompletion's outer loop calls engine.Drive exactly once and is then purely sleeping
+	// when ctx's deadline fires.
 	//
-	// Before that short-circuit existed, this test had to widen poll.argo to LARGER than the
-	// deadline to force exactly one Drive call per run. Without that dodge, every later Drive
-	// re-observed from the top, found PushedStep unsatisfied (MergedStep's Act had deleted the
-	// branch it looks for on origin), re-pushed it, and so made MergedStep's own Observe see
-	// "branch not yet deleted" and re-run its Act — a re-push/re-delete cycle of real git
-	// subprocesses on every tick, which raced this test's own subprocess calls against ctx's
-	// deadline and occasionally surfaced as a raw "signal: killed" instead of the clean
-	// context.DeadlineExceeded asserted below. The short-circuit skips Branched..Merged entirely
-	// once a prior pass has reached Merged, so those ticks now do no git work at all and the
-	// widening is no longer needed.
-	shortDeadline := strings.Replace(string(data), "deadline: 10s", "deadline: 2s", 1)
+	// That one-call shape is what keeps the phase asserted below deterministic. This test cares
+	// specifically that the run is still *waiting on Argo to sync* rather than falsely reporting
+	// done, and it names argo-synced to say so. With a fast poll.argo the loop makes hundreds of
+	// Drive passes instead, and the deadline can just as easily fire mid-pass at argo-refreshed
+	// (whose own Observe reports "already satisfied") as at the argo-synced wait — a flake that
+	// says nothing about ArgoApps, which is what this test is actually for.
+	//
+	// Historical note, since the widening predates the reason above: it originally existed to
+	// dodge a real re-push/re-delete cycle — every post-merge Drive re-observed from the top,
+	// found PushedStep unsatisfied because MergedStep's Act had deleted the branch, re-pushed it,
+	// and so made MergedStep re-run its own Act, burning the deadline in real git subprocesses.
+	// That cycle is fixed (Drive's Merged short-circuit, internal/engine/engine.go) and is
+	// covered directly by TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge
+	// (internal/engine/steps_m5_test.go), which counts pushes and deletes against a real remote
+	// rather than inferring anything from timing. The widening stays only for determinism.
+	shortDeadline := strings.NewReplacer(
+		"deadline: 10s", "deadline: 2s",
+		"argo: 5ms", "argo: 30s",
+	).Replace(string(data))
 	if shortDeadline == string(data) {
-		t.Fatal("fixture config shape changed; poll.deadline replacement point not found")
+		t.Fatal("fixture config shape changed; deadline/poll.argo replacement points not found")
 	}
 	if err := os.WriteFile(cfgPath, []byte(shortDeadline), 0o644); err != nil {
 		t.Fatal(err)
