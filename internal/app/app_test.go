@@ -65,6 +65,25 @@ func press(t *testing.T, m tea.Model, k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m.Update(k)
 }
 
+// runBatch invokes cmd the way the real bubbletea runtime would, one level deep: calling a
+// tea.Cmd directly (a plain func call, no runtime involved) only ever runs the func itself —
+// for a tea.Batch this returns a tea.BatchMsg (a slice of the cmds it wraps) without ever
+// invoking any of them, since unwrapping and dispatching a batch is normally the runtime's job.
+// flight.Model.Init returns tea.Batch(spinner.Tick, driveCmd()), so calling it directly never
+// actually starts the driveCmd goroutine a test needs running. This runs cmd, and if the result
+// is a BatchMsg, runs every sub-cmd in its own goroutine too — enough to exercise a real
+// in-flight driveCmd without pulling in the whole runtime.
+func runBatch(cmd tea.Cmd) {
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			if sub != nil {
+				go sub()
+			}
+		}
+	}
+}
+
 func plain(m tea.Model) string { return ansi.Strip(m.View().Content) }
 
 func TestViewSnapshot(t *testing.T) {
@@ -917,6 +936,79 @@ func TestFlightAbortMsgReturnsToMatrix(t *testing.T) {
 	}
 	if v := plain(m); strings.Contains(v, "abcd1234") {
 		t.Errorf("matrix view should not mention the aborted promotion's id:\n%s", v)
+	}
+}
+
+// TestFlightAbortMsgCancelsInFlightDriveCmd is Copilot's PR #50 round-11 finding: popping the
+// flight screen used to leave any driveCmd already in flight running to completion, free to
+// keep committing, pushing, opening a PR, or merging after the operator had walked away — and
+// since the claim was already released once the initial state saved, a later reconfirmation of
+// the same deterministic promotion id could start a second driver racing the first. This proves
+// AbortMsg actually cancels the popped screen's own drive context, not just its message.
+func TestFlightAbortMsgCancelsInFlightDriveCmd(t *testing.T) {
+	gotErr := make(chan error, 1)
+	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		<-ctx.Done()
+		gotErr <- ctx.Err()
+		return engine.PromotionState{}, false, nil, ctx.Err()
+	}
+	root := sized(t).(Model)
+	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}
+	initCmd := fs.Init()
+	if initCmd == nil {
+		t.Fatal("setup: flight screen's Init produced no command")
+	}
+	root = root.push(fs)
+	go runBatch(initCmd)
+
+	rootTM, _ := root.Update(flight.AbortMsg{ID: "abcd1234"})
+	root = rootTM.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("setup: AbortMsg should return to the matrix: stack has %d screens, want 1", n)
+	}
+
+	select {
+	case err := <-gotErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("hung driveFn's own ctx.Err() = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AbortMsg did not cancel the popped flight screen's in-flight driveCmd within 2s")
+	}
+}
+
+// TestFlightBackMsgCancelsInFlightDriveCmd is TestFlightAbortMsgCancelsInFlightDriveCmd's
+// sibling for the other way a flight screen gets popped: pressing Esc (BackMsg), which had the
+// exact same gap.
+func TestFlightBackMsgCancelsInFlightDriveCmd(t *testing.T) {
+	gotErr := make(chan error, 1)
+	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		<-ctx.Done()
+		gotErr <- ctx.Err()
+		return engine.PromotionState{}, false, nil, ctx.Err()
+	}
+	root := sized(t).(Model)
+	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}
+	initCmd := fs.Init()
+	if initCmd == nil {
+		t.Fatal("setup: flight screen's Init produced no command")
+	}
+	root = root.push(fs)
+	go runBatch(initCmd)
+
+	rootTM, _ := root.Update(flight.BackMsg{})
+	root = rootTM.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("setup: BackMsg should pop the flight screen: stack has %d screens, want 1", n)
+	}
+
+	select {
+	case err := <-gotErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("hung driveFn's own ctx.Err() = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("BackMsg did not cancel the popped flight screen's in-flight driveCmd within 2s")
 	}
 }
 

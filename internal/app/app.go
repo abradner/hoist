@@ -330,6 +330,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.push(fs)
 		return m, fs.Init()
 	case flight.BackMsg:
+		// Cancel the flight screen's shared drive context before popping it — see
+		// flight.Model.Cancel's own doc comment. Without this, a driveCmd already in flight
+		// for the popped screen kept running to completion (committing, pushing, opening a
+		// PR, merging) even though nothing was watching it anymore.
+		if top := len(m.stack) - 1; top >= 0 {
+			if fs, ok := m.stack[top].(flightScreen); ok {
+				fs.Cancel()
+			}
+		}
 		return m.pop(), nil
 	case flight.OpenPRMsg:
 		// openPRMode's three shapes (see Promotion.OpenPRMode's own doc comment): "display"
@@ -375,10 +384,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// deterministic id, per AGENTS.md §4.1) to pick the flight screen back up. No
 		// engine call happens here at all: flight.Model itself now refuses to emit
 		// AbortMsg for an empty/read-only promotion (PR #39 review finding #2), so
-		// msg.ID is always a real id, but this handler does not even need it. A
-		// driveCmd already in flight for the popped screen may still deliver one more
-		// (harmless, unmatched) message to whatever screen is now on top once it
-		// completes or its own poll.Deadline elapses.
+		// msg.ID is always a real id, but this handler does not even need it.
+		//
+		// Cancel the flight screen's shared drive context before popping it — see
+		// flight.Model.Cancel's own doc comment. A driveCmd already in flight for the popped
+		// screen is NOT harmless left running: it can keep committing, pushing, opening a PR
+		// or merging after the operator has walked away, and — since the claim was already
+		// released once the initial state saved — a later reconfirmation of the same
+		// deterministic promotion id could start a second driver racing the first (Copilot
+		// review, PR #50 round 11; this corrects an earlier version of this comment that
+		// called the same lingering call harmless).
+		if top := len(m.stack) - 1; top >= 0 {
+			if fs, ok := m.stack[top].(flightScreen); ok {
+				fs.Cancel()
+			}
+		}
 		if len(m.stack) > 1 {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}

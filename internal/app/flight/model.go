@@ -121,6 +121,15 @@ type Model struct {
 	// doc comment for why a fresh per-call timeout would let the wait outlive the deadline
 	// entirely. Zero when poll.Deadline <= 0 ("no bound at all", the existing convention).
 	deadlineAt time.Time
+	// ctx and cancel are this screen's one shared drive context, built once in New (nil when
+	// driveFn is nil — a read-only screen never calls driveCmd at all) and reused by every
+	// driveCmd call this instance ever makes, automatic ticks and manual R retries alike — see
+	// driveCmd's own doc comment for why one shared context, not a fresh one per call. cancel is
+	// also this screen's external interrupt handle: app.go calls Cancel (below) before popping
+	// this screen for AbortMsg or BackMsg, so a driveCmd already in flight is stopped rather than
+	// left to keep running — see Cancel's own doc comment.
+	ctx    context.Context
+	cancel context.CancelFunc
 	// busy is true while a driveCmd is in flight, so a tick landing mid-call and a manual R
 	// press can't both fire a second, overlapping DriveFunc call.
 	busy bool
@@ -164,11 +173,37 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		// would let the total wait outlive poll.Deadline indefinitely.
 		m.deadlineAt = time.Now().Add(poll.Deadline)
 	}
+	if driveFn != nil {
+		// Built once, here, and reused by every driveCmd call this instance ever makes — see
+		// Model.ctx's own doc comment. A read-only screen (driveFn nil) never calls driveCmd
+		// and so never needs a cancelable context at all.
+		ctx := context.Background()
+		if m.deadlineAt.IsZero() {
+			m.ctx, m.cancel = context.WithCancel(ctx)
+		} else {
+			m.ctx, m.cancel = context.WithDeadline(ctx, m.deadlineAt)
+		}
+	}
 	m.rows = DeriveRows(m.order, false, nil) // every step "not yet reached" until the first poll lands
 	if driveFn != nil {
 		m.busy = true
 	}
 	return m
+}
+
+// Cancel interrupts this screen's shared drive context immediately, rather than waiting for
+// m.deadlineAt or for driveFn to notice at its own next Observe/Act that nobody is watching
+// anymore. app.go calls this on the current flight screen before popping it for AbortMsg or
+// BackMsg (see their own doc comments in app.go): without it, a driveCmd already in flight kept
+// running to completion after the operator had already stopped watching it — free to keep
+// committing, pushing, opening a PR, or merging, and a later reconfirmation of the same
+// deterministic promotion id could then start a second driver racing the first, since the
+// original's claim was already released (Copilot review, PR #50 round 11). A nil cancel — a
+// read-only screen, driveFn nil, New never builds one — makes this a no-op.
+func (m Model) Cancel() {
+	if m.cancel != nil {
+		m.cancel()
+	}
 }
 
 // Init starts the spinner and the first poll, but only when there is something to drive —
@@ -188,33 +223,28 @@ func (m Model) Init() tea.Cmd {
 // git/the forge). state is captured by value at call time, so a concurrent Update never
 // races the copy this goroutine reads.
 //
-// The call is bounded by m.deadlineAt, not left on context.Background(): without this, a
-// single hung network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout)
-// would block this goroutine — and therefore this screen's ability to ever show progress or
-// let the user act — forever, with no way to cancel. m.deadlineAt is one absolute instant
-// computed once in New (poll.Deadline is generous, default 4h, the same value cmd/hoist's own
-// driveToCompletion bounds an entire promotion's wait by) — every poll's context shares that
-// same instant, bounded by the time remaining until it, rather than each call deriving its own
-// fresh poll.Deadline-length timeout from "now". A fresh-per-call timeout would let a promotion
-// stuck re-polling CI/approval (each individual wait returns well within the deadline, then
-// schedules another call with a brand new full-length timeout) outlive the configured deadline
-// indefinitely — cmd/hoist/drive.go's own driveToCompletion enforces exactly one deadline for
-// its whole wait (wrapped around ctx once, by its caller, before the retry loop starts), and
-// this screen must not silently offer a looser guarantee than the CLI's own (Codex review, PR
-// #50).
+// The call is bounded by m.ctx, never context.Background(): without this, a single hung
+// network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout) would block
+// this goroutine — and therefore this screen's ability to ever show progress or let the user
+// act — forever, with no way to cancel. m.ctx is built once in New from m.deadlineAt (poll.Deadline
+// is generous, default 4h, the same value cmd/hoist's own driveToCompletion bounds an entire
+// promotion's wait by) and reused by every call this instance ever makes — automatic ticks and
+// manual R retries alike — rather than each deriving its own fresh poll.Deadline-length timeout
+// from "now". A fresh-per-call timeout would let a promotion stuck re-polling CI/approval (each
+// individual wait returns well within the deadline, then schedules another call with a brand new
+// full-length timeout) outlive the configured deadline indefinitely — cmd/hoist/drive.go's own
+// driveToCompletion enforces exactly one deadline for its whole wait (wrapped around ctx once, by
+// its caller, before the retry loop starts), and this screen must not silently offer a looser
+// guarantee than the CLI's own (Codex review, PR #50). Reusing one context rather than deriving a
+// fresh one per call is also what makes Cancel (above) actually able to interrupt a call already
+// in flight, not just whichever one happens to be constructed next.
 func (m Model) driveCmd() tea.Cmd {
-	driveFn, state, deadlineAt := m.driveFn, m.state, m.deadlineAt
+	driveFn, state, ctx := m.driveFn, m.state, m.ctx
 	gen := m.gen
 	if driveFn == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		ctx := context.Background()
-		if !deadlineAt.IsZero() {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, deadlineAt)
-			defer cancel()
-		}
 		next, done, statuses, err := driveFn(ctx, state)
 		return driveResultMsg{gen: gen, state: next, done: done, statuses: statuses, err: err}
 	}
