@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -564,5 +565,101 @@ func TestArgoAndRolloutFullPipelineConverges(t *testing.T) {
 	}
 	if len(f.PRs()) != 1 || !f.PRs()[0].Merged {
 		t.Fatalf("expected exactly one, merged PR across both attempts: %+v", f.PRs())
+	}
+}
+
+// countingGit wraps a real git.Exec, counting Push and DeleteRemoteBranch calls — used by
+// TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge below to prove, against a real git
+// remote, that Drive's Merged short-circuit (engine.go) actually stops the real re-push/re-delete
+// cycle TestResumeRebuildsArgoAppsForALegacyStateFile (cmd/hoist/resume_test.go) first documented
+// and worked around with a widened poll.argo, rather than just the stubbed shape of it that
+// TestDriveSkipsPushedAndMergedOncePastMergedOnAPriorPass (engine_test.go) already covers.
+type countingGit struct {
+	git.Exec
+	pushes, deletes *int
+}
+
+func (g countingGit) Push(ctx context.Context, worktreeDir, remote, branch string) error {
+	*g.pushes++
+	return g.Exec.Push(ctx, worktreeDir, remote, branch)
+}
+
+func (g countingGit) DeleteRemoteBranch(ctx context.Context, cloneDir, remote, branch string) error {
+	*g.deletes++
+	return g.Exec.DeleteRemoteBranch(ctx, cloneDir, remote, branch)
+}
+
+// TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge drives one real promotion (real
+// git, real bare origin remote — the same "world is the state" wiring AllSteps uses in
+// production) through to a genuine "merged, waiting on Argo to sync" stop, with Argo
+// deliberately left OutOfSync so it never converges (mirroring
+// TestResumeRebuildsArgoAppsForALegacyStateFile's own setup). It then calls Drive on the very
+// same PromotionState several more times — standing in for driveToCompletion's own poll loop
+// (cmd/hoist/drive.go), which calls Drive repeatedly every poll.argo/poll.rollout tick while
+// waiting — and asserts the branch is pushed and deleted exactly once each, not once per poll.
+func TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	f := &forge.Fake{}
+	app := argo.Application{Namespace: testArgoNamespace, Name: testApp}
+	a := &argo.Fake{}
+	// OutOfSync, and already "refreshed" (ReconciledAt ahead of the merge anchor Drive is about
+	// to record) so ArgoRefreshedStep is satisfied without issuing its own extra Refresh call,
+	// leaving ArgoSyncedStep as the one, deliberately permanent, waiting point this test needs.
+	a.SetStatus(app, argo.Status{
+		SyncStatus:   "OutOfSync",
+		SyncRevision: "some-earlier-commit",
+		HealthStatus: argo.HealthStatusHealthy,
+		ReconciledAt: time.Now().Add(time.Hour),
+	})
+	ro := &rollout.Fake{} // unconfigured: RolledOutStep must never be reached
+
+	s := newState(fx, wt)
+	s.CINone, s.CIGrace, s.Approval = "green", time.Nanosecond, "auto"
+	s.ArgoNamespace = testArgoNamespace
+	s.ArgoApps = []string{testApp}
+
+	var pushes, deletes int
+	g := countingGit{Exec: git.Exec{}, pushes: &pushes, deletes: &deletes}
+	all := AllSteps(g, f, a, ro, nil)
+
+	if err := Drive(ctx(), all, s, nil); !errors.Is(err, ErrWaiting) {
+		t.Fatalf("first Drive call: expected ErrWaiting (Argo left OutOfSync on purpose), got %v", err)
+	}
+	if s.Phase != StepArgoSynced {
+		t.Fatalf("expected to stop at %s, stopped at %s", StepArgoSynced, s.Phase)
+	}
+	if s.MergeSHA == "" {
+		t.Fatal("expected the promotion to have actually merged before this test's own Argo wait")
+	}
+	if pushes != 1 {
+		t.Fatalf("expected exactly one push (the original promotion push), got %d", pushes)
+	}
+	if deletes != 1 {
+		t.Fatalf("expected exactly one branch delete (MergedStep's cleanup), got %d", deletes)
+	}
+	// What a real GitHub squash-merge would have done to the base branch — forge.Fake's own
+	// MergePR never touches real git (mergeToBase's own doc comment) — needed so every
+	// subsequent poll's fresh Observe on MergedStep still finds its merge commit a genuine,
+	// verifiable ancestor of the base's current tip, exactly as production would.
+	mergeToBase(t, s)
+
+	for i := 0; i < 4; i++ {
+		if err := Drive(ctx(), all, s, nil); !errors.Is(err, ErrWaiting) {
+			t.Fatalf("poll %d: expected ErrWaiting (Argo is still OutOfSync), got %v", i, err)
+		}
+	}
+
+	if pushes != 1 {
+		t.Fatalf("branch was re-pushed on a later poll while merged and waiting on Argo: %d total push(es), want 1", pushes)
+	}
+	if deletes != 1 {
+		t.Fatalf("branch was re-deleted on a later poll while merged and waiting on Argo: %d total delete(s), want 1", deletes)
+	}
+
+	if remoteSHA, ok, err := (git.Exec{}).LsRemoteBranch(ctx(), fx.cloneDir, "origin", s.Branch); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatalf("branch %s should still be deleted on origin, found at %s", s.Branch, remoteSHA)
 	}
 }
