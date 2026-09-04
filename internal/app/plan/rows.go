@@ -86,7 +86,7 @@ func DeriveRows(pl gitops.Plan, res map[string]resolve.Resolution) []Row {
 
 	warningsByRepo := map[string][]gitops.Warning{}
 	for _, w := range pl.Warnings {
-		if repo := warningRepo(w); repo != "" {
+		if repo := WarningRepo(w); repo != "" {
 			warningsByRepo[repo] = append(warningsByRepo[repo], w)
 		}
 	}
@@ -131,10 +131,13 @@ func unresolvedReason(r resolve.Resolution, warnings []gitops.Warning) string {
 	return "no digest source resolved this repo"
 }
 
-// warningRepo is the repo a warning is about: every Warning built by pkg/gitops and
+// WarningRepo is the repo a warning is about: every Warning built by pkg/gitops and
 // pkg/resolve carries Occurrences for exactly one repo (never a mix), so the first
-// occurrence's ref names it; "" when a warning carries no occurrence at all.
-func warningRepo(w gitops.Warning) string {
+// occurrence's ref names it; "" when a warning carries no occurrence at all. Exported so
+// internal/app's filterTicked (app.go) can correlate a Plan's Warnings against the operator's
+// ticked selection the same way DeriveRows already groups them, rather than re-deriving the
+// "first occurrence's ref" convention a second time.
+func WarningRepo(w gitops.Warning) string {
 	if len(w.Occurrences) == 0 {
 		return ""
 	}

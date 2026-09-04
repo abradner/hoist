@@ -249,13 +249,28 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // there rather than calling Observe a second time — every poll that isn't yet fully done
 // would otherwise cost one extra, wasted remote call on the final step, every tick of the
 // flight screen's own poll loop (PR #39 review finding #3).
+// Both of Status's own Observe errors are returned as *StepError (Op: "observe"), not a bare
+// fmt.Errorf, even though nothing here ever calls Act: internal/app/flight.Model's retry
+// classifier (retryableErr, mirroring cmd/hoist/drive.go's own driveToCompletion) only retries
+// automatically on a *StepError naming StepCIGreen or StepApproved — the two steps whose
+// Observe alone can transiently 404/scope-error on a Checks or Comments call without the
+// underlying condition (CI status, an approval) actually being answerable yet. A bare wrapped
+// error carries the same message (StepError.Error()'s "<step>: <op>: <err>" format matches this
+// function's own pre-existing "%s: observe: %w" text exactly, and Unwrap still reaches oerr, so
+// errors.Is/the message text are both unchanged) but cannot be told apart by errors.As, which is
+// all that classifier can use. Before this, a transient hiccup on the immediately-following
+// Status call — after engine.Drive had itself already observed the very same step successfully
+// as Waiting or Blocked, in cmd/hoist/wiring.go's own DriveFunc — surfaced as a plain error the
+// flight screen read as terminal and stopped polling on for good, unlike the CLI's own
+// driveToCompletion, which retries the identical shape of failure when Drive's own Observe hits
+// it directly (Codex review, PR #50 round 4).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
 	var finalProbe *StepStatus
 	if n := len(steps); n > 0 {
 		final := steps[n-1]
 		obs, oerr := final.Observe(ctx, s)
 		if oerr != nil {
-			return false, nil, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+			return false, nil, &StepError{Step: final.Name(), Op: "observe", Err: oerr}
 		}
 		if obs.Satisfied {
 			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
@@ -274,7 +289,7 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 		} else {
 			obs, oerr := step.Observe(ctx, s)
 			if oerr != nil {
-				return false, statuses, fmt.Errorf("%s: observe: %w", step.Name(), oerr)
+				return false, statuses, &StepError{Step: step.Name(), Op: "observe", Err: oerr}
 			}
 			st = StepStatus{Step: step.Name(), Observation: obs}
 		}

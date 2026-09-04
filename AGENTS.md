@@ -318,8 +318,11 @@ file with its phase re-observed the same way, and `hoist resume <id>` (or `hoist
 <target-env>`) re-drives one from wherever `Observe` actually finds it — the CLI's own poll loop
 (`internal/config`'s `poll` section) is what does the actual waiting on CI/approval, never a
 `Step`'s own `Act`. `mise exec -- go
-run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (read-only;
-`q` quits, `?` help). Golden files under `testdata/golden/` regenerate with
+run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (`q` quits,
+`?` help); browsing it and the plan/confirm screen it opens into is read-only, but confirming a
+plan there (Enter on the confirm screen) now drives a real promotion exactly like `promote`
+above — commit, push, PR, CI, approval, merge — through the same `internal/engine` pipeline.
+Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan -update`; the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`

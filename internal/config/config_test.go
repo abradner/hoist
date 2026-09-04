@@ -44,6 +44,7 @@ registries:
     cluster: { namespace: app-staging, secret: ghcr-pull }
     op: op://vault/item/field
 poll: { ci: 1s, approval: 2s, argo: 3s, rollout: 4s, deadline: 5h }
+preferences: { open_pr: display, browser_launch_timeout: 10s }
 `
 
 func TestLoadFullFile(t *testing.T) {
@@ -80,6 +81,10 @@ func TestLoadFullFile(t *testing.T) {
 			Op:      "op://vault/item/field",
 		}},
 		Poll: PollConfig{CI: Duration(time.Second), Approval: Duration(2 * time.Second), Argo: Duration(3 * time.Second), Rollout: Duration(4 * time.Second), Deadline: Duration(5 * time.Hour)},
+		Preferences: PreferencesConfig{
+			OpenPR:               OpenPRDisplay,
+			BrowserLaunchTimeout: Duration(10 * time.Second),
+		},
 	}
 	if diff := cmp.Diff(want, *c); diff != "" {
 		t.Errorf("Load mismatch (-want +got):\n%s", diff)
@@ -95,46 +100,50 @@ func TestDefaults(t *testing.T) {
 	}
 	r := c.Repos[0]
 	for name, got := range map[string]any{
-		"name":             r.Name,
-		"apps_root":        r.AppsRoot,
-		"promotable":       r.Promotable,
-		"ci.none":          r.CI.None,
-		"ci.grace":         r.CI.Grace,
-		"digest_sources":   strings.Join(r.DigestSources, ","),
-		"approval[prod]":   r.Envs.Approval["prod"],
-		"registries.auth":  strings.Join(c.Registries[0].Auth, ","),
-		"poll.ci":          c.Poll.CI,
-		"poll.approval":    c.Poll.Approval,
-		"poll.argo":        c.Poll.Argo,
-		"poll.rollout":     c.Poll.Rollout,
-		"poll.deadline":    c.Poll.Deadline,
-		"Approval(prod)":   r.Approval("prod"),
-		"Approval(other)":  r.Approval("staging"),
-		"kube.context":     r.Kube.Context,
-		"github":           r.GitHub,
-		"registries.op":    c.Registries[0].Op,
-		"registries.clust": c.Registries[0].Cluster,
+		"name":                               r.Name,
+		"apps_root":                          r.AppsRoot,
+		"promotable":                         r.Promotable,
+		"ci.none":                            r.CI.None,
+		"ci.grace":                           r.CI.Grace,
+		"digest_sources":                     strings.Join(r.DigestSources, ","),
+		"approval[prod]":                     r.Envs.Approval["prod"],
+		"registries.auth":                    strings.Join(c.Registries[0].Auth, ","),
+		"poll.ci":                            c.Poll.CI,
+		"poll.approval":                      c.Poll.Approval,
+		"poll.argo":                          c.Poll.Argo,
+		"poll.rollout":                       c.Poll.Rollout,
+		"poll.deadline":                      c.Poll.Deadline,
+		"Approval(prod)":                     r.Approval("prod"),
+		"Approval(other)":                    r.Approval("staging"),
+		"kube.context":                       r.Kube.Context,
+		"github":                             r.GitHub,
+		"registries.op":                      c.Registries[0].Op,
+		"registries.clust":                   c.Registries[0].Cluster,
+		"preferences.open_pr":                c.Preferences.OpenPR,
+		"preferences.browser_launch_timeout": c.Preferences.BrowserLaunchTimeout,
 	} {
 		want := map[string]any{
-			"name":             "gitops",
-			"apps_root":        "cluster/apps",
-			"promotable":       []string(nil),
-			"ci.none":          "green",
-			"ci.grace":         Duration(3 * time.Minute),
-			"digest_sources":   "pods,manifest,registry",
-			"approval[prod]":   "comment",
-			"registries.auth":  "env,keychain,cluster,op",
-			"poll.ci":          Duration(20 * time.Second),
-			"poll.approval":    Duration(30 * time.Second),
-			"poll.argo":        Duration(5 * time.Second),
-			"poll.rollout":     Duration(3 * time.Second),
-			"poll.deadline":    Duration(4 * time.Hour),
-			"Approval(prod)":   "comment",
-			"Approval(other)":  "auto",
-			"kube.context":     "",
-			"github":           "",
-			"registries.op":    "",
-			"registries.clust": ClusterSecret{},
+			"name":                               "gitops",
+			"apps_root":                          "cluster/apps",
+			"promotable":                         []string(nil),
+			"ci.none":                            "green",
+			"ci.grace":                           Duration(3 * time.Minute),
+			"digest_sources":                     "pods,manifest,registry",
+			"approval[prod]":                     "comment",
+			"registries.auth":                    "env,keychain,cluster,op",
+			"poll.ci":                            Duration(20 * time.Second),
+			"poll.approval":                      Duration(30 * time.Second),
+			"poll.argo":                          Duration(5 * time.Second),
+			"poll.rollout":                       Duration(3 * time.Second),
+			"poll.deadline":                      Duration(4 * time.Hour),
+			"Approval(prod)":                     "comment",
+			"Approval(other)":                    "auto",
+			"kube.context":                       "",
+			"github":                             "",
+			"registries.op":                      "",
+			"registries.clust":                   ClusterSecret{},
+			"preferences.open_pr":                OpenPRBoth,
+			"preferences.browser_launch_timeout": Duration(5 * time.Second),
 		}[name]
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("%s (-want +got):\n%s", name, diff)

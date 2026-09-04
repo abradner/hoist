@@ -36,3 +36,10 @@ registries:
                                                 # `config show`)
 
 poll: { ci: 20s, approval: 30s, argo: 5s, rollout: 3s, deadline: 4h }   # M4/M5
+
+preferences:                       # operator UX, not promotion policy; safe to change on a whim
+  open_pr: both                    # launch|display|both; default both. launch = open the PR
+                                    # in a browser on `o`; display = only ever show the URL as
+                                    # text (headless/SSH session, no browser to launch into);
+                                    # both = attempt launch AND always show the URL too
+  browser_launch_timeout: 5s       # bounds one "launch" attempt; default 5s

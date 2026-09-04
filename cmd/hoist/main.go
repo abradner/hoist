@@ -15,6 +15,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -489,7 +490,26 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		envs = eff.cfg.Envs
 	}
 	resolveFn := buildResolveFunc(cfg, eff.cfg, eff.promotable)
-	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn), tea.WithOutput(stdout)).Run(); err != nil {
+
+	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
+	// reused for every promotion the operator confirms in this TUI session, mirroring
+	// newGit/newForge's own package-level reuse across a single runPromote call. newForge is
+	// called even when eff.cfg is nil or has no GitHub configured (github.New("") fails fast
+	// on the owner/name parse alone, before ever touching gh's own auth or the network) so
+	// buildStartPromotion always has a forge value to close over; its own eff.cfg check runs
+	// first and reports the missing-config case before this error would ever matter.
+	githubRepo := ""
+	if eff.cfg != nil {
+		githubRepo = eff.cfg.GitHub
+	}
+	f, forgeErr := newForge(githubRepo)
+	promo := app.Promotion{
+		Start:      buildStartPromotion(eff, newGit, f, forgeErr),
+		Poll:       buildPollDurations(cfg.Poll),
+		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
+		OpenPRMode: cfg.Preferences.OpenPR,
+	}
+	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}

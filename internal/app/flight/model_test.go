@@ -157,6 +157,94 @@ func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
 	}
 }
 
+// TestDriveCmdSharesOneAbsoluteDeadlineAcrossPolls is PR #50 review finding #8 (Codex):
+// mapping poll.deadline into a fresh context.WithTimeout(ctx, deadline) on every driveCmd call
+// re-derives a brand new deadline-length window each poll, so a promotion stuck re-polling
+// CI/approval (each individual wait returns well within the deadline, then schedules another
+// call with a full-length timeout again) never actually hits poll.Deadline no matter how long
+// it runs — unlike cmd/hoist/drive.go's own driveToCompletion, which bounds its ENTIRE wait by
+// one deadline its caller wraps around ctx once. This proves the fix: a driveFn that blocks
+// until its own ctx expires, called twice with the SAME Model (so it shares the SAME
+// m.deadlineAt, computed once in New), must have its second call's ctx already expired at
+// creation — returning near-instantly — rather than getting its own fresh window and blocking
+// for another almost-full poll.Deadline.
+func TestDriveCmdSharesOneAbsoluteDeadlineAcrossPolls(t *testing.T) {
+	hung := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		<-ctx.Done()
+		return s, false, nil, ctx.Err()
+	}
+	m := New(fixtureState(), PollDurations{Deadline: 60 * time.Millisecond}, hung)
+
+	msg1, ok := m.driveCmd()().(driveResultMsg)
+	if !ok || !errors.Is(msg1.err, context.DeadlineExceeded) {
+		t.Fatalf("first driveCmd result = %#v, want a driveResultMsg with context.DeadlineExceeded", msg1)
+	}
+
+	start := time.Now()
+	msg2, ok := m.driveCmd()().(driveResultMsg)
+	elapsed := time.Since(start)
+	if !ok || !errors.Is(msg2.err, context.DeadlineExceeded) {
+		t.Fatalf("second driveCmd result = %#v, want a driveResultMsg with context.DeadlineExceeded", msg2)
+	}
+	if elapsed > 30*time.Millisecond {
+		t.Errorf("second driveCmd call took %v to return — it looks like it got its own fresh poll.Deadline-length timeout instead of sharing one absolute deadline with the first call (want near-instant: the shared deadline had already elapsed)", elapsed)
+	}
+}
+
+// TestDriveCmdStampsCurrentGen: every driveResultMsg driveCmd produces must carry the issuing
+// Model's own generation (m.gen) — the guard onDriveResult uses to drop a stale result from a
+// different flight.Model instance (see TestStaleDriveResultFromAnotherModelIsIgnored below,
+// PR #50 review finding #4). This is the direct, narrow check that driveCmd actually stamps it.
+func TestDriveCmdStampsCurrentGen(t *testing.T) {
+	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn())
+	msg, ok := m.driveCmd()().(driveResultMsg)
+	if !ok {
+		t.Fatalf("driveCmd's result is %T, want driveResultMsg", msg)
+	}
+	if msg.gen != m.gen {
+		t.Errorf("driveResultMsg.gen = %d, want %d (m.gen)", msg.gen, m.gen)
+	}
+}
+
+// TestStaleDriveResultFromAnotherModelIsIgnored is PR #50 review finding #4 (Codex): the
+// root's message dispatch (internal/app/app.go's Update, "forward everything else to the top
+// screen") delivers a message to whichever screen is on top by concrete Go type alone, with no
+// notion of which screen instance actually issued the tea.Cmd that produced it. A driveCmd
+// still in flight for a flight.Model the operator has since aborted can complete later and
+// deliver one more driveResultMsg — which a DIFFERENT flight.Model now on top (driving a
+// different promotion) must not silently adopt as its own: doing so would show the wrong
+// promotion's state/statuses while continuing to poll and save under the wrong driveFn/state
+// closure. This builds a driveResultMsg stamped with one Model's gen ("A", aborted) and feeds
+// it to a completely different Model ("B") — B must ignore it outright, unchanged.
+func TestStaleDriveResultFromAnotherModelIsIgnored(t *testing.T) {
+	a := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn()) // stands in for the aborted promotion
+	staleFromA := driveResultMsg{
+		gen:   a.gen,
+		state: engine.PromotionState{ID: "from-a-not-b"},
+		done:  true,
+	}
+
+	b := New(engine.PromotionState{ID: "b-own-id", SourceEnv: "x", TargetEnv: "y"}, PollDurations{}, (&stubDrive{}).fn())
+	if b.gen == a.gen {
+		t.Fatal("setup: two New() calls produced the same gen — this test can't tell stale from current")
+	}
+	wantState, wantBusy, wantDone := b.state, b.busy, b.done
+
+	got, cmd := b.Update(staleFromA)
+	if cmd != nil {
+		t.Errorf("a stale driveResultMsg produced a command: %#v", cmd())
+	}
+	if got.state.ID != wantState.ID {
+		t.Errorf("model B adopted A's state: ID = %q, want unchanged %q", got.state.ID, wantState.ID)
+	}
+	if got.done != wantDone {
+		t.Errorf("model B's done changed to %v processing A's stale, unrelated result", got.done)
+	}
+	if got.busy != wantBusy {
+		t.Errorf("busy changed from %v to %v processing a stale result", wantBusy, got.busy)
+	}
+}
+
 // TestNilDriveFuncNeverTicks: a read-only flight screen (driveFn nil, the shape app.go's
 // plan.StartMsg handler currently pushes — see app.go's own comment on why) never calls
 // anything and never schedules a tick.
@@ -333,11 +421,16 @@ func TestLogToggle(t *testing.T) {
 	}
 }
 
-// TestDriveErrorShowsNoticeAndKeepsPolling: a plumbing error from DriveFunc must not stop
-// the screen from scheduling another attempt (mirrors cmd/hoist/drive.go's own retry
-// behaviour for a transient Checks/Comments failure).
+// TestDriveErrorShowsNoticeAndKeepsPolling: a plumbing error from DriveFunc on a retryable step
+// (StepCIGreen/StepApproved — Known bug classes: a transient 404/permissions hiccup on
+// Checks/Comments) must not stop the screen from scheduling another attempt (mirrors
+// cmd/hoist/drive.go's own driveToCompletion retry behaviour, via retryableErr/retryableStep).
+// The error is a properly-shaped *engine.StepError on StepCIGreen, matching what engine.Drive
+// itself actually returns for this scenario (Drive wraps an Observe/Act error in *StepError
+// before ever handing it back) — see TestDriveErrorOnNonRetryableStepStopsPolling below for the
+// terminal-step counterpart PR #50 review finding #7 added.
 func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
-	drv := &stubDrive{err: errors.New("GET check-runs: 404")}
+	drv := &stubDrive{err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")}}
 	m := New(fixtureState(), PollDurations{}, drv.fn())
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
@@ -358,6 +451,196 @@ func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
 	}
 	if tickCmd == nil {
 		t.Fatal("no further tick scheduled after a plumbing error")
+	}
+}
+
+// TestDriveErrorOnNonRetryableStepStopsPolling is PR #50 review finding #7 (Codex):
+// cmd/hoist/drive.go's own driveToCompletion retries a *engine.StepError only on
+// StepCIGreen/StepApproved; every other step's error — a rejected push, a failed signing
+// commit — is terminal there and returned immediately, never retried. Before this fix,
+// onDriveResult scheduled another poll for literally any non-nil err regardless of which step
+// it came from, so the screen would silently repeat a terminal Act failure every ~2s until
+// poll.Deadline elapsed instead of stopping and surfacing it as a real failure. This uses
+// StepPushed (not CIGreen/Approved) to prove the terminal path: no further tick, either as the
+// immediate result of processing the error or for a tick arriving afterward.
+func TestDriveErrorOnNonRetryableStepStopsPolling(t *testing.T) {
+	drv := &stubDrive{err: &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")}}
+	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	cmd := m.Init()
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("Init's command is not a 2-command batch")
+	}
+	m, tickCmd := m.Update(batch[1]())
+	if m.busy {
+		t.Error("busy = true after a terminal drive error")
+	}
+	if !strings.Contains(m.View(), "rejected: non-fast-forward") {
+		t.Errorf("view missing the terminal-error notice:\n%s", m.View())
+	}
+	if tickCmd != nil {
+		t.Error("a terminal (non-retryable) step error still scheduled another poll")
+	}
+	// A stray tick arriving later (one already scheduled before the failure, say) must not
+	// fire another drive call either.
+	if _, cmd := m.Update(tickMsg{}); cmd != nil {
+		t.Error("a stray tick after a terminal step error still fired another drive call")
+	}
+}
+
+// TestDriveResultAdoptsStateOnError is PR #50 round-4 review finding #7 (Codex): driveFn
+// always returns however far a single drive iteration actually got, even one that ends in
+// error — a branch, commit, push and PR can all have already succeeded (and been persisted by
+// driveFn's own save callback) before a later step's Act then fails. Before this fix,
+// onDriveResult's error branch returned without ever adopting msg.state, so the screen kept
+// showing whatever it was constructed with — here, a state with no PR at all — even though the
+// state driveFn actually returned (and drove.lastSeen would be re-driven from on a manual R)
+// already has one. This proves m.state is the returned state, not the constructor's original
+// one, once an error result has been processed.
+func TestDriveResultAdoptsStateOnError(t *testing.T) {
+	original := fixtureState() // no PR set
+	withPR := original
+	withPR.PR = &forge.PR{Number: 7, URL: "https://example.invalid/pull/7"}
+	drv := &stubDrive{
+		next: withPR,
+		err:  &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")},
+	}
+	m := New(original, PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, _ = m.Update(batch[1]())
+
+	if url, ok := PRURL(m.state); !ok || url != withPR.PR.URL {
+		t.Errorf("m.state after an errored drive result has PR %v, want the returned state's PR %v (o would report no PR to open otherwise)", m.state.PR, withPR.PR)
+	}
+}
+
+// TestDriveResultUpdatesRowsOnError is PR #50 round-5 review finding (Copilot): DriveFunc
+// always calls engine.Status after engine.Drive regardless of whether Drive itself errored
+// (cmd/hoist/wiring.go), so msg.statuses reflects the real, current per-step standing even on
+// a failed poll — but before this fix, onDriveResult's error branch never derived m.rows from
+// it, only m.state. A PR already opened before a later step's Act fails would leave the step
+// list still showing "PR: not yet opened" even though m.state (fixed in round 4) correctly
+// showed the PR. This proves m.rows reflects msg.statuses even when the same result carries a
+// (retryable) error.
+func TestDriveResultUpdatesRowsOnError(t *testing.T) {
+	drv := &stubDrive{
+		statuses: []engine.StepStatus{
+			{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
+			{Step: engine.StepCommitted, Observation: engine.Observation{Satisfied: true}},
+			{Step: engine.StepPushed, Observation: engine.Observation{Satisfied: true}},
+			{Step: engine.StepPROpened, Observation: engine.Observation{Satisfied: true}},
+			{Step: engine.StepCIGreen, Observation: engine.Observation{Waiting: true, Detail: "pending"}},
+		},
+		err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")},
+	}
+	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, _ = m.Update(batch[1]())
+
+	v := m.View()
+	if !strings.Contains(v, GlyphDone) {
+		t.Errorf("view after an errored-but-informative drive result shows no completed step:\n%s", v)
+	}
+	for _, done := range []engine.StepName{engine.StepBranched, engine.StepCommitted, engine.StepPushed, engine.StepPROpened} {
+		row, ok := indexRows(m.rows)[done]
+		if !ok || row.Glyph != GlyphDone {
+			t.Errorf("row for %s = %+v (ok=%v), want done — m.rows should reflect msg.statuses even on an errored poll", done, row, ok)
+		}
+	}
+}
+
+// TestRetryableErrorAfterPriorStopClearsStoppedAndResumesPolling is PR #50 round-5 review
+// finding (Copilot): a retryable error must clear m.stopped, not just schedule a tick — if
+// this poll followed a manual R retry after an EARLIER, unrelated terminal stop (R bypasses
+// the m.stopped gate on purpose, see onDriveResult's own comment), m.stopped was still true
+// from that prior stop; without clearing it here, the very tick this call schedules would be
+// immediately suppressed by tickMsg's own busy||done||stopped||driveFn==nil check the moment
+// it fires — silently breaking automatic re-polling even though this error is exactly the
+// transient kind that's supposed to keep retrying on its own.
+func TestRetryableErrorAfterPriorStopClearsStoppedAndResumesPolling(t *testing.T) {
+	terminal := &stubDrive{err: &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")}}
+	m := New(fixtureState(), PollDurations{}, terminal.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, tickCmd := m.Update(batch[1]())
+	if !m.stopped || tickCmd != nil {
+		t.Fatalf("setup: expected the terminal error to stop polling first (stopped=%v, tickCmd=%v)", m.stopped, tickCmd)
+	}
+
+	// The operator presses R (Reobserve) to retry by hand; this time the poll comes back with
+	// a retryable error instead (a transient CI-endpoint hiccup).
+	retryable := &stubDrive{err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")}}
+	m.driveFn = retryable.fn()
+	m, retryCmd := m.handleKey(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if retryCmd == nil {
+		t.Fatal("R produced no command")
+	}
+	rBatch, ok := retryCmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("R's command = %#v, want a spinner-tick-plus-drive batch", retryCmd())
+	}
+	// handleKey's Reobserve case orders its batch driveCmd-first (tea.Batch(m.driveCmd(),
+	// m.spinner.Tick)) — the opposite order from Init's (spinner.Tick, then driveCmd) — so
+	// index 0, not the last element, is the drive result here.
+	m, tickCmd = m.Update(rBatch[0]())
+	if m.stopped {
+		t.Error("stopped = true after a retryable error, want false (a stale stop must not survive a retryable result)")
+	}
+	if tickCmd == nil {
+		t.Fatal("no tick scheduled after a retryable error")
+	}
+
+	// The scheduled tick itself must not be suppressed by a stale m.stopped.
+	if _, cmd := m.Update(tickMsg{}); cmd == nil {
+		t.Error("a tick after a retryable error was suppressed — m.stopped was left true from the earlier terminal stop")
+	}
+}
+
+// TestDriveResultBlockedStopsPolling is PR #50 round-4 review finding #5 (Codex):
+// cmd/hoist/wiring.go's DriveFunc deliberately suppresses *engine.BlockedError as msg.err (it
+// is read from the statuses engine.Status produces instead, the same way Waiting already is —
+// see DriveFunc's own comment), so msg.err is nil even when the active step is genuinely
+// Blocked. Before this fix, onDriveResult only ever stopped automatic polling by inspecting
+// msg.err, so a Blocked result — terminal until an operator resolves the underlying conflict,
+// per engine.BlockedError's own doc comment ("retrying will not help") — fell through to the
+// success path and scheduled another tick, repeating the identical blocked observation and
+// state save every poll interval forever. This proves polling stops once the active status is
+// Blocked, exactly like a non-retryable StepError already does, and that a stray tick
+// afterward still does not fire another drive call.
+func TestDriveResultBlockedStopsPolling(t *testing.T) {
+	drv := &stubDrive{statuses: []engine.StepStatus{
+		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
+		{Step: engine.StepCommitted, Observation: engine.Observation{Satisfied: true}},
+		{Step: engine.StepPushed, Observation: engine.Observation{
+			Blocked: "origin/promo-1 already exists with different content",
+		}},
+	}}
+	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	batch := m.Init()().(tea.BatchMsg)
+	m, tickCmd := m.Update(batch[1]())
+	if m.busy {
+		t.Error("busy = true after a blocked drive result")
+	}
+	if !m.stopped {
+		t.Error("stopped = false after a blocked drive result, want true (terminal until an operator resolves it)")
+	}
+	if !strings.Contains(m.View(), "already exists with different content") {
+		t.Errorf("view missing the blocked reason:\n%s", m.View())
+	}
+	if tickCmd != nil {
+		t.Error("a blocked drive result still scheduled another poll")
+	}
+	if _, cmd := m.Update(tickMsg{}); cmd != nil {
+		t.Error("a stray tick after a blocked drive result still fired another drive call")
 	}
 }
 
