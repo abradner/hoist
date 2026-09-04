@@ -15,6 +15,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -503,9 +504,10 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	f, forgeErr := newForge(githubRepo)
 	promo := app.Promotion{
-		Start:   buildStartPromotion(eff, newGit, f, forgeErr),
-		Poll:    buildPollDurations(cfg.Poll),
-		OpenURL: browserOpener,
+		Start:      buildStartPromotion(eff, newGit, f, forgeErr),
+		Poll:       buildPollDurations(cfg.Poll),
+		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
+		OpenPRMode: cfg.Preferences.OpenPR,
 	}
 	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)

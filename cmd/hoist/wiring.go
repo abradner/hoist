@@ -144,11 +144,16 @@ func buildPollDurations(poll config.PollConfig) flight.PollDurations {
 	}
 }
 
-// browserOpener is a variable so tests substitute a fake: no test in this repo launches a real
-// browser (the hard constraint against contacting a real external endpoint in a test extends to
-// spawning arbitrary OS processes a CI sandbox may not even have, and may not even have a
-// display or an `open`/`xdg-open` binary at all).
-var browserOpener = defaultOpenBrowser
+// browserOpener builds the launch mechanism flight.OpenPRMsg's handler calls when
+// preferences.open_pr is "launch" or "both" (see internal/app.Promotion.OpenURL and
+// config.PreferencesConfig.OpenPR's own doc comment) — a variable, not a plain function call,
+// so tests substitute a fake: no test in this repo launches a real browser (the hard constraint
+// against contacting a real external endpoint in a test extends to spawning arbitrary OS
+// processes a CI sandbox may not even have, and may not even have a display or an
+// `open`/`xdg-open` binary at all).
+var browserOpener = func(timeout time.Duration) func(url string) error {
+	return func(url string) error { return defaultOpenBrowser(timeout, url) }
+}
 
 // browserCommand is the pure half of defaultOpenBrowser: for a given runtime.GOOS value, it
 // picks the program and arguments that would open url in the operator's default browser —
@@ -176,15 +181,6 @@ func browserCommand(goos, url string) (name string, args []string) {
 	}
 }
 
-// browserLaunchTimeout bounds defaultOpenBrowser's own Run call — see its doc comment for why
-// this is a Run, not the Start-and-reap shape a real long-lived browser process would need.
-// Generous for what should normally be a near-instant fork+exec-and-return (open/xdg-open/
-// rundll32 are all designed as fire-and-forget dispatchers that hand off and exit immediately,
-// never blocking for the browser's own lifetime), while still bounding the worst case (no
-// DISPLAY set, a genuinely wedged launcher) to a few seconds of TUI unresponsiveness rather than
-// forever.
-const browserLaunchTimeout = 5 * time.Second
-
 // defaultOpenBrowser opens url in the operator's default browser (no new dependency, AGENTS.md
 // §4.7; e.g. github.com/pkg/browser is exactly this well-known exec.Command-per-platform idiom
 // in a package no heavier than browserCommand's dozen lines plus this one exec.Command call
@@ -197,9 +193,13 @@ const browserLaunchTimeout = 5 * time.Second
 // background goroutine reaping cmd.Wait() discarded whatever it returned, so a launcher that
 // started but then failed at runtime (no browser installed, a bad DISPLAY, xdg-open's own
 // failure) reported nil here — flight.OpenPRMsg's handler showed no notice at all, even though
-// nothing actually opened (Copilot review, PR #50). browserLaunchTimeout bounds the wait so a
-// genuinely wedged launcher cannot block the TUI's whole event loop indefinitely — see its own
-// doc comment for why that bound is safe here specifically.
+// nothing actually opened (Copilot review, PR #50). timeout (preferences.browser_launch_timeout,
+// default 5s) bounds the wait so a genuinely wedged launcher cannot block the TUI's whole event
+// loop indefinitely — generous for what should normally be a near-instant fork+exec-and-return
+// (open/xdg-open/rundll32 are all designed as fire-and-forget dispatchers that hand off and exit
+// immediately, never blocking for the browser's own lifetime), while still bounding the worst
+// case (no DISPLAY set, a genuinely wedged launcher) to a few seconds of TUI unresponsiveness
+// rather than forever.
 //
 // The only caller today is flight.OpenPRMsg's handler (app.go), whose url is always
 // PRURL(state) — a PR URL the forge itself returned when this promotion opened it, not
@@ -207,22 +207,22 @@ const browserLaunchTimeout = 5 * time.Second
 // hardening (no cmd.exe metacharacter parsing) is worth having regardless: it is free, and
 // this function's contract ("open this url") should not depend on trusting every caller to
 // have vetted url first.
-func defaultOpenBrowser(url string) error {
+func defaultOpenBrowser(timeout time.Duration, url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
-	if err := runLauncher(name, args...); err != nil {
+	if err := runLauncher(timeout, name, args...); err != nil {
 		return fmt.Errorf("opening %s in a browser: %w", url, err)
 	}
 	return nil
 }
 
-// runLauncher runs name/args to completion (bounded by browserLaunchTimeout) and surfaces
-// whatever exec.Cmd.Run reports — including a non-zero exit from the launcher itself, not only
-// the "binary not found" failure a bare Start would have reported. Split out from
-// defaultOpenBrowser so a test can exercise this exact mechanism against a command it fully
-// owns and controls, without ever launching a real browser or a process it doesn't own (this
-// repo's own hard constraint, AGENTS.md §4.7 / newPromoteFixture's own comment).
-func runLauncher(name string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), browserLaunchTimeout)
+// runLauncher runs name/args to completion (bounded by timeout) and surfaces whatever
+// exec.Cmd.Run reports — including a non-zero exit from the launcher itself, not only the
+// "binary not found" failure a bare Start would have reported. Split out from defaultOpenBrowser
+// so a test can exercise this exact mechanism against a command it fully owns and controls,
+// without ever launching a real browser or a process it doesn't own (this repo's own hard
+// constraint, AGENTS.md §4.7 / newPromoteFixture's own comment).
+func runLauncher(timeout time.Duration, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Run()
 }

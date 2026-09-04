@@ -811,6 +811,80 @@ func TestFlightOpenPRMsgShowsErrorFromOpenURL(t *testing.T) {
 	}
 }
 
+// TestFlightOpenPRMsgDisplayModeNeverCallsOpenURL: preferences.open_pr: display must always
+// just show the URL as text — never attempting a launch at all, so a headless/SSH session with
+// no OpenURL wired in whatsoever (m.openURL nil) still shows the URL rather than the "not wired
+// yet" notice display mode has no use for.
+func TestFlightOpenPRMsgDisplayModeNeverCallsOpenURL(t *testing.T) {
+	called := false
+	promo := Promotion{
+		OpenPRMode: "display",
+		OpenURL:    func(_ string) error { called = true; return nil },
+	}
+	m := sizedWithPromotion(t, promo)
+	m, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if cmd != nil {
+		t.Error("OpenPRMsg produced a command")
+	}
+	if called {
+		t.Error("display mode called OpenURL — it must never attempt a launch")
+	}
+	if v := plain(m); !strings.Contains(v, "https://example.invalid/pr/1") {
+		t.Errorf("view missing the URL in display mode:\n%s", v)
+	}
+}
+
+// TestFlightOpenPRMsgDisplayModeWorksWithNilOpenURL is display mode's own headless-session
+// case: no browser opener wired in at all (m.openURL nil, e.g. a real SSH session with nothing
+// to launch into) must still show the URL, not the generic "not wired yet" notice launch/both
+// modes fall back to for that case.
+func TestFlightOpenPRMsgDisplayModeWorksWithNilOpenURL(t *testing.T) {
+	promo := Promotion{OpenPRMode: "display"}
+	m := sizedWithPromotion(t, promo)
+	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	v := plain(m)
+	if !strings.Contains(v, "https://example.invalid/pr/1") {
+		t.Errorf("view missing the URL:\n%s", v)
+	}
+	if strings.Contains(v, "not wired yet") {
+		t.Errorf("view shows the launch-mode not-wired notice in display mode:\n%s", v)
+	}
+}
+
+// TestFlightOpenPRMsgBothModeShowsURLOnSuccess: preferences.open_pr: both must show the URL as
+// text even when the launch itself succeeds — the whole point of "both" over plain "launch" is
+// a copy/paste fallback that exists unconditionally, not only on failure.
+func TestFlightOpenPRMsgBothModeShowsURLOnSuccess(t *testing.T) {
+	promo := Promotion{
+		OpenPRMode: "both",
+		OpenURL:    func(_ string) error { return nil },
+	}
+	m := sizedWithPromotion(t, promo)
+	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if v := plain(m); !strings.Contains(v, "https://example.invalid/pr/1") {
+		t.Errorf("view missing the URL after a successful launch in both mode:\n%s", v)
+	}
+}
+
+// TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure: both mode's failure path must still
+// name the URL (so the operator can act on it manually) alongside the launch error, not just
+// the bare error a plain "launch" mode shows.
+func TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure(t *testing.T) {
+	promo := Promotion{
+		OpenPRMode: "both",
+		OpenURL:    func(_ string) error { return errors.New("no such browser") },
+	}
+	m := sizedWithPromotion(t, promo)
+	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	v := plain(m)
+	if !strings.Contains(v, "https://example.invalid/pr/1") {
+		t.Errorf("view missing the URL after a failed launch in both mode:\n%s", v)
+	}
+	if !strings.Contains(v, "no such browser") {
+		t.Errorf("view missing the launch error in both mode:\n%s", v)
+	}
+}
+
 // TestFlightAbortMsgReturnsToMatrix: AbortMsg's real engine-level semantics (close the PR?
 // delete the branch?) are deliberately out of scope for this brief (see app.go's own comment
 // on this case) — the one narrow, safe interpretation implemented is a pure navigation

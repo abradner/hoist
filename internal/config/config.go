@@ -16,13 +16,35 @@ import (
 
 // Config is the whole file. File and Found are set by Load, never read from YAML.
 type Config struct {
-	Repos      []RepoConfig     `yaml:"repos,omitempty"`
-	Registries []RegistryConfig `yaml:"registries,omitempty"`
-	Poll       PollConfig       `yaml:"poll"`
+	Repos       []RepoConfig      `yaml:"repos,omitempty"`
+	Registries  []RegistryConfig  `yaml:"registries,omitempty"`
+	Poll        PollConfig        `yaml:"poll"`
+	Preferences PreferencesConfig `yaml:"preferences"`
 
 	// File is the path Load read, or looked for. Found reports whether it existed.
 	File  string `yaml:"-"`
 	Found bool   `yaml:"-"`
+}
+
+// PreferencesConfig is operator-facing UX behavior — how hoist itself behaves for this
+// operator, as distinct from Repos/Registries/Poll's own promotion-pipeline policy. Unlike
+// those, every field here has a purely local, no-network-effect default that's safe to change
+// on a whim; nothing here is checked against a repo or forge.
+type PreferencesConfig struct {
+	// OpenPR controls what pressing o on the flight screen does with a promotion's PR URL
+	// (flight.OpenPRMsg, cmd/hoist/wiring.go): "launch" attempts to open it in a browser and
+	// stays silent on success (M4's original behavior, for a desktop session with one to
+	// open into); "display" only ever shows the URL as text (for a headless/SSH session with
+	// no browser to launch into at all — see AGENTS.md's own note on this); "both" attempts
+	// the launch AND always shows the URL as text regardless of outcome, so a copy/paste
+	// fallback exists even on a desktop session where launching usually just works. Default
+	// "both": it never regresses the desktop case (launch is still attempted) and never
+	// leaves a headless session with nothing to act on.
+	OpenPR string `yaml:"open_pr"`
+	// BrowserLaunchTimeout bounds one "launch" attempt (cmd/hoist/wiring.go's runLauncher) —
+	// see its own doc comment for why this bounds the LAUNCHER's exit, not the browser
+	// window's own lifetime, and is safe to leave short. Default 5s.
+	BrowserLaunchTimeout Duration `yaml:"browser_launch_timeout"`
 }
 
 // RepoConfig describes one GitOps repository. Only Path is ever required, and only when
@@ -122,6 +144,15 @@ const (
 
 	ApprovalComment = "comment"
 	ApprovalAuto    = "auto"
+
+	// OpenPRLaunch, OpenPRDisplay, OpenPRBoth are PreferencesConfig.OpenPR's allowed values —
+	// see its own doc comment for what each means.
+	OpenPRLaunch  = "launch"
+	OpenPRDisplay = "display"
+	OpenPRBoth    = "both"
+
+	DefaultOpenPR               = OpenPRBoth
+	DefaultBrowserLaunchTimeout = Duration(5 * time.Second)
 )
 
 var (
@@ -260,6 +291,10 @@ func (c *Config) Normalize() error {
 	fill(&c.Poll.Argo, defaultPoll.Argo)
 	fill(&c.Poll.Rollout, defaultPoll.Rollout)
 	fill(&c.Poll.Deadline, defaultPoll.Deadline)
+	if c.Preferences.OpenPR == "" {
+		c.Preferences.OpenPR = DefaultOpenPR
+	}
+	fill(&c.Preferences.BrowserLaunchTimeout, DefaultBrowserLaunchTimeout)
 	return nil
 }
 
@@ -329,6 +364,10 @@ func (c *Config) Validate() error {
 		if d <= 0 {
 			p.add("poll."+name, "must be a positive duration, got %s", d)
 		}
+	}
+	validateEnum(p, "preferences.open_pr", c.Preferences.OpenPR, OpenPRLaunch, OpenPRDisplay, OpenPRBoth)
+	if c.Preferences.BrowserLaunchTimeout <= 0 {
+		p.add("preferences.browser_launch_timeout", "must be a positive duration, got %s", c.Preferences.BrowserLaunchTimeout)
 	}
 	return errors.Join(sortedErrs(p.errs)...)
 }

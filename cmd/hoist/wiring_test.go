@@ -370,7 +370,7 @@ func TestRunLauncherSurfacesNonZeroExit(t *testing.T) {
 	// environment" at Start time), while this same check at the TOP of this very function
 	// already ran and returned false before this line, so the parent invocation is unaffected.
 	t.Setenv("HOIST_WIRING_TEST_HELPER_PROCESS", "1")
-	err := runLauncher(os.Args[0], "-test.run=^TestRunLauncherSurfacesNonZeroExit$")
+	err := runLauncher(2*time.Second, os.Args[0], "-test.run=^TestRunLauncherSurfacesNonZeroExit$")
 	if err == nil {
 		t.Fatal("runLauncher = nil, want the helper process's non-zero exit surfaced as an error")
 	}

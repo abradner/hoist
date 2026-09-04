@@ -40,11 +40,17 @@ type StartPromotionFunc func(ctx context.Context, p gitops.Plan) (engine.Promoti
 // context with nothing to drive (mirrors ResolveFunc's own nil convention): the plan screen's
 // Enter key then shows a notice instead of pushing a read-only flight screen. OpenURL is nil
 // the same way: flight.OpenPRMsg then falls back to the pre-wiring "not wired yet" notice
-// rather than panicking on a nil call.
+// rather than panicking on a nil call. OpenPRMode is one of "launch", "display" or "both"
+// (cmd/hoist owns reading config.PreferencesConfig.OpenPR and resolving it to this plain
+// string, per AGENTS.md §4.8 — this package only ever compares against string literals, never
+// importing internal/config's own constants for it, matching Poll's own already-translated-
+// from-config shape); empty behaves like "launch", so a caller that never sets it (a test, in
+// particular) gets today's original launch-only behavior rather than a silently different one.
 type Promotion struct {
-	Start   StartPromotionFunc
-	Poll    flight.PollDurations
-	OpenURL func(url string) error
+	Start      StartPromotionFunc
+	Poll       flight.PollDurations
+	OpenURL    func(url string) error
+	OpenPRMode string
 }
 
 // promotionBuiltMsg is delivered once the tea.Cmd wrapping a StartPromotionFunc call finishes
@@ -83,12 +89,13 @@ type Model struct {
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
 
-	// startPromotion, poll and openURL are Promotion's three fields, unpacked here — see
-	// Promotion's own doc comment for what each one is and why a nil Start/OpenURL degrades
-	// to a notice rather than a panic.
+	// startPromotion, poll, openURL and openPRMode are Promotion's fields, unpacked here —
+	// see Promotion's own doc comment for what each one is and why a nil Start/OpenURL
+	// degrades to a notice rather than a panic.
 	startPromotion StartPromotionFunc
 	poll           flight.PollDurations
 	openURL        func(url string) error
+	openPRMode     string
 
 	// notice is a transient, root-level message shown below the top screen — used for
 	// plan.StartMsg's own construction failure (a real in-flight conflict, missing config) and
@@ -148,6 +155,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		startPromotion: promo.Start,
 		poll:           promo.Poll,
 		openURL:        promo.OpenURL,
+		openPRMode:     promo.OpenPRMode,
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
@@ -324,6 +332,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case flight.BackMsg:
 		return m.pop(), nil
 	case flight.OpenPRMsg:
+		// openPRMode's three shapes (see Promotion.OpenPRMode's own doc comment): "display"
+		// never attempts a launch at all — nothing here needs m.openURL, so a headless/SSH
+		// session with no browser opener wired at all is never even in the nil-check branch
+		// below for this mode. "both" attempts the launch (same as "launch") but always shows
+		// the URL as text afterward too, regardless of outcome, so a copy/paste fallback
+		// exists even when the launch itself succeeds. Anything else (including the empty
+		// string) behaves exactly like "launch" always did: silent on success, a notice only
+		// on failure — preserving the original pre-preferences behavior for any caller that
+		// never set this field.
+		if m.openPRMode == "display" {
+			m.notice = msg.URL
+			return m, nil
+		}
 		if m.openURL == nil {
 			// Mirrors startPromotion's own nil convention above: a caller that hasn't
 			// wired a browser opener in gets a clear notice instead of a nil-pointer
@@ -331,8 +352,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
 			return m, nil
 		}
-		if err := m.openURL(msg.URL); err != nil {
-			m.notice = fmt.Sprintf("could not open %s: %v", msg.URL, err)
+		launchErr := m.openURL(msg.URL)
+		switch {
+		case m.openPRMode == "both" && launchErr != nil:
+			m.notice = fmt.Sprintf("%s (could not open automatically: %v)", msg.URL, launchErr)
+		case m.openPRMode == "both":
+			m.notice = msg.URL
+		case launchErr != nil:
+			m.notice = fmt.Sprintf("could not open %s: %v", msg.URL, launchErr)
 		}
 		return m, nil
 	case flight.AbortMsg:
