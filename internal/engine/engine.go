@@ -109,12 +109,64 @@ type HistoryEntry struct {
 // first step that is Blocked, Waiting, or whose Act fails; a later re-invocation of Drive
 // with the same steps and an s built the same way re-observes every step from the top —
 // nothing here remembers where it left off beyond what Observe itself re-derives.
+//
+// One exception, and the reason for the probe below: without it, that "re-observes every step
+// from the top" rule collides with MergedStep's own Act, which deletes the promotion's branch
+// on origin. Once a later step (M5's ArgoRefreshed/ArgoSynced/RolledOut) leaves Drive Waiting
+// for multiple polls, every one of those later polls would re-run the full loop from Branched
+// — including PushedStep, whose Observe finds the now-deleted branch missing and (correctly, by
+// its own contract) re-pushes it, which in turn makes MergedStep's Observe see "branch not yet
+// deleted" and re-run its own delete. That is a real, if individually harmless, re-push/re-delete
+// cycle on every poll tick for as long as the rollout takes to converge — first noticed, and
+// worked around locally with a widened poll.argo, in TestResumeRebuildsArgoAppsForALegacyStateFile
+// (cmd/hoist/resume_test.go). The fix mirrors ObserveAll/Status's own short-circuit (see their
+// doc comments): MergedStep's Observe re-verifies, from the world, that the whole core chain up
+// to and including the merge still genuinely holds (FindPR, ancestry via mergeWasReverted, and
+// the branch's absence) — that is self-contained proof, and re-deriving Branched..Approved on
+// top of it adds nothing. So: probe MergedStep's Observe once, out of order, before the main
+// loop, and when it comes back cleanly Satisfied, skip straight past it — Branched through
+// Merged are not re-Observed or re-Acted this pass. The probe only runs once s.Phase (an
+// advisory hint only, same as pollInterval's own use of it — never trusted as proof) shows a
+// prior Drive call already reached Merged or beyond, so the earlier, still-in-progress ticks
+// (waiting on CI or approval) pay no extra Observe call for a step that cannot possibly be
+// satisfied yet. If the probe comes back anything other than cleanly Satisfied — including a
+// real revert caught by mergeWasReverted's ancestry check — its Observation is reused rather
+// than re-fetched when the main loop reaches that step in its own turn, so the probe never
+// costs a duplicate real call either way.
 func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*PromotionState) error) error {
-	for _, step := range steps {
+	mergedIdx := -1
+	for i, step := range steps {
+		if step.Name() == StepMerged {
+			mergedIdx = i
+			break
+		}
+	}
+	start := 0
+	probedIdx := -1
+	var probed Observation
+	if mergedIdx >= 0 && mergedIdx < len(steps)-1 && phaseIndex(steps, s.Phase) > mergedIdx {
+		if obs, err := steps[mergedIdx].Observe(ctx, s); err == nil {
+			probedIdx, probed = mergedIdx, obs
+			if obs.Blocked == "" && !obs.Waiting && obs.Satisfied {
+				start = mergedIdx + 1
+			}
+		}
+		// A probe error is deliberately not handled here — it falls through to the main loop,
+		// which re-Observes this same step in its own turn and reports the error through the
+		// normal *StepError path, exactly as if no probe had run at all.
+	}
+	for i := start; i < len(steps); i++ {
+		step := steps[i]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		obs, err := step.Observe(ctx, s)
+		var obs Observation
+		var err error
+		if i == probedIdx {
+			obs = probed
+		} else {
+			obs, err = step.Observe(ctx, s)
+		}
 		if err != nil {
 			s.Phase = step.Name()
 			return &StepError{Step: step.Name(), Op: "observe", Err: err}
@@ -152,6 +204,22 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 	return nil
 }
 
+// phaseIndex returns the index within steps whose Name() matches phase, or -1 if phase is empty,
+// unrecognized, or not present in this particular steps slice (e.g. CoreSteps, which has no M5
+// steps to match an M5 phase against). Used only as an optimization hint by Drive's own Merged
+// short-circuit above — never as a substitute for a real Observe call.
+func phaseIndex(steps []Step, phase StepName) int {
+	if phase == "" {
+		return -1
+	}
+	for i, step := range steps {
+		if step.Name() == phase {
+			return i
+		}
+	}
+	return -1
+}
+
 // StepStatus is one step's re-observed state — never read from Phase, always from a fresh
 // Observe call. Returned by ObserveAll for a listing (`hoist resume`'s startup listing) or a
 // one-in-flight-per-target-env check (`hoist promote`'s refusal), neither of which should call
@@ -177,34 +245,45 @@ type StepStatus struct {
 // throughout the promotion, false forever after MergedStep's cleanup runs). Without this
 // short-circuit, ObserveAll would report a fully completed, cleaned-up promotion as stuck at
 // Pushed — wrong, and exactly backwards from what a one-in-flight-per-env check needs: it would
-// make a *finished* promotion block every future one for the same env, forever. Drive itself
-// never hits this, because it always calls Act (PushedStep's Act simply re-pushes and
-// re-converges — see the resume tests), but ObserveAll never calls Act, so it needs the
-// short-circuit instead.
+// make a *finished* promotion block every future one for the same env, forever. ObserveAll never
+// calls Act, so its short-circuit probes the *last* step. Drive does call Act, and for a while
+// (pre-M5) that meant it never needed a short-circuit of its own: Merged was always the last
+// step, so Drive simply finished the moment Merged was satisfied and was never called again.
+// M5 added steps after Merged, so a promotion now sits waiting there across many further Drive
+// calls — each of which, without its own short-circuit, would re-hit exactly the problem this
+// paragraph describes for ObserveAll, except with Act: PushedStep re-pushing the branch Merged
+// just deleted, then MergedStep deleting it again, every poll tick. Drive now carries the same
+// probe, aimed one step earlier (at Merged rather than the last step, since Merged's own Observe
+// is the self-contained proof either way) — see Drive's own doc comment.
 func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
-	var finalProbe *StepStatus
-	if n := len(steps); n > 0 {
-		final := steps[n-1]
-		obs, oerr := final.Observe(ctx, s)
+	start, probedIdx, probed := 0, -1, Observation{}
+	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil {
-			return false, StepStatus{Step: final.Name()}, fmt.Errorf("%s: observe: %w", final.Name(), oerr)
+			return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), oerr)
 		}
-		if obs.Satisfied {
-			return true, StepStatus{Step: final.Name(), Observation: obs}, nil
+		switch {
+		case obs.Satisfied && mi == len(steps)-1:
+			return true, StepStatus{Step: steps[mi].Name(), Observation: obs}, nil
+		case obs.Satisfied:
+			// Everything up to and including the merge is proven; the steps after it are not,
+			// so the walk resumes at them rather than reporting done here.
+			start = mi + 1
+			last = StepStatus{Step: steps[mi].Name(), Observation: obs}
+		default:
+			probedIdx, probed = mi, obs
 		}
-		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for i, step := range steps {
+	for i := start; i < len(steps); i++ {
+		step := steps[i]
 		if err := ctx.Err(); err != nil {
 			return false, last, err
 		}
-		if finalProbe != nil && i == len(steps)-1 {
-			// Same step the short-circuit probe already observed above (round-6 regression:
-			// this doubled every final step's Observe — real remote/git work for MergedStep —
-			// on every findInFlight/promotions/resume --env call; Status already carries this
-			// fix, ObserveAll had not been given it) — reuse that Observation instead of
-			// calling Observe on it again.
-			last = *finalProbe
+		if i == probedIdx {
+			// Same step the probe already observed above (round-6 regression: this doubled
+			// MergedStep's Observe — real remote/git work — on every
+			// findInFlight/promotions/resume --env call) — reuse that Observation.
+			last = StepStatus{Step: step.Name(), Observation: probed}
 		} else {
 			obs, oerr := step.Observe(ctx, s)
 			if oerr != nil {
@@ -265,27 +344,35 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // driveToCompletion, which retries the identical shape of failure when Drive's own Observe hits
 // it directly (Codex review, PR #50 round 4).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
-	var finalProbe *StepStatus
-	if n := len(steps); n > 0 {
-		final := steps[n-1]
-		obs, oerr := final.Observe(ctx, s)
+	start, probedIdx, probed := 0, -1, Observation{}
+	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil {
-			return false, nil, &StepError{Step: final.Name(), Op: "observe", Err: oerr}
+			return false, nil, &StepError{Step: steps[mi].Name(), Op: "observe", Err: oerr}
 		}
-		if obs.Satisfied {
-			return true, []StepStatus{{Step: final.Name(), Observation: obs}}, nil
+		switch {
+		case obs.Satisfied && mi == len(steps)-1:
+			return true, []StepStatus{{Step: steps[mi].Name(), Observation: obs}}, nil
+		case obs.Satisfied:
+			// Everything up to and including the merge is proven; the steps after it are not.
+			// The merge's own status is kept so a caller rendering per-step glyphs still shows
+			// it done (flight.DeriveRows keys by step name, so a partial slice is safe).
+			start = mi + 1
+			statuses = append(statuses, StepStatus{Step: steps[mi].Name(), Observation: obs})
+		default:
+			probedIdx, probed = mi, obs
 		}
-		finalProbe = &StepStatus{Step: final.Name(), Observation: obs}
 	}
-	for i, step := range steps {
+	for i := start; i < len(steps); i++ {
+		step := steps[i]
 		if cerr := ctx.Err(); cerr != nil {
 			return false, statuses, cerr
 		}
 		var st StepStatus
-		if finalProbe != nil && i == len(steps)-1 {
-			// Same step the short-circuit probe already observed above; reuse that
-			// Observation instead of calling Observe on it again.
-			st = *finalProbe
+		if i == probedIdx {
+			// Same step the probe already observed above; reuse that Observation instead of
+			// calling Observe on it again.
+			st = StepStatus{Step: step.Name(), Observation: probed}
 		} else {
 			obs, oerr := step.Observe(ctx, s)
 			if oerr != nil {

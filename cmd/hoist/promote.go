@@ -188,6 +188,27 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
+	// M5: the Argo Applications this promotion's plan touches, computed once from the same
+	// discovered repo BuildPlan already read (engine.ArgoAppNames' own doc comment), plus the
+	// Argo/Deployment adaptors themselves. AllSteps always wires all seven-plus-three steps
+	// (AGENTS.md invariant 4 of M1-M4: Steps run unconditionally, Observe decides what's
+	// actually left to do), so these are built here alongside the forge client rather than
+	// lazily once a promotion actually reaches Argo — the same posture newForge already takes.
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	a, _, err := newArgo(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	ro, _, err := newRollout(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -197,7 +218,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		defer cancel()
 	}
 
-	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f)
+	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
@@ -227,7 +248,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintln(stderr, "hoist promote: waiting for signing approval...")
 		}
 	}
-	steps := engine.AllSteps(newGit, f, onWaiting)
+	steps := engine.AllSteps(newGit, f, a, ro, onWaiting)
 	// The claim only needs to outlive the gap up to the first durable state write — once that
 	// lands, findInFlight's own re-observation of the real state file is what enforces invariant
 	// 5 for the rest of the (possibly hours-long) promotion, so release it here rather than
@@ -262,12 +283,20 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 // no equivalent flags yet, so its own caller passes the same defaults ("main", false) runPromote
 // itself defaults to.
 //
+// argoApps is M5's addition: the Argo Application names this promotion's own state records
+// (engine.ArgoAppNames), computed by the caller from the same discovered repo BuildPlan already
+// read — it needs a *gitops.Repo this function deliberately does not take. No Argo/rollout
+// adaptor is needed here despite that: the two findInFlight scans below are scoped to
+// engine.CoreSteps, never AllSteps, precisely so a merged-but-still-converging promotion does
+// not block a new one (see findInFlight's own doc comment), which also means they never reach
+// the steps that would need one.
+//
 // On success, release must be called by the caller exactly once the returned state's first
 // successful save lands (ClaimInFlight's own doc comment: the claim's job is done once a durable
 // state file exists for a future findInFlight/ObserveAll scan to see) — never held for the whole
 // promotion. On error, any claim this call acquired has already been released; release is nil
 // whenever err is non-nil.
-func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge) (*engine.PromotionState, func(), error) {
+func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge, argoApps []string) (*engine.PromotionState, func(), error) {
 	id := engine.DeriveID(eff.cfg.GitHub, plan)
 	branch := engine.BranchName(plan.TargetEnv, id)
 	worktreeDir, err := engine.WorktreeDir(id)
@@ -347,6 +376,8 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 		Approval:       eff.cfg.Approval(plan.TargetEnv),
 		Approvers:      eff.cfg.Approvers,
 		Collaborators:  eff.cfg.Collaborators,
+		ArgoNamespace:  eff.cfg.Kube.ArgoNamespace,
+		ArgoApps:       argoApps,
 	}
 	// The state file is an index of what to look at, never evidence of what happened
 	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the

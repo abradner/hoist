@@ -315,3 +315,66 @@ func TestStatusEmptySteps(t *testing.T) {
 		t.Errorf("statuses = %v, want empty", statuses)
 	}
 }
+
+// TestObserveAllDoesNotReportDoneOnRolledOutAloneAfterMerge is the regression for the P1 Codex
+// found on PR #51: the ObserveAll/Status short-circuit was written when MergedStep was the last
+// step, where "final step satisfied" and "the merge is proven" were the same statement. M5
+// appended ArgoRefreshed/ArgoSynced/RolledOut, and RolledOutStep reports Satisfied as soon as
+// MergeSHA is set for a promotion whose edits touch no Deployment at all (a Job/CronJob-only
+// promotion — see RolledOutStep.Observe's own no-gated-Deployments path). Anchored on the last
+// step, that made the whole promotion read as done the instant it merged, with Argo sync never
+// checked: `hoist promotions` and `hoist resume --env` would both misreport it, and a genuinely
+// OutOfSync Application would never be waited on. Anchoring on StepMerged instead keeps the
+// short-circuit's real guarantee (PushedStep cannot be re-observed once Merged's Act deleted the
+// branch) while still evaluating everything after the merge.
+func TestObserveAllDoesNotReportDoneOnRolledOutAloneAfterMerge(t *testing.T) {
+	steps := []Step{
+		stepStub{name: StepPushed, obs: Observation{Satisfied: false, Detail: "branch gone: merged and cleaned up"}},
+		stepStub{name: StepMerged, obs: Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
+		stepStub{name: StepArgoSynced, obs: Observation{Waiting: true, Detail: "waiting for argo to sync"}},
+		stepStub{name: StepRolledOut, obs: Observation{Satisfied: true, Detail: "no gated Deployments"}},
+	}
+	done, last, err := ObserveAll(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: ArgoSynced is still waiting, and RolledOut being satisfied on its own proves nothing about it")
+	}
+	if last.Step != StepArgoSynced || !last.Waiting {
+		t.Fatalf("last = %+v, want the ArgoSynced step it actually stopped at", last)
+	}
+}
+
+// The Status sibling of the case above, plus the statuses-shape guarantee flight.DeriveRows
+// relies on: the merge's own entry is kept when the walk skips ahead past it, so a caller
+// rendering per-step glyphs still shows Merged as done rather than never-reached.
+func TestStatusSkipsPastMergedButStillWalksTheStepsAfterIt(t *testing.T) {
+	observedPushed := false
+	steps := []Step{
+		observeTrackingStub{stepStub{name: StepPushed, obs: Observation{Satisfied: false}}, &observedPushed},
+		stepStub{name: StepMerged, obs: Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
+		stepStub{name: StepArgoSynced, obs: Observation{Waiting: true, Detail: "waiting for argo to sync"}},
+		stepStub{name: StepRolledOut, obs: Observation{Satisfied: true}},
+	}
+	done, statuses, err := Status(ctx(), steps, &PromotionState{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Fatal("done = true, want false: ArgoSynced is still waiting")
+	}
+	if observedPushed {
+		t.Error("Status re-observed PushedStep: the merge probe should still skip everything before it")
+	}
+	var names []StepName
+	for _, st := range statuses {
+		names = append(names, st.Step)
+	}
+	if len(statuses) != 2 || statuses[0].Step != StepMerged || statuses[1].Step != StepArgoSynced {
+		t.Fatalf("statuses = %v, want [Merged, ArgoSynced]: the merge's own entry kept, then the step it stopped at", names)
+	}
+	if !statuses[0].Satisfied {
+		t.Errorf("statuses[0] = %+v, want the merge recorded as satisfied", statuses[0])
+	}
+}

@@ -8,19 +8,24 @@ import (
 	"strings"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // The adaptor constructors are variables so tests substitute fakes: no test points a
-// client at a cluster or a registry.
+// client at a cluster, a registry, Argo CD or a Deployment (AGENTS.md hard constraints —
+// never a real cluster or Argo CD instance).
 var (
 	newCluster  = k8s.NewCluster
 	newRegistry = func(cfg registry.AuthConfig) (registry.Registry, error) { return registry.New(cfg) }
+	newArgo     = argo.NewFromKubeconfig
+	newRollout  = rollout.NewFromKubeconfig
 )
 
 // resolveFlags are the plan flags that shape digest resolution, as given ("" = not given).

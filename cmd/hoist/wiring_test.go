@@ -94,7 +94,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, newGit, f, nil)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	state, driveFn, err := start(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
@@ -202,7 +202,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, newGit, f, nil)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
@@ -239,7 +239,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, newGit, f, nil)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
@@ -284,7 +284,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, newGit, f, nil)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	_, driveFn, err := start(context.Background(), plan)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
@@ -330,7 +330,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, newGit, f, nil)
+	start := buildStartPromotion(eff, r, newGit, f, nil)
 	state1, driveFn1, err := start(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
