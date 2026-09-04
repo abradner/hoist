@@ -204,6 +204,10 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 func (m *Model) buildEnvSelect() {
 	candidates := TargetsFor(m.repo, m.source)
 	sel := huh.NewSelect[string]().Title(fmt.Sprintf("promote %s to…", m.source)).Value(&m.target)
+	// Wires Down/Up/"/" filtering the same way a huh.Form/Group would, without adopting either
+	// (AGENTS.md §4.7 — this is component wiring, not layout). See CapturesText's own doc
+	// comment for why this call has to happen here rather than being left to a Form/Group.
+	sel.WithKeyMap(huh.NewDefaultKeyMap())
 	if len(candidates) > 0 {
 		opts := make([]huh.Option[string], 0, len(candidates))
 		for _, e := range candidates {
@@ -225,6 +229,9 @@ func (m *Model) buildMultiSelect() {
 		opts = append(opts, huh.NewOption(r.Label(), r.Repo))
 	}
 	ms := huh.NewMultiSelect[string]().Value(&m.ticked)
+	// Same wiring as buildEnvSelect's own WithKeyMap call — see CapturesText's doc comment.
+	// This is what makes Down/Space("x")/"/" actually reach the field's Update.
+	ms.WithKeyMap(huh.NewDefaultKeyMap())
 	if len(opts) > 0 {
 		ms = ms.Options(opts...)
 	}
@@ -330,6 +337,19 @@ func (m Model) updateSelectEnv(msg tea.Msg) (Model, tea.Cmd) {
 		return m, m.Init()
 	}
 	_, cmd := m.envSelect.Update(msg)
+	// Re-read m.target from the field itself rather than trusting buildEnvSelect's
+	// Value(&m.target) binding to have kept it current: this Model is a value passed by copy
+	// through every Update in the chain (New's own doc comment on the convention), so the
+	// pointer that binding captured addresses a Model snapshot that stopped being "the" model
+	// the instant New returned — huh's own Down/Up navigation still updates its field-owned
+	// accessor correctly (GetValue reads the same accessor Value(&m.target) wrote to, so it's
+	// internally consistent), but that write never reached this m.target copy. Without this
+	// resync, Down could move the highlighted option while m.target silently stayed pinned to
+	// whichever option construction time happened to default to, and Enter above would submit
+	// that stale value instead of whatever the operator actually selected.
+	if v, ok := m.envSelect.GetValue().(string); ok {
+		m.target = v
+	}
 	return m, cmd
 }
 
@@ -386,6 +406,13 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	}
 	before := append([]string(nil), m.ticked...)
 	_, cmd := m.multiSelect.Update(msg)
+	// Re-read m.ticked from the field itself — see updateSelectEnv's own resync comment for
+	// why buildMultiSelect's Value(&m.ticked) binding alone can't keep this Model's own copy
+	// current across Toggle presses (space/x), only View()'s rendering (which reads the
+	// field's own internal option state directly, not m.ticked).
+	if v, ok := m.multiSelect.GetValue().([]string); ok {
+		m.ticked = v
+	}
 	if !equalSets(before, m.ticked) {
 		m = m.recomputeDiff()
 	}
@@ -447,18 +474,28 @@ func equalSets(a, b []string) bool {
 
 // CapturesText implements app.Screen (via planScreen's thin delegate in internal/app/screen.go).
 // The root queries this before treating "q" as its own global quit key (round 5, finding 3).
-// Always false: huh.Select and huh.MultiSelect both support their own "/" filter-typing mode in
-// principle (GetFiltering), but neither field here ever has huh.Field.WithKeyMap called on it
-// (that only happens automatically inside a huh.Form/Group, and this screen uses both fields
-// standalone — AGENTS.md §4.7, "no layout library", extends to not adopting huh.Form just for
-// its wiring) — so every keymap-gated mode on these fields, filtering included, is unreachable
-// through real key input today, not only "q" specifically. Verified directly: pressing Down or
-// Space against a bare huh.NewMultiSelect() with no WithKeyMap call moves nothing and toggles
-// nothing. That gap is real but is this screen's own pre-existing wiring issue, independent of
-// the quit-key bug this method exists to fix, and is flagged separately rather than fixed here.
-// If a future change wires a real keymap (or a text-entry mode of its own), this should change
-// to query it exactly as tags.Model.CapturesText queries its own m.filtering.
-func (m Model) CapturesText() bool { return false }
+// huh.Select and huh.MultiSelect both support their own "/" filter-typing mode (GetFiltering),
+// but that mode — like Down/Up/Space navigation generally — is only reachable once
+// huh.Field.WithKeyMap has been called on the field. That normally happens automatically inside
+// a huh.Form/Group; this screen uses both fields standalone (AGENTS.md §4.7, "no layout
+// library", ruled out adopting huh.Form just for its wiring), so buildEnvSelect and
+// buildMultiSelect now call WithKeyMap directly at construction time instead — plain component
+// wiring, not a layout dependency, so it doesn't touch §4.7's constraint. With that in place,
+// query whichever field is actually live for its own real filtering state, exactly as
+// tags.Model.CapturesText queries its own m.filtering: the env-select prompt while it's up, or
+// the multiSelect while it holds focus and no huh.Confirm dialog is covering it (confirmDirect
+// is y/n/enter/esc only — "q" was never meant to be typed there, so it's fine to let the root's
+// global quit key see it, matching tags.Model's own confirm-dialog reasoning).
+func (m Model) CapturesText() bool {
+	switch {
+	case m.state == stateSelectEnv:
+		return m.envSelect != nil && m.envSelect.GetFiltering()
+	case m.state == stateReady && !m.confirming && m.focus == focusLeft:
+		return m.multiSelect != nil && m.multiSelect.GetFiltering()
+	default:
+		return false
+	}
+}
 
 // SetSize lays every huh field and the viewport out inside width × height.
 func (m Model) SetSize(width, height int) Model {
