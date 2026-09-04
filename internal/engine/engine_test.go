@@ -80,6 +80,105 @@ func TestStepErrorMessageContainsWrappedErrorText(t *testing.T) {
 	}
 }
 
+// countingStub is a minimal Step, like stepStub, that also counts how many times Observe and
+// Act are each called on it — used below to prove Drive's Merged short-circuit really does skip
+// re-Observing and re-Acting on earlier steps, not just happen to produce the right end state.
+type countingStub struct {
+	name     StepName
+	obs      Observation
+	observes *int
+	acts     *int
+}
+
+func (c countingStub) Name() StepName { return c.name }
+
+func (c countingStub) Observe(context.Context, *PromotionState) (Observation, error) {
+	if c.observes != nil {
+		*c.observes++
+	}
+	return c.obs, nil
+}
+
+func (c countingStub) Act(context.Context, *PromotionState) error {
+	if c.acts != nil {
+		*c.acts++
+	}
+	return nil
+}
+
+// TestDriveSkipsPushedAndMergedOncePastMergedOnAPriorPass is this round's regression for the
+// churn TestResumeRebuildsArgoAppsForALegacyStateFile (cmd/hoist/resume_test.go) first flagged
+// and worked around locally rather than fixed: once a promotion has merged and is waiting on an
+// M5 Argo/rollout step, Drive's own "re-observe every step from the top" rule used to make
+// PushedStep re-push the branch MergedStep had just deleted, and MergedStep delete it again — on
+// every single poll tick for as long as the rollout takes to converge, not just once. This drives
+// with s.Phase already set to a step after Merged (the same hint pollInterval already reads from
+// a prior Drive call) and asserts PushedStep's Observe/Act and MergedStep's Act are never called
+// this pass — only MergedStep's Observe, exactly once (the short-circuit probe) — while the
+// pipeline still correctly reports ErrWaiting on the still-unsatisfied step after it.
+func TestDriveSkipsPushedAndMergedOncePastMergedOnAPriorPass(t *testing.T) {
+	var pushedObserves, pushedActs, mergedObserves, mergedActs int
+	steps := []Step{
+		countingStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		countingStub{name: StepCommitted, obs: Observation{Satisfied: true}},
+		countingStub{name: StepPushed, obs: Observation{Satisfied: false}, observes: &pushedObserves, acts: &pushedActs},
+		countingStub{name: StepPROpened, obs: Observation{Satisfied: true}},
+		countingStub{name: StepCIGreen, obs: Observation{Satisfied: true}},
+		countingStub{name: StepApproved, obs: Observation{Satisfied: true}},
+		countingStub{name: StepMerged, obs: Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}, observes: &mergedObserves, acts: &mergedActs},
+		countingStub{name: StepArgoSynced, obs: Observation{Waiting: true, Detail: "waiting for argo to sync"}},
+	}
+	s := &PromotionState{Phase: StepArgoSynced}
+
+	if err := Drive(ctx(), steps, s, nil); err != ErrWaiting {
+		t.Fatalf("expected ErrWaiting, got %v", err)
+	}
+	if s.Phase != StepArgoSynced {
+		t.Fatalf("expected to stop at %s, stopped at %s", StepArgoSynced, s.Phase)
+	}
+	if pushedObserves != 0 || pushedActs != 0 {
+		t.Fatalf("PushedStep should not be re-Observed or re-Acted once past Merged: observes=%d acts=%d", pushedObserves, pushedActs)
+	}
+	if mergedObserves != 1 {
+		t.Fatalf("MergedStep's Observe should be called exactly once (the short-circuit probe), got %d", mergedObserves)
+	}
+	if mergedActs != 0 {
+		t.Fatalf("MergedStep's Act should never be called once its Observe reports Satisfied, got %d", mergedActs)
+	}
+	if len(s.History) != 1 || !strings.Contains(s.History[0].Detail, "waiting") {
+		t.Fatalf("expected exactly one history entry, for the waiting Argo step, got %+v", s.History)
+	}
+}
+
+// TestDriveDoesNotShortCircuitBeforeMergedIsFirstReached is the short-circuit's own guard rail:
+// on any pass where s.Phase has not yet reached Merged (still waiting on, say, CI), the probe
+// must not run at all — Merged cannot possibly be satisfied yet, so probing it would only add a
+// wasted Observe call on every earlier-phase poll tick too.
+func TestDriveDoesNotShortCircuitBeforeMergedIsFirstReached(t *testing.T) {
+	var mergedObserves int
+	steps := []Step{
+		countingStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		countingStub{name: StepCommitted, obs: Observation{Satisfied: true}},
+		countingStub{name: StepPushed, obs: Observation{Satisfied: true}},
+		countingStub{name: StepPROpened, obs: Observation{Satisfied: true}},
+		countingStub{name: StepCIGreen, obs: Observation{Waiting: true, Detail: "waiting for CI"}},
+		countingStub{name: StepApproved, obs: Observation{Satisfied: false}},
+		countingStub{name: StepMerged, obs: Observation{Satisfied: false}, observes: &mergedObserves},
+		countingStub{name: StepArgoSynced, obs: Observation{Satisfied: false}},
+	}
+	s := &PromotionState{Phase: StepApproved}
+
+	if err := Drive(ctx(), steps, s, nil); err != ErrWaiting {
+		t.Fatalf("expected ErrWaiting, got %v", err)
+	}
+	if s.Phase != StepCIGreen {
+		t.Fatalf("expected to stop at %s, stopped at %s", StepCIGreen, s.Phase)
+	}
+	if mergedObserves != 0 {
+		t.Fatalf("Merged should not be probed before a prior pass has actually reached it, got %d Observe call(s)", mergedObserves)
+	}
+}
+
 // TestObserveAllObservesFinalStepExactlyOnce is round-6's regression: ObserveAll had the same
 // double-observe bug Status was already fixed for (PR #39 review finding #3) — the short-circuit
 // probe on the final step, when not satisfied, got observed a SECOND time when the ordinary walk
