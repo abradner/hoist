@@ -257,12 +257,27 @@ func TargetsFor(r *gitops.Repo, source string) []string {
 // IsProduction reports whether env is listed in the repo's envs.production (AGENTS.md
 // §4.5): direct mode is never offered for it, whatever the source env.
 func IsProduction(env string, envs config.EnvsConfig) bool {
-	for _, p := range envs.Production {
-		if p == env {
-			return true
-		}
+	return envs.IsProduction(env)
+}
+
+// WarnDeployIntoProduction attaches gitops.WarnProductionTarget to a deploy plan whose target
+// env the operator's own config lists as production, and is the single place that decision is
+// made: cmd/hoist's `deploy` and the TUI's own deploy screen both call it, because a warning
+// only one of the two entry points attaches is a warning half the operators never see — which
+// is exactly the bug the constant replaced (an ad-hoc string in one screen's View, reaching
+// neither the dry run nor the PR body). Informational only; production's real constraint is
+// the PR plus the approval comment, enforced in internal/engine (AGENTS.md §4.5).
+//
+// A no-op for anything but a deploy: a promotion into production is what the paired-env
+// config exists to describe, so saying it out loud there is noise, not news.
+func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
+	if pl == nil || !pl.IsDeploy() || !envs.IsProduction(pl.TargetEnv) {
+		return
 	}
-	return false
+	pl.Warnings = append(pl.Warnings, gitops.Warning{
+		Code:    gitops.WarnProductionTarget,
+		Message: fmt.Sprintf("%s is a production env: this deploy opens a PR and waits for an approval comment", pl.TargetEnv),
+	})
 }
 
 // SkippedStaging reports the configured staging env for source when target is production

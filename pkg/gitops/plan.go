@@ -22,6 +22,15 @@ const (
 	// env. Nothing would be written, so the refusal is reported rather than failing the plan
 	// (AGENTS.md principle 5); a digest override for the repo turns it into missing-in-target.
 	WarnSourceOnlyUnwritable = "source-only-unwritable"
+	// WarnProductionTarget: this plan writes into an env the operator's own config lists as
+	// production. Informational and never blocking (AGENTS.md §4.5: the registry-pick path's
+	// production warning "informs; it does not block") — what production actually forces is a
+	// PR and an approval comment, which the engine enforces on its own.
+	//
+	// Constructed by the caller rather than by BuildPlan/BuildDeployPlan: which envs are
+	// production is config, and pkg never imports internal. That is the same shape
+	// pkg/resolve's warnings already arrive in.
+	WarnProductionTarget = "production-target"
 )
 
 // BuildPlan plans the promotion of every promotable image repo from env src to env dst.
