@@ -12,9 +12,11 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // tuiBase and tuiOverrideCINone are the defaults the TUI's own confirm path uses for
@@ -36,8 +38,8 @@ const (
 // whole run); forgeErr is newForge's own error building f, deferred to here (rather than
 // failing runTUI outright) since a repo with no github configured never needs f at all — see
 // the eff.cfg check below, which reports that more specific case first.
-func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error) app.StartPromotionFunc {
-	return func(ctx context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
+	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		if eff.cfg == nil || eff.cfg.GitHub == "" {
 			// The same check runPromote itself makes before ever calling
 			// buildPromotionForConfirm (which assumes eff.cfg.GitHub is non-empty: it's
@@ -47,6 +49,12 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		}
 		if forgeErr != nil {
 			return engine.PromotionState{}, nil, forgeErr
+		}
+		if clusterErr != nil {
+			// The Argo/Deployment adaptors every promotion now needs, deferred here exactly
+			// like forgeErr: a session that only browses the matrix never opens a cluster
+			// connection and should not fail to start because one could not be built.
+			return engine.PromotionState{}, nil, clusterErr
 		}
 
 		// The same all-NoOp fast path runPromote's own body applies (promote.go, "changed"
@@ -120,17 +128,20 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// need a way to deliver a message mid-driveCmd, which this brief does not add) — the
 		// flight screen's own spinner keeps animating for the whole Act call regardless, so
 		// the operator still sees the screen is busy, just without that specific wording.
-		// engine.CoreSteps, the seven M4 already drove, not M5's full ten. The flight screen
-		// renders all ten (flight.StepOrder), so M5's three show as never-reached and the
-		// operator finishes the promotion with `hoist resume` — deliberately, for now.
-		// Driving them from here needs more than passing AllSteps: flight.retryableStep
-		// classifies only CIGreen/Approved as retryable, so a transient Kubernetes Get would
-		// stop the flight dead instead of polling again, and buildPollDurations carries neither
-		// poll.argo nor poll.rollout, so flight.pollInterval would fall back to its 2s default
-		// and hammer the API regardless of what the operator configured. Wiring all three
-		// together is its own piece of work, tracked as a follow-up issue rather than smuggled
-		// into M5's rebase (Codex review, PR #51; issue #64).
-		steps := engine.CoreSteps(g, f, nil)
+		// The full ten either way, now that direct mode converges too (issue #66). The TUI drove
+		// only CoreSteps while three things were missing: DirectSteps stopped at the push,
+		// flight.retryableStep classified only CIGreen/Approved so a transient Kubernetes Get
+		// stopped the flight dead, and buildPollDurations carried neither poll.argo nor
+		// poll.rollout so pollInterval fell back to 2s. All three are addressed, so the screen
+		// now drives what it has always rendered (issue #64).
+		var steps []engine.Step
+		if opts.Direct {
+			// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
+			// caller narrowing it. Confirmed comes from the screen that ran the gesture.
+			steps = engine.AllDirectSteps(g, a, ro, eff.cfg.Envs.Production, opts.Confirmed, nil)
+		} else {
+			steps = engine.AllSteps(g, f, a, ro, nil)
+		}
 
 		driveFn := func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 			next := cur
@@ -157,13 +168,15 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 
 // buildPollDurations translates config.PollConfig's CI/Approval/Deadline into
 // flight.PollDurations — the plain-value shape the flight screen actually needs (AGENTS.md
-// §4.8: the screen never imports internal/config itself). Argo/Rollout have no flight-screen
-// analogue (M4's four-then-three engine steps stop at Merged; there is no Argo/rollout step
-// yet), so they are deliberately not translated here.
+// §4.8: the screen never imports internal/config itself). All five are translated now that the
+// screen drives the Argo and rollout steps too; it previously stopped at Merged, so poll.argo
+// and poll.rollout had no analogue to carry (issue #64).
 func buildPollDurations(poll config.PollConfig) flight.PollDurations {
 	return flight.PollDurations{
 		CI:       time.Duration(poll.CI),
 		Approval: time.Duration(poll.Approval),
+		Argo:     time.Duration(poll.Argo),
+		Rollout:  time.Duration(poll.Rollout),
 		Deadline: time.Duration(poll.Deadline),
 	}
 }

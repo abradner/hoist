@@ -10,10 +10,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// tuiCluster supplies buildStartPromotion's Argo/Deployment adaptors from whatever
+// newPromoteFixture pointed newArgo/newRollout at, so a test wires exactly what runTUI wires
+// rather than a differently-shaped stand-in.
+func tuiCluster(t *testing.T) (argo.Argo, rollout.Rollout, error) {
+	t.Helper()
+	a, _, aerr := newArgo("")
+	ro, _, rerr := newRollout("")
+	return a, ro, errors.Join(aerr, rerr)
+}
 
 // buildEffForFixture loads cfgPath (built by newPromoteFixture) and resolves it into the
 // effective value runTUI itself would build for the TUI, standing in for
@@ -94,8 +107,9 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	state, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	state, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -202,8 +216,9 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
 	}
@@ -239,8 +254,9 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
 	}
@@ -289,8 +305,9 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
 	}
@@ -335,8 +352,9 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	state1, driveFn1, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
 	}
@@ -345,7 +363,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 	_ = driveFn1 // deliberately never called — see the test's own doc comment
 
-	state2, driveFn2, err := start(context.Background(), plan)
+	state2, driveFn2, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("second startPromotion call failed — the first call's claim was not released before it ever returned driveFn: %v", err)
 	}

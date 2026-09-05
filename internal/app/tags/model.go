@@ -69,6 +69,11 @@ type BackMsg struct{}
 // rather than inventing one).
 type SelectedMsg struct {
 	ImageRepo, Tag, Digest string
+	// Target is the env this picker was opened for. Carried on the message rather than
+	// left for the root to remember: the root would have to hold per-screen state to
+	// recover it, and a message that does not say what it is about is how the wrong env
+	// gets written.
+	Target string
 }
 
 // DirectRequestedMsg is emitted only once the operator has completed the keypress + huh.
@@ -81,6 +86,8 @@ type SelectedMsg struct {
 // gating").
 type DirectRequestedMsg struct {
 	ImageRepo, Tag, Digest string
+	// Target, as on SelectedMsg.
+	Target string
 }
 
 // nextGeneration hands out this process's next tag-picker generation id. Package-level and
@@ -450,7 +457,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	if !direct {
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest := r.Tag, r.Meta.Digest
-		return m, func() tea.Msg { return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest} }
+		return m, func() tea.Msg { return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target} }
 	}
 	m.confirming = true
 	m.confirmValue = false
@@ -477,7 +484,9 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		r := rows[idx]
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest := r.Tag, r.Meta.Digest
-		return m, func() tea.Msg { return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest} }
+		return m, func() tea.Msg {
+			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target}
+		}
 	}
 	_, cmd := m.confirmDirect.Update(msg)
 	return m, cmd

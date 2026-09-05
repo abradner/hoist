@@ -51,6 +51,31 @@ var StepOrder = []engine.StepName{
 	engine.StepRolledOut,
 }
 
+// DirectStepOrder is StepOrder's counterpart for a direct-mode promotion (engine.AllDirectSteps):
+// the gate and a push straight to the base branch instead of push/PR/CI/approval/merge, then the
+// same three convergence steps. A direct promotion rendered against StepOrder draws four steps it
+// will never run (PR, CI, approval, merge) and hides the two it actually does, which is a screen
+// lying about what is happening.
+var DirectStepOrder = []engine.StepName{
+	engine.StepDirectGate,
+	engine.StepBranched,
+	engine.StepCommitted,
+	engine.StepDirectPushed,
+	engine.StepArgoRefreshed,
+	engine.StepArgoSynced,
+	engine.StepRolledOut,
+}
+
+// OrderFor picks the row order matching how this promotion is actually being driven. Keyed on
+// the state's own Direct field rather than on a parameter, so a resumed promotion renders the
+// shape it really is even when whatever opened the screen has forgotten.
+func OrderFor(s engine.PromotionState) []engine.StepName {
+	if s.Direct {
+		return DirectStepOrder
+	}
+	return StepOrder
+}
+
 // stepLabels is the human-readable name shown for each step in the list — short, so the
 // glyph column stays aligned regardless of terminal width.
 var stepLabels = map[engine.StepName]string{
@@ -64,6 +89,8 @@ var stepLabels = map[engine.StepName]string{
 	engine.StepArgoRefreshed: "argo refresh",
 	engine.StepArgoSynced:    "argo sync",
 	engine.StepRolledOut:     "rollout",
+	engine.StepDirectGate:    "gate",
+	engine.StepDirectPushed:  "push to base",
 }
 
 // Label is the human-readable name for a step; falls back to the raw StepName for anything

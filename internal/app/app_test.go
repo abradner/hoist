@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
@@ -239,7 +240,7 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		return s, true, nil, nil
 	}
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		if p.SourceEnv != "app-staging" || p.TargetEnv != "app-production" {
 			t.Errorf("startPromotion called with unexpected plan: %+v", p)
@@ -277,7 +278,7 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // mirrors TestDriveCmdStampsCurrentGen at the flight layer (internal/app/flight/model_test.go),
 // one layer up the stack, guarding the build step instead of the drive step.
 func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -308,7 +309,7 @@ func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		return s, true, nil, nil
 	}
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		return wantState, stubDriveFn, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -358,7 +359,7 @@ func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 		return s, true, nil, nil
 	}
 	calls := 0
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		calls++
 		if calls == 1 {
 			return first, stubDriveFn, nil
@@ -422,7 +423,7 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -473,7 +474,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -526,32 +527,64 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 // StartMsg confirmed with Mode: plan.ModeDirect must therefore never reach startPromotion —
 // silently driving PR mode instead would mean the confirm screen told the operator "commit
 // straight to the branch, no PR" and then opened one anyway.
-func TestStartMsgRefusesDirectModeNotWired(t *testing.T) {
+// A direct-mode confirm reaches the start function AS direct. The TUI used to refuse this
+// outright, because nothing downstream could honour it: StartPromotionFunc had no way to carry
+// the choice, and buildStartPromotion always built the PR step list. Confirming would have told
+// the operator "commit straight to the branch, no PR" and then opened a PR — so refusing was
+// the honest option at the time. StartOpts carries it now, and AllDirectSteps honours it.
+//
+// Confirmed rides along with Direct because reaching ModeDirect already required the plan
+// screen's own keypress-then-huh.Confirm gesture, which is exactly what
+// engine.DirectCommitGateStep asks Confirmed to attest — and the gate re-derives the production
+// refusal independently regardless.
+func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
+	var got StartOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
-		called = true
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
-	before := len(m.(Model).stack)
 	msg := plan.StartMsg{
 		Plan:   gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"},
 		Mode:   plan.ModeDirect,
 		Source: "app-staging",
 		Target: "app-production",
 	}
-	m, cmd := m.Update(msg)
-	if cmd != nil {
-		t.Errorf("direct-mode StartMsg produced a command: %#v", cmd())
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("direct-mode StartMsg produced no command; the confirm should start a promotion")
 	}
-	if called {
-		t.Error("startPromotion was called for a direct-mode confirm the TUI cannot honor yet")
+	cmd() // the start call happens off the Update stack
+	if !called {
+		t.Fatal("startPromotion was never called for a direct-mode confirm")
 	}
-	if n := len(m.(Model).stack); n != before {
-		t.Errorf("stack changed from %d to %d screens for a refused direct-mode confirm", before, n)
+	if !got.Direct {
+		t.Error("StartOpts.Direct = false for a ModeDirect confirm: the promotion would open a PR the operator declined")
 	}
-	if v := plain(m); !strings.Contains(v, "direct mode") {
-		t.Errorf("view missing the direct-mode-not-wired notice:\n%s", v)
+	if !got.Confirmed {
+		t.Error("StartOpts.Confirmed = false: the gate would refuse a gesture the operator actually completed")
+	}
+}
+
+// The PR path must not accidentally inherit direct mode.
+func TestStartMsgPRModeIsNotDirect(t *testing.T) {
+	var got StartOpts
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+		got = opts
+		return engine.PromotionState{}, nil, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	_, cmd := m.Update(plan.StartMsg{
+		Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"},
+		Mode: plan.ModePR, Source: "app-staging", Target: "app-production",
+	})
+	if cmd == nil {
+		t.Fatal("PR-mode StartMsg produced no command")
+	}
+	cmd()
+	if got.Direct || got.Confirmed {
+		t.Errorf("PR mode leaked direct opts: %+v", got)
 	}
 }
 
@@ -581,7 +614,7 @@ func TestPromotionBuiltMsgNilDriveFnShowsNotice(t *testing.T) {
 // pushed) rather than crashing.
 func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	wantErr := errors.New("promotion existing-id targeting app-production is still in flight (at pr-opened: open); run `hoist resume existing-id` instead of starting a second one")
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{}, nil, wantErr
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -606,7 +639,7 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 // flight.Model.driveCmd's own DriveFunc call, so this returns with ctx's deadline error instead
 // of the goroutine blocking indefinitely.
 func TestStartMsgBoundedByPollDeadline(t *testing.T) {
-	hung := func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		<-ctx.Done()
 		return engine.PromotionState{}, nil, ctx.Err()
 	}
@@ -642,7 +675,7 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 // startPromotion call's own context, not just its result.
 func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
 		return engine.PromotionState{}, nil, ctx.Err()
@@ -678,7 +711,7 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	firstErr := make(chan error, 1)
 	callCount := 0
-	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		callCount++
 		if callCount == 1 {
 			<-ctx.Done()
@@ -728,7 +761,7 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 		return s, false, nil, ctx.Err()
 	}
 	promo := Promotion{
-		Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 			time.Sleep(buildSleep)
 			return engine.PromotionState{ID: "abcd1234"}, hungDrive, nil
 		},
@@ -768,7 +801,7 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
 	const secret = "ghp_totallysecrettoken1234567890"
 	redact.Register(secret)
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{}, nil, fmt.Errorf("push failed: authentication using %s rejected", secret)
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -1070,7 +1103,10 @@ func TestDeployNewPushesTagsScreen(t *testing.T) {
 // was (and wasn't) done. The window is widened past the default 80 columns so the assertions
 // aren't fighting the status bar's own truncation (internal/ui.StatusBar) rather than testing
 // the notice's content.
-func TestDirectRequestedMsgShowsHonestNotice(t *testing.T) {
+// Choosing a tag now opens the deploy confirm screen rather than popping back with a notice
+// saying nothing happened. Both picker messages take the same route: the D gesture chooses a
+// mode, not a change, so it still has to look at the diff.
+func TestSelectedMsgOpensTheDeployConfirmScreen(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
@@ -1078,24 +1114,33 @@ func TestDirectRequestedMsgShowsHonestNotice(t *testing.T) {
 		t.Fatal("d produced no command")
 	}
 	m, _ = m.Update(cmd())
-	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("stack has %d screens after d, want 2", n)
-	}
 
-	m, _ = m.Update(tags.DirectRequestedMsg{ImageRepo: "ghcr.io/example/web", Tag: "v2", Digest: "sha256:" + strings.Repeat("a", 64)})
-	if n := len(m.(Model).stack); n != 1 {
-		t.Fatalf("DirectRequestedMsg should pop back to the matrix: stack has %d screens", n)
+	m, _ = m.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/web",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
+	stack := m.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("stack has %d screens, want 2 (matrix + deploy confirm)", n)
+	}
+	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
+		t.Fatalf("top screen is %T, want the deploy confirm", stack[len(stack)-1])
 	}
 	v := plain(m)
-	if !strings.Contains(v, "v2") {
-		t.Errorf("notice does not name the tag that was confirmed:\n%s", v)
+	if !strings.Contains(v, "v2") || !strings.Contains(v, "app-production") {
+		t.Errorf("confirm screen should name the image and the env:\n%s", v)
 	}
-	if !strings.Contains(v, "no commit was made") {
-		t.Errorf("notice does not say plainly that no commit was made:\n%s", v)
+	// The whole point of the screen: the bytes are on it before anything is written.
+	if !strings.Contains(v, "image:") {
+		t.Errorf("confirm screen should show the diff:\n%s", v)
 	}
 }
 
-func TestSelectedMsgShowsHonestNotice(t *testing.T) {
+// A tag with no occurrence in the target env cannot be deployed. The operator gets the reason
+// on the matrix rather than an empty confirm screen.
+func TestSelectedMsgReportsAnUndeployableChoice(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
@@ -1103,17 +1148,18 @@ func TestSelectedMsgShowsHonestNotice(t *testing.T) {
 		t.Fatal("d produced no command")
 	}
 	m, _ = m.Update(cmd())
-	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("stack has %d screens after d, want 2", n)
-	}
 
-	m, _ = m.Update(tags.SelectedMsg{ImageRepo: "ghcr.io/example/web", Tag: "v2", Digest: "sha256:" + strings.Repeat("a", 64)})
+	m, _ = m.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/not-in-this-env",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
 	if n := len(m.(Model).stack); n != 1 {
-		t.Fatalf("SelectedMsg should pop back to the matrix: stack has %d screens", n)
+		t.Fatalf("an undeployable choice should return to the matrix: stack has %d screens", n)
 	}
-	v := plain(m)
-	if !strings.Contains(v, "nothing was written") {
-		t.Errorf("notice does not say plainly that nothing was written:\n%s", v)
+	if v := plain(m); !strings.Contains(v, "cannot deploy") {
+		t.Errorf("notice should say why it cannot be deployed:\n%s", v)
 	}
 }
 
@@ -1288,5 +1334,50 @@ func TestBackgroundColorRethemes(t *testing.T) {
 func TestViewUsesAltScreen(t *testing.T) {
 	if !sized(t).View().AltScreen {
 		t.Error("view is not in the alternate screen")
+	}
+}
+
+// Confirming on the deploy screen starts a real promotion, and carries the mode with it. This
+// is the end of the path the tag picker used to dead-end: matrix -> d -> picker -> confirm ->
+// a write.
+func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mode       string
+		confirmed  bool
+		wantDirect bool
+	}{
+		{"PR mode", deploy.ModePR, false, false},
+		{"direct mode", deploy.ModeDirect, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got StartOpts
+			called := false
+			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+				called, got = true, opts
+				return engine.PromotionState{}, nil, nil
+			}}
+			m := sizedWithPromotion(t, promo)
+			_, cmd := m.Update(deploy.StartMsg{
+				Plan:      gitops.Plan{Variant: gitops.VariantDeploy, TargetEnv: "app-production"},
+				Mode:      tc.mode,
+				Confirmed: tc.confirmed,
+				Target:    "app-production",
+				Image:     "ghcr.io/example/web:v2",
+			})
+			if cmd == nil {
+				t.Fatal("confirming a deploy produced no command")
+			}
+			cmd()
+			if !called {
+				t.Fatal("startPromotion was never called for a confirmed deploy")
+			}
+			if got.Direct != tc.wantDirect {
+				t.Errorf("StartOpts.Direct = %v, want %v", got.Direct, tc.wantDirect)
+			}
+			if got.Confirmed != tc.confirmed {
+				t.Errorf("StartOpts.Confirmed = %v, want %v", got.Confirmed, tc.confirmed)
+			}
+		})
 	}
 }
