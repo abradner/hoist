@@ -198,7 +198,11 @@ type Model struct {
 
 	confirming    bool
 	confirmDirect *huh.Confirm
-	confirmValue  bool
+	// confirmValue is huh's write target only. It is NOT read to decide anything: Value takes
+	// the address of a field in whichever Model copy built the widget, and every Update since
+	// has returned a new copy, so this field on the current model stays at whatever it was
+	// initialised to no matter what the operator typed. confirmAgreed asks the widget instead.
+	confirmValue bool
 
 	spinner spinner.Model
 	notice  string
@@ -463,6 +467,12 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	m.confirmValue = false
 	verb := fmt.Sprintf("Commit %s directly to %s's base branch — no PR, no review? This is only offered for non-production envs.", r.Tag, m.target)
 	m.confirmDirect = huh.NewConfirm().Title(verb).Value(&m.confirmValue)
+	// WithKeyMap is not optional decoration: huh.NewConfirm leaves keymap zero-valued, and a
+	// zero key.Binding matches nothing, so a Confirm used standalone (rather than inside a
+	// huh.Form, which installs the keymap itself) ignores every keypress. Without it y/n/←/→
+	// all did nothing and this gesture could not be completed at all by a real operator —
+	// only by a test reaching past the widget to set the bool (Copilot, PR #72).
+	m.confirmDirect.WithKeyMap(huh.NewDefaultKeyMap())
 	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	if m.width > 0 {
 		m.confirmDirect.WithWidth(m.width)
@@ -473,7 +483,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
 		m.confirming = false
-		if !m.confirmValue {
+		if !m.confirmAgreed() {
 			return m, nil
 		}
 		rows := m.filtered()
@@ -488,8 +498,26 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target}
 		}
 	}
-	_, cmd := m.confirmDirect.Update(msg)
+	f, cmd := m.confirmDirect.Update(msg)
+	// Keep whatever the widget returned: huh's own Update is where the operator's y/n lands,
+	// and its accessor is the only honest reading of it (see confirmValue's own comment).
+	if c, ok := f.(*huh.Confirm); ok {
+		m.confirmDirect = c
+	}
 	return m, cmd
+}
+
+// confirmAgreed is the operator's actual answer, read from the widget rather than from the
+// bool huh was pointed at. The pointer form (Value(&m.confirmValue)) captures a field in a
+// Model copy that Update immediately supersedes, so reading the field made the D gesture
+// unreachable through real input: y then enter emitted nothing at all, and the tests that
+// covered it assigned the field directly and so could never have caught it (Copilot, PR #72).
+func (m Model) confirmAgreed() bool {
+	if m.confirmDirect == nil {
+		return false
+	}
+	v, _ := m.confirmDirect.GetValue().(bool)
+	return v
 }
 
 func (m Model) updateFilter(msg tea.Msg) (Model, tea.Cmd) {
@@ -644,11 +672,60 @@ func (m Model) View() string {
 // mirrors it rather than silently rendering an arbitrary one of them and hiding the rest.
 // Only ever called when m.hasStagingMismatch is true, which StagingMismatch never reports
 // alongside an empty m.stagingTags (see its own doc comment).
+//
+// Known gap, deliberately not closed here (issue #74): when the paired staging env has no
+// occurrence of this image repo AT ALL, StagingMismatch reports ok=false and viewReady
+// suppresses this note entirely — so the strongest "this has never been through staging" case
+// is the one case that gets no verdict. Closing it means StagingMismatch distinguishing "no
+// pair configured" from "pair exists, nothing of this repo in it", which is the same return
+// reshaping #74 already needs for digests. Until then nothing here, and nothing in
+// docs/repo-map.md, may describe this note as covering that case.
 func (m Model) stagingNote() string {
+	// The env's own committed state comes first and is described in exactly the terms it is
+	// read in — a manifest occurrence, never a live cluster read (this package has no cluster
+	// connection wired in at all), and never collapsed to one tag when the env disagrees with
+	// itself.
+	base := fmt.Sprintf("note: %s (paired staging) disagrees with itself on this image's committed manifest tag: %s",
+		m.stagingEnv, strings.Join(m.stagingTags, ", "))
 	if len(m.stagingTags) == 1 {
-		return fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTags[0])
+		base = fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTags[0])
 	}
-	return fmt.Sprintf("note: %s (paired staging) disagrees with itself on this image's committed manifest tag: %s", m.stagingEnv, strings.Join(m.stagingTags, ", "))
+	// The comparison this note existed to enable but never made. StagingMismatch has always
+	// fetched the paired staging env's committed tags; until now the screen printed them and
+	// left the operator to check the tag under their own cursor against the list by eye —
+	// which is the actual question ("has this build been anywhere first?") on the screen where
+	// it is being answered. Appended rather than substituted so the honest description of what
+	// was read survives the verdict.
+	tag := m.cursorTag()
+	switch {
+	case tag == "":
+		return base
+	case m.stagingRuns(tag):
+		// Named as a tag comparison, because that is all it is: StagingMismatch carries the
+		// staging env's committed tag STRINGS, and a tag is mutable — staging may have
+		// committed v1 when v1 meant one digest and the registry may point v1 at another now.
+		// Saying "v1 is committed there" would let that read as "this build went through
+		// staging", which this data cannot support (Copilot, PR #73; issue #74 for carrying
+		// the digests through and comparing those).
+		return base + fmt.Sprintf("; %s is the tag committed there — tags move, so this is not proof of the same build", tag)
+	default:
+		return base + fmt.Sprintf("; warning: %s (under the cursor) is not committed there — it has not been through %s",
+			tag, m.stagingEnv)
+	}
+}
+
+// cursorTag is the tag the operator is looking at, or "" when nothing is selected yet and
+// there is nothing to compare.
+func (m Model) cursorTag() string { return m.selectedTag }
+
+// stagingRuns reports whether the paired staging env's committed manifest carries tag.
+func (m Model) stagingRuns(tag string) bool {
+	for _, t := range m.stagingTags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) header() string {

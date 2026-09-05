@@ -148,7 +148,10 @@ first target GitOps repo are both public; a hostname in a PR body is indexed wit
 An env listed in `envs.production` always goes through a PR, always requires the magic comment
 unless the operator sets `approval: auto` for that env explicitly, and refuses direct mode outright
 — the keypress that enables direct mode on a non-production env is not offered. The "deploying
-straight to production" warning on the registry-pick path informs; it does not block (principle 5).
+straight to production" warning on the deploy path informs; it does not block (principle 5). It is a
+real `gitops.Warning` (`WarnProductionTarget`) attached to the plan, not a string one renderer
+prints, so the dry run, the confirm screen and the PR body all carry it — a warning only one
+surface shows is a warning the reviewer of a PR never sees.
 Config *defaults* may never weaken this; only an explicit per-env setting can. *Why:* on the target
 repo every `Application` auto-syncs with prune and self-heal, so a merge to `main` is the
 deployment, and the app entrypoint runs `db:prepare` — a merge can migrate a production database.
@@ -322,9 +325,12 @@ and `hoist resume <id>` (or `hoist resume --env <target-env>`) re-drives one fro
 `Observe` actually finds it — the CLI's own poll loop (`internal/config`'s `poll` section,
 `poll.argo`/`poll.rollout` from M5 on) is what does the actual waiting on CI/approval/Argo/rollout,
 never a `Step`'s own `Act`. `promote` also takes `--direct` (M6): commit straight to `--base` instead of
-opening a PR, driving `internal/engine.DirectSteps` (branch, commit, then push straight to
-`--base` — no separate branch left on origin, no PR) rather than the full pipeline above; it
-stops at that push and does not drive Argo or rollout (issue #66). `--direct` requires both a
+opening a PR, driving `internal/engine.AllDirectSteps` (branch, commit, then push straight to
+`--base` — no separate branch left on origin, no PR) rather than the full pipeline above, and
+then converging through Argo and rollout exactly as the PR path does (M8; until then it stopped
+at the push — issue #66). Every step past the push gates on `PromotionState.LandedSHA()` rather
+than `MergeSHA` directly, which a direct push never produces; `LandedSHA` is derived from the
+state's `Direct` flag rather than persisted, so old state files keep resuming. `--direct` requires both a
 configured repo (`repos[].envs.production` must be known — a flags-only run has no such list,
 and `promote` refuses `--direct` outright rather than treat "unconfigured" as "every env is
 non-production") and `--confirm-direct=<env>`, a second, distinct flag repeating `--to`'s exact
@@ -332,7 +338,13 @@ value as the confirming argument (refused if it doesn't match) — the CLI's equ
 TUI tag picker's keypress + `huh.Confirm` gesture. Neither flag is itself the gate:
 `internal/engine.DirectCommitGateStep` independently refuses any env listed in
 `envs.production` regardless of what the CLI or the TUI believed (§4.5), checked before any
-planning fast path (including the all-no-op short circuit) can report success. `hoist watch --app <name>` (M5) is a read-only companion, independent
+planning fast path (including the all-no-op short circuit) can report success. `hoist deploy --repo <path> --env <env> --image <repo:tag@sha256:…>` (M8) is `promote`'s sibling
+for the other half of the problem statement: instead of copying one env's digests into another it
+writes one caller-named ref into every occurrence of that image repo in `--env`, then drives the
+identical engine pipeline (`gitops.BuildDeployPlan`, which unlike `BuildPlan` treats the repo
+being absent from the target env as an error — there is nothing to write). It takes `promote`'s
+flags minus `--from`, plus the same `--direct`/`--confirm-direct` pair, and its rendered artifacts
+say *deploy*, never *promote*. `hoist watch --app <name>` (M5) is a read-only companion, independent
 of any promotion: it prints one Application's current sync/health/revision and the rollout
 progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
 the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
@@ -342,10 +354,13 @@ run ./cmd/hoist --repo <path>` with no command opens the env × family matrix sc
 `?` help; `d` opens the tag picker — `internal/app/tags`, M6 — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
 repo's git tag dates for ordering when `repos[].apps` names one, and its own `D` key walks the
-same keypress-then-confirm gesture as `--direct`/`--confirm-direct`); browsing the matrix and the
-plan/confirm screen it opens into is read-only, but confirming a
-plan there (Enter on the confirm screen) now drives a real promotion exactly like `promote`
-above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same
+same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
+deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
+written: it shows the diff the pick would make and takes Enter, so no write in hoist skips a diff
+and a confirmation); browsing the matrix, the picker and the
+plan/confirm screen they open into is read-only, but confirming a
+plan there (Enter on either confirm screen) drives a real promotion or deploy exactly like
+`promote`/`deploy` above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same
 `internal/engine` pipeline. Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan ./internal/app/tags -update`; the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).

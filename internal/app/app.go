@@ -535,6 +535,9 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool) (t
 	if err != nil {
 		return m.pop().withMatrixNotice(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
+	// The identical warning cmd/hoist's own `deploy` attaches, from the same helper, so the
+	// confirm screen and the PR body it later renders agree with the CLI's dry run.
+	plan.WarnDeployIntoProduction(&pl, m.envs)
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles)}
 	if direct {
 		ds = deployScreen{ds.WithDirectMode()}

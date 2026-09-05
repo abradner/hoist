@@ -183,14 +183,7 @@ func ShortDigest(digest string) string {
 // caller (model.go's viewReady) can render either the single agreed tag or an explicit
 // disagreement across every distinct value, never an arbitrary pick that hides the others.
 func StagingMismatch(repo *gitops.Repo, imageRepo, target string, envs config.EnvsConfig) (stagingEnv string, stagingTags []string, ok bool) {
-	isProd := false
-	for _, p := range envs.Production {
-		if p == target {
-			isProd = true
-			break
-		}
-	}
-	if !isProd || repo == nil {
+	if !envs.IsProduction(target) || repo == nil {
 		return "", nil, false
 	}
 	var candidates []string

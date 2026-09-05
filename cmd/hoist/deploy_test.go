@@ -438,3 +438,58 @@ func TestDeployDryRunNeedsNoForgeConfig(t *testing.T) {
 		t.Errorf("a direct dry run with no forge identity must still be refused:\n%s", out.String())
 	}
 }
+
+// TestDeployIntoProductionWarnsEverywhereItRenders is the regression test for the warning's
+// whole reason to be a gitops.Warning rather than the ad-hoc UI string it replaced: as a
+// warning on the plan it reaches every renderer at once — here the dry run, and by the same
+// plan.Warnings loop internal/engine/template.go already runs, the PR body the human is
+// supposed to review. The string reached neither.
+//
+// Asserted against its own absence on an identical run whose only difference is the config
+// listing, so a test that passes because the word "production" is simply everywhere in the
+// output cannot survive.
+func TestDeployIntoProductionWarnsEverywhereItRenders(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "deploy",
+		"--env", "app-production",
+		"--image", "ghcr.io/example/app:v3@" + digestThird,
+		"--dry-run",
+	}
+
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if strings.Contains(out.String(), "is a production env") {
+		t.Fatalf("app-production is not listed under envs.production in this fixture; the warning must not fire:\n%s", out.String())
+	}
+
+	// The one change: the operator's own config now calls this env production.
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withProd := strings.Replace(string(data),
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    envs:\n      production: [app-production]\n",
+		1)
+	if withProd == string(data) {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withProd), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(out.String(), "app-production is a production env") {
+		t.Fatalf("the dry run must name the production target:\n%s", out.String())
+	}
+	// Informational, never blocking (AGENTS.md §4.5): the plan still renders its edit.
+	if !strings.Contains(out.String(), "v3") {
+		t.Fatalf("the warning must not suppress the plan itself:\n%s", out.String())
+	}
+}

@@ -325,16 +325,27 @@ func expandHome(p string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
+// IsProduction reports whether env is one the operator listed as production. The single
+// implementation of that question: envs.production is the one config authority that governs
+// PR-required, approval-required and the direct-mode refusal alike (AGENTS.md §4.5), and a
+// second copy of the scan is how those three drift apart.
+func (e EnvsConfig) IsProduction(env string) bool {
+	for _, p := range e.Production {
+		if p == env {
+			return true
+		}
+	}
+	return false
+}
+
 // Approval is the approval mode for env: the explicit setting, else comment for a
 // production env, else auto.
 func (r RepoConfig) Approval(env string) string {
 	if v, ok := r.Envs.Approval[env]; ok {
 		return v
 	}
-	for _, p := range r.Envs.Production {
-		if p == env {
-			return ApprovalComment
-		}
+	if r.Envs.IsProduction(env) {
+		return ApprovalComment
 	}
 	return ApprovalAuto
 }
