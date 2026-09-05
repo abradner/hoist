@@ -231,6 +231,14 @@ func (m Model) View() string {
 	} else {
 		b.WriteString(m.diff.View())
 	}
+	// The plan's own warnings, above the hint and above the fold — this is the last screen
+	// before a write, and a warning the CLI's dry run and the PR body both carry (see
+	// internal/app/plan.WarnDeployIntoProduction) has no business being invisible on the one
+	// surface where the operator is about to press enter. Informational, never blocking
+	// (AGENTS.md §4.5): enter still works.
+	for _, w := range m.pl.Warnings {
+		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render("warning: "+w.Message))
+	}
 	if m.notice != "" {
 		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render(m.notice))
 	}

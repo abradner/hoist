@@ -519,6 +519,44 @@ func TestStagingNoteRendersDisagreementAcrossMultipleTags(t *testing.T) {
 	}
 }
 
+// TestStagingNoteComparesCursorTagAgainstStaging is the note's reason for existing: the
+// operator's actual question on this screen is "has the build under my cursor been anywhere
+// first?", and until now the screen printed staging's tags and left them to check by eye.
+// The verdict is appended to — never substituted for — the honest description of what was
+// read, so both halves must survive together.
+func TestStagingNoteComparesCursorTagAgainstStaging(t *testing.T) {
+	// readyModel's registry tags are v3/v2/v1 newest-first and its paired staging env carries
+	// only v1, so the cursor lands on a tag staging has never had.
+	m := readyModel(t, "app-production", true, true)
+	if m.cursorTag() != "v3" {
+		t.Fatalf("fixture precondition: cursor should start on the newest tag, got %q", m.cursorTag())
+	}
+	v := m.View()
+	if !strings.Contains(v, "warning: v3 (under the cursor) is not committed there") {
+		t.Fatalf("a tag staging has never carried must be called out as such:\n%s", v)
+	}
+	if !strings.Contains(v, "committed manifest tag is v1") {
+		t.Fatalf("the verdict must not displace what was actually read:\n%s", v)
+	}
+
+	// Move the cursor down to v1, which staging does carry: same note, opposite verdict, and
+	// no warning left over from the row above.
+	m2 := m
+	for i := 0; i < 2; i++ {
+		m2, _ = m2.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	}
+	if m2.cursorTag() != "v1" {
+		t.Fatalf("expected the cursor on v1 after two j presses, got %q", m2.cursorTag())
+	}
+	v2 := m2.View()
+	if !strings.Contains(v2, "v1 (under the cursor) is committed there") {
+		t.Fatalf("a tag staging does carry must read as such:\n%s", v2)
+	}
+	if strings.Contains(v2, "warning:") {
+		t.Fatalf("no warning should survive moving onto a tag staging carries:\n%s", v2)
+	}
+}
+
 func TestDirectKeyNotOfferedForProduction(t *testing.T) {
 	m := readyModel(t, "app-production", true, true)
 	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})

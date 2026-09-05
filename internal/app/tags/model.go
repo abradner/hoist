@@ -645,10 +645,45 @@ func (m Model) View() string {
 // Only ever called when m.hasStagingMismatch is true, which StagingMismatch never reports
 // alongside an empty m.stagingTags (see its own doc comment).
 func (m Model) stagingNote() string {
+	// The env's own committed state comes first and is described in exactly the terms it is
+	// read in — a manifest occurrence, never a live cluster read (this package has no cluster
+	// connection wired in at all), and never collapsed to one tag when the env disagrees with
+	// itself.
+	base := fmt.Sprintf("note: %s (paired staging) disagrees with itself on this image's committed manifest tag: %s",
+		m.stagingEnv, strings.Join(m.stagingTags, ", "))
 	if len(m.stagingTags) == 1 {
-		return fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTags[0])
+		base = fmt.Sprintf("note: %s (paired staging)'s committed manifest tag is %s", m.stagingEnv, m.stagingTags[0])
 	}
-	return fmt.Sprintf("note: %s (paired staging) disagrees with itself on this image's committed manifest tag: %s", m.stagingEnv, strings.Join(m.stagingTags, ", "))
+	// The comparison this note existed to enable but never made. StagingMismatch has always
+	// fetched the paired staging env's committed tags; until now the screen printed them and
+	// left the operator to check the tag under their own cursor against the list by eye —
+	// which is the actual question ("has this build been anywhere first?") on the screen where
+	// it is being answered. Appended rather than substituted so the honest description of what
+	// was read survives the verdict.
+	tag := m.cursorTag()
+	switch {
+	case tag == "":
+		return base
+	case m.stagingRuns(tag):
+		return base + fmt.Sprintf("; %s (under the cursor) is committed there", tag)
+	default:
+		return base + fmt.Sprintf("; warning: %s (under the cursor) is not committed there — it has not been through %s",
+			tag, m.stagingEnv)
+	}
+}
+
+// cursorTag is the tag the operator is looking at, or "" when nothing is selected yet and
+// there is nothing to compare.
+func (m Model) cursorTag() string { return m.selectedTag }
+
+// stagingRuns reports whether the paired staging env's committed manifest carries tag.
+func (m Model) stagingRuns(tag string) bool {
+	for _, t := range m.stagingTags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) header() string {

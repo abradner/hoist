@@ -1138,6 +1138,43 @@ func TestSelectedMsgOpensTheDeployConfirmScreen(t *testing.T) {
 	}
 }
 
+// TestDeployConfirmScreenCarriesTheProductionWarning is the wiring half of the warning the CLI
+// already renders: the TUI builds its own deploy plan, so attaching the warning in cmd/hoist
+// alone would have left the one screen where the operator actually presses enter as the only
+// surface that never mentions production. Asserted against the same screen opened with an
+// empty production list, so it cannot pass on the word "production" appearing in the header's
+// own env name.
+func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
+	open := func(t *testing.T, envs config.EnvsConfig) string {
+		t.Helper()
+		r, err := gitops.Discover(fixtureRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, nil)
+		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+		tm, _ = tm.Update(tags.SelectedMsg{
+			ImageRepo: "ghcr.io/example/web",
+			Tag:       "v2",
+			Digest:    "sha256:" + strings.Repeat("a", 64),
+			Target:    "app-production",
+		})
+		return plain(tm)
+	}
+
+	if v := open(t, config.EnvsConfig{}); strings.Contains(v, "is a production env") {
+		t.Fatalf("no env is configured production here; the warning must not fire:\n%s", v)
+	}
+	v := open(t, config.EnvsConfig{Production: []string{"app-production"}})
+	if !strings.Contains(v, "app-production is a production env") {
+		t.Fatalf("the confirm screen must name the production target:\n%s", v)
+	}
+	// Informational, never blocking (AGENTS.md §4.5): the diff and the enter hint both stay.
+	if !strings.Contains(v, "image:") || !strings.Contains(v, "enter deploy") {
+		t.Fatalf("the warning must not displace the diff or the confirmation:\n%s", v)
+	}
+}
+
 // A tag with no occurrence in the target env cannot be deployed. The operator gets the reason
 // on the matrix rather than an empty confirm screen.
 func TestSelectedMsgReportsAnUndeployableChoice(t *testing.T) {
