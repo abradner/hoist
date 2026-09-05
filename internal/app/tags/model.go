@@ -672,6 +672,14 @@ func (m Model) View() string {
 // mirrors it rather than silently rendering an arbitrary one of them and hiding the rest.
 // Only ever called when m.hasStagingMismatch is true, which StagingMismatch never reports
 // alongside an empty m.stagingTags (see its own doc comment).
+//
+// Known gap, deliberately not closed here (issue #74): when the paired staging env has no
+// occurrence of this image repo AT ALL, StagingMismatch reports ok=false and viewReady
+// suppresses this note entirely — so the strongest "this has never been through staging" case
+// is the one case that gets no verdict. Closing it means StagingMismatch distinguishing "no
+// pair configured" from "pair exists, nothing of this repo in it", which is the same return
+// reshaping #74 already needs for digests. Until then nothing here, and nothing in
+// docs/repo-map.md, may describe this note as covering that case.
 func (m Model) stagingNote() string {
 	// The env's own committed state comes first and is described in exactly the terms it is
 	// read in — a manifest occurrence, never a live cluster read (this package has no cluster
