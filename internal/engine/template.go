@@ -18,7 +18,7 @@ func RenderPRBody(id string, plan gitops.Plan) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, Marker(id))
 	fmt.Fprintln(&b)
-	fmt.Fprintf(&b, "hoist promotes `%s` -> `%s`.\n\n", plan.SourceEnv, plan.TargetEnv)
+	fmt.Fprintf(&b, "%s\n\n", lede(plan))
 
 	rows := editRows(plan.Edits)
 	if len(rows) > 0 {
@@ -31,7 +31,7 @@ func RenderPRBody(id string, plan gitops.Plan) string {
 	}
 
 	if len(plan.Untouched) > 0 {
-		fmt.Fprintln(&b, "Untouched (not part of this promotion):")
+		fmt.Fprintf(&b, "Untouched (not part of this %s):\n", noun(plan))
 		for _, ref := range plan.Untouched {
 			fmt.Fprintf(&b, "- %s\n", ref)
 		}
@@ -46,13 +46,36 @@ func RenderPRBody(id string, plan gitops.Plan) string {
 		fmt.Fprintln(&b)
 	}
 
-	fmt.Fprintf(&b, "Promotion id: `%s`\n", id)
+	fmt.Fprintf(&b, "%s id: `%s`\n", strings.ToUpper(noun(plan)[:1])+noun(plan)[1:], id)
 	return b.String()
+}
+
+// noun is what this plan calls itself in rendered prose — "deploy" or "promotion". A deploy
+// has no source env, so every sentence that would have read "A -> B" has to be re-worded
+// rather than left with an empty side (AGENTS.md principle 1: a rendered artifact that
+// misdescribes what happened is a bug, and the PR body is the thing a reader trusts six
+// months later).
+func noun(plan gitops.Plan) string {
+	if plan.IsDeploy() {
+		return "deploy"
+	}
+	return "promotion"
+}
+
+// lede is the PR body's opening sentence.
+func lede(plan gitops.Plan) string {
+	if plan.IsDeploy() {
+		return fmt.Sprintf("hoist deploys into `%s`.", plan.TargetEnv)
+	}
+	return fmt.Sprintf("hoist promotes `%s` -> `%s`.", plan.SourceEnv, plan.TargetEnv)
 }
 
 // PRTitle renders the PR title for plan.
 func PRTitle(plan gitops.Plan) string {
 	rows := editRows(plan.Edits)
+	if plan.IsDeploy() {
+		return fmt.Sprintf("hoist: deploy %d image(s) to %s", len(rows), plan.TargetEnv)
+	}
 	return fmt.Sprintf("hoist: promote %d image(s) %s -> %s", len(rows), plan.SourceEnv, plan.TargetEnv)
 }
 
@@ -60,7 +83,11 @@ func PRTitle(plan gitops.Plan) string {
 // the hoist-id trailer on its own line at the end (AGENTS.md invariant 5).
 func RenderCommitMessage(id string, plan gitops.Plan) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "hoist: promote %s -> %s\n\n", plan.SourceEnv, plan.TargetEnv)
+	if plan.IsDeploy() {
+		fmt.Fprintf(&b, "hoist: deploy to %s\n\n", plan.TargetEnv)
+	} else {
+		fmt.Fprintf(&b, "hoist: promote %s -> %s\n\n", plan.SourceEnv, plan.TargetEnv)
+	}
 	for _, r := range editRows(plan.Edits) {
 		fmt.Fprintf(&b, "- %s: %s -> %s (%d occurrence(s))\n", r.repo, r.from, r.to, r.count)
 	}
