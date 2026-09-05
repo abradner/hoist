@@ -14,7 +14,9 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // PollDurations is the plain-value slice of internal/config.PollConfig this screen actually
@@ -384,7 +386,22 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 // engine.Drive's own ctx.Err() check — is terminal from this screen's point of view too.
 func retryableErr(err error) bool {
 	var stepErr *engine.StepError
-	return errors.As(err, &stepErr) && retryableStep(stepErr.Step)
+	if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) {
+		return false
+	}
+	// The same sentinel exclusion cmd/hoist/drive.go applies, and for the same reason: a
+	// missing Application or Deployment is a structural condition no amount of waiting
+	// resolves. Observe reports it as Blocked, but Act has no way to produce a BlockedError of
+	// its own, so an Act that races a deletion after a successful Observe surfaces the sentinel
+	// as an ordinary error — which, once the cluster steps became retryable, this screen would
+	// have retried until the deadline instead of stopping (Copilot, PR #72).
+	return !isNotFoundErr(stepErr.Err)
+}
+
+// isNotFoundErr mirrors cmd/hoist/drive.go's own, duplicated for the same reason retryableStep
+// is: cmd/hoist is package main and cannot be imported from here.
+func isNotFoundErr(err error) bool {
+	return errors.Is(err, argo.ErrNotFound) || errors.Is(err, rollout.ErrNotFound)
 }
 
 // retryableStep mirrors cmd/hoist/drive.go's own retryableStep exactly. It is duplicated

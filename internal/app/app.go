@@ -226,6 +226,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.resolveFn)}
 		m = m.push(ps)
 		return m, ps.Init()
+	case deploy.BackMsg:
+		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
+		// here the message was forwarded to the top screen — the deploy screen itself — which
+		// fed it to its own viewport, so Esc did nothing and the screen could not be left
+		// (Copilot, PR #72). The same build-generation invalidation applies: a deploy confirm
+		// can have a startPromotion request outstanding just as a plan confirm can.
+		m.buildGen++
+		if m.buildCancel != nil {
+			m.buildCancel()
+			m.buildCancel = nil
+		}
+		return m.pop(), nil
 	case plan.BackMsg:
 		// Abandon any startPromotion request this plan screen has outstanding — see
 		// Model.buildGen's own doc comment. Bumping unconditionally (whether or not a request

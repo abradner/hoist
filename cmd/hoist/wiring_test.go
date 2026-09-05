@@ -433,3 +433,58 @@ func TestBrowserCommandPerOS(t *testing.T) {
 		}
 	}
 }
+
+// TestTUIStartPromotionRecordsDirectBeforeTheFirstSave is Copilot's PR #72 finding: the TUI
+// chose direct mode only for the step list, so the state it saved and handed to the flight
+// screen never carried Direct at all. Two things read the mode off the state rather than off
+// the step list — flight.OrderFor, which would draw the PR path's ten steps for a run that
+// only has six, and `hoist resume`, which for a state saved before DirectPushedStep ever ran
+// would drive the promotion as a PR: opening a branch and a PR for a change the operator
+// explicitly asked to push straight to base.
+func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+
+	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true})
+	if err != nil {
+		t.Fatalf("startPromotion: %v", err)
+	}
+	if !state.Direct {
+		t.Error("the returned state must carry Direct: the flight screen picks its step order from it")
+	}
+	// And on disk, which is what resume reads — the state is saved before this function ever
+	// returns, so a quit here must not leave a file resume drives as a PR promotion.
+	saved, err := engine.LoadState(mustStatePath(t, state.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.Direct {
+		t.Error("the SAVED state must carry Direct: resume reads the mode from the file, not from this process")
+	}
+
+	// The asymmetry: a PR-mode start must not set it, or the assertion above passes on a
+	// field that is simply always true.
+	prState, _, err := start(context.Background(), plan, app.StartOpts{})
+	if err == nil && prState.Direct {
+		t.Error("a PR-mode start must not record Direct")
+	}
+}
+
+func mustStatePath(t *testing.T, id string) string {
+	t.Helper()
+	p, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

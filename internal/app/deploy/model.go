@@ -130,6 +130,15 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "esc":
 		return m, func() tea.Msg { return BackMsg{} }
 	case "enter":
+		if m.diffErr != nil {
+			// The screen's entire promise is that the bytes are visible before anything is
+			// written. When RenderDiff failed there are no bytes on screen, so enter would
+			// confirm a write on the operator's behalf against something they were never
+			// shown — the one thing this screen exists to prevent (Copilot, PR #72). Esc back
+			// and fix the cause; there is no way to force past it, deliberately.
+			m.notice = "cannot confirm a deploy whose diff could not be rendered — esc back and retry"
+			return m, nil
+		}
 		return m, m.start(m.mode, false)
 	case "m":
 		if m.production {
