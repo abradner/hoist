@@ -1381,3 +1381,35 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 		})
 	}
 }
+
+// TestEscOnTheDeployScreenPopsIt: the deploy screen emits deploy.BackMsg on Esc, but the root
+// had no case for it, so the message was forwarded to the top screen — the deploy screen — which
+// fed it to its own viewport. Esc did nothing and the screen could not be left (Copilot, PR #72).
+func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d produced no command")
+	}
+	m, _ = m.Update(cmd())
+	m, _ = m.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/web",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("fixture precondition: stack has %d screens, want 2", n)
+	}
+
+	// Esc goes to the screen, which asks the root to pop it; the root must act on that ask.
+	m2, escCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if escCmd == nil {
+		t.Fatal("esc on the deploy screen produced no command")
+	}
+	m3, _ := m2.Update(escCmd())
+	if n := len(m3.(Model).stack); n != 1 {
+		t.Fatalf("esc left %d screens on the stack, want 1 (back to the matrix)", n)
+	}
+}

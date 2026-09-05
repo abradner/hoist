@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -121,5 +122,28 @@ func TestEscGoesBack(t *testing.T) {
 	}
 	if _, ok := cmd().(BackMsg); !ok {
 		t.Errorf("esc produced %T, want BackMsg", cmd())
+	}
+}
+
+// TestEnterRefusesWhenTheDiffCouldNotBeRendered is the screen's own promise, enforced: the
+// deploy confirm exists so the bytes are visible before anything is written, and enter used to
+// emit StartMsg regardless of whether RenderDiff had failed — confirming a write against
+// something the operator was never shown (Copilot, PR #72).
+func TestEnterRefusesWhenTheDiffCouldNotBeRendered(t *testing.T) {
+	m := fixture(t, config.EnvsConfig{})
+	m.diffErr = errors.New("reading cluster/apps/app-production/web/deployment.yaml: permission denied")
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("enter produced a command despite an unrendered diff: %v", cmd())
+	}
+	v := m2.View()
+	if !strings.Contains(v, "cannot confirm") {
+		t.Errorf("the refusal should say why:\n%s", v)
+	}
+	// And the same key still works once there is a diff to look at, so this is a gate, not a
+	// screen that never confirms.
+	if _, c := fixture(t, config.EnvsConfig{}).Update(tea.KeyPressMsg{Code: tea.KeyEnter}); c == nil {
+		t.Error("enter on a rendered diff must still confirm")
 	}
 }

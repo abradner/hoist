@@ -16,6 +16,7 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -78,7 +79,39 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			return engine.PromotionState{}, nil, err
 		}
 		if !anyRealEdit(p.Edits) {
+			if p.SourceEnv == "" {
+				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)
+			}
 			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
+		}
+
+		// checkCloneCurrentForBase above only validates the files THIS plan already knows
+		// about, which is enough for the PR path: a PR is reviewed against origin's own tree
+		// before it merges. A direct push has no such second look, so if origin/Base has since
+		// gained an occurrence of this image repo in a file the local checkout cannot see, the
+		// push would silently update a subset of the family and leave the rest behind. The CLI
+		// runs this for --direct on both promote and deploy; the TUI's D gesture is the same
+		// write with the same blind spot, so it runs the same check (Copilot, PR #72).
+		if opts.Direct {
+			buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
+				if p.IsDeploy() {
+					return gitops.BuildDeployPlan(fresh, p.TargetEnv, deployRefOf(p), eff.promotable)
+				}
+				// The digest overrides are recovered from the confirmed plan's own edits
+				// rather than re-resolved: the point of this check is whether origin's tree
+				// has an occurrence THIS plan cannot see, so the two plans must differ only
+				// in the tree they were built from — re-running resolution here could also
+				// move the refs and turn a resolution change into a phantom missing
+				// occurrence. Edit.New is the resolved ref for its repo by construction.
+				digests := make(map[string]image.Ref, len(p.Edits))
+				for _, e := range p.Edits {
+					digests[e.New.Repo] = e.New
+				}
+				return gitops.BuildPlan(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests)
+			}
+			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, tuiBase, eff.appsRoot, p, buildFresh); err != nil {
+				return engine.PromotionState{}, nil, err
+			}
 		}
 
 		// Recomputed per confirm rather than once in runTUI: it is derived from p.TargetEnv,
@@ -114,6 +147,14 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// flight screen, closes that gap the same way runPromote's defer does, just earlier —
 		// the claim's job (letting a future findInFlight scan see this promotion) is already
 		// done the moment this state file exists on disk.
+		// Before the first save, not after: flight.OrderFor and `hoist resume` both read the
+		// mode off the state, so a state saved without it renders the PR path's ten steps for
+		// a direct run, and a quit before DirectPushedStep ever ran would leave a state file
+		// resume drives as a PR promotion — opening a branch and a PR for a change the
+		// operator asked to push straight to base. The CLI's own callers set it here too;
+		// DirectPushedStep still sets it independently, because the step that does the
+		// landing is what makes it true (Copilot, PR #72).
+		s.Direct = opts.Direct
 		if err := engine.SaveState(statePath, s); err != nil {
 			release()
 			return engine.PromotionState{}, nil, fmt.Errorf("writing initial promotion state: %w", err)
@@ -262,4 +303,17 @@ func runLauncher(timeout time.Duration, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Run()
+}
+
+// deployRefOf recovers the single image reference a deploy plan writes. Exact, not a guess:
+// gitops.BuildDeployPlan sets Edit.New to the one caller-named ref on every edit it produces,
+// and refuses to produce a plan with no edits at all — so the first edit's New is that ref
+// whenever p.IsDeploy() holds. Recovered from the plan rather than threaded through
+// app.StartOpts because the plan is what actually crosses this boundary; a second copy of the
+// ref could disagree with the edits it is supposed to describe.
+func deployRefOf(p gitops.Plan) image.Ref {
+	if len(p.Edits) == 0 {
+		return image.Ref{}
+	}
+	return p.Edits[0].New
 }

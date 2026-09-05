@@ -3,6 +3,7 @@ package flight
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // TestStepOrderMatchesAllSteps guards StepOrder (a literal, see rows.go's doc comment)
@@ -947,5 +950,36 @@ func TestPollIntervalUsesTheConfiguredArgoAndRolloutCadences(t *testing.T) {
 		if got := pollInterval(poll, step); got != want {
 			t.Errorf("pollInterval(%s) = %s, want %s — an unconfigured step falls back to 2s and hammers the API", step, got, want)
 		}
+	}
+}
+
+// TestNotFoundOnARetryableStepIsTerminal is the sentinel exclusion cmd/hoist/drive.go has
+// always applied and this screen did not once the three cluster steps became retryable: a
+// missing Application or Deployment is structural, and no amount of waiting brings it back.
+// Observe reports it as Blocked, but Act cannot produce a BlockedError of its own, so an Act
+// that races a deletion after a successful Observe surfaces the sentinel as a plain error —
+// which would then have been retried until poll.Deadline (Copilot, PR #72).
+//
+// Asserted alongside the same step carrying an ordinary transient error, so this cannot pass
+// by the cluster steps having quietly stopped being retryable at all.
+func TestNotFoundOnARetryableStepIsTerminal(t *testing.T) {
+	transient := &engine.StepError{Step: engine.StepArgoSynced, Op: "observe", Err: errors.New("GET applications: connection reset")}
+	if !retryableErr(transient) {
+		t.Fatal("fixture precondition: a transient failure on a cluster step is retryable")
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"argo", argo.ErrNotFound},
+		{"rollout", rollout.ErrNotFound},
+		{"wrapped", fmt.Errorf("reading Argo Application app-production: %w", argo.ErrNotFound)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &engine.StepError{Step: engine.StepArgoRefreshed, Op: "act", Err: tc.err}
+			if retryableErr(e) {
+				t.Errorf("a %s sentinel on a retryable step must stop the flight, not be polled until the deadline", tc.name)
+			}
+		})
 	}
 }
