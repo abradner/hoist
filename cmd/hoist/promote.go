@@ -15,14 +15,12 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/forge/github"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // newGit and newForge are variables so tests substitute fakes/local fixtures: no test in this
@@ -254,7 +252,7 @@ func discoverAtFreshBase(ctx context.Context, g git.Git, cloneDir, base string) 
 // registry): this is only about which occurrences BuildPlan finds, never a second, independent
 // digest resolution against the fresh snapshot — the source env's own local content stays
 // authoritative for what digest is "current" (discoverAtFreshBase's own doc comment).
-func checkNoMissingOccurrenceAtFreshBase(ctx context.Context, g git.Git, cloneDir, base, appsRoot, src, dst string, prefixes []string, planDigests map[string]image.Ref, plan gitops.Plan) error {
+func checkNoMissingOccurrenceAtFreshBase(ctx context.Context, g git.Git, cloneDir, base, appsRoot string, plan gitops.Plan, buildFresh func(*gitops.Repo) (gitops.Plan, error)) error {
 	snap, cleanup, err := discoverAtFreshBase(ctx, g, cloneDir, base)
 	if err != nil {
 		return err
@@ -265,7 +263,12 @@ func checkNoMissingOccurrenceAtFreshBase(ctx context.Context, g git.Git, cloneDi
 	if err != nil {
 		return fmt.Errorf("discovering origin/%s's own current tree: %w", base, err)
 	}
-	freshPlan, err := gitops.BuildPlan(freshRepo, src, dst, prefixes, planDigests)
+	// buildFresh is how this plan would be built against origin's tree rather than the local
+	// one — BuildPlan for a promotion, BuildDeployPlan for a deploy. Passed in rather than
+	// branched on here so the occurrence comparison below stays a single implementation: this
+	// check is direct mode's only defence against writing a file the local clone cannot see,
+	// and a second copy of it is how one command silently loses that defence.
+	freshPlan, err := buildFresh(freshRepo)
 	if err != nil {
 		return fmt.Errorf("planning against origin/%s's own current tree: %w", base, err)
 	}
@@ -393,7 +396,10 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// branch — AGENTS.md §4.6 — and nothing else refreshes it either), so only direct mode
 	// needs this cross-check.
 	if *direct {
-		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, *from, *to, prefixes, planDigests, plan); err != nil {
+		buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
+			return gitops.BuildPlan(fresh, *from, *to, prefixes, planDigests)
+		}
+		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, plan, buildFresh); err != nil {
 			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 			return exitFailure
 		}
@@ -409,36 +415,24 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
-	// M5: the Argo Applications this promotion's plan touches, computed once from the same
-	// discovered repo BuildPlan already read (engine.ArgoAppNames' own doc comment), plus the
-	// Argo/Deployment adaptors themselves. AllSteps always wires all seven-plus-three steps
-	// (AGENTS.md invariant 4 of M1-M4: Steps run unconditionally, Observe decides what's
-	// actually left to do), so these are built here alongside the forge client rather than
-	// lazily once a promotion actually reaches Argo — the same posture newForge already takes.
-	//
-	// Only for the PR path. engine.DirectSteps (M6) stops at the push and has no Argo or
-	// rollout step at all, so requiring a reachable cluster to run `--direct` would fail a
-	// promotion on a dependency it never uses — see issue #66 for the open question of whether
-	// direct mode should converge through Argo too (it cannot today: every M5 step gates on
-	// s.MergeSHA, which a direct push never produces).
-	var (
-		argoApps []string
-		a        argo.Argo
-		ro       rollout.Rollout
-	)
-	if !*direct {
-		if argoApps, err = engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits); err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-			return exitFailure
-		}
-		if a, _, err = newArgo(opts.kubeContext); err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
-			return exitFailure
-		}
-		if ro, _, err = newRollout(opts.kubeContext); err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
-			return exitFailure
-		}
+	// Both modes reach the Argo/rollout steps now that DirectSteps converges too (issue #66),
+	// so these are unconditional. An earlier revision built them only for the PR path, because
+	// direct mode stopped at the push and would otherwise have demanded a cluster for work it
+	// never did; converging is the real fix, and it retires that gate.
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
+	a, _, err := newArgo(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	ro, _, err := newRollout(opts.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -492,7 +486,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		// comments explain why this must be exactly that list, verbatim, never narrowed.
 		// Confirmed is true only because both --direct and --confirm-direct were given,
 		// checked above (the CLI's keypress-then-confirm equivalent).
-		steps = engine.DirectSteps(newGit, eff.cfg.Envs.Production, true, onWaiting)
+		steps = engine.AllDirectSteps(newGit, a, ro, eff.cfg.Envs.Production, true, onWaiting)
 	} else {
 		steps = engine.AllSteps(newGit, f, a, ro, onWaiting)
 	}
@@ -654,6 +648,24 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 		if !overrideCINone {
 			s.CINoneOverride = prev.CINoneOverride
 		}
+		// The rendered artifacts are carried forward for the same reason, and one more. They
+		// describe a commit and a PR that already exist: re-rendering them from this
+		// invocation's plan would leave the state file narrating something the forge does not
+		// say. That matters now that two differently-shaped commands can reach the same id —
+		// DeriveID hashes (repo, target env, resulting refs) and deliberately treats a deploy
+		// and a promotion landing identical refs as the same promotion (identity.go), so a
+		// `promote` re-run against a `deploy`'s id would otherwise rewrite "deploy" wording to
+		// "promote" while the actual commit and PR keep the original (self-review, PR #70).
+		// Whoever described this promotion first is the one the world agrees with.
+		if prev.CommitMessage != "" {
+			s.CommitMessage = prev.CommitMessage
+		}
+		if prev.PRTitle != "" {
+			s.PRTitle = prev.PRTitle
+		}
+		if prev.PRBody != "" {
+			s.PRBody = prev.PRBody
+		}
 	}
 
 	ok = true
@@ -684,7 +696,16 @@ func statusDetail(o engine.Observation) string {
 func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv string, s *engine.PromotionState, err error) int {
 	switch {
 	case err == nil:
-		fmt.Fprintf(stdout, "%s: %s -> %s\n", cmdName, sourceEnv, targetEnv)
+		// A deploy has no source env, so the promotion's "A -> B" would render as
+		// ": " with a hole in it — the same empty-SourceEnv defect the templates and
+		// printPlan were reworked for, on the most visible line hoist prints. The arrow goes
+		// with it: "-> env" with nothing on its left is the same hole one character narrower,
+		// and a deploy is not a movement between two places anyway. It names the one env.
+		if sourceEnv == "" {
+			fmt.Fprintf(stdout, "%s: %s\n", cmdName, targetEnv)
+		} else {
+			fmt.Fprintf(stdout, "%s: %s -> %s\n", cmdName, sourceEnv, targetEnv)
+		}
 		fmt.Fprintf(stdout, "  branch: %s\n", s.Branch)
 		fmt.Fprintf(stdout, "  commit: %s\n", s.CommitSHA)
 		switch {

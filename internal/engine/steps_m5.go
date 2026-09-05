@@ -132,9 +132,10 @@ func (s *PromotionState) argoApplications() []argo.Application {
 // wall-clock time, with no new dependency and no change to MergedStep itself. ok is false only
 // if Drive has genuinely never reached Merged yet, which ArgoRefreshedStep's own MergeSHA guard
 // already rules out before this is ever called.
-func mergedAt(s *PromotionState) (t time.Time, ok bool) {
+func landedAt(s *PromotionState) (t time.Time, ok bool) {
+	want := s.landedStep()
 	for _, h := range s.History {
-		if h.Step != StepMerged {
+		if h.Step != want {
 			continue
 		}
 		if !ok || h.At.Before(t) {
@@ -154,17 +155,18 @@ func (ArgoRefreshedStep) Name() StepName { return StepArgoRefreshed }
 
 // Observe implements Step.
 func (a ArgoRefreshedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
-	if s.MergeSHA == "" {
-		// Nothing has merged yet — an earlier step's own Blocked/Waiting already stopped
-		// Drive before this is reached in practice; this guard is what makes that an
-		// invariant rather than an assumption.
+	if s.LandedSHA() == "" {
+		// Nothing has landed on Base yet — a merge for a PR promotion, a direct push for a
+		// direct one (LandedSHA's own doc comment). An earlier step's Blocked/Waiting already
+		// stopped Drive before this is reached in practice; the guard makes that an invariant
+		// rather than an assumption.
 		return Observation{Satisfied: false}, nil
 	}
 	apps := s.argoApplications()
 	if len(apps) == 0 {
 		return Observation{Satisfied: true, Detail: "no Argo Application in this promotion's plan"}, nil
 	}
-	anchor, ok := mergedAt(s)
+	anchor, ok := landedAt(s)
 	if !ok {
 		// s.MergeSHA is set (checked above), so mergedAt's own doc comment's invariant says
 		// this "should" never happen — but trusting that blindly is exactly the zero-means-
@@ -177,8 +179,8 @@ func (a ArgoRefreshedStep) Observe(ctx context.Context, s *PromotionState) (Obse
 		// (Satisfied: false would hang forever; Satisfied: true would be worse) or waiting
 		// indefinitely for History to grow an entry nothing here will ever add retroactively.
 		return Observation{Blocked: fmt.Sprintf(
-			"this promotion has a merge commit (%s) but no recorded Merged step in its own history — cannot anchor the Argo refresh check; investigate the state file manually",
-			s.MergeSHA,
+			"this promotion landed at %s but has no recorded %s step in its own history — cannot anchor the Argo refresh check; investigate the state file manually",
+			s.LandedSHA(), s.landedStep(),
 		)}, nil
 	}
 	var pending []string
@@ -227,7 +229,7 @@ func (ArgoSyncedStep) Name() StepName { return StepArgoSynced }
 // regardless of what its own revision currently reads, since a promotion has no business
 // declaring itself synced-and-rolled-out while the app it just changed is unhealthy.
 func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
-	if s.MergeSHA == "" {
+	if s.LandedSHA() == "" {
 		return Observation{Satisfied: false}, nil
 	}
 	apps := s.argoApplications()
@@ -250,8 +252,8 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
 		switch {
-		case st.SyncRevision != s.MergeSHA:
-			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s", app.Name, orNone(st.SyncRevision), s.MergeSHA))
+		case st.SyncRevision != s.LandedSHA():
+			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s", app.Name, orNone(st.SyncRevision), s.LandedSHA()))
 		case st.SyncStatus != argo.SyncStatusSynced || st.HealthStatus != argo.HealthStatusHealthy:
 			notSynced = append(notSynced, fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus)))
 		}
@@ -260,7 +262,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		sort.Strings(notSynced)
 		return Observation{Waiting: true, Detail: strings.Join(notSynced, "; ")}, nil
 	}
-	return Observation{Satisfied: true, Detail: "synced and healthy at " + s.MergeSHA}, nil
+	return Observation{Satisfied: true, Detail: "synced and healthy at " + s.LandedSHA()}, nil
 }
 
 // Act implements Step: nothing to do. Syncing is Argo's own auto-sync/self-heal acting on the
@@ -369,7 +371,7 @@ func (RolledOutStep) Name() StepName { return StepRolledOut }
 
 // Observe implements Step.
 func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
-	if s.MergeSHA == "" {
+	if s.LandedSHA() == "" {
 		return Observation{Satisfied: false}, nil
 	}
 	deployments, jobLikes := groupEditsByWorkload(s.Edits)
@@ -448,9 +450,49 @@ func CoreSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
 	return append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
 }
 
+// ObserveSteps is the step list to observe a PRIOR promotion state by, chosen from the state
+// itself rather than from what the caller happens to be doing now. Three callers ask the same
+// question of a state file they did not create — findInFlight ("is another promotion still
+// running for this env?"), `hoist promotions` and `resume --env`'s candidate scan — and all
+// three used a fixed list, which for a direct state is a list it can never satisfy: a direct
+// promotion pushes to the base branch, so PushedStep's branch on origin, PROpenedStep's PR and
+// MergedStep's merge are all permanently unsatisfied. The consequence was not cosmetic: one
+// completed direct run made findInFlight refuse every later promotion into that env forever,
+// and left the finished run listed as in flight.
+//
+// DirectCommitGateStep is deliberately NOT among the direct list here. The gate decides whether
+// a direct promotion may START; re-running it while observing one that already landed would let
+// a later config edit (an env newly listed under envs.production) turn a finished run into a
+// permanently blocked one — a state file re-interpreted by today's config rather than observed.
+// Refusing a new direct promotion is the gate's job, and it still runs first in DirectSteps
+// where that decision is actually made (AGENTS.md §4.5, R-007).
+//
+// through is where to stop: pass nil for the git-only core (findInFlight's own "the branch/PR
+// collision risk is retired" boundary — see its doc comment), or a non-nil argo/rollout pair
+// for the full list. The PR path's boundary is Merged; the direct path's is the push.
+func ObserveSteps(s *PromotionState, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
+	core := CoreSteps(g, f, onWaiting)
+	if s != nil && s.Direct {
+		core = []Step{BranchedStep{Git: g}, CommittedStep{Git: g, OnWaiting: onWaiting}, DirectPushedStep{Git: g}}
+	}
+	if a == nil && ro == nil {
+		return core
+	}
+	return append(core, ConvergeSteps(a, ro)...)
+}
+
 // AllSteps returns every step a promotion drives through, in order: CoreSteps' seven (branch,
 // commit, push, PR, CIGreen, Approved, Merged) then ArgoRefreshed, ArgoSynced and RolledOut
 // (M5). `hoist promote` and `hoist resume` always drive AllSteps to completion.
 func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
-	return append(CoreSteps(g, f, onWaiting), ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a}, RolledOutStep{Rollout: ro})
+	return append(CoreSteps(g, f, onWaiting), ConvergeSteps(a, ro)...)
+}
+
+// ConvergeSteps is the post-landing tail both modes share: ask Argo to refresh, wait for it to
+// agree with what landed, then watch the Deployments roll. Extracted so DirectSteps drives the
+// identical three rather than a copy — the design has always said direct mode converges through
+// Argo too ("Pushed -> ArgoRefreshed -> ..."), and it only ever stopped at the push because
+// every step here used to gate on MergeSHA, which a direct push never produces (issue #66).
+func ConvergeSteps(a argo.Argo, ro rollout.Rollout) []Step {
+	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a}, RolledOutStep{Rollout: ro}}
 }
