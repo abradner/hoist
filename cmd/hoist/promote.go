@@ -698,9 +698,11 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 	case err == nil:
 		// A deploy has no source env, so the promotion's "A -> B" would render as
 		// ": " with a hole in it — the same empty-SourceEnv defect the templates and
-		// printPlan were reworked for, on the most visible line hoist prints.
+		// printPlan were reworked for, on the most visible line hoist prints. The arrow goes
+		// with it: "-> env" with nothing on its left is the same hole one character narrower,
+		// and a deploy is not a movement between two places anyway. It names the one env.
 		if sourceEnv == "" {
-			fmt.Fprintf(stdout, "%s: -> %s\n", cmdName, targetEnv)
+			fmt.Fprintf(stdout, "%s: %s\n", cmdName, targetEnv)
 		} else {
 			fmt.Fprintf(stdout, "%s: %s -> %s\n", cmdName, sourceEnv, targetEnv)
 		}

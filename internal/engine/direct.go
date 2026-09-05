@@ -179,11 +179,16 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 			return Observation{Satisfied: false}, nil
 		}
 	}
-	// PushedSHA names THIS promotion's own commit, not whatever else the tip now is — mirroring
-	// the exact-match branch above and PushedStep's own field semantics: "PushedSHA" confirms
-	// this promotion's own commit is effectively present, not "here is the tip's current SHA"
-	// (which s.Base's own remote ref already tells a caller, if that's what they want).
-	s.PushedSHA = s.CommitSHA
+	// PushedSHA is the base-branch revision that CARRIES this promotion's content, which here
+	// is remoteSHA, not s.CommitSHA. Recording the original commit instead reads better as a
+	// field name and is unobservable in the world: Argo tracks the branch and reports the tip,
+	// so ArgoSyncedStep — which compares status.sync.revision against LandedSHA() exactly —
+	// would wait out its whole deadline for a SHA the branch has already moved past and will
+	// never report again. Re-derived on every observation rather than pinned once, so a base
+	// that keeps moving keeps converging (§4.1: re-observe, never remember). The exact-match
+	// branch above records the same thing; the two only look different because there the tip
+	// and this promotion's commit happen to be equal.
+	s.PushedSHA = remoteSHA
 	s.Direct = true
 	return Observation{Satisfied: true, Detail: fmt.Sprintf(
 		"origin/%s has moved to %s (not this promotion's own commit %s), but every planned path still matches the planned content there — already effectively promoted, not reverted",

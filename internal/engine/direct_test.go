@@ -193,8 +193,25 @@ func TestDirectModeReObserveToleratesBaseAdvancingFurther(t *testing.T) {
 	if resumed.CommitSHA != first.CommitSHA {
 		t.Fatalf("resumed produced a different commit: %s vs %s", resumed.CommitSHA, first.CommitSHA)
 	}
-	if resumed.PushedSHA != first.CommitSHA {
-		t.Fatalf("PushedSHA = %q, want this promotion's own commit %q even though Base has since moved past it", resumed.PushedSHA, first.CommitSHA)
+	// PushedSHA is the base revision that CARRIES this promotion's content, not the commit
+	// object it originally created. This assertion used to demand the latter, which reads
+	// better as a field name and is unobservable in the world: Argo tracks the branch and
+	// reports the tip, and ArgoSyncedStep compares status.sync.revision against LandedSHA()
+	// exactly — so pinning the superseded commit made a direct promotion whose base had moved
+	// wait out its entire deadline for a SHA the branch would never report again.
+	tip, ok, err := g.LsRemoteBranch(ctx(), fx.cloneDir, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+	if tip == first.CommitSHA {
+		t.Fatal("fixture precondition: origin/main should have moved past this promotion's own commit")
+	}
+	if resumed.PushedSHA != tip {
+		t.Fatalf("PushedSHA = %q, want the base tip carrying this promotion's content %q (its own superseded commit was %q)",
+			resumed.PushedSHA, tip, first.CommitSHA)
+	}
+	if resumed.LandedSHA() != tip {
+		t.Fatalf("LandedSHA = %q, want %q: this is the revision ArgoSyncedStep waits for", resumed.LandedSHA(), tip)
 	}
 }
 
