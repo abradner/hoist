@@ -56,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable; see AGENTS.md §4.1)\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable; see AGENTS.md §4.1)\n  deploy         write one named image into one env and drive the same pipeline (--env, --image repo:tag@sha256:...); the image-bump half of promote\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", version)
 		fs.PrintDefaults()
 	}
@@ -94,6 +94,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPlan(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "promote":
 		return runPromote(fs.Args()[1:], cfg, sel, stdout, stderr)
+	case "deploy":
+		return runDeploy(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "promotions":
 		return runPromotions(fs.Args()[1:], cfg, stdout, stderr)
 	case "resume":
@@ -406,7 +408,11 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 		byFile[e.File] = append(byFile[e.File], e)
 	}
 	sort.Strings(files)
-	fmt.Fprintf(w, "hoist plan: %s -> %s (%d edits in %d files)\n\n", plan.SourceEnv, plan.TargetEnv, changes, len(files))
+	if plan.IsDeploy() {
+		fmt.Fprintf(w, "hoist deploy: -> %s (%d edits in %d files)\n\n", plan.TargetEnv, changes, len(files))
+	} else {
+		fmt.Fprintf(w, "hoist plan: %s -> %s (%d edits in %d files)\n\n", plan.SourceEnv, plan.TargetEnv, changes, len(files))
+	}
 	for _, f := range files {
 		p, err := gitops.ResolvePath(r.Root, f)
 		if err != nil {
@@ -435,7 +441,7 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	}
 	fmt.Fprintf(w, "Untouched (%d):\n", len(plan.Untouched))
 	for _, ref := range plan.Untouched {
-		fmt.Fprintf(w, "  %s  (%s)\n", ref, untouchedReason(ref, plan.SourceEnv, prefixes))
+		fmt.Fprintf(w, "  %s  (%s)\n", ref, untouchedReason(ref, plan, prefixes))
 	}
 	fmt.Fprintln(w)
 	if rep != nil {
@@ -457,11 +463,20 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	return nil
 }
 
-func untouchedReason(ref image.Ref, src string, prefixes []string) string {
-	if gitops.IsPromotable(ref.Repo, prefixes) {
-		return "not running in " + src
+// untouchedReason explains, per reference, why an occurrence in the target env was left alone.
+// The two plan variants leave things alone for different reasons, and saying the wrong one is
+// worse than saying nothing: a promotion skips a repo because the source env does not run it,
+// while a deploy skips every repo that simply is not the one image it was asked to write — those
+// repos are running perfectly well in the env, so a promotion's wording would flatly misreport
+// them (and, with a deploy's empty SourceEnv, would read "not running in ").
+func untouchedReason(ref image.Ref, plan *gitops.Plan, prefixes []string) string {
+	if !gitops.IsPromotable(ref.Repo, prefixes) {
+		return "third-party: outside " + strings.Join(prefixes, ",")
 	}
-	return "third-party: outside " + strings.Join(prefixes, ",")
+	if plan.IsDeploy() {
+		return "not this deploy's image"
+	}
+	return "not running in " + plan.SourceEnv
 }
 
 func splitList(s string) []string {

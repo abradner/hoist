@@ -135,3 +135,56 @@ func TestRenderPRBodyWithInternalLookingFixtureIsCaught(t *testing.T) {
 		t.Fatal("expected the deliberately-planted 10.x address to trip a public-safety pattern")
 	}
 }
+
+// deployFixturePlan mirrors fixturePlan but for the deploy variant: no source env, one repo
+// planned, everything else in the env untouched.
+func deployFixturePlan() gitops.Plan {
+	p := fixturePlan()
+	p.Variant = gitops.VariantDeploy
+	p.SourceEnv = ""
+	return p
+}
+
+// A deploy's artifacts must describe a deploy. The failure this guards is not cosmetic: with
+// the promotion wording and an empty SourceEnv, the PR title reads "promote 1 image(s)  ->
+// app-production" and the body opens "hoist promotes “ -> `app-production`" — an artifact
+// that both misdescribes the operation and looks corrupted.
+func TestDeployArtifactsDescribeADeployNotAPromotion(t *testing.T) {
+	plan := deployFixturePlan()
+	title := PRTitle(plan)
+	body := RenderPRBody("dh4arammqe", plan)
+	commit := RenderCommitMessage("dh4arammqe", plan)
+
+	for label, text := range map[string]string{"title": title, "body": body, "commit": commit} {
+		if strings.Contains(text, "promote") || strings.Contains(text, "Promotion") {
+			t.Errorf("%s uses promotion wording for a deploy: %q", label, text)
+		}
+		// The tell-tale of a source env rendered into a deploy: an arrow with nothing to its
+		// left, or a doubled space where SourceEnv would have gone.
+		if strings.Contains(text, "`` ->") || strings.Contains(text, "  ->") {
+			t.Errorf("%s renders an empty source env: %q", label, text)
+		}
+	}
+	if !strings.Contains(title, "deploy") || !strings.Contains(title, "app-production") {
+		t.Errorf("title should name the operation and the env, got %q", title)
+	}
+	if !strings.Contains(body, "Deploy id:") {
+		t.Errorf("body should label the id as a deploy's:\n%s", body)
+	}
+	if !strings.Contains(body, "not part of this deploy") {
+		t.Errorf("body's untouched section should read as a deploy's:\n%s", body)
+	}
+}
+
+// Invariant 5 and 6 hold for the deploy variant too — the marker is still the first line, and
+// nothing public-safety would flag reaches the rendered body.
+func TestDeployPRBodyKeepsMarkerFirstAndIsPublicSafe(t *testing.T) {
+	body := RenderPRBody("dh4arammqe", deployFixturePlan())
+	if first := strings.SplitN(body, "\n", 2)[0]; first != Marker("dh4arammqe") {
+		t.Errorf("first line = %q, want the marker", first)
+	}
+	assertPublicSafe(t, "deploy PR body", body)
+	if !strings.Contains(RenderCommitMessage("dh4arammqe", deployFixturePlan()), CommitTrailer("dh4arammqe")) {
+		t.Error("deploy commit message must still carry the hoist-id trailer")
+	}
+}
