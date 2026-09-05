@@ -14,7 +14,9 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // PollDurations is the plain-value slice of internal/config.PollConfig this screen actually
@@ -23,7 +25,7 @@ import (
 // allowed to know both sides) translates for it. Zero values are valid — New/pollInterval
 // already fall back to a fixed default for anything left unset.
 type PollDurations struct {
-	CI, Approval, Deadline time.Duration
+	CI, Approval, Argo, Rollout, Deadline time.Duration
 }
 
 // DriveFunc advances a promotion by one poll iteration: it runs engine.Drive once (Drive
@@ -160,7 +162,7 @@ type Model struct {
 func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Model {
 	m := Model{
 		state:   state,
-		order:   StepOrder,
+		order:   OrderFor(state),
 		poll:    poll,
 		driveFn: driveFn,
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
@@ -384,7 +386,22 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 // engine.Drive's own ctx.Err() check — is terminal from this screen's point of view too.
 func retryableErr(err error) bool {
 	var stepErr *engine.StepError
-	return errors.As(err, &stepErr) && retryableStep(stepErr.Step)
+	if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) {
+		return false
+	}
+	// The same sentinel exclusion cmd/hoist/drive.go applies, and for the same reason: a
+	// missing Application or Deployment is a structural condition no amount of waiting
+	// resolves. Observe reports it as Blocked, but Act has no way to produce a BlockedError of
+	// its own, so an Act that races a deletion after a successful Observe surfaces the sentinel
+	// as an ordinary error — which, once the cluster steps became retryable, this screen would
+	// have retried until the deadline instead of stopping (Copilot, PR #72).
+	return !isNotFoundErr(stepErr.Err)
+}
+
+// isNotFoundErr mirrors cmd/hoist/drive.go's own, duplicated for the same reason retryableStep
+// is: cmd/hoist is package main and cannot be imported from here.
+func isNotFoundErr(err error) bool {
+	return errors.Is(err, argo.ErrNotFound) || errors.Is(err, rollout.ErrNotFound)
 }
 
 // retryableStep mirrors cmd/hoist/drive.go's own retryableStep exactly. It is duplicated
@@ -396,7 +413,23 @@ func retryableErr(err error) bool {
 // double-check this copy stays in step with it, exactly as pollInterval's own doc comment
 // already asks for that function.
 func retryableStep(step engine.StepName) bool {
-	return step == engine.StepCIGreen || step == engine.StepApproved
+	switch step {
+	case engine.StepCIGreen, engine.StepApproved:
+		// The two forge-polling steps: Checks and Comments can transiently 404 or
+		// scope-error without the underlying condition being answerable yet.
+		return true
+	case engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut:
+		// The three cluster-polling steps, for exactly the same reason: a Kubernetes Get can
+		// fail transiently (an API server restart, a dropped connection) while the sync or
+		// rollout it is asking about is still perfectly well under way. Before the flight
+		// screen drove these, such an error could only reach the CLI's own loop, which
+		// retries; reaching this classifier instead used to stop the flight dead on a hiccup
+		// (issue #64). A genuinely missing Application is a Blocked observation, not an
+		// error, so it is unaffected by this.
+		return true
+	default:
+		return false
+	}
 }
 
 // scheduleTick waits pollInterval's answer for whichever step is currently active before
@@ -577,6 +610,16 @@ func pollInterval(poll PollDurations, phase engine.StepName) time.Duration {
 			return fallback
 		}
 		return poll.Approval
+	case engine.StepArgoRefreshed, engine.StepArgoSynced:
+		if poll.Argo <= 0 {
+			return fallback
+		}
+		return poll.Argo
+	case engine.StepRolledOut:
+		if poll.Rollout <= 0 {
+			return fallback
+		}
+		return poll.Rollout
 	default:
 		return fallback
 	}

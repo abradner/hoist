@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
@@ -15,6 +16,7 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -33,7 +35,20 @@ import (
 // popped up plan.StartMsg, rather than pushing the flight screen at all. p is expected to
 // already be filtered to the operator's ticked selection (see filterTicked below) — this type
 // itself carries no notion of "ticked", only whatever Plan the caller hands it.
-type StartPromotionFunc func(ctx context.Context, p gitops.Plan) (engine.PromotionState, flight.DriveFunc, error)
+type StartPromotionFunc func(ctx context.Context, p gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error)
+
+// StartOpts is how a screen says which shape of promotion it confirmed. It is a struct rather
+// than a bool so that adding a future mode does not change every call site's meaning silently.
+//
+// Direct selects engine.AllDirectSteps over engine.AllSteps: commit straight to the base branch
+// with no PR. Confirmed must be true only in direct response to the operator's own
+// keypress-then-confirm gesture — engine.DirectCommitGateStep trusts it as the record of that
+// gesture and refuses production regardless of it (internal/engine/direct.go), so a screen that
+// sets it without one is not bypassing the gate, only lying to it.
+type StartOpts struct {
+	Direct    bool
+	Confirmed bool
+}
 
 // Promotion groups everything New needs to actually drive a confirmed plan and act on the
 // flight screen's own requests, beyond what ResolveFunc already covers — the wiring PR #39
@@ -211,6 +226,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.resolveFn)}
 		m = m.push(ps)
 		return m, ps.Init()
+	case deploy.BackMsg:
+		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
+		// here the message was forwarded to the top screen — the deploy screen itself — which
+		// fed it to its own viewport, so Esc did nothing and the screen could not be left
+		// (Copilot, PR #72). The same build-generation invalidation applies: a deploy confirm
+		// can have a startPromotion request outstanding just as a plan confirm can.
+		m.buildGen++
+		if m.buildCancel != nil {
+			m.buildCancel()
+			m.buildCancel = nil
+		}
+		return m.pop(), nil
 	case plan.BackMsg:
 		// Abandon any startPromotion request this plan screen has outstanding — see
 		// Model.buildGen's own doc comment. Bumping unconditionally (whether or not a request
@@ -225,21 +252,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.pop(), nil
 	case plan.StartMsg:
-		if msg.Mode == plan.ModeDirect {
-			// Direct mode's real step-selection machinery (an engine.Step set that commits
-			// straight to the target env's base branch, no PR — M6/PR #43, not merged into
-			// this branch) does not exist anywhere in this codebase yet: buildStartPromotion
-			// (cmd/hoist/wiring.go) always builds engine.AllSteps regardless of what the
-			// operator chose, and StartPromotionFunc's own signature has no Mode parameter to
-			// carry the choice through even if it did. Silently driving PR mode here would
-			// mean the confirm screen told the operator "commit straight to the default
-			// branch, no PR" and then opened one anyway — a lie the operator has no way to
-			// notice until the PR shows up. Until M6 lands, refuse honestly instead: a clear
-			// notice, no call to startPromotion at all, so the plan screen (still on top)
-			// lets the operator switch back to PR mode (m) and confirm that instead.
-			m.notice = fmt.Sprintf("direct mode isn't wired up in the TUI yet (M6 not merged): confirming would open a PR for %s -> %s instead, not commit straight to the branch — press m to switch back to PR mode", msg.Source, msg.Target)
-			return m, nil
-		}
 		if m.startPromotion == nil {
 			// Mirrors ResolveFunc's own nil convention: a caller that hasn't wired
 			// cmd/hoist's adaptor in gets a clear notice instead of a nil-pointer panic,
@@ -248,6 +260,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		start, p, deadline := m.startPromotion, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
+		direct := msg.Mode == plan.ModeDirect
 		m.buildGen++
 		gen := m.buildGen
 		if m.buildCancel != nil {
@@ -288,7 +301,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cancelDeadline != nil {
 				defer cancelDeadline()
 			}
-			state, driveFn, err := start(ctx, p)
+			// The plan screen's mode toggle (m) is gated on IsProduction and sits behind its own
+			// huh.Confirm, so reaching ModeDirect here IS the keypress-then-confirm gesture
+			// engine.DirectCommitGateStep asks Confirmed to attest — which the gate then
+			// re-checks against envs.production independently anyway.
+			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: direct})
 			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
 		}
 	case promotionBuiltMsg:
@@ -435,32 +452,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		// This milestone's picker stops at reporting the operator's choice (SelectedMsg's own
-		// doc comment): no screen in this codebase drives a write yet (hoist promote is
-		// CLI-only). Round-N finding: silently popping back to the matrix here used to leave
-		// no trace that the selection did nothing — an operator who pressed enter expecting a
-		// promotion to start would see the matrix again with no explanation. Say so plainly
-		// instead of claiming (by silence) that something happened.
-		m = m.pop()
-		return m.withMatrixNotice(fmt.Sprintf(
-			"%s:%s selected, but the tag picker only reports the choice today — nothing was written (hoist promote is still the only write path)",
-			msg.ImageRepo, msg.Tag,
-		)), nil
+		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, false)
 	case tags.DirectRequestedMsg:
-		// Same honesty gap, direct-mode side: DirectRequestedMsg is only emitted once the
-		// operator has completed the keypress + huh.Confirm gesture invariant 5 requires
-		// (tags.DirectRequestedMsg's own doc comment) — a real, deliberate confirmation, not a
-		// stray keypress. Popping back to the matrix with no notice would let the operator
-		// believe a direct commit just happened when nothing wires this message to an actual
-		// write yet (see internal/app/tags' own package doc and AGENTS.md §8 "building
-		// structure where no convention is stated is a decision": wiring this into a real
-		// write path is out of this PR's scope — a separate PR already wires the pair-
-		// promotion confirm path into a real start function and explicitly defers this one).
-		m = m.pop()
-		return m.withMatrixNotice(fmt.Sprintf(
-			"direct commit to %s:%s was confirmed, but nothing wires the TUI to an actual write yet — no commit was made (use hoist promote --direct instead)",
-			msg.ImageRepo, msg.Tag,
-		)), nil
+		// DirectRequestedMsg is only emitted after the picker's own keypress + huh.Confirm
+		// gesture (tags.DirectRequestedMsg's doc comment), so the confirm screen opens already
+		// in direct mode rather than making the operator repeat the gesture. It still shows
+		// the diff first: the gesture chose a mode, not a change.
+		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, true)
+	case deploy.StartMsg:
+		if m.startPromotion == nil {
+			m.notice = "starting a deploy is not wired up"
+			return m, nil
+		}
+		start, deadline := m.startPromotion, m.poll.Deadline
+		direct := msg.Mode == deploy.ModeDirect
+		m.buildGen++
+		gen := m.buildGen
+		if m.buildCancel != nil {
+			m.buildCancel()
+		}
+		var deadlineAt time.Time
+		if deadline > 0 {
+			deadlineAt = time.Now().Add(deadline)
+		}
+		ctx := context.Background()
+		var cancelDeadline context.CancelFunc
+		if !deadlineAt.IsZero() {
+			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		m.buildCancel = cancel
+		p := msg.Plan
+		return m, func() tea.Msg {
+			defer cancel()
+			if cancelDeadline != nil {
+				defer cancelDeadline()
+			}
+			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: msg.Confirmed})
+			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
+		}
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -490,6 +520,28 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
+}
+
+// openDeploy builds the plan for one image into one env and pushes the confirm screen for it.
+// The plan is built here, in the root, rather than in the picker: internal/app/tags names a
+// choice, and deciding what that choice would write is the root's job (AGENTS.md §4.8).
+//
+// A build failure is a notice on the matrix rather than a screen: the operator picked a tag
+// that cannot be written (an unpinned ref, a repo with no occurrence in the env), and the
+// useful response is the reason, not an empty confirm screen.
+func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool) (tea.Model, tea.Cmd) {
+	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
+	pl, err := gitops.BuildDeployPlan(m.repo, target, ref, m.promotable)
+	if err != nil {
+		return m.pop().withMatrixNotice(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
+	}
+	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles)}
+	if direct {
+		ds = deployScreen{ds.WithDirectMode()}
+	}
+	m = m.pop() // the picker has done its job
+	m = m.push(ds)
+	return m, ds.Init()
 }
 
 // push adds a screen on top, sized and themed like the rest. The slice is copied so the

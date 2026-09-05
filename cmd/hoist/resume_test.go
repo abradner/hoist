@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -343,7 +342,7 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	originOut, err := exec.Command("git", "-C", clone, "remote", "get-url", "origin").Output()
+	originOut, err := gitHostCmd("", "-C", clone, "remote", "get-url", "origin").Output()
 	if err != nil {
 		t.Fatalf("reading the fixture clone's own origin: %v", err)
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
@@ -124,3 +125,23 @@ func (s tagsScreen) SetStyles(st ui.Styles) Screen {
 // CapturesText implements Screen, delegating to tags.Model's own filtering flag — see
 // tags.Model.CapturesText's own doc comment.
 func (s tagsScreen) CapturesText() bool { return s.Model.CapturesText() }
+
+// deployScreen adapts deploy.Model. It is pushed on top of the tag picker once the operator
+// chooses a tag (tags.SelectedMsg/DirectRequestedMsg, handled in app.go) and is the last thing
+// between that choice and a real write.
+type deployScreen struct{ deploy.Model }
+
+func (s deployScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s deployScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return deployScreen{m}, cmd
+}
+
+func (s deployScreen) SetSize(width, height int) Screen {
+	return deployScreen{s.Model.SetSize(width, height)}
+}
+
+func (s deployScreen) SetStyles(st ui.Styles) Screen {
+	return deployScreen{s.Model.SetStyles(st)}
+}
