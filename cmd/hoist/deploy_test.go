@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -157,5 +158,49 @@ func TestDeployDryRunWritesNothing(t *testing.T) {
 	}
 	if len(states) != 0 {
 		t.Errorf("a dry run must not write state, got %d", len(states))
+	}
+}
+
+// TestDeployDryRunNeedsNoForgeConfig: --dry-run's promise is that it touches nothing, and a
+// non-direct dry run opens no PR and derives no promotion id — so demanding repos[].github
+// refused a read-only command for a reason that could not apply to it, while `hoist plan
+// --dry-run` (the same operation for a promotion) has never demanded one (Copilot, PR #70).
+//
+// --direct keeps the whole gate even under --dry-run: a dry run of something that would be
+// refused outright should say so, which the second half asserts.
+func TestDeployDryRunNeedsNoForgeConfig(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noGitHub := strings.Replace(string(data), "    github: example/gitops\n", "", 1)
+	if noGitHub == string(data) {
+		t.Fatal("fixture config shape changed; github line not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(noGitHub), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	got := run([]string{"--config", cfgPath, "deploy",
+		"--env", "app-production",
+		"--image", "ghcr.io/example/app:v3@" + digestThird,
+		"--dry-run"}, &out, &errOut)
+	if got != 0 {
+		t.Fatalf("a read-only dry run must not require a forge identity: exit %d; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(out.String(), "v3") {
+		t.Errorf("the dry run should still print the plan:\n%s", out.String())
+	}
+
+	// The direct gate is not relaxed with it.
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "deploy",
+		"--env", "app-production",
+		"--image", "ghcr.io/example/app:v3@" + digestThird,
+		"--dry-run", "--direct", "--confirm-direct", "app-production"}, &out, &errOut); got == 0 {
+		t.Errorf("a direct dry run with no forge identity must still be refused:\n%s", out.String())
 	}
 }

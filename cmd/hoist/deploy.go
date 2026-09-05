@@ -77,9 +77,17 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// The same single gate `hoist promote` uses, in the same position: before anything is
 	// discovered, planned or written, so a production target is refused outright rather than
 	// after a fast path could report success (see checkDirectPreflight's own doc comment).
-	// A --dry-run still runs it: a dry run of something that would be refused should say so.
-	if code := checkDirectPreflight("hoist deploy", eff, *direct, *confirmDirect, *env, stderr); code != 0 {
-		return code
+	//
+	// A --dry-run still runs it for --direct — a dry run of something that would be refused
+	// should say so, and the production refusal is the whole point of the gate. It does NOT
+	// run for a plain dry run, whose only remaining check is "is repos[].github configured":
+	// a non-direct dry run opens no PR and derives no id, so demanding a forge identity
+	// refuses a read-only command for a reason that cannot apply to it — and `hoist plan
+	// --dry-run`, the same operation for a promotion, has never demanded one (Copilot, PR #70).
+	if *direct || !*dryRun {
+		if code := checkDirectPreflight("hoist deploy", eff, *direct, *confirmDirect, *env, stderr); code != 0 {
+			return code
+		}
 	}
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
