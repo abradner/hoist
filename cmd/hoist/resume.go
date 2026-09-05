@@ -329,18 +329,6 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		return exitFailure
 	}
 
-	if s.Direct {
-		// A direct promotion has no branch on origin and no PR, so re-driving it through
-		// AllSteps below would find PushedStep unsatisfied, push s.Branch, and open a PR —
-		// converting the promotion into exactly the shape the operator chose --direct to
-		// avoid, with two real writes before anyone noticed (Codex review, PR #43).
-		// `hoist promote --direct` is already the resume path for this mode: the id is
-		// deterministic (§4.1), so re-running it against the same plan re-observes this same
-		// state and carries on through DirectSteps from wherever it actually stopped.
-		fmt.Fprintf(stderr, "hoist resume: promotion %s was started with --direct, which resume cannot re-drive (it would push a branch and open a PR). Re-run `hoist promote --direct --confirm-direct=%s` for the same plan instead — the id is deterministic, so it resumes this promotion rather than starting a second one.\n", s.ID, s.TargetEnv)
-		return exitFailure
-	}
-
 	statePath, err := engine.StatePath(s.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
@@ -363,7 +351,22 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 			fmt.Fprintln(stderr, "hoist resume: waiting for signing approval...")
 		}
 	}
+	// Drive the mode this promotion actually is, not the one resume happens to know best. A
+	// direct promotion never pushed s.Branch and has no PR, so AllSteps would find PushedStep
+	// unsatisfied, push the branch and open one — turning a deliberately PR-less deploy into a
+	// PR, with two real writes (Codex, PR #43). An earlier revision refused to resume these at
+	// all, on the belief that runResume could not reach envs.production for the gate; it can —
+	// repoConfigFor above already resolved rc for exactly this state — so the honest fix is to
+	// drive DirectSteps rather than to decline.
+	//
+	// Confirmed is true because this promotion's own existence is the confirmation: the state
+	// file only exists because the operator already passed --confirm-direct when they started
+	// it. DirectCommitGateStep still re-derives the production refusal independently of that
+	// (direct.go), so resuming can never reach an env the original run would have been refused.
 	steps := engine.AllSteps(newGit, f, a, ro, onWaiting)
+	if s.Direct {
+		steps = engine.AllDirectSteps(newGit, a, ro, rc.Envs.Production, true, onWaiting)
+	}
 	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
 	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, s, err)
 }
