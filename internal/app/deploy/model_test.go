@@ -11,6 +11,7 @@ import (
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 func fixture(t *testing.T, envs config.EnvsConfig) Model {
@@ -145,5 +146,49 @@ func TestEnterRefusesWhenTheDiffCouldNotBeRendered(t *testing.T) {
 	// screen that never confirms.
 	if _, c := fixture(t, config.EnvsConfig{}).Update(tea.KeyPressMsg{Code: tea.KeyEnter}); c == nil {
 		t.Error("enter on a rendered diff must still confirm")
+	}
+}
+
+// TestModeToggleCompletesThroughRealInput is the deploy screen's half of the same defect the
+// tag picker had: huh.NewConfirm leaves its keymap zero-valued, so a standalone Confirm
+// matched no key at all and the advertised `m` toggle could never be completed — and the
+// screen then read m.confirmV, a field on a Model copy every Update supersedes, so even a
+// working keypress would not have been seen (Copilot, PR #72).
+//
+// Driven only through keypresses: nothing here may touch m.confirmV.
+func TestModeToggleCompletesThroughRealInput(t *testing.T) {
+	m := fixture(t, config.EnvsConfig{})
+	if m.mode != ModePR {
+		t.Fatalf("fixture precondition: mode = %q, want %q", m.mode, ModePR)
+	}
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	if !m2.CapturesText() {
+		t.Fatal("m did not open the confirmation")
+	}
+	m3, _ := m2.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m4, _ := m3.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m4.mode != ModeDirect {
+		t.Fatalf("mode = %q after confirming, want %q: the confirmation never saw the keypress", m4.mode, ModeDirect)
+	}
+
+	// Answering no must leave the mode alone, so the above cannot pass by the confirmation
+	// being bypassed.
+	n, _ := fixture(t, config.EnvsConfig{}).Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	n, _ = n.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if n.mode != ModePR {
+		t.Errorf("mode = %q after declining, want %q", n.mode, ModePR)
+	}
+}
+
+// TestViewRedactsRegisteredSecrets: this screen is a final boundary like every other, and its
+// diff carries three lines of context from files it never chose (Copilot, PR #72/#73).
+func TestViewRedactsRegisteredSecrets(t *testing.T) {
+	const secret = "ghp_ThisIsNotARealTokenJustAFixture"
+	redact.Register(secret)
+	m := fixture(t, config.EnvsConfig{})
+	m.notice = "could not reach the registry with " + secret
+	if v := m.View(); strings.Contains(v, secret) {
+		t.Errorf("a registered secret reached the rendered view:\n%s", v)
 	}
 }

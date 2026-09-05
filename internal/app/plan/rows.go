@@ -266,7 +266,10 @@ func IsProduction(env string, envs config.EnvsConfig) bool {
 // only one of the two entry points attaches is a warning half the operators never see — which
 // is exactly the bug the constant replaced (an ad-hoc string in one screen's View, reaching
 // neither the dry run nor the PR body). Informational only; production's real constraint is
-// the PR plus the approval comment, enforced in internal/engine (AGENTS.md §4.5).
+// the PR — always — plus whichever approval mode the repo configures for that env: the
+// comment is the default, but an explicit `approval: auto` is permitted (§4.5), so neither
+// this helper nor the warning it attaches may claim a human comment is unconditional. Both
+// are enforced in internal/engine.
 //
 // A no-op for anything but a deploy: a promotion into production is what the paired-env
 // config exists to describe, so saying it out loud there is noise, not news.
@@ -276,7 +279,7 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 	}
 	pl.Warnings = append(pl.Warnings, gitops.Warning{
 		Code:    gitops.WarnProductionTarget,
-		Message: fmt.Sprintf("%s is a production env: this deploy opens a PR and waits for an approval comment", pl.TargetEnv),
+		Message: fmt.Sprintf("%s is a production env: this deploy opens a PR, and waits for an approval comment unless the repo sets approval: auto for it", pl.TargetEnv),
 	})
 }
 
