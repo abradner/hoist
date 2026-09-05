@@ -24,6 +24,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // BackMsg asks whatever composes screens to pop this one.
@@ -155,6 +156,11 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.confirm = huh.NewConfirm().
 			Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target)).
 			Value(&m.confirmV)
+		// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing: a
+		// Confirm used standalone rather than inside a huh.Form ignores every keypress, so
+		// without this y/n/←/→ all did nothing and this screen could not be switched to
+		// direct mode at all (Copilot, PR #72).
+		m.confirm.WithKeyMap(huh.NewDefaultKeyMap())
 		m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 		if m.width > 0 {
 			m.confirm.WithWidth(m.width)
@@ -171,9 +177,15 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		m.confirm = nil
 		return m, nil
 	}
-	_, cmd := m.confirm.Update(msg)
+	f, cmd := m.confirm.Update(msg)
+	if c, ok := f.(*huh.Confirm); ok {
+		m.confirm = c
+	}
 	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "enter" {
-		agreed := m.confirmV
+		// Read from the widget, not from m.confirmV: Value takes the address of a field in
+		// whichever Model copy built the confirm, and every Update since has returned a new
+		// copy, so this model's own field never moves however the operator answers.
+		agreed, _ := m.confirm.GetValue().(bool)
 		m.confirm = nil
 		if agreed {
 			m.mode = ModeDirect
@@ -224,7 +236,7 @@ func (m Model) View() string {
 	fmt.Fprintf(&b, "%s\n\n", scale(m.pl))
 	if m.confirm != nil {
 		b.WriteString(m.confirm.View())
-		return b.String()
+		return redact.Strings(b.String())
 	}
 	if m.diffErr != nil {
 		fmt.Fprintf(&b, "could not render the diff: %v\n", m.diffErr)
@@ -243,7 +255,13 @@ func (m Model) View() string {
 		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render(m.notice))
 	}
 	b.WriteString("\n" + m.styles.Hint.Render("enter deploy · m mode · esc back"))
-	return b.String()
+	// The same final-boundary scrub every other screen applies (internal/app/plan's own View,
+	// and tags'): the diff carries three lines of context from files this screen never chose,
+	// and the warnings and render errors are rendered verbatim — so a credential registered
+	// with pkg/redact would otherwise reach the terminal through the one screen that skipped
+	// it (Copilot, PR #72/#73). Applied once at the boundary rather than per field, so a
+	// field added later cannot forget.
+	return redact.Strings(b.String())
 }
 
 // scale is the one-line summary of what will be written — the sentence an operator would say

@@ -522,7 +522,15 @@ func (m Model) View() string {
 }
 
 func (m Model) header() string {
-	left := fmt.Sprintf("hoist promote: %s -> %s  (%s)", m.state.SourceEnv, m.state.TargetEnv, m.state.ID)
+	// A deploy has no source env, so the promotion's "A -> B" would render as
+	// "hoist promote:  -> app-production" — wrong on both halves: a hole where the source
+	// belongs, and the wrong verb for what the operator confirmed (Copilot, PR #72). The
+	// state's own empty SourceEnv is what distinguishes them, the same discriminator
+	// internal/engine/template.go and cmd/hoist's success line already use.
+	left := fmt.Sprintf("hoist deploy: %s  (%s)", m.state.TargetEnv, m.state.ID)
+	if m.state.SourceEnv != "" {
+		left = fmt.Sprintf("hoist promote: %s -> %s  (%s)", m.state.SourceEnv, m.state.TargetEnv, m.state.ID)
+	}
 	return ui.StatusBar(m.width, left, m.elapsed())
 }
 

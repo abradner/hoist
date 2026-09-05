@@ -549,7 +549,7 @@ func TestStagingNoteComparesCursorTagAgainstStaging(t *testing.T) {
 		t.Fatalf("expected the cursor on v1 after two j presses, got %q", m2.cursorTag())
 	}
 	v2 := m2.View()
-	if !strings.Contains(v2, "v1 (under the cursor) is committed there") {
+	if !strings.Contains(v2, "v1 is the tag committed there") {
 		t.Fatalf("a tag staging does carry must read as such:\n%s", v2)
 	}
 	if strings.Contains(v2, "warning:") {
@@ -585,7 +585,10 @@ func TestDirectKeyRequiresConfirmBeforeEmitting(t *testing.T) {
 		t.Fatal("D on a non-production target should open the confirm dialog")
 	}
 
-	m.confirmValue = true
+	// Answered through the widget's own key, not by assigning the bool behind it: the field
+	// huh writes to lives on a superseded Model copy, so setting it here proved nothing about
+	// what an operator can actually do (Copilot, PR #72).
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected a command after confirming")
@@ -599,12 +602,12 @@ func TestDirectKeyRequiresConfirmBeforeEmitting(t *testing.T) {
 	}
 }
 
-// TestDirectConfirmDeclineEmitsNothing: accepting the dialog with confirmValue false (the
+// TestDirectConfirmDeclineEmitsNothing: accepting the dialog after answering no (the
 // operator declined) must not emit DirectRequestedMsg.
 func TestDirectConfirmDeclineEmitsNothing(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	m.confirmValue = false
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Fatalf("declining should emit nothing, got %v", cmd())
@@ -924,7 +927,7 @@ func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	m.confirmValue = true
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if m.ctx.Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
@@ -970,5 +973,60 @@ func TestViewGolden(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("View() drifted from testdata/golden/tags.txt; if intentional, regenerate with -update.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestDirectGestureCompletesThroughRealInput is the regression test for a gesture that had
+// never worked: huh.NewConfirm leaves its keymap zero-valued, and a zero key.Binding matches
+// nothing, so a Confirm used standalone (rather than inside a huh.Form, which installs the
+// keymap itself) ignored y, n and the arrows alike. The D path could therefore not be
+// completed by any real operator — and every test covering it set the bool behind the widget's
+// back, which is exactly why the whole package was green while the feature was unreachable
+// (Copilot, PR #72).
+//
+// Driven only through keypresses for that reason: nothing here may touch m.confirmValue.
+func TestDirectGestureCompletesThroughRealInput(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	if !m.confirming {
+		t.Fatal("D did not open the confirmation")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("y then enter produced no command: the confirmation never saw the keypress")
+	}
+	if _, ok := cmd().(DirectRequestedMsg); !ok {
+		t.Fatalf("y then enter emitted %T, want DirectRequestedMsg", cmd())
+	}
+	if m2.confirming {
+		t.Error("the confirmation should be closed after enter")
+	}
+
+	// The asymmetry that makes the above mean something: answering no must emit nothing, so
+	// this cannot pass by the confirmation being bypassed entirely.
+	n := readyModel(t, "app-staging", true, false)
+	n, _ = n.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
+	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if _, cmd := n.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+		t.Errorf("answering no must not start a direct promotion, got %v", cmd())
+	}
+}
+
+// TestStagingNoteDoesNotClaimTheSameBuild: the verdict compares tag strings, because tag
+// strings are all StagingMismatch carries. A tag is mutable, so a match means staging
+// committed that tag, never that staging ran this build — and the note must not let an
+// operator read the stronger claim out of it (Copilot, PR #73).
+func TestStagingNoteDoesNotClaimTheSameBuild(t *testing.T) {
+	m := readyModel(t, "app-production", true, true)
+	for i := 0; i < 2; i++ {
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	}
+	if m.cursorTag() != "v1" {
+		t.Fatalf("fixture precondition: cursor should be on v1, got %q", m.cursorTag())
+	}
+	v := m.View()
+	if !strings.Contains(v, "tags move") {
+		t.Errorf("the verdict must say what a tag match does and does not prove:\n%s", v)
 	}
 }

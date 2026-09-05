@@ -25,7 +25,9 @@ const (
 	// WarnProductionTarget: this plan writes into an env the operator's own config lists as
 	// production. Informational and never blocking (AGENTS.md §4.5: the registry-pick path's
 	// production warning "informs; it does not block") — what production actually forces is a
-	// PR and an approval comment, which the engine enforces on its own.
+	// PR, always, plus whatever approval mode the repo configures for that env: the comment is
+	// the default, but an explicit `approval: auto` is permitted (§4.5, RepoConfig.Approval),
+	// so this must not claim a human comment is unconditional. The engine enforces both.
 	//
 	// Constructed by the caller rather than by BuildPlan/BuildDeployPlan: which envs are
 	// production is config, and pkg never imports internal. That is the same shape

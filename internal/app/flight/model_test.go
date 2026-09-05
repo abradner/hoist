@@ -983,3 +983,25 @@ func TestNotFoundOnARetryableStepIsTerminal(t *testing.T) {
 		})
 	}
 }
+
+// TestHeaderNamesADeployAsADeploy: a deploy state has no source env, so the promotion header's
+// "A -> B" rendered as "hoist promote:  -> app-production" — a hole where the source belongs,
+// and the wrong verb for what the operator confirmed (Copilot, PR #72).
+func TestHeaderNamesADeployAsADeploy(t *testing.T) {
+	s := fixtureState()
+	s.SourceEnv = ""
+	m := New(s, PollDurations{}, nil).SetSize(120, 20).SetStyles(ui.NewStyles(true))
+	v := m.View()
+	if strings.Contains(v, "->") {
+		t.Errorf("a deploy has no source env, so its header has no arrow:\n%s", v)
+	}
+	if !strings.Contains(v, "hoist deploy") || !strings.Contains(v, s.TargetEnv) {
+		t.Errorf("the header should name the deploy and its env:\n%s", v)
+	}
+
+	// A promotion keeps both, so this is a discrimination and not a flattening.
+	p := New(fixtureState(), PollDurations{}, nil).SetSize(120, 20).SetStyles(ui.NewStyles(true))
+	if pv := p.View(); !strings.Contains(pv, "hoist promote") || !strings.Contains(pv, "->") {
+		t.Errorf("a promotion still moves between two envs:\n%s", pv)
+	}
+}
