@@ -154,7 +154,10 @@ func StateDir() (string, error) {
 //   - A PR promotion lands via MergeSHA, the squash commit MergedStep records on Base. Its
 //     PushedSHA names a commit on the promotion branch, which Argo never tracks.
 //   - A direct promotion (M6) never merges anything, so MergeSHA stays empty forever. Its
-//     PushedSHA IS on Base, because DirectPushedStep pushes there rather than to a branch.
+//     PushedSHA IS on Base, because DirectPushedStep pushes there rather than to a branch —
+//     and is the base tip carrying this promotion's content, re-derived on each observation,
+//     not the original commit object (see DirectPushedStep.Observe for why the distinction is
+//     the difference between converging and waiting out the deadline).
 //
 // Deriving it rather than persisting a third field keeps one source of truth per mode and
 // needs no migration for state files written before direct mode existed: Direct is false for

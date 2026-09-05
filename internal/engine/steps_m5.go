@@ -450,6 +450,37 @@ func CoreSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
 	return append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
 }
 
+// ObserveSteps is the step list to observe a PRIOR promotion state by, chosen from the state
+// itself rather than from what the caller happens to be doing now. Three callers ask the same
+// question of a state file they did not create — findInFlight ("is another promotion still
+// running for this env?"), `hoist promotions` and `resume --env`'s candidate scan — and all
+// three used a fixed list, which for a direct state is a list it can never satisfy: a direct
+// promotion pushes to the base branch, so PushedStep's branch on origin, PROpenedStep's PR and
+// MergedStep's merge are all permanently unsatisfied. The consequence was not cosmetic: one
+// completed direct run made findInFlight refuse every later promotion into that env forever,
+// and left the finished run listed as in flight.
+//
+// DirectCommitGateStep is deliberately NOT among the direct list here. The gate decides whether
+// a direct promotion may START; re-running it while observing one that already landed would let
+// a later config edit (an env newly listed under envs.production) turn a finished run into a
+// permanently blocked one — a state file re-interpreted by today's config rather than observed.
+// Refusing a new direct promotion is the gate's job, and it still runs first in DirectSteps
+// where that decision is actually made (AGENTS.md §4.5, R-007).
+//
+// through is where to stop: pass nil for the git-only core (findInFlight's own "the branch/PR
+// collision risk is retired" boundary — see its doc comment), or a non-nil argo/rollout pair
+// for the full list. The PR path's boundary is Merged; the direct path's is the push.
+func ObserveSteps(s *PromotionState, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
+	core := CoreSteps(g, f, onWaiting)
+	if s != nil && s.Direct {
+		core = []Step{BranchedStep{Git: g}, CommittedStep{Git: g, OnWaiting: onWaiting}, DirectPushedStep{Git: g}}
+	}
+	if a == nil && ro == nil {
+		return core
+	}
+	return append(core, ConvergeSteps(a, ro)...)
+}
+
 // AllSteps returns every step a promotion drives through, in order: CoreSteps' seven (branch,
 // commit, push, PR, CIGreen, Approved, Merged) then ArgoRefreshed, ArgoSynced and RolledOut
 // (M5). `hoist promote` and `hoist resume` always drive AllSteps to completion.

@@ -147,7 +147,10 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
 			continue
 		}
-		done, status, err := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), s)
+		// Observed by the list the state itself implies, not by whichever list this command
+		// happens to know about: a direct run can never satisfy the PR path's push/PR/merge steps
+		// and would list as in flight forever (engine.ObserveSteps).
+		done, status, err := engine.ObserveAll(ctx, engine.ObserveSteps(s, newGit, f, a, ro, nil), s)
 		switch {
 		case err != nil:
 			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
@@ -247,7 +250,7 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
 				continue
 			}
-			done, _, oerr := engine.ObserveAll(ctx, engine.AllSteps(newGit, f, a, ro, nil), st)
+			done, _, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(st, newGit, f, a, ro, nil), st)
 			if oerr != nil {
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
 				continue

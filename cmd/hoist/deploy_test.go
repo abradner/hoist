@@ -177,11 +177,19 @@ func TestDeploySuccessLineHasNoEmptySourceEnv(t *testing.T) {
 		t.Fatalf("exit %d; stderr: %s", got, errOut.String())
 	}
 	first := strings.SplitN(out.String(), "\n", 2)[0]
-	if strings.Contains(first, ":  ->") || strings.Contains(first, ": ->  ") {
-		t.Errorf("success line renders an empty source env: %q", first)
+	// No arrow at all, not merely no double space. An earlier version of this test looked for
+	// the whitespace and passed on "hoist deploy: -> app-production", which still renders the
+	// hole this test exists to catch: a deploy is not a movement between two places, so there
+	// is nothing for an arrow to point away from.
+	if strings.Contains(first, "->") {
+		t.Errorf("a deploy's success line has no source env, so it has no arrow: %q", first)
 	}
 	if !strings.Contains(first, "app-production") {
 		t.Errorf("success line should name the target env: %q", first)
+	}
+	// A promotion's does, and must keep it — the fix must not flatten both shapes into one.
+	if got := promoteSuccessLine(t); !strings.Contains(got, "->") {
+		t.Errorf("a promotion still moves between two envs and keeps its arrow: %q", got)
 	}
 }
 
@@ -300,6 +308,91 @@ func TestPromoteDoesNotRewriteADeploysArtifactsOnIdCollision(t *testing.T) {
 	if after[0].CommitMessage != before[0].CommitMessage {
 		t.Errorf("the promote re-run rewrote the deploy's commit message")
 	}
+}
+
+// digestFourth is a second genuinely-new build, for the follow-up deploy the first must not
+// have locked out.
+const digestFourth = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+
+// TestDirectRunDoesNotLockOutLaterPromotionsForTheEnv is the regression test for the worst bug
+// in direct mode's convergence work: every caller that asks "is another promotion still running
+// for this env?" observed a fixed PR-path step list, which a direct state can never satisfy — it
+// pushes to the base branch, so there is no promotion branch on origin, no PR, and no merge, for
+// ever. One completed direct deploy therefore made findInFlight refuse EVERY later promotion
+// into that env permanently, and left the finished run listed as in flight by `hoist promotions`.
+//
+// Asserted through the CLI rather than against findInFlight directly, because the bug was in
+// which step list three separate callers chose, not in the scan itself.
+func TestDirectRunDoesNotLockOutLaterPromotionsForTheEnv(t *testing.T) {
+	cfgPath, clone, _ := newPromoteFixture(t)
+	rolloutFor(t, "ghcr.io/example/app:v3@"+digestThird)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withEnvs := strings.Replace(string(data),
+		"    promotable: [ghcr.io/example/]\n",
+		"    promotable: [ghcr.io/example/]\n    envs:\n      production: [somewhere-else]\n",
+		1)
+	if withEnvs == string(data) {
+		t.Fatal("fixture config shape changed; promotable insertion point not found")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withEnvs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "deploy",
+		"--env", "app-production",
+		"--image", "ghcr.io/example/app:v3@" + digestThird,
+		"--direct", "--confirm-direct", "app-production"}, &out, &errOut); got != 0 {
+		t.Fatalf("first (direct) deploy: exit %d; stderr: %s", got, errOut.String())
+	}
+	// What the operator does after a direct push: bring their own clone up to the base branch
+	// it just moved. Without this the next run is refused for clone staleness — correctly, and
+	// for a different reason than the one under test, which would mask it.
+	runGitHost(t, clone, "pull", "-q", "--ff-only")
+
+	// `hoist promotions` re-observes every state file. The direct run finished; it must not
+	// still be listed as in flight.
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "promotions"}, &out, &errOut); got != 0 {
+		t.Fatalf("promotions: exit %d; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(out.String(), "done") {
+		t.Errorf("a converged direct promotion must list as done:\n%s", out.String())
+	}
+
+	// And a genuinely different promotion into the same env must be allowed to start.
+	rolloutFor(t, "ghcr.io/example/app:v4@"+digestFourth)
+	out.Reset()
+	errOut.Reset()
+	got := run([]string{"--config", cfgPath, "deploy",
+		"--env", "app-production",
+		"--image", "ghcr.io/example/app:v4@" + digestFourth}, &out, &errOut)
+	if got != 0 {
+		t.Fatalf("a later deploy into the same env was refused after a direct run: exit %d\nstdout: %s\nstderr: %s",
+			got, out.String(), errOut.String())
+	}
+	if strings.Contains(errOut.String(), "in flight") {
+		t.Errorf("the finished direct run was treated as in flight:\n%s", errOut.String())
+	}
+}
+
+// promoteSuccessLine drives a plain promotion through the same fixture and returns its first
+// stdout line, so the deploy assertion above can be stated as an asymmetry rather than as an
+// absence — an absence alone would also pass if the line stopped rendering entirely.
+func promoteSuccessLine(t *testing.T) string {
+	t.Helper()
+	cfgPath, _, _ := newPromoteFixture(t)
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "promote",
+		"--from", "app-staging", "--to", "app-production",
+		"--digest-sources", "none"}, &out, &errOut); got != 0 {
+		t.Fatalf("promote: exit %d; stderr: %s", got, errOut.String())
+	}
+	return strings.SplitN(out.String(), "\n", 2)[0]
 }
 
 // TestDeployDryRunNeedsNoForgeConfig: --dry-run's promise is that it touches nothing, and a
