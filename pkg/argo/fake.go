@@ -23,6 +23,8 @@ type Fake struct {
 	// instead of the configured/not-found behavior — simulating a transient plumbing error a
 	// caller must retry rather than treat as authoritative.
 	GetErr, RefreshErr error
+	// OnRefresh, when set, runs on every Refresh — see Refresh's own doc comment.
+	OnRefresh func(app Application)
 
 	Calls []string
 }
@@ -43,10 +45,20 @@ func (f *Fake) SetStatus(app Application, st Status) {
 // reconcile (not this call) is what actually changes status.
 func (f *Fake) Refresh(_ context.Context, app Application) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, "Refresh "+app.String())
-	if f.RefreshErr != nil {
-		return f.RefreshErr
+	err, hook := f.RefreshErr, f.OnRefresh
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// Real Argo reacts to a refresh by reconciling against whatever is on the branch it
+	// tracks — it does not care whether that commit arrived by merge or by a direct push. A
+	// test that wants that behaviour sets OnRefresh; one that wants a frozen status (an
+	// Application deliberately left OutOfSync, say) leaves it nil and the fake stays static.
+	//
+	// Called outside the lock: the hook is expected to call SetStatus, which takes it.
+	if hook != nil {
+		hook(app)
 	}
 	return nil
 }
