@@ -34,6 +34,54 @@ func TestStepOrderMatchesAllSteps(t *testing.T) {
 	}
 }
 
+// The same guard for direct mode. Without it DirectStepOrder drifts from
+// engine.AllDirectSteps exactly as StepOrder would from AllSteps — and the failure is
+// invisible: rows simply render for steps that never run, or omit ones that do.
+func TestDirectStepOrderMatchesAllDirectSteps(t *testing.T) {
+	steps := engine.AllDirectSteps(nil, nil, nil, nil, false, nil)
+	if len(steps) != len(DirectStepOrder) {
+		t.Fatalf("engine.AllDirectSteps has %d steps, DirectStepOrder has %d", len(steps), len(DirectStepOrder))
+	}
+	for i, s := range steps {
+		if s.Name() != DirectStepOrder[i] {
+			t.Errorf("DirectStepOrder[%d] = %s, want %s (engine.AllDirectSteps' order)", i, DirectStepOrder[i], s.Name())
+		}
+	}
+}
+
+// Every step either order renders needs a label, or the row draws blank.
+func TestEveryOrderedStepHasALabel(t *testing.T) {
+	for _, order := range [][]engine.StepName{StepOrder, DirectStepOrder} {
+		for _, name := range order {
+			if stepLabels[name] == "" {
+				t.Errorf("step %q has no label", name)
+			}
+		}
+	}
+}
+
+// A direct promotion must render its own steps, not the PR path's. Rendering it against
+// StepOrder draws four steps it will never run and hides the two it does.
+func TestFlightRendersDirectOrderForADirectPromotion(t *testing.T) {
+	st := fixtureState()
+	st.Direct = true
+	m := New(st, PollDurations{}, nil)
+	var names []engine.StepName
+	for _, r := range m.rows {
+		names = append(names, r.Step)
+	}
+	if len(names) != len(DirectStepOrder) {
+		t.Fatalf("rendered %d rows, want %d (the direct order)", len(names), len(DirectStepOrder))
+	}
+	for _, unwanted := range []engine.StepName{engine.StepPROpened, engine.StepCIGreen, engine.StepApproved, engine.StepMerged} {
+		for _, got := range names {
+			if got == unwanted {
+				t.Errorf("direct promotion renders %q, a step it never runs", unwanted)
+			}
+		}
+	}
+}
+
 func fixtureState() engine.PromotionState {
 	return engine.PromotionState{
 		ID:        "abcd1234",
@@ -859,6 +907,45 @@ func assertFits(t *testing.T, view string, width int) {
 	for i, l := range strings.Split(view, "\n") {
 		if w := len([]rune(l)); w > width+8 { // generous slack: no ansi width helper needed here, just a sanity bound
 			t.Errorf("line %d is suspiciously wide (%d): %q", i+1, w, l)
+		}
+	}
+}
+
+// Issue #64's two remaining halves, both invisible until the screen actually drove the M5
+// steps: a transient Kubernetes error must keep the flight polling, and the operator's
+// configured Argo/rollout cadences must be the ones used.
+func TestRetryableStepCoversTheClusterPollingSteps(t *testing.T) {
+	for _, step := range []engine.StepName{
+		engine.StepCIGreen, engine.StepApproved,
+		engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut,
+	} {
+		if !retryableStep(step) {
+			t.Errorf("%s should be retryable: a transient poll failure there stops the flight dead", step)
+		}
+	}
+	// A step whose failure is genuinely terminal must stay terminal — retrying a broken push
+	// or a rejected commit forever would hide a real problem behind a spinner.
+	for _, step := range []engine.StepName{engine.StepBranched, engine.StepCommitted, engine.StepPushed, engine.StepMerged} {
+		if retryableStep(step) {
+			t.Errorf("%s must not be retryable", step)
+		}
+	}
+}
+
+func TestPollIntervalUsesTheConfiguredArgoAndRolloutCadences(t *testing.T) {
+	poll := PollDurations{
+		CI: 11 * time.Second, Approval: 22 * time.Second,
+		Argo: 33 * time.Second, Rollout: 44 * time.Second,
+	}
+	for step, want := range map[engine.StepName]time.Duration{
+		engine.StepCIGreen:       11 * time.Second,
+		engine.StepApproved:      22 * time.Second,
+		engine.StepArgoRefreshed: 33 * time.Second,
+		engine.StepArgoSynced:    33 * time.Second,
+		engine.StepRolledOut:     44 * time.Second,
+	} {
+		if got := pollInterval(poll, step); got != want {
+			t.Errorf("pollInterval(%s) = %s, want %s — an unconfigured step falls back to 2s and hammers the API", step, got, want)
 		}
 	}
 }

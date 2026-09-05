@@ -522,8 +522,18 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		githubRepo = eff.cfg.GitHub
 	}
 	f, forgeErr := newForge(githubRepo)
+	// The Argo/Deployment adaptors, built once alongside f and deferred the same way. Every
+	// promotion the flight screen drives now reaches the Argo/rollout steps — both modes
+	// (issues #64, #66) — so these are needed for any confirm, but a session that only browses
+	// the matrix should not fail to open because the cluster is unreachable.
+	kubeContext := ""
+	if eff.cfg != nil {
+		kubeContext = eff.cfg.Kube.Context
+	}
+	a, _, argoErr := newArgo(kubeContext)
+	ro, _, rolloutErr := newRollout(kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr),
+		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
