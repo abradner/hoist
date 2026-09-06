@@ -484,7 +484,19 @@ func (m Model) IsProduction(env string) bool { return m.envs.IsProduction(env) }
 // View is the frame: the table, a notes section when there is something to say about the
 // cursor's column (drift, a cluster that could not be asked, the help line), and the footer.
 // With the chooser open the frame is drawn under the dialog.
+// minWidth and minHeight are the smallest terminal the matrix draws itself in; below them
+// View is one line saying so rather than a partial table (#16).
+const (
+	minWidth  = 40
+	minHeight = 8
+)
+
+// View renders the frame: the table, the notes, the in-flight pane and the footer, with a
+// chooser dialog over it when one is open — or the too-small line.
 func (m Model) View() string {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		return fmt.Sprintf("window too small: %d×%d, hoist needs at least %d×%d", m.width, m.height, minWidth, minHeight)
+	}
 	// Laid out here, on this copy, so the table's height always reflects the notes section
 	// as it is now — a notice set or cleared since the last SetSize would otherwise leave the
 	// box a few rows short or push the notes off the bottom.

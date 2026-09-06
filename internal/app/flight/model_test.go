@@ -1043,3 +1043,71 @@ func TestLogScrollsByKeypress(t *testing.T) {
 }
 
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
+
+// The wait before a poll is capped at what is left of the deadline (#59): a 1s deadline with a
+// 20s CI interval used to sleep the full 20s and report the deadline 19s late.
+func TestTickDelayIsCappedAtTheDeadline(t *testing.T) {
+	now := time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
+	m := New(fixtureState(), PollDurations{CI: 20 * time.Second, Deadline: time.Hour}, nil).WithNow(func() time.Time { return now })
+	m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
+		st(engine.StepBranched, engine.Observation{Satisfied: true}),
+		st(engine.StepCIGreen, engine.Observation{Waiting: true}),
+	})
+	if d := m.tickDelay(""); d != 20*time.Second {
+		t.Fatalf("an hour left: delay %v, want the CI interval", d)
+	}
+	m.deadlineAt = now.Add(time.Second)
+	if d := m.tickDelay(""); d != time.Second {
+		t.Fatalf("a second left: delay %v, want 1s", d)
+	}
+	m.deadlineAt = now.Add(-time.Second)
+	if d := m.tickDelay(""); d != 0 {
+		t.Fatalf("deadline passed: delay %v, want an immediate poll", d)
+	}
+}
+
+// After a Status error on CI or approval, Status returns no row for the failing step, so the
+// active step is unknown and the retry used to poll at the last step's 2s fallback (#61). The
+// error names the step, and the retry polls at that step's cadence.
+func TestRetryAfterAStatusErrorPollsAtTheFailedStepsCadence(t *testing.T) {
+	m := New(fixtureState(), PollDurations{CI: 20 * time.Second, Approval: 30 * time.Second}, nil)
+	m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{st(engine.StepBranched, engine.Observation{Satisfied: true})})
+	if d := m.tickDelay(""); d == 30*time.Second {
+		t.Fatal("setup: no active row must not already read as the approval step")
+	}
+	if d := m.tickDelay(engine.StepApproved); d != 30*time.Second {
+		t.Fatalf("retry after an approval Status error: delay %v, want the approval interval", d)
+	}
+	if d := m.tickDelay(engine.StepCIGreen); d != 20*time.Second {
+		t.Fatalf("retry after a CI Status error: delay %v, want the CI interval", d)
+	}
+}
+
+// R after the deadline has passed used to reuse the exhausted context and fail before it
+// started (#57). It now gets a fresh window of poll.Deadline and says so.
+func TestReobserveAfterTheDeadlineGetsAFreshWindow(t *testing.T) {
+	calls := 0
+	drive := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		calls++
+		return s, false, nil, ctx.Err()
+	}
+	now := time.Now() // a wall-clock instant: the renewed context is a real deadline
+	m := New(fixtureState(), PollDurations{Deadline: time.Millisecond}, drive).WithNow(func() time.Time { return now })
+	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	time.Sleep(5 * time.Millisecond) // the real deadline in New's context passes
+	if m.ctx.Err() == nil {
+		t.Fatal("setup: the original context should have expired")
+	}
+	m.busy = false                // as after the deadline-exceeded result landed and stopped the screen
+	m.poll.Deadline = time.Minute // the window R grants
+	m, cmd := m.Update(uitest.Key("R"))
+	if cmd == nil || m.ctx.Err() != nil || !strings.Contains(m.notice, "fresh window") {
+		t.Fatalf("R after the deadline: cmd=%v ctxErr=%v notice=%q", cmd != nil, m.ctx.Err(), m.notice)
+	}
+	if !m.deadlineAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("deadline renewed to %v, want now+poll.Deadline", m.deadlineAt)
+	}
+	if calls != 0 {
+		t.Fatal("R must not have driven synchronously")
+	}
+}

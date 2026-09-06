@@ -274,3 +274,16 @@ func TestViewGolden(t *testing.T) {
 	m = uitest.Keys(m, update, "?")
 	uitest.Golden(t, "matrix-help", m.View(), 80, 24)
 }
+
+// Below a minimum size the matrix says so in one line instead of drawing a partial table (#16).
+func TestTooSmallAWindowSaysSo(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(10, 3)
+	v := m.View()
+	if strings.Count(v, "\n") != 0 || !strings.Contains(v, "window too small") || !strings.Contains(v, "40×8") {
+		t.Fatalf("view at 10×3:\n%s", v)
+	}
+	// Positive control: at the minimum it draws the table.
+	if v := m.SetSize(40, 8).View(); strings.Contains(v, "too small") || !strings.Contains(v, "FAMILY") {
+		t.Fatalf("view at 40×8 should be the table:\n%s", v)
+	}
+}
