@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -32,8 +33,28 @@ import (
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
-// version is overwritten at build time by -ldflags "-X main.version=…".
+// version is overwritten at build time by -ldflags "-X main.version=…" (goreleaser sets it to
+// the tag). A `go install …@v0.1.0` build has no ldflags but Go embeds the module version, which
+// versionString falls back to; only a build from a checkout is "dev".
 var version = "dev"
+
+func versionString() string {
+	bi, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, bi, ok)
+}
+
+// resolveVersion picks what --version prints: the ldflag when a build set it, else the module
+// version Go embedded (a `go install …@vX.Y.Z` build), else "dev". A checkout build embeds
+// "(devel)", which is no version at all.
+func resolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
+	if ldflag != "dev" {
+		return ldflag
+	}
+	if ok && bi != nil && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
 
 // Exit codes. 1 is a runtime failure, 2 a usage error, 3 "not implemented in this milestone".
 const (
@@ -58,7 +79,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
 		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable)\n  deploy         write one named image into one env and drive the same pipeline (--env, --image repo:tag@sha256:...); the image-bump half of promote\n  restart        roll an env's Deployments without changing the refs they declare (--env, optional --family); patches the live pod template like kubectl, writes nothing to git\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
-		fmt.Fprintf(stderr, "hoist %s\n\n", version)
+		fmt.Fprintf(stderr, "hoist %s\n\n", versionString())
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -68,7 +89,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if *showVersion {
-		fmt.Fprintln(stdout, version)
+		fmt.Fprintln(stdout, versionString())
 		return 0
 	}
 	cfg, err := loadConfig(*configPath)

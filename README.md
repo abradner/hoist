@@ -52,7 +52,15 @@ and `docs/repo-map.md` — those are for people working on hoist, not for people
 
 ## Install
 
-Not yet. When it exists: `go install github.com/abradner/hoist/cmd/hoist@latest`.
+```bash
+go install github.com/abradner/hoist/cmd/hoist@latest
+```
+
+That builds the newest tagged release (or `main`, before the first tag exists). Prebuilt binaries
+for macOS and Linux, amd64 and arm64, are attached to every
+[release](https://github.com/abradner/hoist/releases) with a `checksums.txt`; `hoist --version`
+names what you are running. hoist shells out to `git` and `gh` — both on `PATH`, and `gh auth
+status` logged in, is the whole prerequisite.
 
 ## Configuration
 

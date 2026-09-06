@@ -1,0 +1,54 @@
+# goreleaser builds the release binaries when a v* tag is pushed (.github/workflows/release.yml)
+# and is run against every PR as `build --snapshot --clean` — every target below — with the
+# linux/arm64 binary's --version asserted (ci.yml, release-config), so a broken config or a
+# lost ldflag fails before a tag does. Verify locally with `mise exec -- goreleaser check`, or
+# `mise exec -- goreleaser build --snapshot --clean --single-target` for this machine's binary.
+version: 2
+
+project_name: hoist
+
+builds:
+  - id: hoist
+    main: ./cmd/hoist
+    binary: hoist
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # main.version is what `hoist --version` prints and what the usage banner names; without
+    # this flag a build reports "dev" (or the module version Go embedded — see versionString).
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: tarballs
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+
+release:
+  # A v0.x.y-rc tag is a prerelease on GitHub; everything else is a release. Draft is off so
+  # the tag push is the whole release step — the approval is the tag, not a second click.
+  prerelease: auto
+  draft: false

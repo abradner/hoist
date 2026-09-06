@@ -33,6 +33,33 @@ jobs:
         with:
           version: v2.13.2
 
+  release-config:
+    # .goreleaser.yaml is only otherwise exercised when a tag is pushed, which is the worst
+    # moment to find it broken. A snapshot build of every target a tag publishes proves the
+    # config and the ldflags (the artifact, not the linter — AGENTS.md §8); CGO is off, so the
+    # four cross-builds cost seconds.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.18.0 # the same pin as mise.toml; an upstream release must not redden a PR
+          args: build --snapshot --clean
+      # Verify the output, not the instrument: the binary must print the snapshot version the
+      # ldflag injected — a zero exit that printed "dev" would mean -X main.version stopped
+      # applying while the job stayed green.
+      - run: |
+          out="$(./dist/hoist_linux_arm64*/hoist --version)"
+          echo "hoist --version: $out"
+          case "$out" in
+            *-SNAPSHOT-*) ;;
+            *) echo "the ldflag did not apply (expected a *-SNAPSHOT-<sha> version)"; exit 1 ;;
+          esac
+
   public-safety:
     # This repo is public. Nothing that identifies a real cluster may land in it:
     # LAN addresses, internal hostnames, kube context names. Fixtures and docs use placeholders.

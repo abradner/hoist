@@ -35,3 +35,6 @@ coverage.out
 
 # go build ./... drops the single main binary in the tree root
 /hoist
+
+# goreleaser output (snapshot builds and releases)
+dist/
