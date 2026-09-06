@@ -415,3 +415,15 @@ func TestRateLimitedProbeIsNotCached(t *testing.T) {
 		t.Fatalf("after the limit lifted: ok=%v err=%v probes=%d; want a plain not-found from a second probe", ok, err, probes)
 	}
 }
+
+// A secondary rate limit is a 403 with no X-Ratelimit-Remaining header and a message that
+// says so; the guidance must be the rate-limit one, not "missing the repo scope".
+func TestSecondaryRateLimitIsNamedAsOne(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(403, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`),
+	})
+	_, _, err := c.ResolveRef(context.Background(), "v9")
+	if err == nil || !strings.Contains(err.Error(), "rate limit exhausted") || strings.Contains(err.Error(), "repo scope") {
+		t.Fatalf("err = %v; want the rate-limit guidance, not the scope one", err)
+	}
+}

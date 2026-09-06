@@ -415,7 +415,7 @@ func (m Model) summarySection() string {
 	} else if d.Prefix == "" {
 		parts = append(parts, m.styles.Dim.Render("migrations not tracked"))
 	} else if d.MigrationsIncomplete {
-		parts = append(parts, m.styles.Warn.Render("migrations unknown — a commit's file list was capped"))
+		parts = append(parts, m.styles.Warn.Render("migrations unknown — the history is incomplete"))
 	}
 	if m.history.Declared.Repo != "" {
 		replacing := "replacing " + tagOrDigest(m.history.Declared)
