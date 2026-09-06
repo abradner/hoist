@@ -191,11 +191,28 @@ root calls on resize and theme change; the root adapts each one through its `Scr
 (`internal/app/screen.go`), so a screen never imports `app`. A screen's derived data — what it
 shows, before any styling — lives in a file with no terminal dependency (`matrix/cells.go`) so it
 is unit-testable as plain values; the model file only lays that data out. `internal/ui` holds the
-shared palette and small shared widgets (the status bar), nothing screen-specific. No layout
-library (§4.7): screens compose strings with `strings.Join` and the Bubbles components they
-embed. *Why:* the first UI PR (#10) had no stated convention and adopted this shape as a proposal
-in `internal/app/doc.go` (§8, "building structure where no convention is stated is a decision");
-stating it here once means the next screen follows it instead of re-litigating shape per PR.
+shared palette, the frame chrome and the small shared widgets (the status bar), nothing
+screen-specific. No layout library (§4.7) — which means no flexbox-for-terminals dependency, not
+no borders: from M10 on, a screen's `View` is `ui.Frame{Title, Sections, Footer}.Render(styles,
+w, h)` (a titled rounded box with rules between sections, the footer always the terminal's last
+line), two panes are `ui.Columns`, a sub-pane is `ui.Box`, and every `huh.Confirm` is drawn
+through `ui.Dialog` (lipgloss's `Canvas`/`Layer` compositor, centred over the dimmed parent — the
+one place the compositor is used; everything else composes with `JoinVertical`). Those helpers are
+built from lipgloss's own `Border`, `JoinHorizontal`/`JoinVertical` and `Place`; a screen that
+hand-assembles `─` and `│` is reimplementing `borders.go` and will get the width arithmetic wrong
+the way the pre-M10 screens did (padded strings, a hints line wherever content ended, versions
+wrapping mid-token — #85). Relative times go through `ui.Ago`/`ui.Until`/`ui.Span` with a `now
+func() time.Time` the screen takes, so goldens are stable. Every screen's tests render through
+`internal/ui/uitest`: `Golden` at 80×24 *and* 120×40 (exact line count, no line over width), one
+shared `-update` flag, and `Keys`/`Drain` driving real keypresses — a confirmation is never tested
+by setting the bool a key would have set (`huh.NewConfirm()` ships a zero keymap and ignores every
+key unless `.WithKeyMap(huh.NewDefaultKeyMap())` is called; read the answer with `GetValue()`, never
+through `Value(&m.field)`, which captures a field on the copy that built the widget — two shipped
+gestures were broken this way and their tests passed). *Why:* the first UI PR (#10) had no stated
+convention and adopted this shape as a proposal in `internal/app/doc.go` (§8, "building structure
+where no convention is stated is a decision"); stating it here once means the next screen follows
+it instead of re-litigating shape per PR. The M10 amendment replaces the earlier "screens compose
+strings with `strings.Join`" wording, which had been read as forbidding borders.
 
 Three more conventions, codified from PR #27 (the plan screen), which needed all three and found
 no rule stated for any of them:

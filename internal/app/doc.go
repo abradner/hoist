@@ -12,10 +12,15 @@
 //   - A screen's derived data — what it shows, before any styling — lives in a separate
 //     file with no terminal dependency (matrix/cells.go) so it is unit-testable as plain
 //     values; the model file only lays that data out.
-//   - internal/ui holds the shared Styles palette and the status-bar helper; it imports
-//     Lip Gloss and x/ansi (width and strip), no Bubbles.
-//   - No layout library (AGENTS.md §4.7): screens compose strings with strings.Join and the
-//     Bubbles components they embed.
+//   - internal/ui holds the shared Styles palette, the frame chrome (ui.Frame, ui.Box,
+//     ui.Columns, ui.Dialog), relative time and the status-bar helper; it imports Lip Gloss
+//     and x/ansi (width and strip), no Bubbles.
+//   - No layout library (AGENTS.md §4.7) means no flexbox-for-terminals dependency: a
+//     screen's View is ui.Frame{...}.Render(styles, w, h), built on lipgloss's own borders
+//     and joins, with the footer always the last line. Hand-assembled box characters are the
+//     thing that rule forbids (§4.8, the M10 amendment).
+//   - Every screen's tests render through internal/ui/uitest: goldens at 80×24 and 120×40,
+//     and keypresses driven through uitest.Keys rather than fields set by hand.
 //
 // The stack gained pop with the first screen that opens on top of the matrix
 // (internal/app/plan): a screen never calls back into app to push or pop itself — that
