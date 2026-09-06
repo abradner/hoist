@@ -399,3 +399,37 @@ func TestMatchesPrefixRequiresHostBoundary(t *testing.T) {
 		})
 	}
 }
+
+// The source-disagrees warning names where the chosen ref came from. Through BuildPlan the
+// override is the --digest flag's and reads caller-supplied; through BuildPlanWith a caller
+// that resolved it from running pods says so, and the warning must not call a pod-resolved
+// ref caller-supplied (issue #25). The fixture's web family is the one whose staging
+// occurrences disagree.
+func TestBuildPlanWithReasonNamesTheOverrideSource(t *testing.T) {
+	r := discoverFixture(t)
+	override := map[string]image.Ref{"ghcr.io/example/web": {Tag: "v9", Digest: digestC}}
+	find := func(p Plan) string {
+		for _, w := range p.Warnings {
+			if w.Code == WarnSourceDisagrees && strings.Contains(w.Message, "ghcr.io/example/web") {
+				return w.Message
+			}
+		}
+		t.Fatalf("no source-disagrees warning for web: %+v", p.Warnings)
+		return ""
+	}
+	p, err := BuildPlan(r, "app-staging", "app-production", promotable, override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg := find(p); !strings.Contains(msg, "("+DefaultOverrideReason+")") {
+		t.Errorf("BuildPlan warning does not read caller-supplied: %s", msg)
+	}
+	p, err = BuildPlanWith(r, "app-staging", "app-production", promotable, override, map[string]string{"ghcr.io/example/web": "resolved from pods"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := find(p)
+	if !strings.Contains(msg, "(resolved from pods)") || strings.Contains(msg, DefaultOverrideReason) {
+		t.Errorf("BuildPlanWith warning does not carry the caller's reason: %s", msg)
+	}
+}

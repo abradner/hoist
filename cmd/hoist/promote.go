@@ -359,15 +359,16 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return exitFailure
 	}
 	planDigests := map[string]image.Ref(digests)
+	var planReasons map[string]string
 	if len(opts.order) > 0 {
 		rep, err := runResolution(context.Background(), r, *from, prefixes, opts, digests)
 		if err != nil {
 			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 			return exitFailure
 		}
-		planDigests = rep.digests(digests)
+		planDigests, planReasons = rep.digests(digests), rep.reasons()
 	}
-	plan, err := gitops.BuildPlan(r, *from, *to, prefixes, planDigests)
+	plan, err := gitops.BuildPlanWith(r, *from, *to, prefixes, planDigests, planReasons)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
@@ -397,7 +398,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// needs this cross-check.
 	if *direct {
 		buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
-			return gitops.BuildPlan(fresh, *from, *to, prefixes, planDigests)
+			return gitops.BuildPlanWith(fresh, *from, *to, prefixes, planDigests, planReasons)
 		}
 		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, plan, buildFresh); err != nil {
 			fmt.Fprintf(stderr, "hoist promote: %v\n", err)

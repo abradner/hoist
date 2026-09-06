@@ -654,3 +654,29 @@ func TestRegistryEntryForRejectsHostConfusion(t *testing.T) {
 		t.Fatalf("registryEntryFor(real repo) = %+v, want the ghcr.io entry", e)
 	}
 }
+
+// With two registries[] entries whose repos both fail every auth link, the diagnostic names
+// one entry's auth order. Which one used to depend on map iteration, so the same config
+// could print (env) on one run and (keychain) on the next (issue #30); now it is the entry
+// of the first repo in sorted order, every time. Eight runs is enough to make the old
+// coin-flip visible.
+func TestPlanAuthDiagnosticIsDeterministicAcrossRegistryEntries(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))
+	writeFile(t, root, "cluster/apps/zed-app-staging-app.yaml", argoApp("zed-staging", "cluster/apps/app-staging/zed", "app-staging"))
+	writeFile(t, root, "cluster/apps/marketing-app-production-app.yaml", argoApp("marketing-production", "cluster/apps/app-production/marketing", "app-production"))
+	writeFile(t, root, "cluster/apps/app-staging/web/app.yaml", deployment("ghcr.io/example/web:sha-abc123"))
+	writeFile(t, root, "cluster/apps/app-staging/zed/app.yaml", deployment("ghcr.io/other/zed:sha-abc123"))
+	writeFile(t, root, "cluster/apps/app-production/marketing/app.yaml", deployment("ghcr.io/example/marketing:sha-000000@"+digestB))
+	cfgPath := writeConfig(t, "repos:\n  - path: "+root+"\n    promotable: [ghcr.io/example/, ghcr.io/other/]\nregistries:\n  - prefix: ghcr.io/example/\n    auth: [env]\n  - prefix: ghcr.io/other/\n    auth: [keychain]\n")
+	installFakes(t, &k8s.Fake{}, &registry.Fake{Err: errors.New("registry: no credential source worked: DENIED")})
+	for i := 0; i < 8; i++ {
+		code, out, errOut := run3(t, "--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run")
+		if code != 0 {
+			t.Fatalf("run %d: exit %d; stderr: %s", i, code, errOut)
+		}
+		if !strings.Contains(out, "all auth sources failed (env)") {
+			t.Fatalf("run %d: diagnostic did not name the sorted-first entry's auth order:\n%s", i, out)
+		}
+	}
+}

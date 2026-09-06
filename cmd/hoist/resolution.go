@@ -329,7 +329,16 @@ func runResolution(ctx context.Context, r *gitops.Repo, from string, prefixes []
 		mr := &multiRegistry{byRepo: map[string]registry.Registry{}}
 		built := map[*config.RegistryConfig]registry.Registry{}
 		var primaryAuth []registry.AuthSource
-		for repo, e := range entryFor {
+		// Sorted, so which entry becomes mr.primary — and therefore which auth order the
+		// "all auth sources failed" diagnostic names when several entries all fail — is the
+		// same on every run, mirroring distinctClients' own ordering (issue #30).
+		repos := make([]string, 0, len(entryFor))
+		for repo := range entryFor {
+			repos = append(repos, repo)
+		}
+		sort.Strings(repos)
+		for _, repo := range repos {
+			e := entryFor[repo]
 			c, ok := built[e]
 			if !ok {
 				auth, clusterSecret, opRef := entryAuthConfig(e, opts)
@@ -372,6 +381,17 @@ func (rep *resolutionReport) digests(overrides map[string]image.Ref) map[string]
 		out[repo] = ref
 	}
 	return out
+}
+
+// reasons is digests' companion for gitops.BuildPlanWith: where each override came from, so
+// the plan's source-disagrees warning names the pods rather than calling a pod-resolved ref
+// caller-supplied (issue #25). A nil report has no reasons, and BuildPlanWith's default
+// covers the --digest flag.
+func (rep *resolutionReport) reasons() map[string]string {
+	if rep == nil {
+		return nil
+	}
+	return resolve.Reasons(rep.res)
 }
 
 // print renders the section: how each repo was resolved, and which cluster context and

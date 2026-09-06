@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/registry"
@@ -344,14 +345,14 @@ func TestPrintPlanRefusesFileOutsideRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Positive control: the unmodified plan prints.
-	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}, nil); err != nil {
+	if err := printPlan(io.Discard, r, &plan, []string{"ghcr.io/"}, nil, nil); err != nil {
 		t.Fatalf("control: %v", err)
 	}
 	for _, file := range []string{"../" + plan.Edits[0].File, "x/../../" + plan.Edits[0].File} {
 		esc := plan
 		esc.Edits = append([]gitops.Edit(nil), plan.Edits...)
 		esc.Edits[0].File = file
-		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}, nil); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
+		if err := printPlan(io.Discard, r, &esc, []string{"ghcr.io/"}, nil, nil); err == nil || !strings.Contains(err.Error(), "relative path inside the repo") {
 			t.Errorf("%s: printPlan err = %v, want a containment refusal", file, err)
 		}
 	}
@@ -604,5 +605,68 @@ func TestConfigShowAndPath(t *testing.T) {
 		if code := run(args, io.Discard, io.Discard); code != exitUsage {
 			t.Errorf("run(%q) exit %d, want %d", args, code, exitUsage)
 		}
+	}
+}
+
+// Narrowing --promotable to one family is how a promotion is scoped when an env pair holds
+// several; the repos it leaves out are still the operator's own, and the Untouched section
+// must not call them third-party (issue #65). Only a repo matching no configured prefix at
+// all is third-party; a flags-only run has no configured list, so there everything outside
+// the flag stays third-party (the control).
+func TestPlanUntouchedDistinguishesNarrowedFirstPartyFromThirdParty(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    promotable: [ghcr.io/example/]\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--promotable", "ghcr.io/example/web", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		"ghcr.io/example/counta:v202601151010@sha256:abad1dea",
+		"(first-party, outside --promotable ghcr.io/example/web)",
+		"docker.io/temporalio/server:1.31.2  (third-party: outside ghcr.io/example/web)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "counta:v202601151010@sha256:abad1dea") && strings.Contains(s, "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea  (third-party") {
+		t.Errorf("a first-party repo is labelled third-party:\n%s", s)
+	}
+	out.Reset()
+	if code := run(planArgs("--dry-run", "--promotable", "ghcr.io/example/web"), &out, &errOut); code != 0 {
+		t.Fatalf("flags-only: exit %d; stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea  (third-party: outside ghcr.io/example/web)") {
+		t.Errorf("flags-only run has no configured list to be first-party against:\n%s", out.String())
+	}
+}
+
+// A dry run prints the id promote would give the same plan, so the operator can find the
+// branch, PR marker and approval token before anything is written (issue #15). The id
+// hashes the forge repo name, which only config supplies: a flags-only run prints none.
+func TestPlanPrintsPromotionIDWhenGitHubIsConfigured(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    github: me/my-gitops\n    promotable: [ghcr.io/example/]\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	r, err := gitops.Discover(absFixture(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("me/my-gitops", plan)
+	if want := "Promotion id: " + id + " (branch hoist/app-production/" + id + ")"; !strings.Contains(out.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, out.String())
+	}
+	out.Reset()
+	if code := run(planArgs("--dry-run"), &out, &errOut); code != 0 {
+		t.Fatalf("flags-only: exit %d; stderr: %s", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "Promotion id:") {
+		t.Errorf("flags-only run printed an id with no forge repo to hash:\n%s", out.String())
 	}
 }

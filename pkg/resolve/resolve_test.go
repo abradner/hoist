@@ -448,3 +448,25 @@ func TestParseOrder(t *testing.T) {
 		}
 	}
 }
+
+// Reasons is Digests' companion for the plan's source-disagrees warning: a pod-resolved
+// ref reads "resolved from pods", a caller override keeps its own detail, and an
+// unresolved repo has no entry — so a plan never labels a running digest caller-supplied
+// (issue #25).
+func TestReasonsNameTheSourcePerRepo(t *testing.T) {
+	res := map[string]Resolution{
+		"ghcr.io/example/web":  {Ref: image.Ref{Repo: "ghcr.io/example/web", Tag: "v1", Digest: digestA}, Source: SourcePods, Detail: "2 pods agree"},
+		"ghcr.io/example/api":  {Ref: image.Ref{Repo: "ghcr.io/example/api", Tag: "v1", Digest: digestA}, Source: SourceOverride, Detail: "caller-supplied digest"},
+		"ghcr.io/example/none": {},
+	}
+	got := Reasons(res)
+	want := map[string]string{"ghcr.io/example/web": "resolved from pods", "ghcr.io/example/api": "caller-supplied digest"}
+	if len(got) != len(want) {
+		t.Fatalf("Reasons = %v, want %v", got, want)
+	}
+	for repo, reason := range want {
+		if got[repo] != reason {
+			t.Errorf("Reasons[%s] = %q, want %q", repo, got[repo], reason)
+		}
+	}
+}

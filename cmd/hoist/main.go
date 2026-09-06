@@ -23,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -290,7 +291,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		}
 		planDigests = rep.digests(digests)
 	}
-	plan, err := gitops.BuildPlan(r, *from, *to, prefixes, planDigests)
+	plan, err := gitops.BuildPlanWith(r, *from, *to, prefixes, planDigests, rep.reasons())
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
@@ -298,9 +299,20 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if rep != nil {
 		plan.Warnings = append(resolve.Warnings(rep.res), plan.Warnings...)
 	}
-	if err := printPlan(stdout, r, &plan, prefixes, rep); err != nil {
+	var configured []string
+	if eff.cfg != nil {
+		configured = eff.cfg.Promotable
+	}
+	if err := printPlan(stdout, r, &plan, prefixes, configured, rep); err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
+	}
+	// The id promote would give this exact plan (issue #15): it needs the forge repo name,
+	// which is config, so a flags-only run — no repos[].github to hash — prints none rather
+	// than an id derived from a checkout directory name that would drift.
+	if eff.cfg != nil && eff.cfg.GitHub != "" {
+		id := engine.DeriveID(eff.cfg.GitHub, plan)
+		fmt.Fprintf(stdout, "\nPromotion id: %s (branch %s)\n", id, engine.BranchName(plan.TargetEnv, id))
 	}
 	if !*dryRun {
 		fmt.Fprintln(stderr, "hoist plan: promotion without --dry-run lands in a later milestone; nothing was written. The output above is what it would change.")
@@ -393,7 +405,7 @@ func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests dige
 // printPlan renders the plan read-only: files are read from disk, edits applied in memory,
 // verified, and diffed. Nothing is written. rep, when non-nil, adds the resolution section
 // before the warnings; with nil the output is M1's, byte for byte.
-func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string, rep *resolutionReport) error {
+func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes, configured []string, rep *resolutionReport) error {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
 	var noops []gitops.Edit
@@ -443,7 +455,7 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 	}
 	fmt.Fprintf(w, "Untouched (%d):\n", len(plan.Untouched))
 	for _, ref := range plan.Untouched {
-		fmt.Fprintf(w, "  %s  (%s)\n", ref, untouchedReason(ref, plan, prefixes))
+		fmt.Fprintf(w, "  %s  (%s)\n", ref, untouchedReason(ref, plan, prefixes, configured))
 	}
 	fmt.Fprintln(w)
 	if rep != nil {
@@ -471,8 +483,18 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes []string
 // while a deploy skips every repo that simply is not the one image it was asked to write — those
 // repos are running perfectly well in the env, so a promotion's wording would flatly misreport
 // them (and, with a deploy's empty SourceEnv, would read "not running in ").
-func untouchedReason(ref image.Ref, plan *gitops.Plan, prefixes []string) string {
+//
+// prefixes is what this invocation may promote; configured is the repo's own promotable list
+// from the config file (nil on a flags-only run). They differ when --promotable narrowed the
+// run to one family, and a first-party repo left out by that narrowing is not third-party —
+// saying it was undercut the very output an operator scoping a production promotion is
+// reading for safety (issue #65). "third-party" is reserved for a repo matching no
+// configured prefix at all.
+func untouchedReason(ref image.Ref, plan *gitops.Plan, prefixes, configured []string) string {
 	if !gitops.IsPromotable(ref.Repo, prefixes) {
+		if len(configured) > 0 && gitops.IsPromotable(ref.Repo, configured) {
+			return "first-party, outside --promotable " + strings.Join(prefixes, ",")
+		}
 		return "third-party: outside " + strings.Join(prefixes, ",")
 	}
 	if plan.IsDeploy() {

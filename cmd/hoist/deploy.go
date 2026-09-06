@@ -110,7 +110,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	}
 
 	if *dryRun {
-		if err := printPlan(stdout, r, &plan, eff.promotable, nil); err != nil {
+		if err := printPlan(stdout, r, &plan, eff.promotable, nil, nil); err != nil {
 			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 			return exitFailure
 		}

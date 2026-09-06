@@ -46,6 +46,20 @@ const (
 // WarnSourceOnlyUnwritable warning, since invariant 1 forbids writing a bare tag, not reading
 // one. The plan also fails if any edit would touch a block scalar.
 func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string]image.Ref) (Plan, error) {
+	return BuildPlanWith(r, src, dst, promotable, digests, nil)
+}
+
+// DefaultOverrideReason is what a source-disagrees warning says about an override whose
+// origin the caller did not name: the --digest flag's own case.
+const DefaultOverrideReason = "caller-supplied digest"
+
+// BuildPlanWith is BuildPlan with a reason per override, so the source-disagrees warning can
+// say where the chosen ref actually came from. A caller that resolved the ref from the
+// source env's running pods (pkg/resolve) passes that as the reason; the warning then reads
+// "resolved from pods" rather than "caller-supplied digest", which was true only of the
+// mechanism (the override map) and false about the provenance the operator is checking
+// (issue #25). A repo with no entry in reasons gets DefaultOverrideReason.
+func BuildPlanWith(r *Repo, src, dst string, promotable []string, digests map[string]image.Ref, reasons map[string]string) (Plan, error) {
 	if r == nil {
 		return Plan{}, errors.New("nil repo")
 	}
@@ -102,7 +116,10 @@ func BuildPlan(r *Repo, src, dst string, promotable []string, digests map[string
 			if why := unwritable(ov); why != "" {
 				return Plan{}, fmt.Errorf("digest override for %s is %s", repo, why)
 			}
-			chosen, reason = ov, "caller-supplied digest"
+			chosen, reason = ov, DefaultOverrideReason
+			if why := reasons[repo]; why != "" {
+				reason = why
+			}
 		}
 		if disagree {
 			plan.Warnings = append(plan.Warnings, Warning{
