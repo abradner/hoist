@@ -565,7 +565,12 @@ func UnifiedRestartDiff(path string, before []byte, restarts []RestartEdit) stri
 	if len(restarts) == 0 {
 		return ""
 	}
-	lines := bytes.Split(before, []byte{'\n'})
+	// splitForDiff, not bytes.Split: the latter leaves a synthetic empty final element for a
+	// file ending in a newline, which a hunk reaching EOF would render as a phantom blank
+	// context line — and it loses the fact that a file did NOT end in one, which a truthful
+	// unified diff has to mark (Copilot, PR #80). This is the same pair UnifiedDiff uses.
+	lines, trailingNewline := splitForDiff(before)
+	last := len(lines) - 1
 	sorted := append([]RestartEdit(nil), restarts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Line < sorted[j].Line })
 
@@ -611,18 +616,21 @@ func UnifiedRestartDiff(path string, before []byte, restarts []RestartEdit) stri
 		oldCount := g.end - g.start
 		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", g.start+1, oldCount, g.start+1+offset, oldCount+added)
 		for k := g.start; k < g.end; k++ {
+			// The "\ No newline at end of file" marker belongs on the last line of a file that
+			// has no trailing newline, and on nothing else.
+			atEOF := k == last && !trailingNewline
 			r, isAnchor := byAnchor[k]
 			switch {
 			case isAnchor && r.Replace:
-				fmt.Fprintf(&sb, "-%s\n", lines[k])
-				fmt.Fprintf(&sb, "+%s\n", r.Lines[0])
+				writeDiffLine(&sb, '-', lines[k], atEOF)
+				writeDiffLine(&sb, '+', []byte(r.Lines[0]), atEOF)
 			case isAnchor:
-				fmt.Fprintf(&sb, " %s\n", lines[k])
-				for _, l := range r.Lines {
-					fmt.Fprintf(&sb, "+%s\n", l)
+				writeDiffLine(&sb, ' ', lines[k], atEOF && len(r.Lines) == 0)
+				for i, l := range r.Lines {
+					writeDiffLine(&sb, '+', []byte(l), atEOF && i == len(r.Lines)-1)
 				}
 			default:
-				fmt.Fprintf(&sb, " %s\n", lines[k])
+				writeDiffLine(&sb, ' ', lines[k], atEOF)
 			}
 		}
 		offset += added

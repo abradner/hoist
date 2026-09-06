@@ -610,3 +610,43 @@ func TestRestartDiffMergesOverlappingHunks(t *testing.T) {
 		seen[l] = true
 	}
 }
+
+// UnifiedRestartDiff must render both EOF forms truthfully: no phantom blank context line for
+// a file that ends in a newline, and the "\ No newline at end of file" marker for one that does
+// not (Copilot, PR #80).
+//
+// Driven at the function, for the same reason as the overlapping-hunk test above: a valid
+// Deployment's pod-template anchor is never within three lines of EOF, so no plan reaches
+// either case. The renderer takes a []RestartEdit and should be total over it.
+func TestRestartDiffHandlesBothEOFForms(t *testing.T) {
+	edit := func(line int) RestartEdit {
+		return RestartEdit{File: "m.yaml", Line: line, Lines: []string{"  x: y"}}
+	}
+
+	// Ends in a newline: no marker, and no line that is just the context prefix.
+	withNL := []byte("a\nb\nc\nd\n")
+	got := UnifiedRestartDiff("m.yaml", withNL, []RestartEdit{edit(4)})
+	if strings.Contains(got, "No newline at end of file") {
+		t.Errorf("this file ends in a newline; the marker must not appear:\n%s", got)
+	}
+	for _, l := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if l == " " {
+			t.Errorf("a phantom blank context line was rendered at EOF:\n%s", got)
+		}
+	}
+	// The hunk covers the whole four-line file and adds one.
+	if !strings.Contains(got, "@@ -1,4 +1,5 @@") {
+		t.Errorf("unexpected hunk header:\n%s", got)
+	}
+
+	// No trailing newline: the marker appears, once, on the last rendered line.
+	noNL := []byte("a\nb\nc\nd")
+	got2 := UnifiedRestartDiff("m.yaml", noNL, []RestartEdit{edit(4)})
+	if n := strings.Count(got2, "No newline at end of file"); n != 1 {
+		t.Errorf("expected exactly one no-newline marker, got %d:\n%s", n, got2)
+	}
+	lines := strings.Split(strings.TrimRight(got2, "\n"), "\n")
+	if !strings.HasPrefix(lines[len(lines)-1], "\\ No newline") {
+		t.Errorf("the marker should be on the last rendered line:\n%s", got2)
+	}
+}

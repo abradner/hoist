@@ -69,8 +69,13 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// from it, not only one that happens to come out all-no-op. runPromote does exactly
 		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
 		// disagree about when a plan is trustworthy.
-		if err := checkCloneCurrentForBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
-			return engine.PromotionState{}, nil, err
+		// Skipped for a restart: with no Edits this validates no files at all, yet still fetches
+		// origin/<base> — a round trip that buys nothing before the restart's own two checks
+		// fetch it again (Copilot, PR #80).
+		if !p.IsRestart() {
+			if err := checkCloneCurrentForBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
+				return engine.PromotionState{}, nil, err
+			}
 		}
 		if p.IsRestart() {
 			// A restart's freshness question is about the files it writes, not the images it
