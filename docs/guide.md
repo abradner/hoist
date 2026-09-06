@@ -253,12 +253,15 @@ CLI — because nothing is committed and nothing reviews it.
 A stopped promotion says which step and why; this is what to do about each. `R` on the flight
 screen (or `hoist resume <id>`) re-observes once you have.
 
-**CI.** `CI: 2/3 checks complete` is waiting, not stopped. A failed check is named; fix it on the
-branch (push to `hoist/<env>/<id>` — the promotion refuses to merge a head it did not push, so
-re-observe after and it will say `something else moved the branch`; the honest path is to fix
-the underlying cause and let hoist push again, or resolve it by hand and delete the state file to
-start fresh). *No checks reported after the grace period* depends on the repo's `ci.none`
-setting: `green` (the default) treats it as passing, `prompt` waits for you to say so —
+**CI.** `CI: 2/3 checks complete` is waiting, not stopped. `1 of 3 checks failed: <name>` — or
+`… were skipped (never ran)`, which blocks the same way — names the check. Do not push a fix to
+`hoist/<env>/<id>`: the promotion only ever merges the head it pushed itself, and a branch
+someone else moved is refused at the merge. If the failure is transient, re-run the failed
+workflow on the same commit in GitHub and `R`. If it needs a real change in the GitOps repo,
+land that change on the base branch through its own PR, then abandon this promotion — close its
+PR and delete its branch on origin — and run the promotion again, so it starts from the updated
+base. *No checks reported after the grace period* depends on the repo's `ci.none` setting:
+`green` (the default) treats it as passing, `prompt` waits for you to say so —
 
 ```bash
 hoist resume <id> --override-ci-none
@@ -273,8 +276,9 @@ hoist resume <id> --override-ci-none
 hoist approve <id>
 ```
 
-on the PR — the whole comment, nothing else in it — after the head commit hoist pushed; an
-earlier comment does not count. hoist cannot approve its own PRs, since it acts as you.
+on the PR, on a line of its own (the rest of the comment can say whatever it likes; the case
+and a leading `/` do not matter), after the head commit hoist pushed — an earlier comment does
+not count. hoist cannot approve its own PRs, since it acts as you.
 `rejected by <login> at <time>` means an approver commented `hoist reject <id>` after the last
 approval; a new approval after the rejection wins.
 
