@@ -20,7 +20,10 @@ import (
 type Frame struct {
 	Title    string
 	Sections []string
-	Footer   string
+	// Panes are full-width blocks (already rendered, a Box each) stacked under the main box
+	// and above the footer — the matrix's in-flight pane. Empty strings are skipped.
+	Panes  []string
+	Footer string
 }
 
 // chrome is the number of rows the box's own edges take: top and bottom.
@@ -48,6 +51,11 @@ func (f Frame) Render(st Styles, width, height int) string {
 		return footer
 	}
 	box := Box(st, f.Title, f.Sections, width)
+	for _, p := range f.Panes {
+		if p != "" {
+			box += "\n" + p
+		}
+	}
 	lines := strings.Split(box, "\n")
 	room := height - 1
 	if len(lines) > room {

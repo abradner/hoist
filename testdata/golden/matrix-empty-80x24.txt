@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │no environments discovered                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env (none) · families 0 · un… p promote • d deploy • R restart • ? help • q quit
+env (none)                     p promote • d deploy • r resume • ? help • q quit

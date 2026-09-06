@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │⚠ c is a production env: writes there always open a PR                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env c (production) · familie… p promote • d deploy • R restart • ? help • q quit
+env c (production)             p promote • d deploy • r resume • ? help • q quit

@@ -19,6 +19,7 @@ import (
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -198,27 +199,129 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			steps = engine.AllSteps(g, f, a, ro, nil)
 		}
 
-		driveFn := func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-			next := cur
-			driveErr := engine.Drive(ctx, steps, &next, save)
-			// Waiting and Blocked are read from statuses (via engine.Status below), not
-			// surfaced as err — see flight.DriveFunc's own doc comment. Any other error
-			// from Drive (a plumbing hiccup on a retryable step, or a terminal Act/Observe
-			// failure) is a genuine failure and is returned as err.
-			var outErr error
-			var blocked *engine.BlockedError
-			if driveErr != nil && !errors.Is(driveErr, engine.ErrWaiting) && !errors.As(driveErr, &blocked) {
-				outErr = driveErr
-			}
-			done, statuses, statusErr := engine.Status(ctx, steps, &next)
-			if statusErr != nil && outErr == nil {
-				outErr = statusErr
-			}
-			return next, done, statuses, outErr
-		}
-
-		return *s, driveFn, nil
+		return *s, driveFuncFor(steps, save), nil
 	}
+}
+
+// driveFuncFor is the flight.DriveFunc both a confirmed plan and a resumed promotion drive
+// through: one engine.Drive, then engine.Status for the full step list. Waiting and Blocked
+// are read from statuses, not surfaced as err — see flight.DriveFunc's own doc comment. Any
+// other error from Drive (a plumbing hiccup on a retryable step, or a terminal Act/Observe
+// failure) is a genuine failure and is returned as err.
+func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error) flight.DriveFunc {
+	return func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+		next := cur
+		driveErr := engine.Drive(ctx, steps, &next, save)
+		var outErr error
+		var blocked *engine.BlockedError
+		if driveErr != nil && !errors.Is(driveErr, engine.ErrWaiting) && !errors.As(driveErr, &blocked) {
+			outErr = driveErr
+		}
+		done, statuses, statusErr := engine.Status(ctx, steps, &next)
+		if statusErr != nil && outErr == nil {
+			outErr = statusErr
+		}
+		return next, done, statuses, outErr
+	}
+}
+
+// buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10): List
+// re-observes every state file the way runPromotions does — the step list the state itself
+// implies, against a forge and Argo/rollout clients built from the repo config it names —
+// and Resume builds the same state and DriveFunc runResume would. A state whose repo is not
+// in the config file, or whose clients cannot be built, is listed with that as its Err rather
+// than dropped: a promotion that cannot be confirmed is not one that is not there.
+func buildInFlightFuncs(cfg *config.Config) app.InFlight {
+	if cfg == nil {
+		return app.InFlight{}
+	}
+	return app.InFlight{
+		List: func(ctx context.Context) ([]flight.Summary, error) {
+			states, err := engine.ListStates()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]flight.Summary, 0, len(states))
+			for _, s := range states {
+				out = append(out, observeForList(ctx, cfg, s))
+			}
+			return out, nil
+		},
+		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.DriveFunc, error) {
+			states, err := engine.ListStates()
+			if err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			var s *engine.PromotionState
+			for _, st := range states {
+				if st.ID == id {
+					s = st
+					break
+				}
+			}
+			if s == nil {
+				return engine.PromotionState{}, nil, fmt.Errorf("no promotion %s found", id)
+			}
+			rc, ok := repoConfigFor(cfg, s.RepoFullName)
+			if !ok {
+				return engine.PromotionState{}, nil, fmt.Errorf("%s: repo %s is not in the config file", s.ID, s.RepoFullName)
+			}
+			f, err := newForge(rc.GitHub)
+			if err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			a, ro, err := buildArgoRollout(rc)
+			if err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			// The same carry-forward rules runResume applies (see its own comments): policy
+			// fields stay as persisted, ArgoNamespace is re-read, a pre-M5 state is repaired.
+			s.ArgoNamespace = rc.Kube.ArgoNamespace
+			if err := ensureArgoApps(s, rc); err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			statePath, err := engine.StatePath(s.ID)
+			if err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+			save := func(st *engine.PromotionState) error { return engine.SaveState(statePath, st) }
+			// Drive the mode this promotion actually is (runResume's own reasoning): a direct
+			// promotion through AllSteps would push its branch and open a PR. Confirmed is
+			// true because the state file exists only because the operator already confirmed.
+			steps := engine.AllSteps(newGit, f, a, ro, nil)
+			if s.Direct {
+				steps = engine.AllDirectSteps(newGit, a, ro, rc.Envs.Production, true, nil)
+			}
+			return *s, driveFuncFor(steps, save), nil
+		},
+	}
+}
+
+// observeForList re-observes one state for the in-flight pane: engine.Status over the list
+// the state implies, so the pane can draw every step, not only where it stopped.
+func observeForList(ctx context.Context, cfg *config.Config, s *engine.PromotionState) flight.Summary {
+	rc, ok := repoConfigFor(cfg, s.RepoFullName)
+	if !ok {
+		return flight.Summarize(*s, false, nil, fmt.Errorf("repo %s is not in the config file", s.RepoFullName))
+	}
+	f, err := newForge(rc.GitHub)
+	if err != nil {
+		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build a forge client: %w", err))
+	}
+	a, ro, err := buildArgoRollout(rc)
+	if err != nil {
+		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build an Argo/rollout client: %s", redact.Strings(err.Error())))
+	}
+	if err := ensureArgoApps(s, rc); err != nil {
+		return flight.Summarize(*s, false, nil, errors.New(redact.Strings(err.Error())))
+	}
+	done, statuses, err := engine.Status(ctx, engine.ObserveSteps(s, newGit, f, a, ro, nil), s)
+	if err != nil {
+		// The same rule as the Argo/rollout client error above: every adaptor scrubs its own
+		// output, and the pane still passes what it prints through redact.
+		err = errors.New(redact.Strings(err.Error()))
+	}
+	return flight.Summarize(*s, done, statuses, err)
 }
 
 // buildPollDurations translates config.PollConfig's CI/Approval/Deadline into

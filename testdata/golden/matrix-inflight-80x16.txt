@@ -1,5 +1,5 @@
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY      ▸ A                   B                    C ⚠                   │
+│ FAMILY      ▸ A                   B                    C                     │
 │ absent      v1            pinned                       v9    pinned          │
 │ drift       v1          unpinned  v2           pinned  v2  unpinned          │
 │ empty                             no images                                  │
@@ -9,16 +9,8 @@
 │ sidecar     v1            pinned  v1           pinned                        │
 │ thirdparty  7           external  8          external  8   external          │
 │                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-├──────────────────────────────────────────────────────────────────────────────┤
-│↑/k up • ↓/j down • ←/h env • →/l env • p promote • P promote to… • d deploy …│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
+│⟳ 5pr6sd333t → app-production   blocked on approval · 12m                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 env a                          p promote • d deploy • r resume • ? help • q quit

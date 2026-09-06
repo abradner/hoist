@@ -1496,3 +1496,108 @@ func TestRestartKeyWithNoClusterSaysSo(t *testing.T) {
 		t.Errorf("the matrix should say why:\n%s", v)
 	}
 }
+
+// The in-flight pane (M10): the root lists at boot, hands the matrix what it found, and r
+// on the matrix resumes through the same promotionBuiltMsg path a confirmed plan takes.
+func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing.T) {
+	listed := 0
+	resumed := ""
+	parked := engine.PromotionState{ID: "5pr6sd333t", SourceEnv: "app-staging", TargetEnv: "app-production",
+		PR: &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}}
+	inFlight := InFlight{
+		List: func(context.Context) ([]flight.Summary, error) {
+			listed++
+			return []flight.Summary{flight.Summarize(parked, false, []engine.StepStatus{
+				{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
+				{Step: engine.StepCommitted, Observation: engine.Observation{Satisfied: true}},
+				{Step: engine.StepPushed, Observation: engine.Observation{Satisfied: true}},
+				{Step: engine.StepPROpened, Observation: engine.Observation{Satisfied: true}},
+				{Step: engine.StepCIGreen, Observation: engine.Observation{Satisfied: true}},
+				{Step: engine.StepApproved, Observation: engine.Observation{Waiting: true}},
+			}, nil)}, nil
+		},
+		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.DriveFunc, error) {
+			resumed = id
+			return parked, func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+				return s, true, nil, nil
+			}, nil
+		},
+	}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{}).WithInFlight(inFlight)
+	var m tea.Model = root
+	init := root.Init()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Init batches the listing with the theme request and the tick; run the listing.
+	var got inFlightMsg
+	for _, c := range init().(tea.BatchMsg) {
+		if c == nil {
+			continue
+		}
+		if msg, ok := c().(inFlightMsg); ok {
+			got = msg
+		}
+	}
+	if listed != 1 || len(got.list) != 1 {
+		t.Fatalf("listed %d times, msg %+v", listed, got)
+	}
+	m, _ = m.Update(got)
+	if v := plain(m); !strings.Contains(v, "in flight (1)") || !strings.Contains(v, "hoist approve 5pr6sd333t") {
+		t.Fatalf("the matrix did not receive the listing:\n%s", v)
+	}
+	// r: resume, via a command that yields promotionBuiltMsg, which pushes the flight screen.
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if cmd == nil {
+		t.Fatal("r produced no command")
+	}
+	m, cmd = m.Update(cmd()) // matrix.ResumeMsg -> the root's resume command
+	if cmd == nil {
+		t.Fatal("ResumeMsg produced no command")
+	}
+	built := cmd()
+	if resumed != "5pr6sd333t" {
+		t.Fatalf("Resume called with %q", resumed)
+	}
+	m, _ = m.Update(built)
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after resume, want 2 (matrix, flight)", n)
+	}
+	if v := plain(m); !strings.Contains(v, "5pr6sd333t") || !strings.Contains(v, "app-staging -> app-production") {
+		t.Fatalf("flight screen not showing the resumed promotion:\n%s", v)
+	}
+	// A tick while the flight screen is on top does not list; back on the matrix it does.
+	_, cmd = m.Update(inFlightTickMsg{})
+	if msg := cmd(); msg != nil {
+		if _, ok := msg.(inFlightMsg); ok {
+			t.Fatal("a tick with the flight screen on top must not list")
+		}
+	}
+	if listed != 1 {
+		t.Fatalf("listed %d times after a tick off the matrix", listed)
+	}
+	m, cmd = m.Update(flight.BackMsg{})
+	if cmd == nil {
+		t.Fatal("popping back to the matrix must re-list at once")
+	}
+	if _, ok := cmd().(inFlightMsg); !ok || listed != 2 {
+		t.Fatalf("pop re-list: listed %d", listed)
+	}
+	if v := plain(m); !strings.Contains(v, "FAMILY") {
+		t.Fatalf("not back on the matrix:\n%s", v)
+	}
+}
+
+// With nothing wired, r says so instead of panicking, and no listing is attempted.
+func TestInFlightUnwiredDegrades(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(matrix.ResumeMsg{ID: "x"})
+	if v := plain(m); !strings.Contains(v, "resuming a promotion is not wired up") {
+		t.Fatalf("notice missing:\n%s", v)
+	}
+	if v := plain(m); strings.Contains(v, "in flight") {
+		t.Fatalf("no pane without a listing:\n%s", v)
+	}
+}
