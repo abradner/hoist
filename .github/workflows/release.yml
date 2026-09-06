@@ -1,0 +1,32 @@
+name: release
+
+# A merge is not a release (AGENTS.md §7): pushing a v* tag is the release step, and it gets its
+# own gate — the full test suite runs at the tag before goreleaser publishes anything.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # goreleaser's changelog reads the tags
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -count=1 -race ./...
+      - run: ./scripts/public-safety.sh
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

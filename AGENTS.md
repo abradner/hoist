@@ -95,7 +95,7 @@ A conflict with a principle is a stop-and-check, never something to quietly work
 | State | JSON files under `$XDG_STATE_HOME/hoist/` | No database, no workflow engine (§4.1) |
 | Testing | `go test` with golden files, `client-go` fakes, ggcr's in-memory registry, real `git` in temp dirs | See §6 |
 | Lint | golangci-lint v2 | Pinned in `mise.toml` and CI |
-| Deployment | `go install …/cmd/hoist@latest`; tagged releases later | See §7 |
+| Deployment | `go install …/cmd/hoist@latest` at the newest tag; goreleaser binaries per tag | See §7 |
 
 ## 4. Critical Architectural Rules
 
@@ -468,9 +468,14 @@ branch protection exists — it does not yet; until then the merge gate is the o
 §8 plus a green rollup you have read job-by-job. Renovate (`renovate.json5`) opens grouped
 dependency PRs on a weekly schedule; it is scheduled tooling, never a PR gate.
 
-Deployment is `go install github.com/abradner/hoist/cmd/hoist@latest` from `main`. Tagged releases
-with prebuilt binaries (goreleaser, Homebrew tap) are planned for after M7 and nothing should be
-built for them until then.
+Deployment is `go install github.com/abradner/hoist/cmd/hoist@latest`, which resolves to the newest
+`v*` tag once one exists (and `main` until then), plus prebuilt binaries from goreleaser
+(`.goreleaser.yaml`) on every tag push (`.github/workflows/release.yml`: `go vet`, the race suite
+and the public-safety grep run at the tag before anything is published). `ci.yml`'s
+`release-config` job snapshot-builds this platform's binary on every PR and runs its `--version`,
+so the config cannot rot between tags. A Homebrew tap needs its own repo and is not built (issue
+in the tracker). The version string is the ldflag when goreleaser set it, else the module version
+Go embeds for a `go install` at a tag, else `dev` (`versionString`, `cmd/hoist/main.go`).
 
 Two universal cautions, whatever the pipeline:
 
@@ -489,9 +494,10 @@ Two universal cautions, whatever the pipeline:
   passed `--ensure-latest`, so an upstream release turned every PR in a sibling repo red while
   reporting a version fact through the channel reserved for security failures.)
 - **A merge is not a release** — if images/artifacts build from tags only, merged work has no
-  deployable artifact until a tag exists. Today `go install …@latest` builds from `main`, so a
-  merge *is* the release for anyone installing that way; when tagged releases arrive, this line
-  becomes literally true and the release step gets its own approval (batch-review Phase 8).
+  deployable artifact until a tag exists. Since the release workflow landed this is literally
+  true: `go install …@latest` and the binaries both follow the newest `v*` tag, and pushing that
+  tag is the release step, with its own approval (batch-review Phase 8) — never a side effect of
+  a merge.
 
 ## 8. Working Rules
 
