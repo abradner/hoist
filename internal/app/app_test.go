@@ -21,14 +21,17 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
@@ -58,7 +61,7 @@ func sizedWithPromotion(t *testing.T, promo Promotion) tea.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, promo, nil)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, promo, nil, apprestart.Funcs{})
 	_ = m.Init()
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -1151,7 +1154,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, nil)
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, nil, apprestart.Funcs{})
 		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 		tm, _ = tm.Update(tags.SelectedMsg{
 			ImageRepo: "ghcr.io/example/web",
@@ -1294,7 +1297,7 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 		}
 		return false, listFn, metaFn
 	}
-	m := New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, tagsFn)
+	m := New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
@@ -1330,7 +1333,7 @@ func TestQuitKeyTypedIntoTagsFilterDoesNotQuit(t *testing.T) {
 		}
 		return false, listFn, metaFn
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, tagsFn)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
@@ -1448,5 +1451,63 @@ func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 	m3, _ := m2.Update(escCmd())
 	if n := len(m3.(Model).stack); n != 1 {
 		t.Fatalf("esc left %d screens on the stack, want 1 (back to the matrix)", n)
+	}
+}
+
+// R on the matrix opens the restart screen for the family under the cursor, and the matrix stays
+// beneath it: a restart is small and repeatable, so backing out should land on the cell it
+// started from.
+func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		p := restart.Plan{Env: env}
+		for _, n := range names {
+			p.Targets = append(p.Targets, rollout.DeploymentStatus{
+				Namespace: env, Name: n, Replicas: 2, Strategy: "RollingUpdate", ReadinessProbes: 1,
+			})
+		}
+		return p, nil
+	}
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil,
+		apprestart.Funcs{Read: read, Interval: time.Millisecond})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd == nil {
+		t.Fatal("R produced no command")
+	}
+	tm, cmd = tm.Update(cmd())
+	if cmd != nil {
+		tm, _ = tm.Update(cmd())
+	}
+
+	stack := tm.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("stack has %d screens, want 2 (matrix + restart)", n)
+	}
+	if _, ok := stack[len(stack)-1].(restartScreen); !ok {
+		t.Fatalf("top screen is %T, want the restart screen", stack[len(stack)-1])
+	}
+	if v := plain(tm); !strings.Contains(v, "hoist restart") {
+		t.Errorf("the screen should name the operation:\n%s", v)
+	}
+}
+
+// With no cluster wired in, R says so on the matrix rather than opening a screen that can do
+// nothing at all.
+func TestRestartKeyWithNoClusterSaysSo(t *testing.T) {
+	m := sized(t) // Promotion{} and a zero apprestart.Funcs: no Read
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+	if n := len(m.(Model).stack); n != 1 {
+		t.Fatalf("stack has %d screens, want 1: nothing should have opened", n)
+	}
+	if v := plain(m); !strings.Contains(v, "needs a cluster connection") {
+		t.Errorf("the matrix should say why:\n%s", v)
 	}
 }

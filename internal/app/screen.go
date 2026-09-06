@@ -7,6 +7,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/ui"
 )
@@ -145,3 +146,26 @@ func (s deployScreen) SetSize(width, height int) Screen {
 func (s deployScreen) SetStyles(st ui.Styles) Screen {
 	return deployScreen{s.Model.SetStyles(st)}
 }
+
+// restartScreen adapts restart.Model. Pushed on top of the matrix by R, and unlike the deploy
+// path the matrix stays beneath it: a restart is small and repeatable, and backing out should
+// land on the cell it started from.
+type restartScreen struct{ apprestart.Model }
+
+func (s restartScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s restartScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return restartScreen{m}, cmd
+}
+
+func (s restartScreen) SetSize(width, height int) Screen {
+	return restartScreen{s.Model.SetSize(width, height)}
+}
+
+func (s restartScreen) SetStyles(st ui.Styles) Screen {
+	return restartScreen{s.Model.SetStyles(st)}
+}
+
+// CapturesText implements Screen: true only while the production confirmation is open.
+func (s restartScreen) CapturesText() bool { return s.Model.CapturesText() }

@@ -39,7 +39,7 @@ type Model struct {
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the status bar.
@@ -49,7 +49,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
@@ -61,8 +61,13 @@ func defaultKeyMap() keyMap {
 		Promote:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "plan promotion")),
 		PromoteAs: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "plan promotion to…")),
 		DeployNew: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy new image")),
-		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		// Capital R, deliberately. A restart rolls every pod of a family, and the lower-case
+		// keys on this screen all mean "open a screen to look at something". The screen this
+		// opens is still a confirmation, so R asks rather than does — but it asks for a write,
+		// and the shift key is a cheap way to keep it out of reach of a mistyped r.
+		Restart: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "restart this family")),
+		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -86,6 +91,14 @@ type OpenPlanMsg struct {
 // with several first-party images turns out to need it).
 type OpenTagsMsg struct {
 	ImageRepo, Target string
+}
+
+// OpenRestartMsg is emitted when the operator asks to restart the family under the cursor in
+// CurrentEnv (R). It names a family rather than an image because a restart changes no image:
+// what it rolls is every Deployment that family declares, which is the unit an Argo Application
+// already covers and therefore the unit the rollout is watched at.
+type OpenRestartMsg struct {
+	Family, Target string
 }
 
 // New builds the screen for a discovered repo. promotable lists the first-party image repo
@@ -145,6 +158,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, func() tea.Msg { return OpenPlanMsg{Source: source, Force: true} }
+		case key.Matches(msg, m.keys.Restart):
+			env := m.CurrentEnv()
+			if env == "" {
+				m.notice = "no environments discovered"
+				return m, nil
+			}
+			family := m.CurrentFamily()
+			if family == "" {
+				m.notice = "no family under the cursor"
+				return m, nil
+			}
+			return m, func() tea.Msg { return OpenRestartMsg{Family: family, Target: env} }
 		case key.Matches(msg, m.keys.DeployNew):
 			env := m.CurrentEnv()
 			if env == "" {
@@ -207,6 +232,15 @@ func (m Model) CurrentEnv() string {
 		col = 0
 	}
 	return m.matrix.Envs[col]
+}
+
+// CurrentFamily is the family the row cursor is on, "" when the matrix has no rows.
+func (m Model) CurrentFamily() string {
+	row := m.tbl.Cursor()
+	if row < 0 || row >= len(m.matrix.Rows) {
+		return ""
+	}
+	return m.matrix.Rows[row].Family
 }
 
 // View is the table, the help line when toggled, and the status bar.

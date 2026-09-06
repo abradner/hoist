@@ -355,7 +355,10 @@ the operation. Production is gated not by §4.5's PR-and-approval pair (nothing 
 there is nothing to review) but by `--confirm-production=<env>` repeating the env exactly, the
 same shape `--confirm-direct` uses. Before anything rolls it names every target with its replica
 count, strategy and last restart, and warns — never blocks — where a restart will not be graceful.
-`hoist watch --app <name>` (M5) is a read-only companion, independent
+The same operation is on the matrix as `R`, which restarts the family under the cursor through
+the same `internal/restart` core — capital, because it asks for a write — and shows the target
+list with its warnings before taking the confirmation; production there takes a `huh.Confirm`
+rather than the CLI's `--confirm-production`. `hoist watch --app <name>` (M5) is a read-only companion, independent
 of any promotion: it prints one Application's current sync/health/revision and the rollout
 progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
 the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of

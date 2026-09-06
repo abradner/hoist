@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
 )
@@ -220,46 +221,6 @@ func TestRestartWarnsWhenARestartWillNotBeGraceful(t *testing.T) {
 	}
 }
 
-// restartTargets reads the family→Deployment mapping out of the repo, because "family" is a
-// concept the repo defines and the cluster does not.
-func TestRestartTargetsAreScopedToTheNamedFamilies(t *testing.T) {
-	r, err := gitops.Discover("../../testdata/repo", "cluster/apps")
-	if err != nil {
-		t.Fatal(err)
-	}
-	all, err := restartTargets(r, "app-production", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) < 2 {
-		t.Skipf("fixture has %d Deployments in app-production; need 2+ to prove narrowing", len(all))
-	}
-	var fam string
-	for name := range r.Envs["app-production"].Families {
-		fam = name
-		break
-	}
-	one, err := restartTargets(r, "app-production", []string{fam})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(one) >= len(all) {
-		t.Errorf("--family should narrow the set: %d of %d", len(one), len(all))
-	}
-	if _, err := restartTargets(r, "app-production", []string{"no-such-family"}); err == nil {
-		t.Error("naming a family that does not exist must be refused, not silently ignored")
-	}
-	if _, err := restartTargets(r, "no-such-env", nil); err == nil {
-		t.Error("an unknown env must be refused")
-	}
-	// Jobs and CronJobs are not restarted: re-running one is a different operation.
-	for _, name := range all {
-		if strings.Contains(name, "purge") {
-			t.Errorf("a CronJob was included as a restart target: %v", all)
-		}
-	}
-}
-
 // A flags-only run has no envs.production list, so hoist cannot tell whether the target is
 // production. It must fail closed: the same omission hazard checkDirectPreflight refuses, and
 // the one I cited as precedent while leaving this branch open (Copilot, PR #81).
@@ -270,7 +231,7 @@ func TestRestartFailsClosedWithNoConfiguredRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	names, err := restartTargets(r, "app-production", nil)
+	names, err := restart.Targets(r, "app-production", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
