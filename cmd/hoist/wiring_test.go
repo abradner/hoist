@@ -10,10 +10,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// tuiCluster supplies buildStartPromotion's Argo/Deployment adaptors from whatever
+// newPromoteFixture pointed newArgo/newRollout at, so a test wires exactly what runTUI wires
+// rather than a differently-shaped stand-in.
+func tuiCluster(t *testing.T) (argo.Argo, rollout.Rollout, error) {
+	t.Helper()
+	a, _, aerr := newArgo("")
+	ro, _, rerr := newRollout("")
+	return a, ro, errors.Join(aerr, rerr)
+}
 
 // buildEffForFixture loads cfgPath (built by newPromoteFixture) and resolves it into the
 // effective value runTUI itself would build for the TUI, standing in for
@@ -94,8 +107,9 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	state, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	state, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -202,8 +216,9 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
 	}
@@ -239,8 +254,9 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
 	}
@@ -289,8 +305,9 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	_, driveFn, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
 	}
@@ -335,8 +352,9 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(eff, r, newGit, f, nil)
-	state1, driveFn1, err := start(context.Background(), plan)
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
 	}
@@ -345,7 +363,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 	_ = driveFn1 // deliberately never called — see the test's own doc comment
 
-	state2, driveFn2, err := start(context.Background(), plan)
+	state2, driveFn2, err := start(context.Background(), plan, app.StartOpts{})
 	if err != nil {
 		t.Fatalf("second startPromotion call failed — the first call's claim was not released before it ever returned driveFn: %v", err)
 	}
@@ -414,4 +432,59 @@ func TestBrowserCommandPerOS(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestTUIStartPromotionRecordsDirectBeforeTheFirstSave is Copilot's PR #72 finding: the TUI
+// chose direct mode only for the step list, so the state it saved and handed to the flight
+// screen never carried Direct at all. Two things read the mode off the state rather than off
+// the step list — flight.OrderFor, which would draw the PR path's ten steps for a run that
+// only has six, and `hoist resume`, which for a state saved before DirectPushedStep ever ran
+// would drive the promotion as a PR: opening a branch and a PR for a change the operator
+// explicitly asked to push straight to base.
+func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+
+	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true})
+	if err != nil {
+		t.Fatalf("startPromotion: %v", err)
+	}
+	if !state.Direct {
+		t.Error("the returned state must carry Direct: the flight screen picks its step order from it")
+	}
+	// And on disk, which is what resume reads — the state is saved before this function ever
+	// returns, so a quit here must not leave a file resume drives as a PR promotion.
+	saved, err := engine.LoadState(mustStatePath(t, state.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.Direct {
+		t.Error("the SAVED state must carry Direct: resume reads the mode from the file, not from this process")
+	}
+
+	// The asymmetry: a PR-mode start must not set it, or the assertion above passes on a
+	// field that is simply always true.
+	prState, _, err := start(context.Background(), plan, app.StartOpts{})
+	if err == nil && prState.Direct {
+		t.Error("a PR-mode start must not record Direct")
+	}
+}
+
+func mustStatePath(t *testing.T, id string) string {
+	t.Helper()
+	p, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
