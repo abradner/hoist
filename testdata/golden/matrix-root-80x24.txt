@@ -1,0 +1,24 @@
+╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
+│ FAMILY     ▸ APP-PRODUCTION                 APP-STAGING                      │
+│ counta     2 images                 pinned  v202602201200             pinned │
+│ marketing  sha-000011112222333344…  pinned  sha-1a2b3c4d5e6f708192a…  pinned │
+│ temporal   2 images               external  2 images                external │
+│ web        v202601010101          unpinned  2 versions                 split │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+env app-production · familie… p promote • d deploy • R restart • ? help • q quit
