@@ -108,6 +108,11 @@ type SelectedMsg struct {
 	Target   string
 	Delta    *migrate.Delta
 	Declared *Declared
+	// DeclaredSince is when the declared occurrence's manifest line last changed (zero when
+	// unknown); HistoryNote is the sentence the pane showed when Delta is nil — the confirm
+	// screen says the same thing rather than "no history" without a reason.
+	DeclaredSince time.Time
+	HistoryNote   string
 }
 
 // DirectRequestedMsg is emitted only once the operator has completed the keypress + huh.
@@ -121,9 +126,11 @@ type SelectedMsg struct {
 type DirectRequestedMsg struct {
 	ImageRepo, Tag, Digest string
 	// Target, as on SelectedMsg.
-	Target   string
-	Delta    *migrate.Delta
-	Declared *Declared
+	Target        string
+	Delta         *migrate.Delta
+	Declared      *Declared
+	DeclaredSince time.Time
+	HistoryNote   string
 }
 
 // nextGeneration hands out this process's next tag-picker generation id. Package-level and
@@ -565,6 +572,36 @@ func (m Model) currentCommits() []migrate.Commit {
 	return st.Delta.Commits
 }
 
+// declaredSince is the declared line's age when the blame answered, zero otherwise.
+func (m Model) declaredSince() time.Time {
+	if m.ageKnown && m.ageErr == nil {
+		return m.age.Since
+	}
+	return time.Time{}
+}
+
+// historyNote is the gap sentence the pane shows for the cursor tag when there is no delta
+// to carry — "" when there is a delta.
+func (m Model) historyNote() string {
+	if m.currentDelta() != nil {
+		return ""
+	}
+	if m.selectedTag == "" {
+		return ""
+	}
+	if m.declared == nil {
+		return fmt.Sprintf("no commit history — %s does not declare %s yet, so there is nothing to compare with", m.target, m.imageRepo)
+	}
+	if m.histFn.Delta == nil {
+		return fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo)
+	}
+	lines := PaneLines(m.deltas[m.selectedTag], m.selectedTag, "", m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), 1)
+	if len(lines) > 0 && lines[0].Role != "head" {
+		return lines[0].Text
+	}
+	return ""
+}
+
 // currentDelta is the loaded delta for the cursor tag, for the selection messages.
 func (m Model) currentDelta() *migrate.Delta {
 	st, ok := m.deltas[m.selectedTag]
@@ -635,8 +672,9 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	if !direct {
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
+		since, note := m.declaredSince(), m.historyNote()
 		return m, func() tea.Msg {
-			return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared}
+			return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared, DeclaredSince: since, HistoryNote: note}
 		}
 	}
 	m.confirming = true
@@ -668,8 +706,9 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		r := rows[idx]
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
+		since, note := m.declaredSince(), m.historyNote()
 		return m, func() tea.Msg {
-			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared}
+			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared, DeclaredSince: since, HistoryNote: note}
 		}
 	}
 	f, cmd := m.confirmDirect.Update(msg)

@@ -1,0 +1,24 @@
+╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
+│ghcr.io/example/web:v9   →   app-production                           mode: PR│
+├──────────────────────────────────────────────────────────────────────────────┤
+│no commit history — ghcr.io/example/web has no app repo in repos[].apps — the │
+│yaml below is the change                                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│--- a/cluster/apps/app-production/web/app.yaml                                │
+│+++ b/cluster/apps/app-production/web/app.yaml                                │
+│@@ -20,7 +20,7 @@                                                             │
+│       # Production runs three processes from the one image; staging folds que│
+│       containers:                                                            │
+│         - name: web                                                          │
+│-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f6071829│
+│+          image: ghcr.io/example/web:v9@sha256:dddddddddddddddddddddddddddddd│
+│           imagePullPolicy: IfNotPresent                                      │
+│           ports:                                                             │
+│             - containerPort: 3000                                            │
+│@@ -28,11 +28,11 @@                                                           │
+│             - name: RAILS_ENV                                                │
+│               value: production                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│3 occurrences in 1 file · digest dddddddddddd · verified before commit        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                                   enter deploy · ↑/↓ scroll · m mode · esc back

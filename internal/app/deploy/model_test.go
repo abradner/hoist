@@ -4,13 +4,17 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -190,5 +194,105 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 	m.notice = "could not reach the registry with " + secret
 	if v := m.View(); strings.Contains(v, secret) {
 		t.Errorf("a registered secret reached the rendered view:\n%s", v)
+	}
+}
+
+var fixedNow = time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
+
+func withHistory(t *testing.T, envs config.EnvsConfig) Model {
+	t.Helper()
+	commits := []migrate.Commit{
+		{SHA: "4a1c2ef0000", Subject: "Add rate limiting to the public API"},
+		{SHA: "e9b0d310000", Subject: "Fix N+1 query when resolving digests"},
+		{SHA: "77c0ffe0000", Subject: "db: add index on events.created_at", Migrations: []string{"db/migrate/20260225T101500_add_events_created_at_index.rb"}},
+		{SHA: "1b2d3e40000", Subject: "Bump temporal SDK to 1.31"},
+		{SHA: "6f8a90c0000", Subject: "Drop the legacy /v1/export endpoint"},
+		{SHA: "a3e91b20000", Subject: "db: backfill events.tenant_id", Migrations: []string{"db/migrate/20260301T090200_backfill_events_tenant_id.rb"}},
+	}
+	for i := 0; i < 8; i++ {
+		commits = append(commits, migrate.Commit{SHA: strings.Repeat(string(rune('b'+i)), 10), Subject: "older change"})
+	}
+	d := migrate.Delta{
+		Direction: migrate.DirectionForward, Commits: commits, Total: len(commits),
+		Migrations:       []string{"db/migrate/20260225T101500_add_events_created_at_index.rb", "db/migrate/20260301T090200_backfill_events_tenant_id.rb"},
+		MigrationCommits: 2, Prefix: "db/migrate/", PrefixSource: migrate.PrefixFromDefault,
+	}
+	return fixture(t, envs).WithNow(func() time.Time { return fixedNow }).WithHistory(History{
+		Delta:    &d,
+		Declared: image.Ref{Repo: "ghcr.io/example/web", Tag: "v202601010101"},
+		Since:    fixedNow.Add(-34 * 24 * time.Hour),
+	})
+}
+
+func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
+
+// With history the screen leads with the work: the commits, the migrations twice (inline and
+// as the list that runs), the age of what is replaced; the yaml is one key away and enter
+// means the same thing from either view.
+func TestWithHistoryLeadsWithCommitsAndYAMLIsOneKeyAway(t *testing.T) {
+	m := withHistory(t, config.EnvsConfig{Production: []string{"app-production"}})
+	v := ansi.Strip(m.View())
+	for _, want := range []string{
+		"ghcr.io/example/web:v9   →   app-production", "mode: PR · production",
+		"rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks",
+		"4a1c2ef  Add rate limiting to the public API",
+		"77c0ffe  db: add index on events.created_at", "migration",
+		"2 migrations run on this deploy:", "20260301T090200_backfill_events_tenant_id.rb",
+		"writes 3 occurrences in 1 file", "d  see the yaml",
+	} {
+		if !strings.Contains(v, want) {
+			t.Errorf("commits view lacks %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "image:") {
+		t.Errorf("the yaml must not be the body when there is history:\n%s", v)
+	}
+	uitest.Golden(t, "deploy-commits", m.View(), 120, 40)
+	uitest.Golden(t, "deploy-commits", m.SetSize(80, 24).View(), 80, 24)
+
+	y := uitest.Keys(m, updateFn, "d")
+	vy := ansi.Strip(y.View())
+	for _, want := range []string{"hoist · confirm deploy · yaml", "image:", "verified before commit", "d  back to commits"} {
+		if !strings.Contains(vy, want) {
+			t.Errorf("yaml view lacks %q:\n%s", want, vy)
+		}
+	}
+	uitest.Golden(t, "deploy-yaml", y.View(), 120, 40)
+
+	// enter emits the same StartMsg from either view.
+	_, c1 := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, c2 := y.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	s1, s2 := c1().(StartMsg), c2().(StartMsg)
+	if s1.Mode != s2.Mode || s1.Image != s2.Image || len(s1.Plan.Edits) != len(s2.Plan.Edits) {
+		t.Fatalf("enter differs between views: %+v vs %+v", s1, s2)
+	}
+	// d again returns to the commits.
+	if b := uitest.Keys(y, updateFn, "d"); b.showYAML {
+		t.Fatal("d must toggle back")
+	}
+}
+
+// Without history the yaml is the body, the header says why there is no history, and d says
+// there is nothing else to show rather than doing nothing.
+func TestWithoutHistoryTheYAMLIsTheBodyWithTheReason(t *testing.T) {
+	m := fixture(t, config.EnvsConfig{}).WithHistory(History{Note: "no commit history — ghcr.io/example/web has no app repo in repos[].apps"})
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "no commit history — ghcr.io/example/web has no app repo in repos[].apps — the yaml below is the change") || !strings.Contains(v, "image:") {
+		t.Fatalf("view:\n%s", v)
+	}
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if !strings.Contains(ansi.Strip(m2.View()), "there is no commit history to show instead") {
+		t.Fatal("d without history must say so")
+	}
+	uitest.Golden(t, "deploy-nohistory", m.SetSize(80, 24).View(), 80, 24)
+}
+
+// The direct-mode confirmation is a dialog over the screen: the commits stay visible.
+func TestModeDialogKeepsTheScreenVisible(t *testing.T) {
+	m := withHistory(t, config.EnvsConfig{})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "straight to app-production with no PR?") || !strings.Contains(v, "rolling out 14 commits") {
+		t.Fatalf("dialog must sit over the screen:\n%s", v)
 	}
 }
