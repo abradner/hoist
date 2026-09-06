@@ -105,12 +105,37 @@ type Warning struct {
 
 // Plan is the result of BuildPlan for one env pair.
 type Plan struct {
+	// Variant says which operation produced this plan and therefore how it should describe
+	// itself — VariantPromote (an env pair, BuildPlan) or VariantDeploy (one image into one
+	// env, BuildDeployPlan). The empty string means VariantPromote, so a Plan built before
+	// this field existed, or by a test that does not care, keeps its original meaning.
+	//
+	// It exists only for rendering. Nothing that drives a promotion reads it, or SourceEnv:
+	// engine.DeriveID hashes the target env and the resulting refs, BranchName and the PR
+	// marker are id-only, and ClaimInFlight/findInFlight key on the target env — so a deploy
+	// and a promotion into the same env already contend correctly, and a deploy that would
+	// land the same refs as a promotion is deliberately the same promotion (see DeriveID).
+	Variant string
+	// SourceEnv is the env a promotion reads its refs from. Empty for VariantDeploy, which
+	// has no source: the caller names the reference outright.
 	SourceEnv string
 	TargetEnv string
 	Edits     []Edit
 	// Untouched lists the distinct target-env references no Edit touches: third-party images
-	// (repo outside the promotable prefixes) and repos absent from the source env.
+	// (repo outside the promotable prefixes), repos absent from the source env, and — for a
+	// deploy — every repo other than the one being deployed.
 	Untouched   []image.Ref
 	Warnings    []Warning
 	GeneratedAt time.Time
 }
+
+// Plan variants. The zero value is VariantPromote so that an unset Variant keeps the
+// behaviour every caller had before deploys existed.
+const (
+	VariantPromote = ""
+	VariantDeploy  = "deploy"
+)
+
+// IsDeploy reports whether this plan deploys one named image into one env, rather than
+// promoting an env pair. Used by the rendering layer only.
+func (p Plan) IsDeploy() bool { return p.Variant == VariantDeploy }

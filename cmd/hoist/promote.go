@@ -336,66 +336,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fs.Usage()
 		return exitUsage
 	}
-	if *direct {
-		// Direct mode's whole safety rests on knowing envs.production (AGENTS.md invariant
-		// 6): a flags-only run has no such list, which would make internal/engine.
-		// DirectCommitGateStep's ProductionEnvs empty and every env look non-production by
-		// omission. Fail fast rather than silently treat "unconfigured" as "safe" (AGENTS.md
-		// §8: never provide a fallback default for required configuration).
-		if eff.cfg == nil {
-			fmt.Fprintln(stderr, "hoist promote: --direct requires a configured repo (repos[].envs.production must be known — hoist cannot otherwise tell a production env from any other)")
-			return exitUsage
-		}
-		// Direct mode still needs the same github: owner/name the non-direct branch below
-		// requires — not for the forge (direct mode never opens one), but because
-		// engine.DeriveID(eff.cfg.GitHub, plan) hashes it into the promotion's id, which names
-		// the state path, the branch and the worktree directory. Two repos both configured
-		// without github: that promote the same env+digest set would otherwise derive the
-		// IDENTICAL id — a real identity collision (one repo's run could overwrite the
-		// other's state file or remove the other's still-active worktree as "unregistered
-		// stale"), not merely a cosmetic gap. A git-only, no-PR operation still needs a stable
-		// repo identity for that reason alone.
-		if eff.cfg.GitHub == "" {
-			fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file (direct mode still needs it — promotion identity is hashed from it)")
-			return exitUsage
-		}
-		if *confirmDirect == "" {
-			fmt.Fprintln(stderr, "hoist promote: --direct requires --confirm-direct=<env> too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)")
-			return exitUsage
-		}
-		if *confirmDirect != *to {
-			fmt.Fprintf(stderr, "hoist promote: --confirm-direct=%q does not match --to=%q; repeat the exact target env to confirm\n", *confirmDirect, *to)
-			return exitUsage
-		}
-		// Round-N finding (Codex, P2): DirectCommitGateStep — internal/engine/direct.go's own
-		// "sole enforcement point" for AGENTS.md invariant 5/6 — used to be constructed only
-		// after BuildPlan and the all-no-op fast path further down this function, so a
-		// --direct run against a production env whose plan happened to already be current
-		// exited 0 claiming success ("already current") without the gate ever running, and a
-		// resolution failure for a production target surfaced as an unrelated resolution
-		// error instead of the required refusal — either way masking the refusal AGENTS.md
-		// §4.5 promises "outright". Call the identical step here, first — before resolving
-		// digests, building the plan, or reaching the no-op fast path — so a production
-		// target is refused before anything else can mask or bypass it. Confirmed is always
-		// true here: reaching this point already required --confirm-direct to equal --to
-		// exactly, checked immediately above. Drive still runs this same step again below
-		// once steps is built (unreachable through Drive whenever this refuses, per the
-		// step's own doc comment) — this calls the one enforcement point twice, it does not
-		// add a second one (AGENTS.md §8, layered checks: the deletion test).
-		gate := engine.DirectCommitGateStep{ProductionEnvs: eff.cfg.Envs.Production, Confirmed: true}
-		obs, err := gate.Observe(context.Background(), &engine.PromotionState{TargetEnv: *to})
-		if err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-			return exitFailure
-		}
-		if obs.Blocked != "" {
-			blocked := &engine.BlockedError{Step: engine.StepDirectGate, Reason: obs.Blocked}
-			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(blocked.Error()))
-			return exitFailure
-		}
-	} else if eff.cfg == nil || eff.cfg.GitHub == "" {
-		fmt.Fprintln(stderr, "hoist promote: the selected repo has no github: owner/name configured; add repos[].github to the config file")
-		return exitUsage
+	if code := checkDirectPreflight("hoist promote", eff, *direct, *confirmDirect, *to, stderr); code != 0 {
+		return code
 	}
 	prefixes := eff.promotable
 
@@ -786,4 +728,80 @@ func historyDetail(s *engine.PromotionState) string {
 		return ""
 	}
 	return s.History[len(s.History)-1].Detail
+}
+
+// checkDirectPreflight is the CLI's single --direct gate, shared by `hoist promote` and
+// `hoist deploy`. It exists as one function rather than a copy per command because everything
+// it enforces is an invariant (AGENTS.md §4.5, invariants 5 and 6) and a second copy is how
+// those drift: the two commands must refuse a production env, an unconfigured repo, and a
+// mismatched confirmation identically, or the weaker one becomes the way around the stronger.
+//
+// Returns 0 to proceed, or the exit code to return. cmdName prefixes every message so each
+// command still speaks in its own name.
+func checkDirectPreflight(cmdName string, eff effective, direct bool, confirmDirect, targetEnv string, stderr io.Writer) int {
+	if !direct {
+		// The non-direct branch still needs a forge identity.
+		if eff.cfg == nil || eff.cfg.GitHub == "" {
+			fmt.Fprintf(stderr, "%s: the selected repo has no github: owner/name configured; add repos[].github to the config file\n", cmdName)
+			return exitUsage
+		}
+		return 0
+	}
+	// Direct mode's whole safety rests on knowing envs.production (AGENTS.md invariant
+	// 6): a flags-only run has no such list, which would make internal/engine.
+	// DirectCommitGateStep's ProductionEnvs empty and every env look non-production by
+	// omission. Fail fast rather than silently treat "unconfigured" as "safe" (AGENTS.md
+	// §8: never provide a fallback default for required configuration).
+	if eff.cfg == nil {
+		fmt.Fprintf(stderr, "%s: --direct requires a configured repo (repos[].envs.production must be known — hoist cannot otherwise tell a production env from any other)\n", cmdName)
+		return exitUsage
+	}
+	// Direct mode still needs the same github: owner/name the non-direct branch below
+	// requires — not for the forge (direct mode never opens one), but because
+	// engine.DeriveID(eff.cfg.GitHub, plan) hashes it into the promotion's id, which names
+	// the state path, the branch and the worktree directory. Two repos both configured
+	// without github: that promote the same env+digest set would otherwise derive the
+	// IDENTICAL id — a real identity collision (one repo's run could overwrite the
+	// other's state file or remove the other's still-active worktree as "unregistered
+	// stale"), not merely a cosmetic gap. A git-only, no-PR operation still needs a stable
+	// repo identity for that reason alone.
+	if eff.cfg.GitHub == "" {
+		fmt.Fprintf(stderr, "%s: the selected repo has no github: owner/name configured; add repos[].github to the config file (direct mode still needs it — promotion identity is hashed from it)\n", cmdName)
+		return exitUsage
+	}
+	if confirmDirect == "" {
+		fmt.Fprintf(stderr, "%s: --direct requires --confirm-direct=<env> too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)\n", cmdName)
+		return exitUsage
+	}
+	if confirmDirect != targetEnv {
+		fmt.Fprintf(stderr, "%s: --confirm-direct=%q does not match the target env %q; repeat the exact target env to confirm\n", cmdName, confirmDirect, targetEnv)
+		return exitUsage
+	}
+	// Round-N finding (Codex, P2): DirectCommitGateStep — internal/engine/direct.go's own
+	// "sole enforcement point" for AGENTS.md invariant 5/6 — used to be constructed only
+	// after BuildPlan and the all-no-op fast path further down this function, so a
+	// --direct run against a production env whose plan happened to already be current
+	// exited 0 claiming success ("already current") without the gate ever running, and a
+	// resolution failure for a production target surfaced as an unrelated resolution
+	// error instead of the required refusal — either way masking the refusal AGENTS.md
+	// §4.5 promises "outright". Call the identical step here, first — before resolving
+	// digests, building the plan, or reaching the no-op fast path — so a production
+	// target is refused before anything else can mask or bypass it. Confirmed is always
+	// true here: reaching this point already required --confirm-direct to equal --to
+	// exactly, checked immediately above. Drive still runs this same step again below
+	// once steps is built (unreachable through Drive whenever this refuses, per the
+	// step's own doc comment) — this calls the one enforcement point twice, it does not
+	// add a second one (AGENTS.md §8, layered checks: the deletion test).
+	gate := engine.DirectCommitGateStep{ProductionEnvs: eff.cfg.Envs.Production, Confirmed: true}
+	obs, err := gate.Observe(context.Background(), &engine.PromotionState{TargetEnv: targetEnv})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)
+		return exitFailure
+	}
+	if obs.Blocked != "" {
+		blocked := &engine.BlockedError{Step: engine.StepDirectGate, Reason: obs.Blocked}
+		fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(blocked.Error()))
+		return exitFailure
+	}
+	return 0
 }

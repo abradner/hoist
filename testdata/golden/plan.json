@@ -1,4 +1,5 @@
 {
+  "Variant": "",
   "SourceEnv": "app-staging",
   "TargetEnv": "app-production",
   "Edits": [

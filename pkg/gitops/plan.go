@@ -286,3 +286,75 @@ func sortOccurrences[T any](items []T, key func(T) Occurrence) {
 		return a.Col < b.Col
 	})
 }
+
+// BuildDeployPlan plans writing one image reference into one env: every occurrence of
+// ref.Repo in env is rewritten to ref. This is the "image bump" half of hoist's problem
+// statement, where BuildPlan is the "promote an env pair" half.
+//
+// It is a sibling of BuildPlan rather than a mode of it because the two differ in where the
+// reference comes from, not in what they do with it. A promotion derives the ref by reading a
+// source env (ChooseRef, the disagreement warning, the source-only-unwritable case); a deploy
+// is handed one outright by the operator — from the tag picker, or --image. Everything after
+// "which ref" is identical, so the two share envOccurrences, checkEditable, unwritable and
+// sortOccurrences, and produce the same Plan for the same engine to drive.
+//
+// Three differences from BuildPlan worth stating, all of them consequences of having no
+// source env:
+//
+//   - An unwritable ref (bare tag, or digest with no tag — invariant 1) is always an error
+//     here. BuildPlan can afford to downgrade it to WarnSourceOnlyUnwritable when the target
+//     has nothing to write, because the repo was merely observed in the source; a deploy's
+//     ref is the whole request, so there is no lesser thing to do with a bad one.
+//   - A repo with no occurrence in env is an error, not WarnMissingInTarget. For a promotion
+//     that repo is one of many being moved and the others still proceed; for a deploy it means
+//     there is nothing to deploy into, and reporting success would be a lie.
+//   - Untouched lists every other distinct ref in the env, since exactly one repo is planned.
+//     A promotion's Untouched means "not part of this promotion"; a deploy's means the same
+//     thing, and is the larger list.
+func BuildDeployPlan(r *Repo, env string, ref image.Ref, promotable []string) (Plan, error) {
+	if r == nil {
+		return Plan{}, errors.New("nil repo")
+	}
+	e, ok := r.Envs[env]
+	if !ok {
+		return Plan{}, fmt.Errorf("env %q not found in the discovered repo", env)
+	}
+	if err := ref.Validate(); err != nil {
+		return Plan{}, fmt.Errorf("image %s: %w", ref, err)
+	}
+	if why := unwritable(ref); why != "" {
+		return Plan{}, fmt.Errorf("image %s is %s", ref, why)
+	}
+	if len(promotable) > 0 && !IsPromotable(ref.Repo, promotable) {
+		return Plan{}, fmt.Errorf("%s is not a promotable repo; prefixes: %s", ref.Repo, strings.Join(promotable, ", "))
+	}
+
+	plan := Plan{
+		Variant:     VariantDeploy,
+		TargetEnv:   env,
+		GeneratedAt: time.Now().UTC(),
+	}
+	occ := envOccurrences(e)
+	seen := map[string]bool{}
+	for _, o := range occ {
+		if o.Ref.Repo != ref.Repo {
+			if !seen[o.Ref.String()] {
+				seen[o.Ref.String()] = true
+				plan.Untouched = append(plan.Untouched, o.Ref)
+			}
+			continue
+		}
+		ed := Edit{Occurrence: o, New: ref}
+		if err := checkEditable(&ed); err != nil {
+			return Plan{}, err
+		}
+		plan.Edits = append(plan.Edits, ed)
+	}
+	if len(plan.Edits) == 0 {
+		return Plan{}, fmt.Errorf("%s has no occurrence in %s; nothing to deploy into", ref.Repo, env)
+	}
+
+	sort.Slice(plan.Untouched, func(i, j int) bool { return plan.Untouched[i].String() < plan.Untouched[j].String() })
+	sortOccurrences(plan.Edits, func(e Edit) Occurrence { return e.Occurrence })
+	return plan, nil
+}
