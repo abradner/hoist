@@ -248,6 +248,13 @@ func TestWaitingReporterHeartbeatsOnUnchangedReason(t *testing.T) {
 	if got := strings.Count(out.String(), "still"); got != 1 {
 		t.Errorf("heartbeat repeated %d times within one interval", got)
 	}
+	// "so far" counts from when the reason first appeared, not from the previous heartbeat:
+	// a three-hour approval wait must not keep reporting ten minutes.
+	now = now.Add(heartbeatEvery)
+	r.report(s)
+	if !strings.Contains(out.String(), "(25m0s so far)") {
+		t.Errorf("second heartbeat does not count from the start of the wait:\n%s", out.String())
+	}
 	// Drive saves after recording the wait, and a failed save appends its own entry after it:
 	// the reason reported is still the wait, never the save failure read off the end.
 	s.History = append(s.History, engine.HistoryEntry{Step: engine.StepCIGreen, Detail: "state save failed: disk full"})
@@ -256,3 +263,66 @@ func TestWaitingReporterHeartbeatsOnUnchangedReason(t *testing.T) {
 		t.Errorf("a save-failure entry was reported as the waiting reason:\n%s", out.String())
 	}
 }
+
+// A poll interval longer than the heartbeat still shows the run is alive: the sleep is taken
+// in heartbeat-sized pieces, each followed by a report that prints only when a heartbeat is
+// due and never observes the remote (Copilot, PR #94). Here the heartbeat is shrunk far below
+// the poll interval, so several heartbeats land inside one sleep while the step is observed
+// only once.
+func TestDriveToCompletionHeartbeatsInsideALongPollSleep(t *testing.T) {
+	prev := heartbeatEvery
+	heartbeatEvery = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = prev })
+	s := &engine.PromotionState{ID: "abc123", TargetEnv: "app-production", PR: &forge.PR{Number: 7, URL: "https://github.com/me/my-gitops/pull/7"}}
+	step := &waitingStep{name: engine.StepApproved, details: []string{"waiting for `hoist approve abc123` from an approver"}}
+	var errOut bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
+	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if step.calls != 1 {
+		t.Errorf("step observed %d times inside one hour-long poll interval, want 1", step.calls)
+	}
+	if got := strings.Count(errOut.String(), "hoist: still approved:"); got < 2 {
+		t.Errorf("only %d heartbeats printed during a poll sleep longer than the heartbeat:\n%s", got, errOut.String())
+	}
+}
+
+// A retried StepError records no new wait, so no heartbeat is printed for it: a heartbeat off
+// an older "waiting:" entry would claim the run is still waiting on a step it has moved past
+// (Copilot, PR #99). The step here errors transiently on every observe; History carries an
+// old CI wait; nothing but the retry notice may be printed.
+func TestDriveToCompletionDoesNotHeartbeatOnARetriedError(t *testing.T) {
+	prev := heartbeatEvery
+	heartbeatEvery = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = prev })
+	s := &engine.PromotionState{TargetEnv: "app-production", History: []engine.HistoryEntry{{Step: engine.StepCIGreen, Detail: "waiting: CI: 1/3 checks complete"}}}
+	step := &erroringStep{name: engine.StepApproved, err: errors.New("GET /comments: 502")}
+	var errOut bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
+	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if strings.Contains(errOut.String(), "still ci-green") || strings.Contains(errOut.String(), "hoist: ci-green:") {
+		t.Errorf("a retried error produced a heartbeat off an older wait:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "(retrying)") {
+		t.Errorf("the retry notice itself is missing:\n%s", errOut.String())
+	}
+}
+
+// erroringStep is a Step whose Observe always fails with err.
+type erroringStep struct {
+	name engine.StepName
+	err  error
+}
+
+func (e *erroringStep) Name() engine.StepName { return e.name }
+func (e *erroringStep) Observe(context.Context, *engine.PromotionState) (engine.Observation, error) {
+	return engine.Observation{}, e.err
+}
+func (e *erroringStep) Act(context.Context, *engine.PromotionState) error { return nil }

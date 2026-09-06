@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -1051,5 +1052,45 @@ func TestStepsFindTheirPRByRecordedNumber(t *testing.T) {
 	other.Branch = "hoist/app-production/someone-else"
 	if _, err := (PROpenedStep{Forge: f}).Observe(ctx(), &other); err == nil {
 		t.Error("a recorded number whose PR has a different head branch must fall through to FindPR")
+	}
+}
+
+// shallowGit is a git.Git whose four methods mergeWasReverted uses are scripted; every other
+// method is the nil interface and would panic if reached, which is the point — this test is
+// about the one call site the real-clone test cannot reach: the merge commit is present but
+// the shallow history is cut between it and the tip, so IsAncestor answers no.
+type shallowGit struct {
+	git.Git
+	shallow bool
+}
+
+func (shallowGit) FetchBranch(context.Context, string, string, string) (string, bool, error) {
+	return "feedfacefeedfacefeedfacefeedfacefeedface", true, nil
+}
+func (shallowGit) ObjectExists(context.Context, string, string) (bool, error) { return true, nil }
+func (shallowGit) IsAncestor(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (g shallowGit) IsShallow(context.Context, string) (bool, error) { return g.shallow, nil }
+
+// The ancestry-negative path names a shallow clone too, not only the missing-object path
+// (Copilot, PR #99): a merge commit that is present but disconnected from the tip by the
+// clone's depth must not read as a revert. A full clone answering the same way is a revert —
+// the control.
+func TestMergedDisconnectedAncestryInShallowCloneNamesTheClone(t *testing.T) {
+	s := &PromotionState{Base: "main", CloneDir: "/clone"}
+	const mergeSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	step := MergedStep{Git: shallowGit{shallow: true}}
+	reverted, why, err := step.mergeWasReverted(ctx(), s, mergeSHA)
+	if err != nil || !reverted {
+		t.Fatalf("reverted=%v err=%v", reverted, err)
+	}
+	if !strings.Contains(why, "shallow clone") || !strings.Contains(why, "git fetch --unshallow") || strings.Contains(why, "reset or rebuilt") {
+		t.Errorf("shallow clone with disconnected ancestry: %s", why)
+	}
+	step = MergedStep{Git: shallowGit{shallow: false}}
+	reverted, why, err = step.mergeWasReverted(ctx(), s, mergeSHA)
+	if err != nil || !reverted || !strings.Contains(why, "reset or rebuilt") || strings.Contains(why, "shallow") {
+		t.Errorf("full clone control: reverted=%v err=%v why=%s", reverted, err, why)
 	}
 }

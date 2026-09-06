@@ -312,7 +312,13 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	// than an id derived from a checkout directory name that would drift.
 	if eff.cfg != nil && eff.cfg.GitHub != "" {
 		id := engine.DeriveID(eff.cfg.GitHub, plan)
-		fmt.Fprintf(stdout, "\nPromotion id: %s (branch %s)\n", id, engine.BranchName(plan.TargetEnv, id))
+		if anyRealEdit(plan.Edits) {
+			fmt.Fprintf(stdout, "\nPromotion id: %s (branch %s)\n", id, engine.BranchName(plan.TargetEnv, id))
+		} else {
+			// promote stops at "already current" before it creates anything for an all-no-op
+			// plan, so naming a branch here would name one that never exists.
+			fmt.Fprintf(stdout, "\nPromotion id: %s (already current; promote would create no branch)\n", id)
+		}
 	}
 	if !*dryRun {
 		fmt.Fprintln(stderr, "hoist plan: promotion without --dry-run lands in a later milestone; nothing was written. The output above is what it would change.")

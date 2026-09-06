@@ -493,3 +493,17 @@ func TestDeployIntoProductionWarnsEverywhereItRenders(t *testing.T) {
 		t.Fatalf("the warning must not suppress the plan itself:\n%s", out.String())
 	}
 }
+
+// A deploy narrowed by --promotable labels the operator's other first-party repos the same
+// way `hoist plan` does — outside the narrowed list, not third-party (Copilot, PR #93).
+func TestDeployDryRunUntouchedDistinguishesNarrowedFirstParty(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    promotable: [ghcr.io/example/]\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "deploy", "--env", "app-production", "--image", "ghcr.io/example/web:v9@" + digestC, "--promotable", "ghcr.io/example/web", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "(first-party, outside --promotable ghcr.io/example/web)") || !strings.Contains(s, "docker.io/temporalio/server:1.31.2  (third-party: outside ghcr.io/example/web)") {
+		t.Errorf("deploy dry run mislabels the untouched repos:\n%s", s)
+	}
+}

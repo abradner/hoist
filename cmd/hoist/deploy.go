@@ -110,7 +110,14 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	}
 
 	if *dryRun {
-		if err := printPlan(stdout, r, &plan, eff.promotable, nil, nil); err != nil {
+		// The configured promotable list travels here as it does for `hoist plan`, so a deploy
+		// narrowed by --promotable does not call the operator's other first-party repos
+		// third-party in its Untouched section (issue #65, Copilot on PR #93).
+		var configured []string
+		if eff.cfg != nil {
+			configured = eff.cfg.Promotable
+		}
+		if err := printPlan(stdout, r, &plan, eff.promotable, configured, nil); err != nil {
 			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 			return exitFailure
 		}

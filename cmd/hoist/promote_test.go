@@ -1110,3 +1110,83 @@ func TestPromoteRefusesUnknownBaseByName(t *testing.T) {
 		t.Fatalf("no PR should have been created: %+v", f.PRs())
 	}
 }
+
+// A base deleted on origin leaves a remote-tracking ref behind locally; the classification
+// asks the remote (FetchBranch's own answer), never that cached ref, so the operator is told
+// origin no longer has the branch rather than to create a local branch from stale data
+// (Copilot, PR #94).
+func TestPromoteRefusesBaseDeletedOnOrigin(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "branch", "release", "main")
+	runGitHost(t, clone, "push", "-q", "origin", "release")
+	// Deleted on the bare origin itself: `git push --delete` would also prune the clone's
+	// remote-tracking ref, and the stale ref is the point of this test.
+	originURL, err := gitHostCmd(clone, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, strings.TrimSpace(string(originURL)), "branch", "-D", "release")
+	if out, err := gitHostCmd(clone, "rev-parse", "--verify", "--quiet", "origin/release").CombinedOutput(); err != nil {
+		t.Fatalf("test bug: the stale remote-tracking ref should still exist: %v %s", err, out)
+	}
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "release"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected a refusal for a base deleted on origin; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `origin no longer has a branch "release"`) || strings.Contains(errOut.String(), "git branch release") {
+		t.Fatalf("stderr should say origin no longer has the branch, not suggest creating it from the stale ref: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
+
+// The other two shapes of checkCloneCurrentForBase's base classification, each a real branch
+// of the code (AGENTS.md §8): a base that exists only locally (never pushed) and one that
+// exists only on origin (fetched, never checked out). Each names what is missing and what to
+// do, and neither opens a PR.
+func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "branch", "local-only", "main")
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "local-only"}, &out, &errOut); got == 0 {
+		t.Fatalf("local-only base: expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `origin has no branch "local-only", only`) || !strings.Contains(errOut.String(), "push it") {
+		t.Errorf("local-only base: %s", errOut.String())
+	}
+
+	runGitHost(t, clone, "branch", "origin-only", "main")
+	runGitHost(t, clone, "push", "-q", "origin", "origin-only")
+	runGitHost(t, clone, "branch", "-D", "origin-only")
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "origin-only"}, &out, &errOut); got == 0 {
+		t.Fatalf("origin-only base: expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `has no local branch "origin-only", only origin/origin-only`) || !strings.Contains(errOut.String(), "git branch origin-only origin/origin-only") {
+		t.Errorf("origin-only base: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
+
+// The base classification resolves branch refs, not any revision: a tag named like the base
+// is not a local branch, so it is reported as unresolved rather than as a local-only branch
+// (Copilot, PR #99).
+func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "tag", "release", "main")
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "release"}, &out, &errOut); got == 0 {
+		t.Fatalf("expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `"release" does not resolve`) || strings.Contains(errOut.String(), "push it") {
+		t.Fatalf("a tag was taken for a local branch: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
