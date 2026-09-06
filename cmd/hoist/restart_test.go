@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -300,23 +301,80 @@ func TestRestartFailsClosedWithNoConfiguredRepo(t *testing.T) {
 }
 
 // A failed patch has one ambiguous outcome: the API server can commit and the connection can
-// still fail before the response arrives. Reporting that as failure is wrong in a way that
+// still fail before the response arrives. Reporting that as failure is wrong in the way that
 // matters — the pods are already rolling, and re-running would roll them again (Copilot, PR #81).
 func TestRestartTreatsALandedPatchAsSuccessDespiteAFailedCall(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	f := restartFake(t, rolled("app-production"))
-	// The patch "fails" — but the fake records the stamp anyway, which is exactly the shape of
-	// a write that landed and whose response was lost.
+	// The write lands and the response is lost — the one outcome a patch cannot report, and the
+	// only shape that exercises the recovery. An earlier version of this test set RestartErr
+	// alone, which the fake treats as "the write did not happen", so it asserted the failure
+	// path and never reached the branch it was named for.
 	f.RestartErr = errors.New("connection reset by peer")
-	f.OnRestart = nil
+	f.RestartLandsDespiteErr = true
 
 	var out, errOut bytes.Buffer
-	got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut)
-	if got == 0 {
-		t.Fatalf("this fake never records the stamp, so the failure is real and must be reported:\n%s", out.String())
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got != 0 {
+		t.Fatalf("a write that landed must not be reported as a failure:\nstdout: %s\nstderr: %s", out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "all 1 Deployment(s) rolled") {
+		t.Errorf("it should have gone on to watch the rollout:\n%s", out.String())
+	}
+}
+
+// And a patch that genuinely did not land is still a failure.
+func TestRestartReportsAPatchThatNeverLanded(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	f := restartFake(t, rolled("app-production"))
+	f.RestartErr = errors.New("connection reset by peer") // and the stamp is NOT recorded
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got == 0 {
+		t.Fatalf("a patch that never landed must be reported:\n%s", out.String())
 	}
 	if !strings.Contains(errOut.String(), "connection reset") {
 		t.Errorf("the real failure should be reported:\n%s", errOut.String())
+	}
+}
+
+// An explicitly supplied --family that names nothing is refused, not read as "all": the widest
+// possible blast radius from what reads like a narrowing (Copilot, PR #81).
+func TestRestartRefusesAnEmptyFamilySelector(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	f := restartFake(t, rolled("app-production"))
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production", "--family", ""}, &out, &errOut); got == 0 {
+		t.Fatal("`--family \"\"` must not restart every family")
+	}
+	if !strings.Contains(errOut.String(), "omit it to restart every family") {
+		t.Errorf("the refusal should say what to do instead:\n%s", errOut.String())
+	}
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "Restart ") {
+			t.Errorf("nothing should have been restarted: %v", f.Calls)
+		}
+	}
+}
+
+// A restart that someone else supersedes mid-flight is not this command's success to claim.
+func TestRestartDoesNotClaimSomeoneElsesRollout(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	f := restartFake(t, rolled("app-production"))
+	// Whatever stamp this run writes, the world reports a different one — a concurrent
+	// `kubectl rollout restart`, or a second hoist.
+	f.OnRestart = func(ns, name string, _ time.Time) {
+		st, _ := f.Deployment(context.Background(), ns, name)
+		st.RestartedAt = "2099-01-01T00:00:00.000000000Z"
+		f.SetDeployment(ns, name, st)
+	}
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got == 0 {
+		t.Fatalf("hoist must not report someone else's rollout as its own:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "restarted by something else") {
+		t.Errorf("the report should say what actually happened:\n%s", errOut.String())
 	}
 }
 

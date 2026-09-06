@@ -70,7 +70,17 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
 		return exitFailure
 	}
-	targets, err := restartTargets(r, *env, splitFamilies(*family))
+	// An explicitly supplied selector that normalises to nothing is refused rather than treated
+	// as "all". `--family "$FAMILY"` with the variable unset would otherwise restart every
+	// family in the env — the widest possible blast radius from what reads like a narrowing
+	// (Copilot, PR #81). An omitted flag still means all; only a given-but-empty one is an
+	// error, which is a distinction fs.Visit can make and the value alone cannot.
+	families := splitFamilies(*family)
+	if sel.given["family"] && len(families) == 0 {
+		fmt.Fprintln(stderr, "hoist restart: --family was given but names no family; omit it to restart every family in --env")
+		return exitUsage
+	}
+	targets, err := restartTargets(r, *env, families)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
 		return exitFailure
@@ -147,7 +157,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
 
-	return watchRestart(ctx, ro, *env, restarted, cfg.Poll, stdout, stderr)
+	return watchRestart(ctx, ro, *env, restarted, at, cfg.Poll, stdout, stderr)
 }
 
 // restartOne patches one Deployment and resolves the one ambiguous outcome the patch has: the
@@ -167,12 +177,41 @@ func restartOne(ctx context.Context, ro rollout.Rollout, env, name string, at ti
 	if err == nil || errors.Is(err, rollout.ErrNotFound) {
 		return err
 	}
-	st, rerr := ro.Deployment(ctx, env, name)
-	if rerr == nil && st.RestartedAt == at.UTC().Format(rollout.RestartStampLayout) {
-		return nil
+	// One read is not enough: the outage that lost the patch's response can lose this read too,
+	// and reporting failure then is the very mistake this exists to avoid. So retry — the patch
+	// as readily as the read, since re-patching with the same stamp is idempotent — a few times
+	// with a short backoff, and give up only when the outcome is still genuinely unknown.
+	want := at.UTC().Format(rollout.RestartStampLayout)
+	for attempt := 0; attempt < restartConfirmAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(restartConfirmBackoff):
+		}
+		st, rerr := ro.Deployment(ctx, env, name)
+		if rerr == nil {
+			if st.RestartedAt == want {
+				return nil // the write landed; only the response was lost
+			}
+			// The read worked and this stamp is not there, so the patch really did fail.
+			// Retrying it is safe (same stamp, idempotent) and is the useful thing to do.
+			if perr := ro.Restart(ctx, env, name, at); perr == nil {
+				return nil
+			} else if errors.Is(perr, rollout.ErrNotFound) {
+				return perr
+			}
+		}
 	}
 	return err
 }
+
+// How hard restartOne tries to learn whether an ambiguous patch landed. Deliberately small: the
+// question is "did the write take", not "wait out an outage", and the caller's own deadline
+// still bounds everything above this.
+const (
+	restartConfirmAttempts = 3
+	restartConfirmBackoff  = 500 * time.Millisecond
+)
 
 // restartTargets is the distinct Deployment names the named families declare in env, or every
 // family's when none are named.
@@ -288,7 +327,8 @@ func printRestartTargets(w io.Writer, env, kubeContext string, sts []rollout.Dep
 // watchRestart follows the rollout the restart just started, at the configured cadence and
 // within the configured deadline. This is the same question RolledOutStep asks of a promotion,
 // asked directly: there is no promotion here to hang a step on.
-func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []string, poll config.PollConfig, stdout, stderr io.Writer) int {
+func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []string, at time.Time, poll config.PollConfig, stdout, stderr io.Writer) int {
+	want := at.UTC().Format(rollout.RestartStampLayout)
 	interval := time.Duration(poll.Rollout)
 	if interval <= 0 {
 		interval = 3 * time.Second
@@ -311,6 +351,15 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 			case st.DeadlineExceeded:
 				fmt.Fprintf(stderr, "hoist restart: %s: %s\n", name, st.Detail)
 				return exitFailure
+			case st.RestartedAt != want:
+				// Someone else's stamp is on the pod template, so the rollout being watched is
+				// theirs, not this one's. Reporting it as this restart's success would be a
+				// lie, and a plausible one — a concurrent `hoist restart` or `kubectl rollout
+				// restart` is exactly how this happens. hoist stops claiming the outcome rather
+				// than trying to win the race (Copilot, PR #81).
+				fmt.Fprintf(stderr, "hoist restart: %s was restarted by something else while this one was in flight (its stamp is %s, not %s); the pods are rolling, but not for this command\n",
+					name, orNever(st.RestartedAt), want)
+				return exitFailure
 			case st.Complete:
 				fmt.Fprintf(stdout, "  %s: %s\n", name, st.Detail)
 			default:
@@ -329,4 +378,12 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 		case <-time.After(interval):
 		}
 	}
+}
+
+// orNever renders an empty restart stamp readably.
+func orNever(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }

@@ -5,7 +5,13 @@
 // wrapper over kubernetes.Interface, redaction at every error boundary, a fake clientset for
 // tests. Nothing here knows what a "promotion" is or what image a caller wanted — that
 // comparison is internal/engine's job (AGENTS.md §4.3: pkg/* is activity-shaped, with no
-// domain knowledge of the orchestration above it); this package only reads cluster facts.
+// domain knowledge of the orchestration above it).
+//
+// This package reads cluster facts, with exactly one exception: Restart stamps a Deployment's
+// pod-template restart annotation, which is what makes its pods roll. That is the whole of the
+// write surface here, and it holds the same position pkg/argo.Refresh holds there — one named
+// write beside otherwise read-only methods, so "does this package write" has a short answer
+// rather than a survey.
 //
 // The rollout-completeness check is deploymentRolloutComplete below: logic ported from
 // k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go (Apache License 2.0) rather than
@@ -33,7 +39,9 @@ import (
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// ErrNotFound is wrapped by Deployment and JobLike when the named object does not exist.
+// ErrNotFound is wrapped by Deployment, JobLike and Restart when the named object does not
+// exist. For Restart it is terminal: a Deployment that is not there was not restarted, and no
+// retry changes that.
 var ErrNotFound = errors.New("rollout: object not found")
 
 // ContainerImage is one container's current, live image reference, as the Deployment's own
@@ -141,8 +149,9 @@ type JobLikeStatus struct {
 	Detail                string
 }
 
-// Rollout is what internal/engine's RolledOutStep (and `hoist watch`) need from the cluster's
-// workloads. Every method reads; nothing here writes.
+// Rollout is what internal/engine's RolledOutStep, `hoist watch` and `hoist restart` need from
+// the cluster's workloads. Every method reads except Restart, which is this package's only
+// write — see its own doc comment, and the package doc above.
 type Rollout interface {
 	// Deployment reads namespace/name's current images and rollout completeness.
 	Deployment(ctx context.Context, namespace, name string) (DeploymentStatus, error)
