@@ -408,9 +408,14 @@ func (m Model) summarySection() string {
 		if d.Direction == migrate.DirectionRollback {
 			word += " reverted"
 		}
+		if d.Truncated || d.FilesTruncated {
+			word += " (at least)"
+		}
 		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("%d %s", n, word)))
 	} else if d.Prefix == "" {
 		parts = append(parts, m.styles.Dim.Render("migrations not tracked"))
+	} else if d.FilesTruncated {
+		parts = append(parts, m.styles.Warn.Render("migrations unknown — a commit's file list was capped"))
 	}
 	if m.history.Declared.Repo != "" {
 		replacing := "replacing " + tagOrDigest(m.history.Declared)

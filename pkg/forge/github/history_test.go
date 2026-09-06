@@ -312,3 +312,72 @@ func TestCommitTextIsStrippedOfTerminalControls(t *testing.T) {
 		t.Fatalf("clean = %q", got)
 	}
 }
+
+// The newest bound must be contiguous whatever the total: for 450 commits the last pages
+// hold 3..5 (250 commits) and the fill is the tail of page 2, not of page 1 (Copilot, #124).
+func TestCompareKeepsTheNewestContiguousCommits(t *testing.T) {
+	for _, total := range []int{300, 301, 350, 450, 1001} {
+		shas := make([]string, total)
+		for i := range shas {
+			shas[i] = fmt.Sprintf("%040d", i)
+		}
+		pagesHit := map[int]bool{}
+		c := newTestClient(t, map[string]func(*http.Request) (int, string){
+			"GET /repos/example/gitops/compare/aaa...bbb": func(r *http.Request) (int, string) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+				pagesHit[page] = true
+				var items []string
+				for _, s := range paginate(shas, page, per) {
+					items = append(items, commitJSON(s, "s"))
+				}
+				return 200, fmt.Sprintf(`{"status":"ahead","ahead_by":%d,"behind_by":0,"total_commits":%d,"commits":[%s],"files":[]}`, total, total, strings.Join(items, ","))
+			},
+		})
+		cmp, err := c.Compare(context.Background(), "aaa", "bbb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := min(total, 300)
+		if len(cmp.Commits) != want || cmp.Commits[0].SHA != shas[total-want] || cmp.Commits[want-1].SHA != shas[total-1] {
+			t.Fatalf("total %d: got %d commits %s..%s; want the newest %d (%s..%s)", total, len(cmp.Commits), cmp.Commits[0].SHA, cmp.Commits[len(cmp.Commits)-1].SHA, want, shas[total-want], shas[total-1])
+		}
+		for i := 1; i < len(cmp.Commits); i++ {
+			if cmp.Commits[i].SHA != shas[total-want+i] {
+				t.Fatalf("total %d: gap at %d", total, i)
+			}
+		}
+		if cmp.Truncated != (total > 300) {
+			t.Fatalf("total %d: truncated=%v", total, cmp.Truncated)
+		}
+		if !pagesHit[1] {
+			t.Fatalf("total %d: page 1 (metadata, files) was never read", total)
+		}
+	}
+}
+
+// A transient probe failure must not be remembered: a 5xx while the network hiccups would
+// otherwise make every later 404 on this client a "not visible" error for the session.
+func TestRepoVisibilityCachesOnlyDefinitiveAnswers(t *testing.T) {
+	probes := 0
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops": func(*http.Request) (int, string) {
+			probes++
+			if probes == 1 {
+				return 503, `{"message":"unavailable"}`
+			}
+			return 200, `{"full_name":"example/gitops"}`
+		},
+	})
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err == nil {
+		t.Fatal("the first probe failed; that must surface as an error")
+	}
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if err != nil || ok {
+		t.Fatalf("after the probe recovered: ok=%v err=%v; want a plain not-found", ok, err)
+	}
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err != nil || probes != 2 {
+		t.Fatalf("a visible repo is remembered: probes=%d err=%v", probes, err)
+	}
+}

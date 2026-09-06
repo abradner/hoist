@@ -256,6 +256,9 @@ func (m Model) listInFlight() (Model, tea.Cmd) {
 // listInFlightAt is the listing command for one generation; Init uses the current one, since
 // its model copy is discarded and the root must still recognise the answer.
 func (m Model) listInFlightAt(gen uint64) tea.Cmd {
+	if m.inFlight.List == nil {
+		return nil // the in-flight adaptor is optional (WithInFlight); nothing to list
+	}
 	list, deadline := m.inFlight.List, m.poll.Deadline
 	return func() tea.Msg {
 		ctx := context.Background()

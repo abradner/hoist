@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -547,5 +548,50 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 	}
 	if got := m.View(); strings.Contains(got, secret) {
 		t.Errorf("View() leaked the registered secret in the fatal-error render:\n%s", got)
+	}
+}
+
+// Leaving the screen — esc, or enter handing off to the flight screen — cancels the context
+// every history request runs under, so a delta still loading stops calling the forge.
+func TestLeavingThePlanScreenCancelsItsHistory(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if m.ctx.Err() != nil {
+		t.Fatal("fresh screen: context already cancelled")
+	}
+	m, _ = m.Update(uitest.Key("esc"))
+	if !errors.Is(m.ctx.Err(), context.Canceled) {
+		t.Fatalf("after esc: ctx.Err() = %v; want cancelled", m.ctx.Err())
+	}
+
+	m = readyModel(t, config.EnvsConfig{})
+	m, cmd := m.Update(uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter emitted nothing")
+	}
+	if _, ok := cmd().(StartMsg); !ok {
+		t.Fatalf("enter emitted %T", cmd())
+	}
+	if !errors.Is(m.ctx.Err(), context.Canceled) {
+		t.Fatalf("after enter: ctx.Err() = %v; want cancelled", m.ctx.Err())
+	}
+}
+
+// The impact and the yaml are unrelated documents: a scroll offset from one must not hide
+// the other's head when d switches between them.
+func TestSwitchingTheRightPaneStartsAtTheTop(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m.viewport.SetContent(strings.Repeat("line\n", 200))
+	m.viewport.SetYOffset(40)
+	if m.viewport.YOffset() != 40 {
+		t.Fatalf("setup: offset %d", m.viewport.YOffset())
+	}
+	m, _ = m.Update(uitest.Key("d"))
+	if !m.showYAML || m.viewport.YOffset() != 0 {
+		t.Fatalf("after d: yaml=%v offset=%d; want the yaml from its first line", m.showYAML, m.viewport.YOffset())
+	}
+	m.viewport.SetYOffset(10)
+	m, _ = m.Update(uitest.Key("d"))
+	if m.showYAML || m.viewport.YOffset() != 0 {
+		t.Fatalf("back: yaml=%v offset=%d", m.showYAML, m.viewport.YOffset())
 	}
 }

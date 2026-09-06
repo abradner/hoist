@@ -165,14 +165,23 @@ func (c *Client) Compare(ctx context.Context, base, head string) (forge.Comparis
 	}
 	if firstPage > 1 {
 		// The last pages alone hold fewer than the bound when the total is not a multiple
-		// of the page size; page 1 is already in hand, so its newest commits fill the gap and
-		// the caller gets exactly maxComparePages*perPage of the newest.
-		if need := maxComparePages*perPage - len(out.Commits); need > 0 && need <= len(first.Commits) {
-			var fill []forge.Commit
-			for _, r := range first.Commits[len(first.Commits)-need:] {
-				fill = append(fill, toCommit(r))
+		// of the page size; the page just before firstPage fills the gap — page 1 when that
+		// is the one, otherwise fetched — so the result is the newest bound, contiguous.
+		if need := maxComparePages*perPage - len(out.Commits); need > 0 {
+			before := first
+			if firstPage-1 != 1 {
+				var err error
+				if before, err = fetch(firstPage - 1); err != nil {
+					return forge.Comparison{}, err
+				}
 			}
-			out.Commits = append(fill, out.Commits...)
+			if need <= len(before.Commits) {
+				var fill []forge.Commit
+				for _, r := range before.Commits[len(before.Commits)-need:] {
+					fill = append(fill, toCommit(r))
+				}
+				out.Commits = append(fill, out.Commits...)
+			}
 		}
 	}
 	out.Truncated = len(out.Commits) < out.Total
@@ -194,11 +203,19 @@ func (c *Client) repoVisible(ctx context.Context) error {
 		FullName string `json:"full_name"`
 	}
 	err := c.rest.DoWithContext(ctx, http.MethodGet, fmt.Sprintf("repos/%s/%s", c.owner, c.repo), nil, &resp)
-	c.visKnown = true
-	if err != nil {
-		c.visErr = translateErr(fmt.Sprintf("reading %s/%s (the repository itself is not visible to this token)", c.owner, c.repo), err)
+	if err == nil {
+		c.visKnown = true
+		return nil
 	}
-	return c.visErr
+	verr := translateErr(fmt.Sprintf("reading %s/%s (the repository itself is not visible to this token)", c.owner, c.repo), err)
+	// Only a definitive answer is remembered: 404 and 403 say the token cannot see the
+	// repository. A cancelled context, a 5xx or an exhausted rate limit is the moment's
+	// answer, and caching it would replay a stale failure for the rest of the session.
+	var herr *ghapi.HTTPError
+	if errors.As(err, &herr) && (herr.StatusCode == http.StatusNotFound || herr.StatusCode == http.StatusForbidden) {
+		c.visKnown, c.visErr = true, verr
+	}
+	return verr
 }
 
 // clean strips terminal control sequences from upstream text before it is ever styled or

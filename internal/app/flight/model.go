@@ -507,9 +507,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// SetSize records the terminal size; the step list and log have no internal scrolling
-// component (no layout library, AGENTS.md §4.7) so a very long history can overflow a short
-// terminal — see the PR report's note on this tradeoff.
+// SetSize records the terminal size. The log is a viewport sized to what the frame leaves
+// (layout) and scrolls with the unmatched keys handleKey forwards; the step list has no
+// scrolling and degrades to the one-line strip on a short terminal (stepsSection).
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
 	return m

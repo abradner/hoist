@@ -142,3 +142,59 @@ func TestResumeKeys(t *testing.T) {
 		t.Fatal("the chooser must close and reset")
 	}
 }
+
+// A finished promotion is not in flight: the pane lists what is still moving, and r resumes
+// the one active promotion without asking about the done one.
+func TestFinishedPromotionsLeaveThePane(t *testing.T) {
+	active := parked("5pr6sd333t", "app-staging", "app-production", 12)
+	done := parked("0d0n3d0n3d", "app-staging", "app-production", 90)
+	done.Done = true
+	m := withPane(120, 40, done, active)
+	if got := m.InFlight(); len(got) != 1 || got[0].ID != "5pr6sd333t" {
+		t.Fatalf("pane holds %+v; want the active one only", got)
+	}
+	if v := ansi.Strip(m.View()); strings.Contains(v, "0d0n3d0n3d") || !strings.Contains(v, "in flight (1)") {
+		t.Fatalf("view:\n%s", v)
+	}
+	msg := emitted(t, m, "r")
+	if rm, ok := msg.(ResumeMsg); !ok || rm.ID != "5pr6sd333t" {
+		t.Fatalf("r emitted %+v; want the active promotion resumed without a chooser", msg)
+	}
+}
+
+// o with several PRs asks which, and a promotion without a PR is not offered.
+func TestOpenPRAsksWhichWhenSeveralHaveOne(t *testing.T) {
+	p := parked("5pr6sd333t", "app-staging", "app-production", 12)
+	q := parked("9xy8wv777u", "", "app-staging", 3)
+	q.PR = &forge.PR{Number: 104, URL: "https://forge.example.invalid/pr/104"}
+	noPR := parked("0n0pr0n0pr", "app-staging", "app-production", 1)
+	noPR.PR = nil
+	m := withPane(120, 40, p, q, noPR)
+	m, _ = m.Update(uitest.Key("o"))
+	if m.chooser == nil || m.chooserKind != chooserOpenPR {
+		t.Fatal("o with two PRs must ask which")
+	}
+	// The chooser's own options, not the whole screen: the dimmed pane beneath the dialog
+	// still lists every in-flight promotion, the no-PR one included.
+	v := ansi.Strip(m.chooser.View())
+	if !strings.Contains(v, "open which promotion's PR?") || strings.Contains(v, "0n0pr0n0pr") || !strings.Contains(v, "9xy8wv777u") {
+		t.Fatalf("chooser must list only promotions with a PR:\n%s", v)
+	}
+	m = uitest.Keys(m, update, "down")
+	m, cmd := m.Update(uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter chose nothing")
+	}
+	if got, ok := cmd().(flight.OpenPRMsg); !ok || got.URL != "https://forge.example.invalid/pr/104" {
+		t.Fatalf("chose %+v; want the second promotion's PR", cmd())
+	}
+	if m.chooser != nil || m.chooserKind != chooserImage {
+		t.Fatal("the chooser must close and reset its kind")
+	}
+	// esc resets the kind too: the next d chooser must be an image chooser.
+	m, _ = m.Update(uitest.Key("o"))
+	m, _ = m.Update(uitest.Key("esc"))
+	if m.chooser != nil || m.chooserKind != chooserImage {
+		t.Fatal("esc must reset the chooser kind")
+	}
+}

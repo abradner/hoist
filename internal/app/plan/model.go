@@ -801,7 +801,7 @@ func (m Model) totalsSection() string {
 	for _, r := range m.ticked {
 		ticked[r] = true
 	}
-	repos, commits, migrations, loading, missing, unresolved := 0, 0, 0, 0, 0, 0
+	repos, commits, migrations, loading, missing, unresolved, capped := 0, 0, 0, 0, 0, 0, 0
 	for _, r := range m.rows {
 		if r.Disabled {
 			unresolved++
@@ -822,6 +822,9 @@ func (m Model) totalsSection() string {
 		default:
 			commits += len(st.Delta.Commits)
 			migrations += len(st.Delta.Migrations)
+			if st.Delta.Truncated || st.Delta.FilesTruncated {
+				capped++
+			}
 		}
 	}
 	parts := []string{m.styles.Title.Render(plural(repos, "repo") + " ticked")}
@@ -829,7 +832,13 @@ func (m Model) totalsSection() string {
 		parts = append(parts, m.styles.Title.Render(plural(commits, "commit")))
 	}
 	if migrations > 0 {
-		parts = append(parts, m.styles.Warn.Render(plural(migrations, "migration")))
+		word := plural(migrations, "migration")
+		if capped > 0 {
+			word += " (at least)"
+		}
+		parts = append(parts, m.styles.Warn.Render(word))
+	} else if capped > 0 {
+		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("migrations unknown for %d", capped)))
 	}
 	if loading > 0 {
 		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("history loading for %d", loading)))

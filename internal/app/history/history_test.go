@@ -72,3 +72,18 @@ func TestSummaryWordsARollbackAndAFloor(t *testing.T) {
 		t.Fatalf("floor: %q", got)
 	}
 }
+
+// Zero migrations found under a capped file list is not "no migrations": the surface says
+// unknown rather than nothing (Copilot, #124).
+func TestSummaryNamesAnUnknownMigrationCountUnderACap(t *testing.T) {
+	d := delta(4, migrate.DirectionForward)
+	d.FilesTruncated = true
+	if got := Summary(d, "v3", "v1", "prod"); !strings.Contains(got, "migrations unknown") {
+		t.Fatalf("capped, none found: %q", got)
+	}
+	// Positive control: a complete list with none found says nothing about migrations.
+	d.FilesTruncated = false
+	if got := Summary(d, "v3", "v1", "prod"); strings.Contains(got, "migration") {
+		t.Fatalf("complete, none found: %q", got)
+	}
+}
