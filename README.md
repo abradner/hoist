@@ -14,8 +14,9 @@ environment's Deployments without changing anything they declare.
 The interesting part is what happens after you press enter: hoist commits to a worktree, opens the
 PR, waits for CI, waits for a person to comment `hoist approve <id>` (production only, by default),
 squash-merges, asks Argo CD to refresh, and follows the rollout — telling you at every step what
-it is doing and what it is waiting for. Kill it at any point and `hoist resume` picks up where the
-world actually is, not where a log file says it was.
+it is doing and what it is waiting for. Kill it at any point and `hoist resume <id>` (or
+`hoist resume --env <target>`) picks up where the world actually is, not where a log file says it
+was.
 
 ## What it looks like
 
@@ -89,16 +90,19 @@ status` logged in, is the whole prerequisite.
 ## The three operations
 
 Everything hoist does is one of these. Each is a subcommand and a key on the matrix, with the
-same gates either way; `--dry-run` on any of them prints what would happen and touches nothing.
+same gates either way, and each has a read-only form that prints what would happen and touches
+nothing: `plan` for a promotion, `--dry-run` on `deploy` and `restart`.
 
-**Promote a pair** — copy what one environment runs into the next, every image at once:
+**Promote a pair** — copy what one environment runs into the next, every first-party image the
+target already carries (the `promotable` prefixes; anything else is listed as untouched):
 
 ```bash
 hoist plan --from app-staging --to app-production --dry-run   # the diff, nothing written
 hoist promote --from app-staging --to app-production           # branch, commit, push, PR, CI …
 ```
 
-`promote` resolves each image to the digest the source environment's pods are actually running,
+`promote` resolves each image to a digest — by default what the source environment's pods are
+running, else the manifest's own pin, else the registry, in the order `digest_sources` gives —
 rewrites only the image lines in the target environment, and opens one PR carrying all of them.
 Then it waits: for CI, for `hoist approve <id>` on the PR when the target is production, for the
 merge, for Argo to sync, for every Deployment it touched to roll out. On the matrix this is `p`.
@@ -142,12 +146,14 @@ convention, and the refusal says which one:
 - **A restart changes no declared reference**, and warns where it may still not be a no-op: an
   unpinned tag can pull a different build when the replacement pod lands. Restarting production
   takes `--confirm-production=<env>`.
-- **One promotion per target environment at a time.** A second one for an env that already has a
-  promotion in flight is refused; `hoist promotions` lists them and `hoist resume` continues one.
+- **One promotion per target environment until it lands.** While an env's promotion is still
+  before its merge (or its direct push), a second one for that env is refused and named;
+  `hoist promotions` lists them and `hoist resume <id>` continues one. Once the change has landed
+  the guard lifts, even if Argo is still converging.
 
-Everything else is a warning: a digest the source's pods and manifest disagree on, a promotion
-that jumps straight to production, a build staging has never committed, a migration in the
-delta. hoist says so and lets you decide.
+These, by contrast, are warnings and never refusals: a digest the source's pods and manifest
+disagree on, a promotion that jumps straight to production, a build staging has never committed,
+a migration in the delta, a restart that will not be graceful. hoist says so and lets you decide.
 
 ## What hoist is not
 
