@@ -696,3 +696,31 @@ func TestGetPRNotFoundIsNotAnError(t *testing.T) {
 		t.Fatalf("7: ok=%v err=%v pr=%+v", ok, err, pr)
 	}
 }
+
+// A zero since is "everything" and is omitted from the query: GitHub answers HTTP 422 to
+// since=0001-01-01T00:00:00Z (confirmed read-only against the live API), so formatting the zero
+// value would fail every unbounded call (issue #35). A real since still travels, as RFC 3339
+// in UTC — the control.
+func TestCommentsOmitsSinceForZeroTime(t *testing.T) {
+	var sinces []string
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/issues/7/comments": func(r *http.Request) (int, string) {
+			if r.URL.Query().Has("since") {
+				sinces = append(sinces, r.URL.Query().Get("since"))
+			} else {
+				sinces = append(sinces, "<absent>")
+			}
+			return 200, `[]`
+		},
+	})
+	if _, err := c.Comments(context.Background(), 7, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	anchor := time.Date(2026, 9, 6, 10, 30, 0, 0, time.FixedZone("AEST", 10*3600))
+	if _, err := c.Comments(context.Background(), 7, anchor); err != nil {
+		t.Fatal(err)
+	}
+	if len(sinces) != 2 || sinces[0] != "<absent>" || sinces[1] != "2026-09-06T00:30:00Z" {
+		t.Fatalf("since parameters sent = %q, want [<absent> 2026-09-06T00:30:00Z]", sinces)
+	}
+}

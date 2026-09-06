@@ -332,6 +332,19 @@ type commentResponse struct {
 // forever — the same defensive-bound shape as maxCheckRunPages and maxSearchPages.
 const maxCommentPages = 10
 
+// commentsQuery builds one page's query for Comments. A zero since means "no lower bound" and
+// is omitted rather than formatted: GitHub rejects since=0001-01-01T00:00:00Z outright (HTTP
+// 422, "The since parameter needs to be in ISO 8601 format" — confirmed against the live API
+// on 2026-09-06, read-only), so formatting the zero value would have failed every call that
+// asked for everything (issue #35).
+func commentsQuery(since time.Time, page int) url.Values {
+	q := url.Values{"per_page": {"100"}, "page": {fmt.Sprint(page)}}
+	if !since.IsZero() {
+		q.Set("since", since.UTC().Format(time.RFC3339))
+	}
+	return q
+}
+
 // Comments implements forge.Forge: PR conversation comments (GitHub models these as issue
 // comments), newer than since, with AuthorType carrying the API's own account "type" through
 // (M4: internal/engine.ApprovedStep is what actually enforces R-001's author check against it,
@@ -356,8 +369,7 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 	// approve or reject exactly as the original unpaginated bug did, just moved further out.
 	lastPageFull := false
 	for page := 1; page <= maxCommentPages; page++ {
-		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
-		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
+		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, commentsQuery(since, page).Encode())
 		var batch []commentResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &batch); err != nil {
 			return nil, translateErr("listing comments", err)
@@ -380,8 +392,7 @@ func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([
 		// offset is (page-1)*per_page, so a smaller per_page here would ask for a different,
 		// earlier slice than "the next 100-item batch" and almost always find something, falsely
 		// reporting truncation.
-		q := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(maxCommentPages + 1)}}
-		sentinelPath := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, q.Encode())
+		sentinelPath := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, prNumber, commentsQuery(since, maxCommentPages+1).Encode())
 		var sentinel []commentResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, sentinelPath, nil, &sentinel); err != nil {
 			return nil, translateErr("listing comments", err)
