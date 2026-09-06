@@ -86,8 +86,9 @@ exactly the mistake this paragraph originally made.
 
 The other failure mode is a real inline comment your own query missed. On this repo's PR #32, a
 Copilot review said "Comments generated: 2," and `gh api repos/{owner}/{repo}/pulls/<n>/comments`
-— even unfiltered — returned zero rows for both; the GraphQL `reviewThreads` query below found
-them immediately, proving they were genuine separate comment objects, not suppressed-body text.
+— even unfiltered — returned no rows at all: neither of the two comments appeared in the REST
+listing. The GraphQL `reviewThreads` query below found them immediately, proving they were
+genuine separate comment objects, not suppressed-body text.
 Separately, on the same PR, Codex's four P1s and two P2s were real inline comments the REST route
 did return, but a first pass that filtered them by a commit-id field matching the *current* head
 silently dropped every one, because they were anchored to an earlier commit — the exact
