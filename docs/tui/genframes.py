@@ -426,3 +426,37 @@ plan2 += '\n<span class="c-dim">  enter confirm · x toggle repo · tab expand c
 
 open("frames.txt", "a", encoding="utf-8").write("===PLAN2===\n" + plan2 + "\n")
 print("appended")
+
+# ─────────────────── 13. FLIGHT (M10: built, not proposed) ───────────────────
+b = Box([76])
+b.top("hoist · promotion · in flight")
+b.span("5pr6sd333t   app-staging → app-production      started 12m ago · deadline in 3h 48m")
+b.span_rule()
+b.span("✓ branch")
+b.span("✓ commit")
+b.span("✓ push")
+b.span("✓ PR")
+b.span("✓ CI")
+b.span("… approval")
+b.span("    no approval comment yet")
+b.span("· merge")
+b.span("· argo refresh")
+b.span("· argo sync")
+b.span("· rollout")
+b.span_rule()
+b.span("blocked on you — comment on PR #103 to release it:")
+b.span("")
+b.span("    hoist approve 5pr6sd333t")
+b.bot_span()
+flightframe = colour(b.render(), [
+    ("5pr6sd333t", "c-bold"), ("app-staging → app-production", "c-bold"),
+    ("started 12m ago · deadline in 3h 48m", "c-dim"),
+    ("✓ branch", "c-good"), ("✓ commit", "c-good"), ("✓ push", "c-good"), ("✓ PR", "c-good"), ("✓ CI", "c-good"),
+    ("… approval", "c-warn"),
+    ("blocked on you — comment on PR #103 to release it:", "c-warn"),
+    ("    hoist approve 5pr6sd333t", "c-accent"),
+])
+flightframe += '\n<span class="c-dim">  o open PR · R re-observe · x abort · l log · esc back</span>'
+
+open("frames.txt", "a", encoding="utf-8").write("===FLIGHT===\n" + flightframe + "\n")
+print("appended")

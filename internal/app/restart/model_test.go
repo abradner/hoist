@@ -11,6 +11,7 @@ import (
 
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -86,7 +87,7 @@ func TestScreenShowsTheTargetsAndTheirWarnings(t *testing.T) {
 	f := &fakeFuncs{plan: onePlan()}
 	m := ready(t, f, false)
 	v := m.View()
-	for _, want := range []string{"hoist restart", "app-staging", "web", "1 replica", "never restarted this way", "enter restart"} {
+	for _, want := range []string{"hoist · restart", "app-staging", "web", "1 replica", "never restarted this way", "enter restart"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view missing %q:\n%s", want, v)
 		}
@@ -227,4 +228,19 @@ func TestEscAsksToBePopped(t *testing.T) {
 	if _, ok := cmd().(BackMsg); !ok {
 		t.Fatalf("esc emitted %T, want BackMsg", cmd())
 	}
+}
+
+func TestRestartGolden(t *testing.T) {
+	f := &fakeFuncs{plan: onePlan()}
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := ready(t, f, true).SetSize(size[0], size[1])
+		uitest.Golden(t, "restart", m.View(), size[0], size[1])
+	}
+	// The production dialog sits over the list.
+	m := ready(t, f, true).SetSize(80, 24)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if v := m.View(); !strings.Contains(v, "It is a production env") || !strings.Contains(v, "Deployment(s) in app-staging") {
+		t.Fatalf("dialog must sit over the screen:\n%s", v)
+	}
+	uitest.Golden(t, "restart-confirm", m.View(), 80, 24)
 }

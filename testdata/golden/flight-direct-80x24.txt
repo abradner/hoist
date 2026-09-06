@@ -1,0 +1,24 @@
+╭─ hoist · deploy · in flight ─────────────────────────────────────────────────╮
+│abcd1234   deploy → app-production   direct                 started 4 days ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ gate                                                                        │
+│✓ branch                                                                      │
+│✓ commit                                                                      │
+│… push to base                                                                │
+│    pushing to main                                                           │
+│· argo refresh                                                                │
+│· argo sync                                                                   │
+│· rollout                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+                           o open PR · R re-observe · x abort · l log · esc back

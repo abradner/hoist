@@ -1,0 +1,40 @@
+╭─ hoist · restart ────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│app-staging / web                                                                       production   not yet restarted│
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│1 Deployment(s) in app-staging                                                                                        │
+│                                                                                                                      │
+│   web  1 replica(s) · RollingUpdate · last restart: never restarted this way                                         │
+│     ! only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the             │
+│       replacement fails                                                                                              │
+│     ! no readiness probe: a new pod counts as available the moment it starts, before it can serve                    │
+│     ! unpinned image(s) ghcr.io/example/web:v1: a replacement pod can pull a different build than the one running    │
+│       now, so this restart may not be a no-op                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                enter restart · esc back

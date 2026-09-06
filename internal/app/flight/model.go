@@ -10,7 +10,10 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -152,6 +155,16 @@ type Model struct {
 	styles        ui.Styles
 	keys          keyMap
 	width, height int
+	// now is the clock the header's elapsed and deadline are worded against; a test pins it.
+	now func() time.Time
+	// log is the History scrollback when l toggles it on.
+	log viewport.Model
+}
+
+// WithNow fixes the clock (tests).
+func (m Model) WithNow(now func() time.Time) Model {
+	m.now = now
+	return m
 }
 
 // New builds the flight screen for a promotion already at least identified (state.ID,
@@ -168,6 +181,9 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
 		keys:    defaultKeyMap(),
 		gen:     nextGen.Add(1),
+		now:     time.Now,
+		log:     viewport.New(),
+		styles:  ui.NewStyles(true),
 	}
 	if poll.Deadline > 0 {
 		// One absolute deadline for this screen's whole drive, from the moment it starts —
@@ -492,6 +508,31 @@ func (m Model) SetSize(width, height int) Model {
 	return m
 }
 
+// layout sizes the log viewport to what the frame leaves after the fixed sections.
+func (m Model) layout() Model {
+	if m.width <= 0 || m.height <= 0 {
+		m.width, m.height = 80, 24
+	}
+	fixed := lipgloss.Height(m.headerSection()) + lipgloss.Height(m.stepsSection())
+	sections := 2
+	if a := m.actionSection(); a != "" {
+		fixed += lipgloss.Height(a)
+		sections++
+	}
+	if n := m.notes(); n != "" {
+		fixed += lipgloss.Height(n)
+		sections++
+	}
+	if m.showLog {
+		sections++
+		fixed++ // the "history" label above the log
+	}
+	m.log.SetWidth(m.width - 2)
+	m.log.SetHeight(max(ui.BodyHeight(m.height, sections)-fixed, 3))
+	m.log.SetContent(m.logView())
+	return m
+}
+
 // SetStyles applies the palette; this screen has no huh fields or other themed components
 // beyond the shared status bar and notice styles.
 func (m Model) SetStyles(s ui.Styles) Model {
@@ -499,56 +540,63 @@ func (m Model) SetStyles(s ui.Styles) Model {
 	return m
 }
 
-// View renders the header (id, envs, stopwatch), the step list, the log when toggled, any
-// notice, and the status bar. The whole assembled string passes through redact.Strings once
-// here at the final boundary, matching plan.Model's own belt-and-suspenders convention. This
-// is not defense in depth on top of an earlier redaction: engine.Status hands Row.Detail
-// over unredacted (see rows.go's Row.Detail comment for why appendHistory's redaction does
-// not apply to this path) — this call is the one place that text is actually scrubbed before
-// reaching the terminal.
+// View renders the frame: the header (what and how long), the step list, what it is waiting
+// for and what to type, the log when toggled, notices, and the footer. The whole assembled
+// string passes through redact.Strings once here at the final boundary, matching
+// plan.Model's own belt-and-suspenders convention. This is not defense in depth on top of an
+// earlier redaction: engine.Status hands Row.Detail over unredacted (see rows.go's Row.Detail
+// comment for why appendHistory's redaction does not apply to this path) — this call is the
+// one place that text is actually scrubbed before reaching the terminal.
 func (m Model) View() string {
-	parts := []string{m.header(), m.stepList()}
+	m = m.layout()
+	sections := []string{m.headerSection(), m.stepsSection()}
+	if a := m.actionSection(); a != "" {
+		sections = append(sections, a)
+	}
 	if m.showLog {
-		parts = append(parts, m.logView())
+		sections = append(sections, m.styles.Dim.Render("history")+"\n"+m.log.View())
 	}
-	if m.notice != "" {
-		parts = append(parts, m.styles.Notice.Render(m.notice))
+	if n := m.notes(); n != "" {
+		sections = append(sections, n)
 	}
-	if m.errNotice != "" {
-		parts = append(parts, m.styles.Notice.Render(m.errNotice))
-	}
-	parts = append(parts, ui.StatusBar(m.width, m.statusLeft(), m.hint()))
-	return redact.Strings(strings.Join(parts, "\n"))
+	return redact.Strings(ui.Frame{Title: m.title(), Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Status.Render(m.statusLeft()), m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height))
 }
 
-func (m Model) header() string {
-	// A deploy has no source env, so the promotion's "A -> B" would render as
-	// "hoist promote:  -> app-production" — wrong on both halves: a hole where the source
-	// belongs, and the wrong verb for what the operator confirmed (Copilot, PR #72). The
-	// state's own empty SourceEnv is what distinguishes them, the same discriminator
-	// internal/engine/template.go and cmd/hoist's success line already use.
-	left := fmt.Sprintf("hoist deploy: %s  (%s)", m.state.TargetEnv, m.state.ID)
+func (m Model) title() string {
+	if m.state.SourceEnv == "" {
+		return "hoist · deploy · in flight"
+	}
+	return "hoist · promotion · in flight"
+}
+
+// headerSection is the id, the envs, how long it has run and how long it has left.
+func (m Model) headerSection() string {
+	// A deploy has no source env, so the promotion's "A → B" would render with a hole where
+	// the source belongs — the state's own empty SourceEnv is what distinguishes them, the
+	// same discriminator internal/engine/template.go and cmd/hoist's success line use.
+	pair := m.styles.Title.Render("deploy → " + m.state.TargetEnv)
 	if m.state.SourceEnv != "" {
-		left = fmt.Sprintf("hoist promote: %s -> %s  (%s)", m.state.SourceEnv, m.state.TargetEnv, m.state.ID)
+		pair = m.styles.Title.Render(m.state.SourceEnv + " → " + m.state.TargetEnv)
 	}
-	return ui.StatusBar(m.width, left, m.elapsed())
-}
-
-func (m Model) elapsed() string {
-	start := StartedAt(m.state)
-	if start.IsZero() {
-		return ""
+	left := m.styles.Accent.Render(m.state.ID) + "   " + pair
+	if m.state.Direct {
+		left += "   " + m.styles.Warn.Render("direct")
 	}
-	return time.Since(start).Round(time.Second).String()
+	var right []string
+	if start := StartedAt(m.state); !start.IsZero() {
+		right = append(right, "started "+ui.Ago(m.now(), start))
+	}
+	if !m.deadlineAt.IsZero() && !m.done {
+		right = append(right, "deadline "+ui.Until(m.now(), m.deadlineAt))
+	}
+	return ui.StatusBar(max(m.width-2, 1), left, m.styles.Dim.Render(strings.Join(right, " · ")))
 }
 
 // stepList renders one line per step (glyph + label) with a second, indented detail line
-// for whichever row is Active — the "active step detail" the design brief calls for (e.g.
-// "CI 2/3 complete", "waiting for `hoist approve …`"). A fully done promotion has no active
-// row (DeriveRows never sets Active when done — every row is already Done), but its own
-// last row still carries a real Detail (engine.Status's short-circuited final-step
-// Observation, e.g. "merged as <sha>; branch deleted"), so that one row's detail is shown
-// too even though it is not "active" in the mid-flight sense.
+// for whichever row is Active — e.g. "CI 2/3 complete". A fully done promotion has no active
+// row (DeriveRows never sets Active when done — every row is already Done), but its own last
+// row still carries a real Detail (engine.Status's short-circuited final-step Observation,
+// e.g. "merged as <sha>; branch deleted"), so that one row's detail is shown too.
 func (m Model) stepList() string {
 	var b strings.Builder
 	last := len(m.rows) - 1
@@ -557,21 +605,96 @@ func (m Model) stepList() string {
 		if r.Active && m.busy {
 			marker = m.spinner.View()
 		}
-		fmt.Fprintf(&b, "%s %s\n", marker, Label(r.Step))
+		line := marker + " " + Label(r.Step)
+		switch r.Glyph {
+		case GlyphDone:
+			line = m.styles.Good.Render(line)
+		case GlyphBlocked:
+			line = m.styles.Bad.Render(line)
+		case GlyphActive, GlyphWaiting:
+			line = m.styles.Warn.Render(line)
+		default:
+			line = m.styles.Dim.Render(line)
+		}
+		b.WriteString(line + "\n")
 		if r.Detail != "" && (r.Active || (m.done && i == last)) {
-			fmt.Fprintf(&b, "    %s\n", r.Detail)
+			b.WriteString("    " + ansi.Wrap(r.Detail, max(m.width-6, 20), "") + "\n")
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// stepsSection is the step list when the terminal has the rows for it, else the one-line
+// strip the matrix's in-flight pane draws — degrade by dropping evidence, never the verdict:
+// on a short terminal the notice and the action still fit, and every step is still named.
+func (m Model) stepsSection() string {
+	list := m.stepList()
+	other := lipgloss.Height(m.headerSection()) + lipgloss.Height(m.actionSection()) + lipgloss.Height(m.notes()) + 4
+	if lipgloss.Height(list)+other <= m.height {
+		return list
+	}
+	sum := Summary{ID: m.state.ID, PR: m.state.PR, Rows: m.rows, Done: m.done}
+	strip := sum.StepStrip()
+	if ansi.StringWidth(strip) > m.width-2 {
+		parts := strings.Split(strip, "  ")
+		for i, p := range parts {
+			if strings.HasSuffix(p, " merge") || strings.HasSuffix(p, " push to base") {
+				strip = strings.Join(parts[:i+1], "  ") + "\n" + strings.Join(parts[i+1:], "  ")
+				break
+			}
+		}
+	}
+	if step, ok := ActiveStep(m.rows); ok {
+		for _, r := range m.rows {
+			if r.Step == step && r.Detail != "" {
+				strip += "\n" + ansi.Truncate("    "+r.Detail, max(m.width-2, 20), "…")
+			}
+		}
+	}
+	return strip
+}
+
+// actionSection is what the promotion is waiting for and what the operator can do about it
+// — the same words the matrix's in-flight pane uses (Summary), so the two never disagree.
+// Empty when there is nothing to say beyond the step list itself.
+func (m Model) actionSection() string {
+	sum := Summary{ID: m.state.ID, Source: m.state.SourceEnv, Target: m.state.TargetEnv, Direct: m.state.Direct, PR: m.state.PR, Rows: m.rows, Done: m.done}
+	text, command := sum.Action()
+	switch {
+	case m.done:
+		return m.styles.Good.Render("done")
+	case command != "":
+		return m.styles.Warn.Render(text) + "\n\n    " + m.styles.Accent.Render(command)
+	case m.stopped:
+		if _, blocked := BlockedStep(m.rows); blocked {
+			return m.styles.Bad.Render("blocked — resolve the conflict, then R to re-observe")
+		}
+		return m.styles.Bad.Render("stopped — see the error below; R retries")
+	}
+	return ""
+}
+
 func (m Model) logView() string {
+	if len(m.state.History) == 0 {
+		return m.styles.Dim.Render("(no history yet)")
+	}
 	var b strings.Builder
-	b.WriteString("\nHistory:\n")
 	for _, h := range m.state.History {
-		fmt.Fprintf(&b, "  %s  %-12s  %s\n", h.At.Format(time.RFC3339), h.Step, h.Detail)
+		fmt.Fprintf(&b, "%s  %-12s  %s\n", h.At.Format(time.RFC3339), h.Step, h.Detail)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// notes is the transient notice and the last plumbing error, word-wrapped.
+func (m Model) notes() string {
+	var lines []string
+	if m.notice != "" {
+		lines = append(lines, m.styles.Notice.Render(ansi.Wrap(m.notice, max(m.width-2, 20), "")))
+	}
+	if m.errNotice != "" {
+		lines = append(lines, m.styles.Bad.Render(ansi.Wrap(m.errNotice, max(m.width-2, 20), "")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) statusLeft() string {
@@ -581,9 +704,7 @@ func (m Model) statusLeft() string {
 	if m.stopped {
 		// A Blocked step (BlockedStep's own doc comment) stops polling via m.stopped too, but
 		// never sets m.errNotice — its own reason is already shown as the blocked row's
-		// Detail, in the step list above, not as a separate notice below. "see error below"
-		// would send the operator looking for text that was never written, so this checks
-		// for that case specifically rather than assuming every stop came with one.
+		// Detail, in the step list above, not as a separate notice below.
 		if _, blocked := BlockedStep(m.rows); blocked {
 			return "blocked: resolve the conflict, then press R to re-observe"
 		}
