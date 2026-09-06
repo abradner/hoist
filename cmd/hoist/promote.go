@@ -310,7 +310,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
 	base := fs.String("base", "main", "the GitOps repo's default branch: what the promotion branch is created from and the PR targets")
-	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag (AGENTS.md M6 'Direct mode'): this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
+	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag: this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
 	confirmDirect := fs.String("confirm-direct", "", "the operator's explicit second acknowledgement required alongside --direct: must repeat --to's exact value (refused otherwise) — the CLI's stronger keypress-then-confirm shape (the TUI's equivalent is internal/app/tags' own keypress + huh.Confirm dialog, which names the same env in its prompt)")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
@@ -320,7 +320,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order (see hoist plan -h)")
 	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a pull secret for the cluster credential source (see hoist plan -h)")
 	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source (see hoist plan -h)")
-	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block, which has no override; see AGENTS.md invariant 1)")
+	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block, which has no override)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -791,7 +791,7 @@ func checkDirectPreflight(cmdName string, eff effective, direct bool, confirmDir
 		return exitUsage
 	}
 	if confirmDirect == "" {
-		fmt.Fprintf(stderr, "%s: --direct requires --confirm-direct=<env> too (the keypress-then-confirm shape AGENTS.md's M6 brief requires, at the CLI)\n", cmdName)
+		fmt.Fprintf(stderr, "%s: --direct requires --confirm-direct=<env> too — naming the env twice is the acknowledgement, so a direct write is never one flag\n", cmdName)
 		return exitUsage
 	}
 	if confirmDirect != targetEnv {

@@ -929,7 +929,7 @@ func TestPromoteDirectRefusedForConfiguredProductionEnv(t *testing.T) {
 // already be current (TestPromoteNothingToDoIsANoOp's own setup: app-production's committed
 // content already matches app-staging's, pushed to origin) exited 0 claiming the no-op success
 // message without ever being refused. Direct mode must refuse a production env outright
-// (AGENTS.md §4.5) regardless of whether there would have been anything left to write.
+// regardless of whether there would have been anything left to write.
 func TestPromoteDirectRefusedForConfiguredProductionEnvEvenWhenNoOp(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	data, err := os.ReadFile(cfgPath)

@@ -1176,7 +1176,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 	if !strings.Contains(v, "app-production is a production env") {
 		t.Fatalf("the confirm screen must name the production target:\n%s", v)
 	}
-	// Informational, never blocking (AGENTS.md §4.5): the diff and the enter hint both stay.
+	// Informational, never blocking: the diff and the enter hint both stay.
 	if !strings.Contains(v, "image:") || !strings.Contains(v, "enter deploy") {
 		t.Fatalf("the warning must not displace the diff or the confirmation:\n%s", v)
 	}

@@ -209,7 +209,7 @@ func ChooseRef(occ []Occurrence) (chosen image.Ref, reason string, disagree bool
 // not borrowed for the latter: it would then claim to describe a digest it never pointed at.
 func unwritable(ref image.Ref) string {
 	if !ref.Pinned() {
-		return "a bare tag with no digest; nothing hoist writes is a bare tag (AGENTS.md §4.2) — supply a digest for this repo"
+		return "a bare tag with no digest; nothing hoist writes is a bare tag — supply a digest for this repo"
 	}
 	if ref.Tag == "" {
 		return "a digest with no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required — supply a digest override for this repo carrying both the tag and the digest"

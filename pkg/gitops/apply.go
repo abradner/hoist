@@ -104,7 +104,7 @@ func checkEditable(e *Edit) error {
 		return fmt.Errorf("%s: refusing to write a malformed reference: %w", where, err)
 	}
 	if !e.New.Pinned() {
-		return fmt.Errorf("%s: refusing to write %s: not pinned to a digest (AGENTS.md §4.2)", where, e.New)
+		return fmt.Errorf("%s: refusing to write %s: not pinned to a digest", where, e.New)
 	}
 	if e.New.Tag == "" {
 		return fmt.Errorf("%s: refusing to write %s: digest with no tag; the written form is <repo>:<tag>@sha256:<digest>", where, e.New)

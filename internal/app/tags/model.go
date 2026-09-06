@@ -397,7 +397,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.selectCurrent(false)
 	case key.Matches(msg, m.keys.Direct):
 		if m.production {
-			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env (AGENTS.md §4.5)", m.target)
+			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
 			return m, nil
 		}
 		return m.selectCurrent(true)
@@ -453,7 +453,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		// unselectable with no operator-visible explanation (round-N finding). Only the absence
 		// of both MetaLoaded and MetaErr means a fetch is genuinely still in flight.
 		if r.MetaErr != nil {
-			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — cannot select without a digest (AGENTS.md principle 3)", r.Tag)
+			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — hoist never writes an image it has no digest for", r.Tag)
 		} else {
 			m.notice = fmt.Sprintf("still loading metadata for %s — try again in a moment", r.Tag)
 		}

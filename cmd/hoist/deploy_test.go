@@ -488,7 +488,7 @@ func TestDeployIntoProductionWarnsEverywhereItRenders(t *testing.T) {
 	if !strings.Contains(out.String(), "app-production is a production env") {
 		t.Fatalf("the dry run must name the production target:\n%s", out.String())
 	}
-	// Informational, never blocking (AGENTS.md §4.5): the plan still renders its edit.
+	// Informational, never blocking: the plan still renders its edit.
 	if !strings.Contains(out.String(), "v3") {
 		t.Fatalf("the warning must not suppress the plan itself:\n%s", out.String())
 	}

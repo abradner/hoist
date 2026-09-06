@@ -375,7 +375,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		}
 	case key.Matches(kmsg, m.keys.Mode):
 		if IsProduction(m.target, m.envs) {
-			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env (AGENTS.md §4.5)", m.target)
+			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
 			return m, nil
 		}
 		m.confirming = true
@@ -575,7 +575,7 @@ func (m Model) header() string {
 
 func (m Model) modeLabel() string {
 	if IsProduction(m.target, m.envs) {
-		return fmt.Sprintf("direct mode unavailable: %s is production (AGENTS.md §4.5)", m.target)
+		return fmt.Sprintf("direct mode unavailable: %s is production, so every change goes through a PR", m.target)
 	}
 	if m.mode == ModeDirect {
 		return "mode: DIRECT"

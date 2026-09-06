@@ -232,7 +232,7 @@ func TestBuildPlanSourceOnlyUnwritableWarns(t *testing.T) {
 // target would need a write, and the plan still fails exactly as before.
 func TestBuildPlanSourceUnwritableWithTargetStillRefused(t *testing.T) {
 	for name, tc := range map[string]struct{ ref, want string }{
-		"bare tag":       {"ghcr.io/example/side:v2", "ghcr.io/example/side: ghcr.io/example/side:v2 runs as side in staging, a bare tag with no digest; nothing hoist writes is a bare tag (AGENTS.md §4.2) — supply a digest for this repo"},
+		"bare tag":       {"ghcr.io/example/side:v2", "ghcr.io/example/side: ghcr.io/example/side:v2 runs as side in staging, a bare tag with no digest; nothing hoist writes is a bare tag — supply a digest for this repo"},
 		"tagless digest": {"ghcr.io/example/side@" + digestB, "ghcr.io/example/side: ghcr.io/example/side@" + digestB + " runs as side in staging, a digest with no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required — supply a digest override for this repo carrying both the tag and the digest"},
 	} {
 		t.Run(name, func(t *testing.T) {

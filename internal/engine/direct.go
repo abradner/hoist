@@ -68,7 +68,7 @@ func (d DirectCommitGateStep) refuse(s *PromotionState) string {
 	for _, p := range d.ProductionEnvs {
 		if p == s.TargetEnv {
 			return fmt.Sprintf(
-				"direct mode refused: %q is listed in envs.production; production always goes through a PR and never direct mode (AGENTS.md §4.5) — this is enforced here regardless of what any UI layer offered or any caller believed",
+				"direct mode refused: %q is listed in envs.production; production always goes through a PR and never direct mode — this is enforced here regardless of what any UI layer offered or any caller believed",
 				s.TargetEnv,
 			)
 		}

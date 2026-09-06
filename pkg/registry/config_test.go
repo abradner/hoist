@@ -374,3 +374,94 @@ func strings0(ch string, n int) string {
 	}
 	return string(b)
 }
+
+// A single-arch index — every image built for an arm64-only fleet is one — must still yield
+// Created and Labels. An earlier version REQUIRED linux/amd64 and failed on these, which the tag
+// picker rendered as a bare "load failed" and which made every such tag unselectable, since
+// hoist will not write a reference it has no digest for. Created and Labels come from the build,
+// not the architecture, so the preferred platform is a preference and nothing more.
+func TestConfigSingleArchIndexWithoutAmd64(t *testing.T) {
+	isolateCache(t)
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+
+	created := time.Date(2026, 9, 6, 4, 31, 0, 0, time.UTC)
+	arm64Img, err := random.Image(64, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm64Img = withConfig(t, arm64Img, created, map[string]string{"arch": "arm64"})
+
+	// An attestation child alongside it, exactly as buildx emits: platform unknown/unknown, and
+	// never a candidate to read image metadata from.
+	att, err := random.Image(32, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{Add: arm64Img, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "arm64"}}},
+		mutate.IndexAddendum{Add: att, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "unknown", Architecture: "unknown"}}},
+	)
+	ref, err := name.ParseReference(tr.open + "/example/arm:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.WriteIndex(ref, idx); err != nil {
+		t.Fatal(err)
+	}
+	wantIndexDigest, err := idx.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	meta, err := c.Config(context.Background(), mustRef(t, "ghcr.io/example/arm:v1"))
+	if err != nil {
+		t.Fatalf("an arm64-only index must still resolve: %v", err)
+	}
+	if !meta.Created.Equal(created) {
+		t.Errorf("Created = %s, want the arm64 child's %s", meta.Created, created)
+	}
+	if meta.Labels["arch"] != "arm64" {
+		t.Errorf("Labels = %+v, want the arm64 child's", meta.Labels)
+	}
+	// Still the INDEX digest, not the child's: that is what Head returns and what a pod's
+	// imageID reports, and it is what gets written into a manifest — pinning one arch's child
+	// would break the other arch's nodes on a dual-arch fleet.
+	if meta.Digest != wantIndexDigest.String() {
+		t.Errorf("Digest = %s, want the index digest %s", meta.Digest, wantIndexDigest)
+	}
+}
+
+// An index with no linux child at all is still an error — but one that says what it DID find,
+// which is the difference between a two-minute diagnosis and an afternoon of one.
+func TestConfigIndexWithNoLinuxChildNamesWhatItFound(t *testing.T) {
+	isolateCache(t)
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+
+	win, err := random.Image(32, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{Add: win, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "windows", Architecture: "amd64"}}},
+	)
+	ref, err := name.ParseReference(tr.open + "/example/win:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.WriteIndex(ref, idx); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthKeychain}, Keychain: k8s.StaticKeychain{Username: "good", Password: "pw-good"}})
+	_, err = c.Config(context.Background(), mustRef(t, "ghcr.io/example/win:v1"))
+	if err == nil {
+		t.Fatal("expected an error for an index with no linux child")
+	}
+	if !strings.Contains(err.Error(), "no linux child") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
