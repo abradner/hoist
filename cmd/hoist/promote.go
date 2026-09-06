@@ -84,7 +84,8 @@ func anyRealEdit(edits []gitops.Edit) bool {
 // Drive's own re-observation, AGENTS.md §4.1, is what correctly reports it done rather than this
 // function refusing a legitimate resume).
 func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base string, edits []gitops.Edit) error {
-	if _, _, err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
+	_, onOrigin, err := g.FetchBranch(ctx, cloneDir, "origin", base)
+	if err != nil {
 		return fmt.Errorf("fetching origin/%s to confirm the clone is current: %w", base, err)
 	}
 
@@ -101,11 +102,19 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	// every LsTreeBlob against it failed and the whole plan was reported as "uncommitted local
 	// changes" — a safe refusal, but one that sent the operator looking for edits that did not
 	// exist when the real cause was a typo in --base or a branch never fetched (issue #34).
-	if !localOK {
+	// onOrigin is FetchBranch's own answer from the remote, not the remote-tracking ref, which
+	// is a cached belief that outlives a branch deleted on origin (Copilot on PR #94).
+	if !onOrigin {
 		if originOK {
-			return fmt.Errorf("%s has no local branch %q, only %s — check out or fetch it locally (`git branch %s %s`) and re-run", cloneDir, base, originRef, base, originRef)
+			return fmt.Errorf("origin no longer has a branch %q (a stale %s remains in %s) — check the --base name, or prune with `git fetch --prune origin`, and re-run", base, originRef, cloneDir)
 		}
-		return fmt.Errorf("%q does not resolve in %s and origin has no such branch — check the --base name and re-run", base, cloneDir)
+		if !localOK {
+			return fmt.Errorf("%q does not resolve in %s and origin has no such branch — check the --base name and re-run", base, cloneDir)
+		}
+		return fmt.Errorf("origin has no branch %q, only %s does — push it, or check the --base name, and re-run", base, cloneDir)
+	}
+	if !localOK {
+		return fmt.Errorf("%s has no local branch %q, only %s — check out or fetch it locally (`git branch %s %s`) and re-run", cloneDir, base, originRef, base, originRef)
 	}
 	// targetRef is exactly what pkg/git.Exec.Worktree's own resolveBase would build a brand-new
 	// promotion branch from: origin/<base> whenever that ref exists at all — the bare local

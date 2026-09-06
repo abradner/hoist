@@ -1110,3 +1110,34 @@ func TestPromoteRefusesUnknownBaseByName(t *testing.T) {
 		t.Fatalf("no PR should have been created: %+v", f.PRs())
 	}
 }
+
+// A base deleted on origin leaves a remote-tracking ref behind locally; the classification
+// asks the remote (FetchBranch's own answer), never that cached ref, so the operator is told
+// origin no longer has the branch rather than to create a local branch from stale data
+// (Copilot, PR #94).
+func TestPromoteRefusesBaseDeletedOnOrigin(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "branch", "release", "main")
+	runGitHost(t, clone, "push", "-q", "origin", "release")
+	// Deleted on the bare origin itself: `git push --delete` would also prune the clone's
+	// remote-tracking ref, and the stale ref is the point of this test.
+	originURL, err := gitHostCmd(clone, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, strings.TrimSpace(string(originURL)), "branch", "-D", "release")
+	if out, err := gitHostCmd(clone, "rev-parse", "--verify", "--quiet", "origin/release").CombinedOutput(); err != nil {
+		t.Fatalf("test bug: the stale remote-tracking ref should still exist: %v %s", err, out)
+	}
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "release"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected a refusal for a base deleted on origin; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `origin no longer has a branch "release"`) || strings.Contains(errOut.String(), "git branch release") {
+		t.Fatalf("stderr should say origin no longer has the branch, not suggest creating it from the stale ref: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}

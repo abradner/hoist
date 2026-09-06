@@ -89,18 +89,29 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 			}
 			fmt.Fprintf(stderr, "hoist: %s (retrying)\n", redact.Strings(err.Error()))
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollInterval(poll, s.Phase)):
+		// The sleep is taken in heartbeat-sized pieces so a poll interval longer than
+		// heartbeatEvery (poll.approval accepts any duration) still shows the run is alive
+		// between observations; report on the same state prints nothing unless a heartbeat is
+		// due, and never touches the remote (Copilot on PR #94).
+		remaining := pollInterval(poll, s.Phase)
+		for remaining > 0 {
+			nap := min(remaining, heartbeatEvery)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(nap):
+			}
+			remaining -= nap
+			w.report(s)
 		}
 	}
 }
 
 // heartbeatEvery is how long an unchanged wait goes before the CLI says it is still alive. It
 // is deliberately far slower than any poll.* interval: the line exists to tell a healthy
-// hour-long approval wait apart from a hung process, not to narrate every tick.
-const heartbeatEvery = 10 * time.Minute
+// hour-long approval wait apart from a hung process, not to narrate every tick. A variable
+// only so a test can shrink it; nothing else assigns it.
+var heartbeatEvery = 10 * time.Minute
 
 // waitingReporter prints why the CLI is waiting, once per distinct reason, plus a heartbeat
 // while the reason stays the same. Before it existed a promotion parked at Approved re-derived

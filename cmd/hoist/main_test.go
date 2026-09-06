@@ -670,3 +670,25 @@ func TestPlanPrintsPromotionIDWhenGitHubIsConfigured(t *testing.T) {
 		t.Errorf("flags-only run printed an id with no forge repo to hash:\n%s", out.String())
 	}
 }
+
+// An all-no-op plan still prints its id, but not a branch: promote reports "already current"
+// before it creates anything, so naming one would name a branch that never exists (Copilot,
+// PR #93).
+func TestPlanNoOpPrintsIDWithoutABranch(t *testing.T) {
+	cfgPath, clone, _ := newPromoteFixture(t)
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
+	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "already current; promote would create no branch") || strings.Contains(out.String(), "(branch hoist/") {
+		t.Errorf("no-op plan names a branch promote would never create:\n%s", out.String())
+	}
+}

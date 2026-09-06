@@ -29,12 +29,13 @@ package engine
 // without leaning on Pushed's and Merged's checks to make an earlier PR unreachable.
 //
 // The cost of that anchor is accepted, not overlooked: a committer date is workstation
-// metadata, and a clock set ahead of GitHub's would filter out a real approval posted right
-// after the PR opened until that future instant passes. hoist is a single-operator tool whose
-// commits are made on the operator's own NTP-synced machine, so the skew in play is seconds and
-// sinceSlop already absorbs it; the alternative anchor (PR.CreatedAt) fails in the direction
-// that matters for a production gate — a force-push after the PR opened — and is not taken
-// (issue #47, decided rather than deferred).
+// metadata, and a clock set ahead of GitHub's rejects, for good, any approval whose CreatedAt
+// falls before that future instant — sinceSlop only widens the query, never the check, so the
+// operator has to post a fresh approval once the clock has passed the commit time. hoist is a
+// single-operator tool whose commits are made on the operator's own NTP-synced machine, so the
+// skew in play is seconds and the fresh approval is a re-post at worst; the alternative anchor
+// (PR.CreatedAt) fails in the direction that matters for a production gate — a force-push after
+// the PR opened — and is not taken (issue #47, decided rather than deferred).
 import (
 	"context"
 	"fmt"

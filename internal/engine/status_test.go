@@ -432,3 +432,38 @@ func TestStatusMergedProbeFailureIsInvisibleBeforeTheMerge(t *testing.T) {
 		t.Errorf("ObserveAll stopping plain-unsatisfied before the merge must surface the probe error: %v", err)
 	}
 }
+
+// Only a stop past PROpened proves a live PR. Committed or Pushed can Block after a completed
+// promotion too — origin's branch recreated at another sha — so a Blocked stop there, with the
+// merge probe failing, surfaces the probe's error rather than reporting the old promotion as
+// in flight at Pushed (Copilot, PR #95). A Blocked stop at CI keeps the probe error invisible,
+// as a Waiting one does — the control.
+func TestStatusProbeFailureSurfacesOnABlockBeforePROpened(t *testing.T) {
+	probeErr := errors.New("GET /repos/.../pulls: 502")
+	blockedEarly := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepPushed, obs: Observation{Blocked: "origin's hoist/… holds different content"}},
+		stepStub{name: StepPROpened},
+		stepStub{name: StepCIGreen},
+		stepStub{name: StepMerged, err: probeErr},
+	}
+	var stepErr *StepError
+	if _, _, err := Status(ctx(), blockedEarly, &PromotionState{}); !errors.As(err, &stepErr) || stepErr.Step != StepMerged {
+		t.Errorf("Status: a Block at Pushed with the probe failing must surface the probe error, got %v", err)
+	}
+	if _, _, err := ObserveAll(ctx(), blockedEarly, &PromotionState{}); !errors.Is(err, probeErr) {
+		t.Errorf("ObserveAll: a Block at Pushed with the probe failing must surface the probe error, got %v", err)
+	}
+	blockedAtCI := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepPROpened, obs: Observation{Satisfied: true}},
+		stepStub{name: StepCIGreen, obs: Observation{Blocked: "unit-tests failed"}},
+		stepStub{name: StepMerged, err: probeErr},
+	}
+	if _, statuses, err := Status(ctx(), blockedAtCI, &PromotionState{}); err != nil || len(statuses) != 3 || statuses[2].Blocked == "" {
+		t.Errorf("Status: a Block at CI proves a live PR; err=%v statuses=%+v", err, statuses)
+	}
+	if _, last, err := ObserveAll(ctx(), blockedAtCI, &PromotionState{}); err != nil || last.Step != StepCIGreen {
+		t.Errorf("ObserveAll: a Block at CI proves a live PR; err=%v last=%+v", err, last)
+	}
+}

@@ -263,3 +263,29 @@ func TestWaitingReporterHeartbeatsOnUnchangedReason(t *testing.T) {
 		t.Errorf("a save-failure entry was reported as the waiting reason:\n%s", out.String())
 	}
 }
+
+// A poll interval longer than the heartbeat still shows the run is alive: the sleep is taken
+// in heartbeat-sized pieces, each followed by a report that prints only when a heartbeat is
+// due and never observes the remote (Copilot, PR #94). Here the heartbeat is shrunk far below
+// the poll interval, so several heartbeats land inside one sleep while the step is observed
+// only once.
+func TestDriveToCompletionHeartbeatsInsideALongPollSleep(t *testing.T) {
+	prev := heartbeatEvery
+	heartbeatEvery = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = prev })
+	s := &engine.PromotionState{ID: "abc123", TargetEnv: "app-production", PR: &forge.PR{Number: 7, URL: "https://github.com/me/my-gitops/pull/7"}}
+	step := &waitingStep{name: engine.StepApproved, details: []string{"waiting for `hoist approve abc123` from an approver"}}
+	var errOut bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
+	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if step.calls != 1 {
+		t.Errorf("step observed %d times inside one hour-long poll interval, want 1", step.calls)
+	}
+	if got := strings.Count(errOut.String(), "hoist: still approved:"); got < 2 {
+		t.Errorf("only %d heartbeats printed during a poll sleep longer than the heartbeat:\n%s", got, errOut.String())
+	}
+}
