@@ -269,7 +269,7 @@ hoist resume <id> --override-ci-none
 
 — and `block` has no override at all: fix why CI did not run.
 
-**Approval.** `waiting for hoist approve <id> from an approver` — someone in the repo's
+**Approval.** `` waiting for `hoist approve <id>` from an approver `` — someone in the repo's
 `approvers` list (or, with `collaborators: true`, anyone with write access) comments exactly
 
 ```
@@ -295,9 +295,9 @@ know the base branch:
   re-run.
 - `origin no longer has a branch "main" (a stale … remains …)` — the base name is wrong, or the
   remote branch was deleted; `git fetch --prune origin` and check `--base`.
-- `origin/main is already at X, but this promotion's commit is Y — something else moved this
-  branch; refusing to force-push` — someone pushed to the promotion's branch by hand. hoist never
-  force-pushes. Delete or fast-forward the branch yourself if that was intended, then `R`.
+- `origin/main is already at X, but this promotion's commit is Y — something else moved this branch; refusing to force-push. Delete or fast-forward it manually if that was intentional.`
+  — someone pushed to the promotion's branch by hand. hoist never force-pushes. Delete or
+  fast-forward the branch yourself if that was intended, then `R`.
 - `commit X changes paths beyond this promotion's plan` — the branch's commit touches files the
   plan did not. hoist refuses to treat it as its own. Fix the branch — reset `hoist/<env>/<id>` on
   origin to the base branch, or delete it there — then `R`, and hoist commits again.
