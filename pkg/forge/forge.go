@@ -19,6 +19,13 @@ import (
 // transport error with errors.Is.
 var ErrStaleHead = errors.New("forge: PR head does not match the expected sha")
 
+// ErrUnknownRef is returned (wrapped) by Compare when base or head names nothing the forge
+// knows — a tag that was deleted, a sha only ever pushed to a fork, or a private repo the
+// token cannot see (a GitHub 404 is the same for all three). Callers distinguish it from a
+// transport error with errors.Is: pkg/migrate turns it into "not in the app repo" rather than
+// "unknown", since the revision itself was resolved and it is the repo that lacks it.
+var ErrUnknownRef = errors.New("forge: no such ref")
+
 // PRSpec is what CreatePR needs to open a pull request. Head and Base are branch names, not
 // refs (no "refs/heads/" prefix).
 type PRSpec struct {
@@ -76,6 +83,46 @@ type Comment struct {
 	AuthorType string
 	Body       string
 	CreatedAt  time.Time
+}
+
+// Commit is one commit as Compare reports it (M10, for the migration delta and the commit
+// history the confirm screens lead with). Subject is the first line of the message and Body
+// everything after the first blank line ("" for a one-line message). Author is the commit
+// author's display name, not a login — a squash-merged commit's author may have no account.
+// Every string here is upstream text nothing in hoist wrote; adaptors pass each through
+// pkg/redact before returning it, the same way Checks does for check-run names.
+type Commit struct {
+	SHA     string
+	Subject string
+	Body    string
+	Author  string
+	Date    time.Time // author date
+}
+
+// Comparison is base...head, three-dot: the commits reachable from head but not from base.
+// Status is the forge's own word for the relationship ("ahead", "behind", "diverged",
+// "identical"); a caller that asked base...head and gets "behind" is looking at a rollback and
+// should compare the other way to see what is being un-applied. Total is the forge's own count
+// of commits in the range even when Commits is shorter, and Truncated says so explicitly — an
+// adaptor pages to its own bound rather than crawl an unbounded range. Files is every path
+// changed across the whole range (not per commit; use CommitFiles for that), FilesTruncated
+// when the forge capped that list.
+type Comparison struct {
+	Status         string
+	AheadBy        int
+	BehindBy       int
+	Commits        []Commit // oldest first, as the forge orders them
+	Total          int
+	Truncated      bool
+	Files          []string
+	FilesTruncated bool
+}
+
+// LineOrigin is the commit that last changed one line of one file at one ref, as BlameLines
+// reports it. Date is the committer date.
+type LineOrigin struct {
+	SHA  string
+	Date time.Time
 }
 
 // GitTag is one git tag on the forge as Tags reports it: the tag name and the date of the
@@ -139,4 +186,35 @@ type Forge interface {
 	// unspecified — callers sort by Date themselves; a repo with no tags returns an empty
 	// slice, not an error.
 	Tags(ctx context.Context) ([]GitTag, error)
+
+	// ResolveRef resolves a tag name, branch name, or (possibly abbreviated) commit sha to a
+	// full commit sha. ok=false means the forge has no such ref, or the abbreviation is
+	// ambiguous — not an error. A scope or permission failure IS an error, never folded into
+	// ok=false: pkg/migrate reads ok=false as "try the next source" and an error as "stop", and
+	// a token gap read as "unknown" would silently degrade every revision to unresolved
+	// (AGENTS.md §6.1 item 1's scope gotcha, at this boundary). M10.
+	ResolveRef(ctx context.Context, ref string) (sha string, ok bool, err error)
+	// Compare lists the commits and changed files between base and head, three-dot (reachable
+	// from head, not from base). Bounded: an adaptor pages up to its own cap and reports
+	// Comparison.Truncated rather than crawl further. Either ref unknown to the forge is an
+	// error satisfying errors.Is(err, ErrUnknownRef). M10.
+	Compare(ctx context.Context, base, head string) (Comparison, error)
+	// CommitFiles lists the paths one commit changed, bounded the same way (truncated=true
+	// when the forge capped the list). M10.
+	CommitFiles(ctx context.Context, sha string) (files []string, truncated bool, err error)
+	// CommitsTouching lists, newest first, the shas of commits reachable from ref that changed
+	// anything under path (a directory prefix or a file), committed at or after since. Bounded
+	// by the adaptor's page cap. M10: how pkg/migrate attributes migration files to the commits
+	// that added them without reading every commit in a range.
+	CommitsTouching(ctx context.Context, ref, path string, since time.Time) ([]string, error)
+	// BlameLines reports, for each requested 1-based line of path at ref, the commit that last
+	// changed it. A line past the file's end is absent from the map, not an error. M10: "how
+	// long has the image this promotion replaces been live" is the age of the manifest line,
+	// not of the file — one file holds several image lines and any one of them moving would
+	// reset a file-level date.
+	BlameLines(ctx context.Context, ref, path string, lines []int) (map[int]LineOrigin, error)
+	// ReadFile returns the content of path at ref. ok=false means the file does not exist
+	// there — not an error, since the one caller (pkg/migrate's per-app-repo `.hoist.yaml`)
+	// treats absence as "fall back to config". M10.
+	ReadFile(ctx context.Context, ref, path string) (content []byte, ok bool, err error)
 }

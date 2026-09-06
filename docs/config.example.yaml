@@ -32,7 +32,13 @@ repos:
     apps: { ghcr.io/me/app: me/app }            # image repo -> app git repo; used by the M6
                                                 # tag picker to order tags by this repo's own
                                                 # git tag dates instead of the registry's
-                                                # unordered list, and later by pkg/migrate (M7)
+                                                # unordered list, and by the commit history
+                                                # and migration delta on every confirm (M10)
+    migrations: { ghcr.io/me/app: db/migrate/ } # per image repo: the path prefix its app repo
+                                                # keeps migrations under, or `none`. Default
+                                                # db/migrate/ for every apps entry; the app
+                                                # repo's own .hoist.yaml (`migrations:`)
+                                                # overrides this (M10)
 
 registries:
   - prefix: ghcr.io/me/

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/abradner/hoist/pkg/migrate"
 )
 
 // Config is the whole file. File and Found are set by Load, never read from YAML.
@@ -63,6 +65,11 @@ type RepoConfig struct {
 	Kube          KubeConfig        `yaml:"kube,omitempty"`          // M2
 	DigestSources []string          `yaml:"digest_sources"`          // M2; default pods, manifest, registry
 	Apps          map[string]string `yaml:"apps,omitempty"`          // image repo -> app git repo; M7
+	// Migrations maps an image repo (an Apps key) to the path prefix under which its app repo
+	// keeps database migrations, or "none". Filled to DefaultMigrationsPath by Normalize for
+	// every Apps key that lacks one; the app repo's own .hoist.yaml overrides either
+	// (pkg/migrate.MigrationsPath). M10.
+	Migrations map[string]string `yaml:"migrations,omitempty"`
 
 	// Dir is Path with ~ expanded and cleaned; Key is this entry's YAML path (repos[N]).
 	// Both are derived by Normalize.
@@ -153,6 +160,9 @@ const (
 	DefaultCINone        = "green"
 	DefaultCIGrace       = Duration(3 * time.Minute)
 	DefaultArgoNamespace = "argocd"
+	// DefaultMigrationsPath is pkg/migrate's Rails default, restated here so Normalize fills
+	// the same value the app repo's .hoist.yaml would override.
+	DefaultMigrationsPath = migrate.DefaultMigrationsPath
 
 	ApprovalComment = "comment"
 	ApprovalAuto    = "auto"
@@ -278,6 +288,14 @@ func (c *Config) Normalize() error {
 		}
 		if r.Kube.ArgoNamespace == "" {
 			r.Kube.ArgoNamespace = DefaultArgoNamespace
+		}
+		for img := range r.Apps {
+			if _, ok := r.Migrations[img]; !ok {
+				if r.Migrations == nil {
+					r.Migrations = map[string]string{}
+				}
+				r.Migrations[img] = DefaultMigrationsPath
+			}
 		}
 		// §4.5: a production env is gated by the magic comment unless the file says
 		// otherwise for that env by name. Non-production envs default to auto and are
@@ -448,6 +466,16 @@ func validateRepo(p *problems, r RepoConfig) {
 		}
 		if owner, name, ok := strings.Cut(repo, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 			p.add(path, "want owner/name, got %q", repo)
+		}
+	}
+	for img, prefix := range r.Migrations {
+		path := k + ".migrations." + img
+		if _, ok := r.Apps[img]; !ok {
+			p.add(path, "no matching apps entry: migrations are looked up in the app repo apps.%s names", img)
+			continue
+		}
+		if _, err := migrate.NormalizePrefix(prefix); err != nil {
+			p.add(path, "%v", err)
 		}
 	}
 }

@@ -44,6 +44,27 @@ type Fake struct {
 	// MergeErr, when set, is returned by every call to MergePR regardless of head sha.
 	MergeErr error
 
+	// M10 (pkg/migrate) configuration. Refs maps a ref name (tag, branch, full or abbreviated
+	// sha) to the full sha ResolveRef answers with; absent means ok=false. Comparisons is keyed
+	// "base...head" exactly as a caller would write the range. FilesBySHA feeds CommitFiles;
+	// Touching is keyed "ref path" (one space) and feeds CommitsTouching, whose since filter is
+	// NOT applied by the fake (the caller is asserting on attribution, not on dates — a test
+	// that needs the filter seeds only the shas it expects). Blames is keyed "ref path" and maps
+	// line -> LineOrigin. Files is keyed "ref path" and feeds ReadFile. Each *Err, when set, is
+	// returned by every call to the matching method.
+	Refs        map[string]string
+	ResolveErr  error
+	Comparisons map[string]Comparison
+	CompareErr  error
+	FilesBySHA  map[string][]string
+	FilesErr    error
+	Touching    map[string][]string
+	TouchingErr error
+	Blames      map[string]map[int]LineOrigin
+	BlameErr    error
+	Files       map[string][]byte
+	ReadErr     error
+
 	// Calls records every method invocation, in order, for tests asserting call counts
 	// ("CreatePR was called exactly once across both kill/resume attempts").
 	Calls []string
@@ -268,6 +289,92 @@ func (f *Fake) Tags(_ context.Context) ([]GitTag, error) {
 		return nil, f.TagsErr
 	}
 	return append([]GitTag(nil), f.GitTags...), nil
+}
+
+// ResolveRef implements Forge against the Refs map.
+func (f *Fake) ResolveRef(_ context.Context, ref string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "ResolveRef "+ref)
+	if f.ResolveErr != nil {
+		return "", false, f.ResolveErr
+	}
+	sha, ok := f.Refs[ref]
+	return sha, ok, nil
+}
+
+// Compare implements Forge against Comparisons. A range the test never seeded is reported as
+// ErrUnknownRef — the same answer a real forge gives for a ref it does not have — so a test
+// asserting the unknown-ref path needs no special hook, and a test that forgot to seed a range
+// fails loudly rather than getting an empty, plausible-looking comparison.
+func (f *Fake) Compare(_ context.Context, base, head string) (Comparison, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "Compare "+base+"..."+head)
+	if f.CompareErr != nil {
+		return Comparison{}, f.CompareErr
+	}
+	c, ok := f.Comparisons[base+"..."+head]
+	if !ok {
+		return Comparison{}, fmt.Errorf("forge: comparing %s...%s: %w", base, head, ErrUnknownRef)
+	}
+	c.Commits = append([]Commit(nil), c.Commits...)
+	c.Files = append([]string(nil), c.Files...)
+	return c, nil
+}
+
+// CommitFiles implements Forge against FilesBySHA. Never truncated: a test wanting the
+// truncated branch drives it through Comparison.FilesTruncated instead.
+func (f *Fake) CommitFiles(_ context.Context, sha string) ([]string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "CommitFiles "+sha)
+	if f.FilesErr != nil {
+		return nil, false, f.FilesErr
+	}
+	return append([]string(nil), f.FilesBySHA[sha]...), false, nil
+}
+
+// CommitsTouching implements Forge against Touching (keyed "ref path"); since is recorded in
+// Calls but not applied — see the field's doc comment.
+func (f *Fake) CommitsTouching(_ context.Context, ref, path string, since time.Time) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, fmt.Sprintf("CommitsTouching %s %s since=%s", ref, path, since.UTC().Format(time.RFC3339)))
+	if f.TouchingErr != nil {
+		return nil, f.TouchingErr
+	}
+	return append([]string(nil), f.Touching[ref+" "+path]...), nil
+}
+
+// BlameLines implements Forge against Blames (keyed "ref path"). Lines the test never seeded
+// are absent from the result, exactly like a line past the file's end on a real forge.
+func (f *Fake) BlameLines(_ context.Context, ref, path string, lines []int) (map[int]LineOrigin, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "BlameLines "+ref+" "+path)
+	if f.BlameErr != nil {
+		return nil, f.BlameErr
+	}
+	out := map[int]LineOrigin{}
+	for _, n := range lines {
+		if o, ok := f.Blames[ref+" "+path][n]; ok {
+			out[n] = o
+		}
+	}
+	return out, nil
+}
+
+// ReadFile implements Forge against Files (keyed "ref path").
+func (f *Fake) ReadFile(_ context.Context, ref, path string) ([]byte, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, "ReadFile "+ref+" "+path)
+	if f.ReadErr != nil {
+		return nil, false, f.ReadErr
+	}
+	b, ok := f.Files[ref+" "+path]
+	return append([]byte(nil), b...), ok, nil
 }
 
 // PRs returns a snapshot of every PR the fake has created, for a test asserting "exactly one
