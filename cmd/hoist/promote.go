@@ -608,6 +608,7 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 		WorktreeDir:    worktreeDir,
 		Base:           base,
 		Edits:          plan.Edits,
+		Restarts:       plan.Restarts,
 		CommitMessage:  engine.RenderCommitMessage(id, plan),
 		PRTitle:        engine.PRTitle(plan),
 		PRBody:         engine.RenderPRBody(id, plan),

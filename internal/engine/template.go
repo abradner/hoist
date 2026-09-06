@@ -30,6 +30,19 @@ func RenderPRBody(id string, plan gitops.Plan) string {
 		fmt.Fprintln(&b)
 	}
 
+	if len(plan.Restarts) > 0 {
+		fmt.Fprintln(&b, "| workload | file | previously restarted |")
+		fmt.Fprintln(&b, "|---|---|---|")
+		for _, r := range plan.Restarts {
+			was := r.Old
+			if was == "" {
+				was = "never"
+			}
+			fmt.Fprintf(&b, "| %s %s | %s | %s |\n", r.Kind, r.Name, r.File, was)
+		}
+		fmt.Fprintln(&b)
+	}
+
 	if len(plan.Untouched) > 0 {
 		fmt.Fprintf(&b, "Untouched (not part of this %s):\n", noun(plan))
 		for _, ref := range plan.Untouched {
@@ -56,16 +69,23 @@ func RenderPRBody(id string, plan gitops.Plan) string {
 // misdescribes what happened is a bug, and the PR body is the thing a reader trusts six
 // months later).
 func noun(plan gitops.Plan) string {
-	if plan.IsDeploy() {
+	switch {
+	case plan.IsDeploy():
 		return "deploy"
+	case plan.IsRestart():
+		return "restart"
 	}
 	return "promotion"
 }
 
 // lede is the PR body's opening sentence.
 func lede(plan gitops.Plan) string {
-	if plan.IsDeploy() {
+	switch {
+	case plan.IsDeploy():
 		return fmt.Sprintf("hoist deploys into `%s`.", plan.TargetEnv)
+	case plan.IsRestart():
+		return fmt.Sprintf("hoist restarts %d Deployment(s) in `%s`. No image changes: this sets the pod template's `%s` annotation, which is what makes Argo roll the pods.",
+			len(plan.Restarts), plan.TargetEnv, gitops.RestartAnnotation)
 	}
 	return fmt.Sprintf("hoist promotes `%s` -> `%s`.", plan.SourceEnv, plan.TargetEnv)
 }
@@ -73,8 +93,11 @@ func lede(plan gitops.Plan) string {
 // PRTitle renders the PR title for plan.
 func PRTitle(plan gitops.Plan) string {
 	rows := editRows(plan.Edits)
-	if plan.IsDeploy() {
+	switch {
+	case plan.IsDeploy():
 		return fmt.Sprintf("hoist: deploy %d image(s) to %s", len(rows), plan.TargetEnv)
+	case plan.IsRestart():
+		return fmt.Sprintf("hoist: restart %d Deployment(s) in %s", len(plan.Restarts), plan.TargetEnv)
 	}
 	return fmt.Sprintf("hoist: promote %d image(s) %s -> %s", len(rows), plan.SourceEnv, plan.TargetEnv)
 }
@@ -83,13 +106,19 @@ func PRTitle(plan gitops.Plan) string {
 // the hoist-id trailer on its own line at the end (AGENTS.md invariant 5).
 func RenderCommitMessage(id string, plan gitops.Plan) string {
 	var b strings.Builder
-	if plan.IsDeploy() {
+	switch {
+	case plan.IsDeploy():
 		fmt.Fprintf(&b, "hoist: deploy to %s\n\n", plan.TargetEnv)
-	} else {
+	case plan.IsRestart():
+		fmt.Fprintf(&b, "hoist: restart %s\n\n", plan.TargetEnv)
+	default:
 		fmt.Fprintf(&b, "hoist: promote %s -> %s\n\n", plan.SourceEnv, plan.TargetEnv)
 	}
 	for _, r := range editRows(plan.Edits) {
 		fmt.Fprintf(&b, "- %s: %s -> %s (%d occurrence(s))\n", r.repo, r.from, r.to, r.count)
+	}
+	for _, r := range plan.Restarts {
+		fmt.Fprintf(&b, "- %s %s (%s)\n", r.Kind, r.Name, r.File)
 	}
 	fmt.Fprintf(&b, "\n%s\n", CommitTrailer(id))
 	return b.String()

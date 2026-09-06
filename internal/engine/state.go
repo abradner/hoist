@@ -56,6 +56,14 @@ type PromotionState struct {
 	// bypasses gitops.Apply/Verify).
 	Edits []gitops.Edit
 
+	// Restarts are the gitops.Plan's pod-template restart writes (M9), carried the same way
+	// Edits are and used by the same step. A plan is one variant or the other and never both:
+	// BuildPlan and BuildDeployPlan produce Edits and no Restarts, BuildRestartPlan produces
+	// Restarts and no Edits, so CommittedStep can choose between gitops.Apply and
+	// gitops.ApplyRestarts on which of the two is populated rather than on a mode flag that
+	// could disagree with the content.
+	Restarts []gitops.RestartEdit
+
 	// CommitMessage, PRTitle and PRBody are rendered once (identity.go/template.go) from the
 	// plan and id, then carried here so a resumed run acts on exactly the same text it would
 	// have rendered fresh — RenderPRBody and CommitMessage are pure functions of the plan and

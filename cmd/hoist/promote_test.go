@@ -105,7 +105,10 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
 	}
 	deployment := func(ref string) string {
-		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: " + ref + "\n"
+		// spec.template.metadata.labels is not decoration: a Deployment's selector has to match
+		// its pod template, so every real one has this block — and M9's restart writes its
+		// annotation beside it. A fixture without it is a Deployment Kubernetes would reject.
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  selector:\n    matchLabels:\n      app: app\n  template:\n    metadata:\n      labels:\n        app: app\n    spec:\n      containers:\n        - name: app\n          image: " + ref + "\n"
 	}
 	digestOld := "sha256:" + strings.Repeat("0", 64)
 	digestNew := "sha256:" + strings.Repeat("1", 64)

@@ -170,6 +170,7 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 	// per-occurrence no-op to begin with (gitops.Edit.NoOp) — goes straight to add+commit
 	// instead of through Apply a second time.
 	byFile := map[string][]gitops.Edit{}
+	byFileRestart := map[string][]gitops.RestartEdit{}
 	var files []string
 	for _, e := range s.Edits {
 		if _, ok := byFile[e.File]; !ok {
@@ -177,9 +178,19 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 		}
 		byFile[e.File] = append(byFile[e.File], e)
 	}
+	// A plan carries Edits or Restarts, never both (see PromotionState.Restarts), so these two
+	// loops never both contribute and the partitioning below stays a single pass over one set
+	// of files whichever variant this promotion is.
+	for _, r := range s.Restarts {
+		if _, ok := byFileRestart[r.File]; !ok {
+			files = append(files, r.File)
+		}
+		byFileRestart[r.File] = append(byFileRestart[r.File], r)
+	}
 	sort.Strings(files)
 
 	var toApply []gitops.Edit
+	var toRestart []gitops.RestartEdit
 	var alreadyDone []string
 	for _, f := range files {
 		p, err := gitops.ResolvePath(s.WorktreeDir, f)
@@ -201,6 +212,7 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 			continue
 		}
 		toApply = append(toApply, byFile[f]...)
+		toRestart = append(toRestart, byFileRestart[f]...)
 	}
 
 	// gitops.Apply re-verifies before it writes each file (AGENTS.md invariant 3) — this is
@@ -211,6 +223,14 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 	if err != nil {
 		return fmt.Errorf("applying the plan's edits: %w", err)
 	}
+	// The restart half, through its own verified apply (gitops.ApplyRestarts, which verifies
+	// before it writes exactly as gitops.Apply does). Reached only for a restart promotion,
+	// where toApply is empty for the same reason this is empty for every other kind.
+	restarted, err := gitops.ApplyRestarts(s.WorktreeDir, toRestart)
+	if err != nil {
+		return fmt.Errorf("applying the plan's restarts: %w", err)
+	}
+	changed = append(changed, restarted...)
 	changed = append(changed, alreadyDone...)
 	if len(changed) == 0 {
 		return errors.New("no files changed; nothing to commit (the caller should have detected an all-no-op plan before starting the engine)")
@@ -245,7 +265,51 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 // method's own lazy "if empty, compute from CloneDir" path (Observe/Act, both unchanged below)
 // is simply never reached in that case.
 func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (map[string]string, error) {
+	if len(s.Restarts) > 0 {
+		return ComputeExpectedRestartBlobs(ctx, c.Git, s.CloneDir, s.Restarts)
+	}
 	return ComputeExpectedBlobs(ctx, c.Git, s.CloneDir, s.Edits)
+}
+
+// ComputeExpectedRestartBlobs is ComputeExpectedBlobs for a restart plan: same contract, same
+// read source, same reason for reading dir rather than the worktree (see below) — only the
+// apply and verify pair differs, because a restart adds lines and gitops.Apply/Verify cannot.
+// Kept as a sibling rather than a branch inside the other so neither variant's path can be
+// changed by accident while editing the other's.
+func ComputeExpectedRestartBlobs(ctx context.Context, g git.Git, dir string, restarts []gitops.RestartEdit) (map[string]string, error) {
+	byFile := map[string][]gitops.RestartEdit{}
+	var files []string
+	for _, r := range restarts {
+		if _, ok := byFile[r.File]; !ok {
+			files = append(files, r.File)
+		}
+		byFile[r.File] = append(byFile[r.File], r)
+	}
+	sort.Strings(files)
+	out := make(map[string]string, len(files))
+	for _, f := range files {
+		p, err := gitops.ResolvePath(dir, f)
+		if err != nil {
+			return nil, err
+		}
+		before, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s from %s: %w", f, dir, err)
+		}
+		after, err := gitops.ApplyRestartsToBytes(before, byFile[f])
+		if err != nil {
+			return nil, err
+		}
+		if err := gitops.VerifyRestarts(map[string][]byte{f: before}, map[string][]byte{f: after}, byFile[f]); err != nil {
+			return nil, err
+		}
+		blob, err := g.HashObject(ctx, dir, after)
+		if err != nil {
+			return nil, err
+		}
+		out[f] = blob
+	}
+	return out, nil
 }
 
 // ComputeExpectedBlobs computes what each edited file's blob hash will be once edits are

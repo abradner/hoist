@@ -99,10 +99,46 @@ func ArgoAppNames(r *gitops.Repo, targetEnv string, edits []gitops.Edit) ([]stri
 	seen := map[string]bool{}
 	var names []string
 	for _, e := range edits {
-		dir := path.Dir(e.File)
-		app, ok := byDir[dir]
-		if !ok {
-			return nil, fmt.Errorf("argo apps: edit %s: no family in env %q owns directory %s", e.File, targetEnv, dir)
+		app, err := appForFile(byDir, targetEnv, e.File)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[app] {
+			seen[app] = true
+			names = append(names, app)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// appForFile maps one manifest path to the Argo Application whose family owns its directory.
+func appForFile(byDir map[string]string, targetEnv, file string) (string, error) {
+	dir := path.Dir(file)
+	app, ok := byDir[dir]
+	if !ok {
+		return "", fmt.Errorf("argo apps: %s: no family in env %q owns directory %s", file, targetEnv, dir)
+	}
+	return app, nil
+}
+
+// ArgoAppNamesForRestart is ArgoAppNames for a restart plan, which names files rather than
+// image edits. Same lookup, same errors — only the field the path comes out of differs.
+func ArgoAppNamesForRestart(r *gitops.Repo, targetEnv string, restarts []gitops.RestartEdit) ([]string, error) {
+	env, ok := r.Envs[targetEnv]
+	if !ok {
+		return nil, fmt.Errorf("argo apps: target env %q not found in the discovered repo", targetEnv)
+	}
+	byDir := make(map[string]string, len(env.Families))
+	for _, f := range env.Families {
+		byDir[f.Dir] = f.App
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, re := range restarts {
+		app, err := appForFile(byDir, targetEnv, re.File)
+		if err != nil {
+			return nil, err
 		}
 		if !seen[app] {
 			seen[app] = true
