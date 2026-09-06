@@ -115,7 +115,7 @@ func New(repo *gitops.Repo, promotable []string) Model {
 	km := table.DefaultKeyMap()
 	km.LineUp, km.LineDown = m.keys.Up, m.keys.Down
 	m.tbl = table.New(
-		table.WithColumns(columns(m.matrix)),
+		table.WithColumns(columns(m.matrix, m.col)),
 		table.WithRows(rows(m.matrix)),
 		table.WithKeyMap(km),
 		table.WithFocused(true),
@@ -138,12 +138,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.col > 0 {
 				m.col--
 			}
-			return m, nil
+			// Through layout, not a bare return: the marker lives in the column titles, so the
+			// header has to be rebuilt for it to move with the cursor.
+			return m.layout(), nil
 		case key.Matches(msg, m.keys.Right):
 			if m.col < len(m.matrix.Envs)-1 {
 				m.col++
 			}
-			return m, nil
+			return m.layout(), nil
 		case key.Matches(msg, m.keys.Promote):
 			source := m.CurrentEnv()
 			if source == "" {
@@ -294,7 +296,7 @@ func (m Model) layout() Model {
 	if m.showHelp {
 		reserved++
 	}
-	m.tbl.SetColumns(fit(columns(m.matrix), m.width))
+	m.tbl.SetColumns(fit(columns(m.matrix, m.col), m.width))
 	m.tbl.SetWidth(m.width)
 	m.tbl.SetHeight(max(m.height-reserved, 1))
 	m.help.SetWidth(m.width)
@@ -336,8 +338,15 @@ func (m Model) statusBar() string {
 	if m.notice != "" {
 		left = m.styles.Notice.Render(m.notice)
 	} else {
-		left = m.styles.Status.Render(fmt.Sprintf("%s  envs %d · families %d · unmanaged %d",
-			displayRoot(m.repo.Root), len(m.matrix.Envs), len(m.matrix.Rows), len(m.repo.Unmanaged)))
+		// The selected env in words, not only as a marker in the header: this is the thing
+		// every write gesture on this screen acts on, and it was previously nowhere on screen.
+		// The selected env replaces the env COUNT rather than joining it: at 80 columns the
+		// status bar cannot hold both plus the rest, and adding it silently truncated
+		// "unmanaged" off the end. Which env is selected is the fact that was missing and the
+		// one every write gesture here depends on; how many there are is visible in the header
+		// row anyway.
+		left = m.styles.Status.Render(fmt.Sprintf("%s  env %s · families %d · unmanaged %d",
+			displayRoot(m.repo.Root), orNoEnv(m.CurrentEnv()), len(m.matrix.Rows), len(m.repo.Unmanaged)))
 	}
 	right := m.styles.Hint.Render(m.help.ShortHelpView(m.keys.ShortHelp()))
 	return ui.StatusBar(m.width, left, right)
@@ -355,17 +364,27 @@ func displayRoot(root string) string {
 	return filepath.ToSlash(root)
 }
 
-func columns(t Table) []table.Column {
+// selectedMarker prefixes the env column the cursor is on. The table highlights the selected
+// ROW on its own, but nothing marked the selected COLUMN — and the column is what p, P, d and R
+// all act on, so an operator could not see which env they were about to write to. That is not a
+// cosmetic gap: it is how a deploy aimed at staging opens a picker for production.
+const selectedMarker = "▸ "
+
+func columns(t Table, sel int) []table.Column {
 	cols := []table.Column{{Title: "family", Width: len("family")}}
 	for _, r := range t.Rows {
 		cols[0].Width = max(cols[0].Width, ansi.StringWidth(r.Family))
 	}
 	for i, e := range t.Envs {
-		w := ansi.StringWidth(e)
+		title := e
+		if i == sel {
+			title = selectedMarker + e
+		}
+		w := ansi.StringWidth(title)
 		for _, r := range t.Rows {
 			w = max(w, ansi.StringWidth(r.Cells[i].String()))
 		}
-		cols = append(cols, table.Column{Title: e, Width: min(w, maxCellWidth)})
+		cols = append(cols, table.Column{Title: title, Width: min(w, maxCellWidth)})
 	}
 	return cols
 }
@@ -380,4 +399,12 @@ func rows(t Table) []table.Row {
 		out = append(out, row)
 	}
 	return out
+}
+
+// orNoEnv renders an empty selection readably rather than as a gap.
+func orNoEnv(env string) string {
+	if env == "" {
+		return "(none)"
+	}
+	return env
 }

@@ -1030,3 +1030,37 @@ func TestStagingNoteDoesNotClaimTheSameBuild(t *testing.T) {
 		t.Errorf("the verdict must say what a tag match does and does not prove:\n%s", v)
 	}
 }
+
+// A registry failure is a list — one clause per credential source — and printed unwrapped the
+// terminal clips it after the first, which is the clause least likely to be actionable: the
+// operator sees "HOIST_GHCR_TOKEN is not set" and never reaches "cluster: not configured", the
+// one that says what to fix. This is what the operator actually hit.
+func TestCredentialErrorIsWrappedSoEveryClauseIsVisible(t *testing.T) {
+	const chain = "registry: ghcr.io/example/app: no credential source worked for ghcr.io: " +
+		"env: neither HOIST_GHCR_TOKEN nor GHCR_TOKEN is set; keychain: status 403 Forbidden; " +
+		"cluster: not configured; op: not configured; anonymous: status 401 Unauthorized"
+
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return nil, nil, false, errors.New(chain)
+	}
+	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, fixedMetas(nil))
+	m = m.SetSize(100, 20)
+	m = m.SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.err == nil {
+		t.Fatal("the picker should be in its error state")
+	}
+
+	v := m.View()
+	for _, want := range []string{"cluster: not configured", "op: not configured", "keychain: status 403"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("the view must show the %q clause, not just the first:\n%s", want, v)
+		}
+	}
+	// Every line fits the terminal, so nothing is clipped away.
+	for _, line := range strings.Split(v, "\n") {
+		if w := len([]rune(line)); w > 100 {
+			t.Errorf("line is %d wide, wider than the terminal:\n%q", w, line)
+		}
+	}
+}

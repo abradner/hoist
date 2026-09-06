@@ -168,3 +168,37 @@ func TestRestartKeyEmitsOpenRestartMsg(t *testing.T) {
 		}
 	}
 }
+
+// The selected COLUMN is what p, P, d and R all act on, and nothing on screen used to show it —
+// the table highlights the selected row on its own, but the env cursor was invisible. That is
+// not cosmetic: it is how a deploy aimed at staging opens a picker for production, which is
+// exactly what happened to the operator.
+func TestSelectedEnvIsVisible(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}).SetSize(200, 20)
+	first := m.CurrentEnv()
+	v := m.View()
+	if !strings.Contains(v, selectedMarker+first) {
+		t.Errorf("the selected env column should be marked in the header:\n%s", v)
+	}
+	if !strings.Contains(v, "env "+first) {
+		t.Errorf("the status bar should name the selected env:\n%s", v)
+	}
+
+	// And the marker moves with the cursor — a marker stuck on the first column would be worse
+	// than none, because it would actively mislead.
+	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	second := m2.CurrentEnv()
+	if second == first {
+		t.Skip("fixture has only one env; nothing to move to")
+	}
+	v2 := m2.View()
+	if !strings.Contains(v2, selectedMarker+second) {
+		t.Errorf("the marker should follow the cursor to %q:\n%s", second, v2)
+	}
+	if strings.Contains(v2, selectedMarker+first) {
+		t.Errorf("the marker should have left %q:\n%s", first, v2)
+	}
+	if !strings.Contains(v2, "env "+second) {
+		t.Errorf("the status bar should name %q:\n%s", second, v2)
+	}
+}
