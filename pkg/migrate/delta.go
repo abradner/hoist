@@ -47,11 +47,15 @@ type Commit struct {
 // attributed through CommitsTouching, which is bounded by the oldest *returned* commit's date
 // — so under truncation the migration count is a floor, and the screen says so.
 type Delta struct {
-	From, To         Revision
-	Direction        Direction
-	Commits          []Commit
-	Total            int
-	Truncated        bool
+	From, To  Revision
+	Direction Direction
+	Commits   []Commit
+	Total     int
+	Truncated bool
+	// FilesTruncated is set when a commit that touches the migrations path had its file
+	// list capped by the forge, so Migrations may be missing entries: a floor, like
+	// Truncated, and worded as one.
+	FilesTruncated   bool
 	Migrations       []string
 	MigrationCommits int
 	// Prefix and PrefixSource record which migrations path applied and where it came from
@@ -126,7 +130,9 @@ func (c Comparer) Delta(ctx context.Context, in DeltaIn) (Delta, error) {
 		// with no further calls.
 		return out, nil
 	}
-	oldest := cmp.Commits[0].Date
+	// GitHub applies `since` as an exclusive lower bound, so the oldest compared commit's own
+	// timestamp would drop that very commit. One second back; inRange filters any extra.
+	oldest := cmp.Commits[0].Date.Add(-time.Second)
 	touching, err := c.Forge.CommitsTouching(ctx, head, strings.TrimSuffix(in.Migrations, "/"), oldest)
 	if err != nil {
 		return out, fmt.Errorf("migrate: finding commits under %s: %w", in.Migrations, err)
@@ -141,9 +147,15 @@ func (c Comparer) Delta(ctx context.Context, in DeltaIn) (Delta, error) {
 		if !ok {
 			continue
 		}
-		files, _, err := c.Forge.CommitFiles(ctx, sha)
+		files, truncated, err := c.Forge.CommitFiles(ctx, sha)
 		if err != nil {
 			return out, fmt.Errorf("migrate: listing files of %s: %w", short(sha), err)
+		}
+		if truncated {
+			// CommitsTouching already proved this commit changed the migrations path; if
+			// the file list is capped the migration may be past the cap, and a silent "no
+			// migrations" here would be the false negative the whole delta exists to prevent.
+			out.FilesTruncated = true
 		}
 		for _, f := range files {
 			if strings.HasPrefix(f, in.Migrations) {

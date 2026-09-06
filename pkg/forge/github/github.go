@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ghapi "github.com/cli/go-gh/v2/pkg/api"
@@ -38,6 +39,11 @@ type Client struct {
 	// on a Client built through newWithClient, the M3 test seam; newWithClients supplies one.
 	gql         *ghapi.GraphQLClient
 	owner, repo string
+	// visMu/visKnown/visErr memoise repoVisible (history.go): one probe per Client, since
+	// every 404 the history methods see has to ask the same question.
+	visMu    sync.Mutex
+	visKnown bool
+	visErr   error
 }
 
 // New builds a Client for ownerRepo ("owner/name", RepoConfig.GitHub), authenticating

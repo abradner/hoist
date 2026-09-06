@@ -26,6 +26,7 @@ func TestResolveRefFoldsNotFoundAndAmbiguousIntoNotOK(t *testing.T) {
 	for _, status := range []int{404, 422} {
 		c := newTestClient(t, map[string]func(*http.Request) (int, string){
 			"GET /repos/example/gitops/commits/v9": static(status, `{"message":"nope"}`),
+			"GET /repos/example/gitops":            static(200, `{"full_name":"example/gitops"}`),
 		})
 		sha, ok, err := c.ResolveRef(context.Background(), "v9")
 		if err != nil || ok || sha != "" {
@@ -84,6 +85,11 @@ func TestComparePaginatesAndReportsTruncation(t *testing.T) {
 	if len(cmp.Commits) != 300 || cmp.Total != 350 || !cmp.Truncated {
 		t.Fatalf("len=%d total=%d truncated=%v; want 300/350/true", len(cmp.Commits), cmp.Total, cmp.Truncated)
 	}
+	// GitHub pages oldest first; the bound keeps the NEWEST 300 (commits 50..349), because a
+	// migration in the newest fifty is the one that must not fall off the end.
+	if cmp.Commits[0].SHA != shas[50] || cmp.Commits[299].SHA != shas[349] {
+		t.Fatalf("kept %s..%s; want the newest 300 (%s..%s)", cmp.Commits[0].SHA, cmp.Commits[299].SHA, shas[50], shas[349])
+	}
 	if cmp.Status != "ahead" || cmp.AheadBy != 350 {
 		t.Fatalf("status=%q ahead=%d", cmp.Status, cmp.AheadBy)
 	}
@@ -111,6 +117,7 @@ func TestCompareShortRangeIsNotTruncated(t *testing.T) {
 func TestCompareUnknownRefIsTyped(t *testing.T) {
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/compare/aaa...bbb": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":                   static(200, `{"full_name":"example/gitops"}`),
 	})
 	_, err := c.Compare(context.Background(), "aaa", "bbb")
 	if !errors.Is(err, forge.ErrUnknownRef) {
@@ -246,5 +253,62 @@ func TestTranslateErrNamesRateLimitExhaustion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), reset.Local().Format("15:04")) {
 		t.Fatalf("err = %q; want the reset time", err)
+	}
+}
+
+// A 404 is what GitHub answers for a missing ref AND for a private repository the token cannot
+// read. Only the first is ok=false; the second is a scope error, per the Forge contract —
+// pkg/migrate would otherwise degrade every revision to "unknown" without saying why.
+func TestResolveRefTreatsAnInvisibleRepoAsAScopeError(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":            static(404, `{"message":"Not Found"}`),
+	})
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if ok || err == nil || !strings.Contains(err.Error(), "repo scope") || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("ok=%v err=%v; want a scope error naming the repository", ok, err)
+	}
+	// Compare's 404 goes the same way, and the probe runs once per Client.
+	c2 := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/compare/aaa...bbb": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops/commits/v9":        static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":                   static(404, `{"message":"Not Found"}`),
+	})
+	_, err = c2.Compare(context.Background(), "aaa", "bbb")
+	if errors.Is(err, forge.ErrUnknownRef) || err == nil || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("err = %v; want a scope error, not ErrUnknownRef", err)
+	}
+	if _, _, err2 := c2.ResolveRef(context.Background(), "v9"); err2 == nil {
+		t.Fatal("second 404 on the same client must reuse the probe's answer")
+	}
+}
+
+// Commit text is whatever its author typed: a crafted escape sequence in a subject must never
+// reach the operator's terminal. Two layers hold that: go-gh's REST client rewrites C0 control
+// bytes in response bodies to caret notation (ESC becomes the two characters "^["), and clean
+// strips whatever still arrives as a real control byte — the layer a transport without that
+// courtesy (a GitLab adaptor, a future go-gh) would rely on.
+func TestCommitTextIsStrippedOfTerminalControls(t *testing.T) {
+	const commit = `{"sha":"c1","commit":{"message":"fix: \u001b]0;evil\u0007 \u001b[31mred\u001b[0m\u0000 done\n\nbody\ttab \u001b[2J","author":{"name":"Dev\u001b[1m","date":"2026-03-01T00:00:00Z"},"committer":{"date":"2026-03-01T00:00:00Z"}}}`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/compare/aaa...bbb": static(200, `{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"commits":[`+commit+`],"files":[{"filename":"a\u001b[2Jb"}]}`),
+	})
+	cmp, err := c.Compare(context.Background(), "aaa", "bbb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{cmp.Commits[0].Subject, cmp.Commits[0].Body, cmp.Commits[0].Author, cmp.Files[0]} {
+		for _, r := range s {
+			if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f {
+				t.Fatalf("control byte %#x survived in %q", r, s)
+			}
+		}
+	}
+	if !strings.Contains(cmp.Commits[0].Body, "\t") {
+		t.Fatalf("a tab is legitimate commit-body text and must survive: %q", cmp.Commits[0].Body)
+	}
+	// Positive control on clean itself, with real control bytes rather than go-gh's carets.
+	if got := clean("fix: \x1b]0;evil\x07 \x1b[31mred\x1b[0m\x00 done\n\tbody"); got != "fix:  red done\n\tbody" {
+		t.Fatalf("clean = %q", got)
 	}
 }

@@ -142,8 +142,10 @@ func TestDeltaAttributesThroughCommitsTouchingOnly(t *testing.T) {
 	if diff := cmp.Diff([]string{"CommitFiles c2"}, fileCalls); diff != "" {
 		t.Fatalf("CommitFiles calls (-want +got):\n%s", diff)
 	}
-	if !strings.Contains(strings.Join(f.Calls, "\n"), "CommitsTouching "+shaB+" db/migrate since=2026-03-01") {
-		t.Fatalf("CommitsTouching must be bounded by the oldest commit's date; calls = %v", f.Calls)
+	// One second before the oldest compared commit: GitHub's since is exclusive, and the
+	// boundary commit's own migrations must not vanish (Copilot, M10 train).
+	if !strings.Contains(strings.Join(f.Calls, "\n"), "CommitsTouching "+shaB+" db/migrate since=2026-02-28T23:59:59") {
+		t.Fatalf("CommitsTouching must be bounded one second before the oldest commit's date; calls = %v", f.Calls)
 	}
 	if d.MigrationCommits != 1 || d.Migrations[0] != "db/migrate/1.rb" {
 		t.Fatalf("d = %+v", d)
@@ -216,5 +218,34 @@ func TestDeltaUnknownRefPropagates(t *testing.T) {
 	_, err := Comparer{Forge: f}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB)})
 	if !errors.Is(err, forge.ErrUnknownRef) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// CommitsTouching proved c2 touched the migrations path; if the forge then caps c2's file
+// list before the migration appears, "no migrations" would be a false negative. The delta
+// says its migration count is a floor instead.
+func TestDeltaMarksACappedFileListAsAFloor(t *testing.T) {
+	f := &forge.Fake{
+		Comparisons: map[string]forge.Comparison{
+			shaA + "..." + shaB: {Status: "ahead", Total: 2,
+				Commits: []forge.Commit{fc("c1", "a", 1), fc("c2", "b", 2)},
+				Files:   []string{"app/x.rb"}, FilesTruncated: true},
+		},
+		Touching:    map[string][]string{shaB + " db/migrate": {"c2"}},
+		FilesBySHA:  map[string][]string{"c2": {"app/y.rb"}},
+		FilesCapped: map[string]bool{"c2": true},
+	}
+	d, err := Comparer{Forge: f}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.FilesTruncated {
+		t.Fatalf("FilesTruncated must be set when a touching commit's file list was capped: %+v", d)
+	}
+	// Positive control: the same shape with the list complete is not a floor.
+	f.FilesCapped = nil
+	d, err = Comparer{Forge: f}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
+	if err != nil || d.FilesTruncated {
+		t.Fatalf("complete list: FilesTruncated=%v err=%v", d.FilesTruncated, err)
 	}
 }

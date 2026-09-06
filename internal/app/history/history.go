@@ -82,7 +82,7 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 			word = "migration"
 		}
 		migrations = fmt.Sprintf(" · %d %s", len(d.Migrations), word)
-		if d.Truncated {
+		if d.Truncated || d.FilesTruncated {
 			migrations += " (at least)"
 		}
 	}
@@ -90,7 +90,14 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	case migrate.DirectionSame:
 		return fmt.Sprintf("%s is what %s declares", cursor, target)
 	case migrate.DirectionRollback:
-		return fmt.Sprintf("%s is %s behind %s — a rollback%s", cursor, commits(), declared, strings.Replace(migrations, "migration", "migration reverted", 1))
+		// "2 migrations reverted", "1 migration reverted"; the untracked form is unchanged.
+		reverted := migrations
+		if len(d.Migrations) > 0 {
+			reverted = strings.Replace(migrations, " migration", " migration reverted", 1)
+			reverted = strings.Replace(reverted, " migrations", " migrations reverted", 1)
+			reverted = strings.Replace(reverted, "reverted reverted", "reverted", 1)
+		}
+		return fmt.Sprintf("%s is %s behind %s — a rollback%s", cursor, commits(), declared, reverted)
 	case migrate.DirectionDiverged:
 		return fmt.Sprintf("%s and %s diverged: %s only in %s%s", cursor, declared, commits(), cursor, migrations)
 	default:

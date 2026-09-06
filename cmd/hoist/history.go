@@ -31,19 +31,41 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 	// The TUI has no --base flag (promote/deploy default theirs to "main" too), so the
 	// blame fallback is the same literal until one exists.
 	const base = "main"
-	if rc == nil || len(rc.Apps) == 0 {
+	if rc == nil {
 		return history.Funcs{}
+	}
+	var repoRoot string
+	if r != nil {
+		repoRoot = r.Root
+	}
+	blamer := migrate.Blamer{Forge: gitopsForge}
+	// LiveAge blames the gitops repo, which needs no app mapping at all: a repo with an empty
+	// repos[].apps still gets "declares v1 · since 4 weeks ago" — only the delta needs apps.
+	liveAge := func(ctx context.Context, occ gitops.Occurrence) (migrate.LineAge, error) {
+		if forgeErr != nil {
+			return migrate.LineAge{}, fmt.Errorf("live age needs the gitops repo's forge: %w", forgeErr)
+		}
+		if blameRef == "" {
+			return migrate.LineAge{}, fmt.Errorf("live age: the checkout at %s has no resolvable HEAD", repoRoot)
+		}
+		ages, err := blamer.LiveAge(ctx, migrate.LiveAgeIn{Ref: blameRef, FallbackRef: base, Path: occ.File, Lines: []int{occ.Line}})
+		if err != nil {
+			return migrate.LineAge{}, err
+		}
+		age, ok := ages[occ.Line]
+		if !ok {
+			return migrate.LineAge{}, fmt.Errorf("live age: %s has no line %d at %s", occ.File, occ.Line, blameRef)
+		}
+		return age, nil
+	}
+	if len(rc.Apps) == 0 {
+		return history.Funcs{Mapped: func(string) bool { return false }, LiveAge: liveAge}
 	}
 	var registries []config.RegistryConfig
 	if cfg != nil {
 		registries = cfg.Registries
 	}
 	h := &historyAdaptor{rc: rc, registries: registries, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
-	var repoRoot string
-	if r != nil {
-		repoRoot = r.Root
-	}
-	blamer := migrate.Blamer{Forge: gitopsForge}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -52,23 +74,7 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 		Delta: func(ctx context.Context, from, to image.Ref) (migrate.Delta, error) {
 			return h.delta(ctx, from, to)
 		},
-		LiveAge: func(ctx context.Context, occ gitops.Occurrence) (migrate.LineAge, error) {
-			if forgeErr != nil {
-				return migrate.LineAge{}, fmt.Errorf("live age needs the gitops repo's forge: %w", forgeErr)
-			}
-			if blameRef == "" {
-				return migrate.LineAge{}, fmt.Errorf("live age: the checkout at %s has no resolvable HEAD", repoRoot)
-			}
-			ages, err := blamer.LiveAge(ctx, migrate.LiveAgeIn{Ref: blameRef, FallbackRef: base, Path: occ.File, Lines: []int{occ.Line}})
-			if err != nil {
-				return migrate.LineAge{}, err
-			}
-			age, ok := ages[occ.Line]
-			if !ok {
-				return migrate.LineAge{}, fmt.Errorf("live age: %s has no line %d at %s", occ.File, occ.Line, blameRef)
-			}
-			return age, nil
-		},
+		LiveAge: liveAge,
 	}
 }
 
@@ -225,7 +231,8 @@ func (h *historyAdaptor) delta(ctx context.Context, from, to image.Ref) (migrate
 			// The revision was resolved (a label the build stamped) but the app repo does not
 			// hold it — a build from a fork, or a merge ref GitHub has since dropped. Say
 			// that, not "unknown".
-			return d, fmt.Errorf("%w: revision %s (from the %s) is not in %s: %w", migrate.ErrUnresolved, short(toRev.SHA), toRev.Source, appRepo, err)
+			// Compare cannot say which end is missing (both are one 404), so name both.
+			return d, fmt.Errorf("%w: %s (from the %s) or %s (from the %s) is not in %s: %w", migrate.ErrUnresolved, short(fromRev.SHA), fromRev.Source, short(toRev.SHA), toRev.Source, appRepo, err)
 		}
 		d.PrefixSource = source
 		return d, err
