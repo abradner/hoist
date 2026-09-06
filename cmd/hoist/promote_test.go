@@ -24,10 +24,15 @@ import (
 // runGitHost runs git directly for fixture setup that is not itself part of what's under
 // test (seeding the local origin this test promotes against — never a real GitHub repo or
 // cluster, per the hard constraints).
+func gitHostCmd(dir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-c", "safe.bareRepository=all"}, args...)...)
+	cmd.Dir = dir
+	return cmd
+}
+
 func runGitHost(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
+	cmd := gitHostCmd(dir, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
@@ -163,7 +168,7 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 	// block on an Application the fake had never heard of. Converging on Refresh models the
 	// real thing for both paths rather than special-casing one.
 	fakeArgo.OnRefresh = func(a argo.Application) {
-		tip, err := exec.Command("git", "-C", origin, "rev-parse", "refs/heads/main").Output()
+		tip, err := gitHostCmd("", "-C", origin, "rev-parse", "refs/heads/main").Output()
 		if err != nil {
 			return // nothing to converge to; the step's own wait/block reports it
 		}
@@ -594,8 +599,7 @@ func TestPromoteDirectCommitsWithoutPR(t *testing.T) {
 // clone under test without disturbing what the test is trying to observe.
 func gitShowFile(t *testing.T, dir, rev, path string) string {
 	t.Helper()
-	cmd := exec.Command("git", "show", rev+":"+path)
-	cmd.Dir = dir
+	cmd := gitHostCmd(dir, "show", rev+":"+path)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git show %s:%s: %v", rev, path, err)
@@ -669,8 +673,7 @@ func TestPromoteSecondDirectPromotionSeesFirstsPushedContent(t *testing.T) {
 // origin directly (a second, independent clone) without hoist itself ever touching it.
 func originURL(t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = dir
+	cmd := gitHostCmd(dir, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git remote get-url origin: %v", err)
