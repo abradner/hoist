@@ -1,0 +1,40 @@
+╭─ hoist · matrix · repo ──────────────────────────────────────────────────────────────────────────────────────────────╮
+│ FAMILY      A                     B                    ▸ C ⚠                                                         │
+│ absent      v1            pinned                       v9    pinned                                                  │
+│ drift       v1          unpinned  v2           pinned  v2  unpinned                                                  │
+│ empty                             no images                                                                          │
+│ mixedtags   2 versions     split                                                                                     │
+│ multi       2 images      pinned  2 images   unpinned                                                                │
+│ pinned      v1            pinned  v1           pinned  v1    pinned                                                  │
+│ sidecar     v1            pinned  v1           pinned                                                                │
+│ thirdparty  7           external  8          external  8   external                                                  │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│⚠ c is a production env: writes there always open a PR                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+env c (production) · families 8 · unmanaged 0                         p promote • d deploy • R restart • ? help • q quit

@@ -1,7 +1,8 @@
 // Package matrix is the env × family screen: one row per family, one column per env, the
-// family's image tag in each cell with a marker for pin state, drift and third-party-only
-// families. cells.go derives the cell values from a discovered repo with no terminal
-// dependency; model.go lays them out.
+// family's image tag in each cell with its state spelled out — pinned, unpinned, split,
+// external, drifted — as a word an operator can read without a legend. cells.go derives the
+// cell values from a discovered repo (and, when the cluster has answered, from what each env
+// is actually running) with no terminal dependency; model.go lays them out.
 package matrix
 
 import (
@@ -13,52 +14,65 @@ import (
 	"github.com/abradner/hoist/pkg/image"
 )
 
+// State is the one word a cell shows beside its tag. Colour reinforces it; it never replaces
+// it (docs/tui/mockups.html: "state is a word, not a glyph").
+type State string
+
+const (
+	// StatePinned means every first-party occurrence carries a digest.
+	StatePinned State = "pinned"
+	// StateUnpinned means at least one first-party occurrence is a bare tag — a moved tag is
+	// invisible to imagePullPolicy: IfNotPresent (AGENTS.md principle 3).
+	StateUnpinned State = "unpinned"
+	// StateSplit means one image repo runs under more than one reference inside the env — the
+	// condition the runbook blocks a promotion on, so it should look like a problem.
+	StateSplit State = "split"
+	// StateExternal means the family has no first-party image at all.
+	StateExternal State = "external"
+	// StateDrifted means the cluster runs a build the manifest does not declare. The single most
+	// important fact on the screen when it is true, so it gets a sentence under the table too.
+	StateDrifted State = "drifted"
+)
+
 // Cell is one family × env intersection.
 type Cell struct {
 	// Present is false when the family has no Application in this env; the other fields
 	// are then zero and String renders blank.
 	Present bool
 	// Text is the tag shown: the single first-party tag, "N images" when the family's
-	// first-party occurrences span N image repos, or "tagA,tagB" when one image repo runs
-	// under more than one tag inside the env. A third-party-only family shows the same for
-	// its third-party images.
+	// first-party occurrences span N image repos, or "N versions" when one image repo runs
+	// under N references inside the env. A third-party-only family shows the same for its
+	// third-party images.
 	Text string
-	// Pinned: every first-party occurrence carries a digest (marker @).
+	// State is the word beside Text; "" for a present cell with no images at all.
+	State State
+	// Pinned: every first-party occurrence carries a digest.
 	Pinned bool
-	// Differs: the set of refs differs from the previous env column's (marker ≠). Never set
-	// on the first column or when the previous column is blank.
+	// Differs: the set of refs differs from the previous env column's. Never set on the
+	// first column or when the previous column is blank. Kept as data for a caller that
+	// wants to colour a change across columns; it is no longer a glyph.
 	Differs bool
-	// ThirdParty: the family has no first-party image at all (marker !).
+	// ThirdParty: the family has no first-party image at all.
 	ThirdParty bool
+	// Running is what the cluster reports for a drifted cell — the tag, or a short digest —
+	// for the sentence under the table ("marketing runs sha-77c0ffe here; manifest says …").
+	// Empty unless State is StateDrifted.
+	Running string
 	// key is the sorted distinct ref set the Differs comparison runs on.
 	key string
 }
 
-// Marker is two cells wide so tags stay aligned: pin state (@, or ! for third-party-only)
-// then drift (≠), each blank when not set.
-func (c Cell) Marker() string {
-	if !c.Present {
-		return "  "
-	}
-	pin, drift := ' ', ' '
-	switch {
-	case c.ThirdParty:
-		pin = '!'
-	case c.Pinned:
-		pin = '@'
-	}
-	if c.Differs {
-		drift = '≠'
-	}
-	return string([]rune{pin, drift})
-}
-
-// String is the cell as the table shows it: marker, space, text — or blank when absent.
+// String is the cell as the table shows it: text, two spaces, state — or blank when absent.
+// The table aligns the state to the right of the column itself (see rows in model.go); this
+// is the unaligned form for tests and logs.
 func (c Cell) String() string {
 	if !c.Present {
 		return ""
 	}
-	return c.Marker() + " " + c.Text
+	if c.State == "" {
+		return c.Text
+	}
+	return c.Text + "  " + string(c.State)
 }
 
 // Row is one family across every env; Cells is aligned with Table.Envs.
@@ -74,10 +88,16 @@ type Table struct {
 	Rows []Row
 }
 
+// Running is what each env's cluster is actually running, keyed env → image repo → the
+// running reference (tag and digest as the pod reports them). nil, or a missing env, means
+// the cluster has not answered for that env — no cell there can be drifted, and none is
+// claimed not to be.
+type Running map[string]map[string]image.Ref
+
 // Compute derives the matrix from a discovered repo. promotable lists the image repo
 // prefixes that count as first-party (what hoist plan --promotable takes); an occurrence
-// matching none is third-party.
-func Compute(r *gitops.Repo, promotable []string) Table {
+// matching none is third-party. running may be nil.
+func Compute(r *gitops.Repo, promotable []string, running Running) Table {
 	t := Table{Envs: make([]string, 0, len(r.Envs))}
 	famSet := map[string]bool{}
 	for name, env := range r.Envs {
@@ -99,7 +119,7 @@ func Compute(r *gitops.Repo, promotable []string) Table {
 			if fam == nil {
 				continue
 			}
-			c := cellFor(fam, promotable)
+			c := cellFor(fam, promotable, running[e])
 			if i > 0 && row.Cells[i-1].Present && row.Cells[i-1].key != c.key {
 				c.Differs = true
 			}
@@ -111,7 +131,7 @@ func Compute(r *gitops.Repo, promotable []string) Table {
 }
 
 // cellFor computes everything about a cell except Differs, which needs its neighbour.
-func cellFor(fam *gitops.Family, promotable []string) Cell {
+func cellFor(fam *gitops.Family, promotable []string, running map[string]image.Ref) Cell {
 	var first, third []image.Ref
 	for _, o := range fam.Occurrences {
 		if isFirstParty(o.Ref.Repo, promotable) {
@@ -129,16 +149,74 @@ func cellFor(fam *gitops.Family, promotable []string) Cell {
 	}
 	c.key = refKey(refs)
 	c.Text = cellText(refs)
-	if len(first) > 0 {
-		c.Pinned = true
+	switch {
+	case len(refs) == 0:
+		return c
+	case c.ThirdParty:
+		c.State = StateExternal
+		return c
+	}
+	c.Pinned = true
+	for _, ref := range first {
+		if !ref.Pinned() {
+			c.Pinned = false
+			break
+		}
+	}
+	c.State = StateUnpinned
+	if c.Pinned {
+		c.State = StatePinned
+	}
+	// Split is judged on what the cell shows — distinct tags (or digests for tag-less refs),
+	// the same basis as cellText's "N versions" — so the word and the text never disagree.
+	// Two occurrences of one tag, one pinned and one not, are unpinned, not split.
+	if repos := distinct(first, func(r image.Ref) string { return r.Repo }); len(repos) == 1 && len(distinct(first, tagOrDigest)) > 1 {
+		c.State = StateSplit
+	}
+	if run, ok := drifted(first, running); ok {
+		c.State = StateDrifted
+		c.Running = tagOrDigest(run)
+	}
+	return c
+}
+
+// drifted reports the running reference for the first repo whose cluster image matches
+// none of its manifest references. Digests decide when both sides carry one; a bare manifest
+// tag compares by tag. A repo the cluster did not report is not drifted — absence of evidence
+// is not drift.
+func drifted(first []image.Ref, running map[string]image.Ref) (image.Ref, bool) {
+	if len(running) == 0 {
+		return image.Ref{}, false
+	}
+	for _, repo := range distinct(first, func(r image.Ref) string { return r.Repo }) {
+		run, ok := running[repo]
+		if !ok {
+			continue
+		}
+		matched := false
 		for _, ref := range first {
-			if !ref.Pinned() {
-				c.Pinned = false
+			if ref.Repo != repo {
+				continue
+			}
+			if sameBuild(ref, run) {
+				matched = true
 				break
 			}
 		}
+		if !matched {
+			return run, true
+		}
 	}
-	return c
+	return image.Ref{}, false
+}
+
+// sameBuild compares a manifest reference with a running one: by digest when both have one,
+// else by tag.
+func sameBuild(manifest, running image.Ref) bool {
+	if manifest.Digest != "" && running.Digest != "" {
+		return manifest.Digest == running.Digest
+	}
+	return manifest.Tag != "" && manifest.Tag == running.Tag
 }
 
 func isFirstParty(repo string, prefixes []string) bool {
@@ -162,7 +240,11 @@ func cellText(refs []image.Ref) string {
 	case 0:
 		return "no images"
 	case 1:
-		return strings.Join(distinct(refs, tagOrDigest), ",")
+		tags := distinct(refs, tagOrDigest)
+		if len(tags) > 1 {
+			return fmt.Sprintf("%d versions", len(tags))
+		}
+		return tags[0]
 	default:
 		return fmt.Sprintf("%d images", len(repos))
 	}
@@ -191,4 +273,23 @@ func distinct(refs []image.Ref, f func(image.Ref) string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// FirstPartyRepos lists, sorted, the distinct first-party image repos a family runs in one
+// env — what d offers to deploy: one opens the picker directly, several open a chooser first.
+func FirstPartyRepos(fam *gitops.Family, promotable []string) []string {
+	if fam == nil {
+		return nil
+	}
+	var repos []string
+	seen := map[string]bool{}
+	for _, o := range fam.Occurrences {
+		if !isFirstParty(o.Ref.Repo, promotable) || seen[o.Ref.Repo] {
+			continue
+		}
+		seen[o.Ref.Repo] = true
+		repos = append(repos, o.Ref.Repo)
+	}
+	sort.Strings(repos)
+	return repos
 }

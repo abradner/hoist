@@ -21,6 +21,7 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // StartPromotionFunc builds a real engine.PromotionState and flight.DriveFunc for a plan the
@@ -193,7 +194,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		tagsFn:         tagsFn,
 		restartFn:      restartFn,
 	}
-	return m.push(matrixScreen{matrix.New(repo, promotable)})
+	return m.push(matrixScreen{matrix.New(repo, promotable, envs, driftFunc(repo, resolveFn))})
 }
 
 // WithHistory supplies the commit-history and migration-delta functions (cmd/hoist's
@@ -206,6 +207,31 @@ func (m Model) WithHistory(h history.Funcs) Model {
 // History returns what WithHistory set — for the screen constructors in later M10 PRs and
 // for cmd/hoist's own wiring test.
 func (m Model) History() history.Funcs { return m.history }
+
+// driftFunc adapts the plan screen's resolve function into the matrix's DriftFunc: the
+// pod-sourced resolutions for one env are what that env is running. The same adaptor, the
+// same credentials, one call per env at boot — nothing new is opened for the matrix. nil
+// when there is no resolve function (digest sources: none), so the matrix never claims
+// anything about the cluster. A resolution from any source other than the pods (a manifest
+// pin, a registry HEAD) is not evidence of what runs and is left out.
+func driftFunc(repo *gitops.Repo, resolveFn plan.ResolveFunc) matrix.DriftFunc {
+	if resolveFn == nil {
+		return nil
+	}
+	return func(ctx context.Context, env string) (map[string]image.Ref, error) {
+		out, err := resolveFn(ctx, repo, env)
+		if err != nil {
+			return nil, err
+		}
+		running := map[string]image.Ref{}
+		for repoName, res := range out.Resolutions {
+			if res.Source == resolve.SourcePods && res.Ref.Repo != "" {
+				running[repoName] = res.Ref
+			}
+		}
+		return running, nil
+	}
+}
 
 // Init asks the terminal for its background colour so the palette can follow it, and starts
 // whatever the top (only, at boot) screen's own Init needs.

@@ -391,7 +391,10 @@ the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at
 `poll.argo`/`poll.rollout` is tighter; it never calls `Refresh` — only `Get`/`Deployment`/`JobLike`
 — since watching is not promoting. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (`q` quits,
-`?` help; `d` opens the tag picker — `internal/app/tags`, M6 — for the current cell's first-party
+`?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs; every cell carries its state as a
+word — pinned, unpinned, split, external, drifted — and a production column is marked `⚠` in the
+header and named in the footer (#86, M10); `d` opens the tag picker (a chooser first when the cell
+holds several first-party images) — `internal/app/tags`, M6 — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
 repo's git tag dates for ordering when `repos[].apps` names one, and its own `D` key walks the
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the

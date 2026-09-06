@@ -3,10 +3,8 @@ package app
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"image/color"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +13,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/google/go-cmp/cmp"
 
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
@@ -26,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -34,11 +32,8 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
-
 const (
 	fixtureRoot = "../../testdata/repo"
-	goldenDir   = "../../testdata/golden"
 	width       = 80
 	height      = 24
 )
@@ -94,22 +89,33 @@ func runBatch(cmd tea.Cmd) {
 
 func plain(m tea.Model) string { return ansi.Strip(m.View().Content) }
 
-func TestViewSnapshot(t *testing.T) {
-	got := plain(sized(t))
-	lines := strings.Split(got, "\n")
-	if len(lines) != height {
-		t.Errorf("view has %d lines, want %d", len(lines), height)
-	}
-	for i, l := range lines {
-		if w := ansi.StringWidth(l); w > width {
-			t.Errorf("line %d is %d cells wide, want <= %d: %q", i+1, w, width, l)
+// pressD presses d on the matrix and, when the cell has several first-party images (the
+// fixture's first family, counta, has two), accepts the chooser's first option with enter —
+// the same image the pre-M10 "first sorted repo" rule picked silently. Returns the command
+// the matrix emitted (matrix.OpenTagsMsg's cmd).
+func pressD(t *testing.T, m tea.Model) (tea.Model, tea.Cmd) {
+	t.Helper()
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd != nil {
+		if _, ok := cmd().(matrix.OpenTagsMsg); ok {
+			return m, cmd
 		}
 	}
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("d, then enter on the chooser, produced no command")
+	}
+	return m, cmd
+}
+
+func TestViewSnapshot(t *testing.T) {
+	m := sized(t)
+	got := plain(m)
 	// "env app-production" rather than the whole status line: a real env name is long, and at
 	// this fixture's 80 columns the line truncates its tail. What matters is that the SELECTED
 	// env is named at all — it governs every write gesture on this screen and used to appear
 	// nowhere — and it is placed first for exactly that reason.
-	for _, want := range []string{"family", "app-production", "app-staging", "@≠ v202602201200", "!  2 images", "env app-production", "? help"} {
+	for _, want := range []string{"FAMILY", "APP-PRODUCTION", "APP-STAGING", "v202602201200", "2 images", "external", "env app-production", "? help"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("view lacks %q", want)
 		}
@@ -117,20 +123,7 @@ func TestViewSnapshot(t *testing.T) {
 	if strings.Contains(got, string(filepath.Separator)+"testdata") || strings.Contains(got, "..") {
 		t.Error("view shows a path, not a base name")
 	}
-	p := filepath.Join(goldenDir, "matrix.txt")
-	if *update {
-		if err := os.WriteFile(p, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("%v (regenerate with: go test ./internal/app -update)", err)
-	}
-	if diff := cmp.Diff(string(want), got); diff != "" {
-		t.Errorf("matrix.txt differs from golden (-want +got):\n%s", diff)
-	}
+	uitest.Golden(t, "matrix-root", m.View().Content, width, height)
 }
 
 func TestQuitKeys(t *testing.T) {
@@ -171,11 +164,11 @@ func TestHelpToggleKeepsHeight(t *testing.T) {
 	if n := len(strings.Split(v, "\n")); n != height {
 		t.Errorf("with help: %d lines, want %d", n, height)
 	}
-	if !strings.Contains(v, "plan promotion") {
+	if !strings.Contains(v, "promote to…") {
 		t.Errorf("help line missing:\n%s", v)
 	}
 	m, _ = press(t, m, tea.KeyPressMsg{Code: '?', Text: "?"})
-	if v := plain(m); strings.Contains(v, "plan promotion") {
+	if v := plain(m); strings.Contains(v, "promote to…") {
 		t.Error("help line still shown after second ?")
 	}
 }
@@ -1074,10 +1067,7 @@ func TestRootNoticeClearsOnNextKeypress(t *testing.T) {
 // d on the matrix screen pushes internal/app/tags on top, and esc from there pops back.
 func TestDeployNewPushesTagsScreen(t *testing.T) {
 	m := sized(t)
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
-	if cmd == nil {
-		t.Fatal("d produced no command")
-	}
+	m, cmd := pressD(t, m)
 	msg := cmd()
 	if _, ok := msg.(matrix.OpenTagsMsg); !ok {
 		t.Fatalf("d's command yields %T, want matrix.OpenTagsMsg", msg)
@@ -1116,10 +1106,7 @@ func TestDeployNewPushesTagsScreen(t *testing.T) {
 func TestSelectedMsgOpensTheDeployConfirmScreen(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
-	if cmd == nil {
-		t.Fatal("d produced no command")
-	}
+	m, cmd := pressD(t, m)
 	m, _ = m.Update(cmd())
 
 	m, _ = m.Update(tags.SelectedMsg{
@@ -1187,10 +1174,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 func TestSelectedMsgReportsAnUndeployableChoice(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
-	if cmd == nil {
-		t.Fatal("d produced no command")
-	}
+	m, cmd := pressD(t, m)
 	m, _ = m.Update(cmd())
 
 	m, _ = m.Update(tags.SelectedMsg{
@@ -1432,10 +1416,7 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'd', Text: "d"})
-	if cmd == nil {
-		t.Fatal("d produced no command")
-	}
+	m, cmd := pressD(t, m)
 	m, _ = m.Update(cmd())
 	m, _ = m.Update(tags.SelectedMsg{
 		ImageRepo: "ghcr.io/example/web",

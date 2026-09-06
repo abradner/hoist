@@ -50,8 +50,9 @@ func (s matrixScreen) SetStyles(st ui.Styles) Screen {
 	return matrixScreen{s.Model.SetStyles(st)}
 }
 
-// CapturesText implements Screen: the matrix has no text-entry mode of its own.
-func (s matrixScreen) CapturesText() bool { return false }
+// CapturesText implements Screen: true while the matrix's image chooser is open (its filter
+// takes letters).
+func (s matrixScreen) CapturesText() bool { return s.Model.CapturesText() }
 
 // planScreen adapts plan.Model the same way. It is pushed on top of the matrix when the
 // operator asks to plan a promotion (matrix.OpenPlanMsg, handled in app.go) — the first
