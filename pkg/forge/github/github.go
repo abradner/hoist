@@ -476,6 +476,21 @@ func (c *Client) MergePR(ctx context.Context, prNumber int, expectedHeadSHA stri
 	return c.getPR(ctx, prNumber)
 }
 
+// GetPR implements forge.Forge: getPR with a 404 reported as ok=false rather than an error,
+// since "no such PR" is an answer the caller falls back from, not a failure.
+func (c *Client) GetPR(ctx context.Context, number int) (forge.PR, bool, error) {
+	var resp prResponse
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, number)
+	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		var herr *ghapi.HTTPError
+		if errors.As(err, &herr) && herr.StatusCode == http.StatusNotFound {
+			return forge.PR{}, false, nil
+		}
+		return forge.PR{}, false, translateErr(fmt.Sprintf("getting PR #%d", number), err)
+	}
+	return toPR(resp), true, nil
+}
+
 // getPR fetches prNumber fresh: used by MergePR (whose own response is minimal) and available
 // for a caller re-checking "did this already merge" after a call whose response never arrived.
 func (c *Client) getPR(ctx context.Context, prNumber int) (forge.PR, error) {

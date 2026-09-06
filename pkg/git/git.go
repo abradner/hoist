@@ -93,6 +93,12 @@ type Git interface {
 	// specific commit sha is genuinely resolvable in this clone (M4 hardening, MergedStep's
 	// mergeWasReverted) needs this method, not RevParse.
 	ObjectExists(ctx context.Context, dir, sha string) (bool, error)
+	// IsShallow reports whether dir is a shallow clone (`git rev-parse --is-shallow-repository`).
+	// A shallow clone's object database is cut off at its depth, so ObjectExists and IsAncestor
+	// can answer "no" for a commit that is perfectly real on origin; a caller about to read
+	// either answer as a revert needs to know the clone cannot be trusted to hold history
+	// (MergedStep's mergeWasReverted, issue #46).
+	IsShallow(ctx context.Context, dir string) (bool, error)
 	// RevParse resolves rev to a commit sha inside worktreeDir, ok=false when rev cannot be
 	// resolved (e.g. HEAD before any commit exists). Added beyond the brief's listed shape:
 	// Observe needs to read the worktree's current HEAD without creating a commit to find
@@ -538,6 +544,16 @@ func (e Exec) ObjectExists(ctx context.Context, dir, sha string) (bool, error) {
 	default:
 		return false, err
 	}
+}
+
+// IsShallow implements Git: `git rev-parse --is-shallow-repository` prints true or false and
+// exits 0 either way, so any non-zero exit is a real error.
+func (e Exec) IsShallow(ctx context.Context, dir string) (bool, error) {
+	out, err := e.run(ctx, dir, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "true", nil
 }
 
 // RevParse implements Git.

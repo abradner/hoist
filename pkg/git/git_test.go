@@ -877,3 +877,22 @@ func TestWorktreeRefusesADirectoryInsideTheClone(t *testing.T) {
 		t.Fatalf("worktreeDir should still exist after the refusal: %v", err)
 	}
 }
+
+// IsShallow tells a full clone from one cut off at a depth, against real git: a fresh
+// `--depth 1` clone of the same origin reports true, the ordinary clone false.
+func TestIsShallow(t *testing.T) {
+	cloneDir, originDir := newTestRepo(t)
+	var g Exec
+	if shallow, err := g.IsShallow(ctx(), cloneDir); err != nil || shallow {
+		t.Fatalf("full clone: shallow=%v err=%v", shallow, err)
+	}
+	shallowDir := filepath.Join(t.TempDir(), "shallow")
+	// file:// rather than a bare path: git silently ignores --depth for a local-path clone.
+	cmd := exec.Command("git", "clone", "--quiet", "--depth", "1", "file://"+originDir, shallowDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git clone --depth 1: %v\n%s", err, out)
+	}
+	if shallow, err := g.IsShallow(ctx(), shallowDir); err != nil || !shallow {
+		t.Fatalf("depth-1 clone: shallow=%v err=%v", shallow, err)
+	}
+}

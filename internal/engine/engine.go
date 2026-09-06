@@ -257,12 +257,19 @@ type StepStatus struct {
 // is the self-contained proof either way) — see Drive's own doc comment.
 func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
-	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+	var probeErr error
+	mi := phaseIndex(steps, StepMerged)
+	if mi >= 0 {
 		obs, oerr := steps[mi].Observe(ctx, s)
-		if oerr != nil {
-			return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), oerr)
-		}
 		switch {
+		case oerr != nil:
+			// The probe is a short-circuit, never the only observation of the merge: on a
+			// failure here the walk below runs from the top and reaches MergedStep itself only
+			// once every earlier step is satisfied — so a transient FindPR hiccup while the
+			// promotion is provably still at CI or approval stays invisible, exactly as it
+			// would to Drive, instead of surfacing as a Merged-step error (issue #60; Status
+			// below has the same shape). It is kept, not dropped: see the walk's own use.
+			probeErr = oerr
 		case obs.Satisfied && mi == len(steps)-1:
 			return true, StepStatus{Step: steps[mi].Name(), Observation: obs}, nil
 		case obs.Satisfied:
@@ -291,7 +298,19 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 			}
 			last = StepStatus{Step: step.Name(), Observation: obs}
 		}
-		if last.Blocked != "" || last.Waiting || !last.Satisfied {
+		if last.Blocked != "" || last.Waiting {
+			return false, last, nil
+		}
+		if !last.Satisfied {
+			if probeErr != nil && i < mi {
+				// A plain unsatisfied step before the merge is ambiguous once the probe has
+				// failed: a promotion that already merged and deleted its branch reads exactly
+				// like one that never pushed. Waiting and Blocked above are not ambiguous —
+				// they prove a live PR the walk is still short of merging — so only this shape
+				// surfaces the probe's own error, as the old unconditional return did, rather
+				// than let findInFlight take a finished promotion for one stuck at Pushed.
+				return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), probeErr)
+			}
 			return false, last, nil
 		}
 	}
@@ -345,12 +364,20 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // it directly (Codex review, PR #50 round 4).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
-	if mi := phaseIndex(steps, StepMerged); mi >= 0 {
+	var probeErr error
+	mi := phaseIndex(steps, StepMerged)
+	if mi >= 0 {
 		obs, oerr := steps[mi].Observe(ctx, s)
-		if oerr != nil {
-			return false, nil, &StepError{Step: steps[mi].Name(), Op: "observe", Err: oerr}
-		}
 		switch {
+		case oerr != nil:
+			// A failed probe is not a failed Status: the walk below observes every step in
+			// order and only reaches MergedStep once CI and approval are satisfied. Before
+			// this, a transient FindPR failure during a perfectly ordinary CI wait came back
+			// typed StepMerged — the one step no retry classifier treats as transient — and
+			// stopped the flight screen's polling for good, while the CLI's own Drive, which
+			// never probes this early, would simply have kept waiting (issue #60). Kept for
+			// the one ambiguous shape the walk cannot resolve on its own (see below).
+			probeErr = oerr
 		case obs.Satisfied && mi == len(steps)-1:
 			return true, []StepStatus{{Step: steps[mi].Name(), Observation: obs}}, nil
 		case obs.Satisfied:
@@ -381,7 +408,16 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 			st = StepStatus{Step: step.Name(), Observation: obs}
 		}
 		statuses = append(statuses, st)
-		if st.Blocked != "" || st.Waiting || !st.Satisfied {
+		if st.Blocked != "" || st.Waiting {
+			return false, statuses, nil
+		}
+		if !st.Satisfied {
+			if probeErr != nil && i < mi {
+				// As in ObserveAll: a plain unsatisfied step before the merge could be a
+				// promotion that merged and cleaned up its branch, so the probe's failure is
+				// the honest answer here, not a false "still at Pushed".
+				return false, statuses, &StepError{Step: steps[mi].Name(), Op: "observe", Err: probeErr}
+			}
 			return false, statuses, nil
 		}
 	}

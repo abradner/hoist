@@ -21,9 +21,10 @@ type Fake struct {
 	// GitTags is what Tags returns; TagsErr, when set, is returned instead.
 	GitTags []GitTag
 	TagsErr error
-	// CreateErr and FindErr, when set, are returned by every call to the matching method.
+	// CreateErr, FindErr and GetErr, when set, are returned by every call to the matching method.
 	CreateErr error
 	FindErr   error
+	GetErr    error
 	// ChecksBySHA and ChecksErr configure Checks: a sha not present in the map reports the
 	// zero CheckSummary (no checks reported at all), exactly like a real repo with no CI
 	// configured; ChecksErr, when set, is returned instead for every call (simulating a 404 or
@@ -130,6 +131,23 @@ func (f *Fake) FindPR(_ context.Context, headBranch, bodyMarker string) (PR, boo
 			if strings.Contains(f.bodies[p.Number], bodyMarker) {
 				return p, true, nil
 			}
+		}
+	}
+	return PR{}, false, nil
+}
+
+// GetPR implements Forge: the stored PR with that number, ok=false for any other. GetErr,
+// when set, is returned instead.
+func (f *Fake) GetPR(_ context.Context, number int) (PR, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, fmt.Sprintf("GetPR %d", number))
+	if f.GetErr != nil {
+		return PR{}, false, f.GetErr
+	}
+	for _, p := range f.prs {
+		if p.Number == number {
+			return p, true, nil
 		}
 	}
 	return PR{}, false, nil

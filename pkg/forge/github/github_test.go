@@ -676,3 +676,23 @@ func TestNewRejectsMalformedRepo(t *testing.T) {
 		}
 	}
 }
+
+// GetPR is the exact by-number lookup: a 404 is "no such PR" (ok=false), not an error, and any
+// other failure surfaces.
+func TestGetPRNotFoundIsNotAnError(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/pulls/404": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops/pulls/500": static(502, `{"message":"bad gateway"}`),
+		"GET /repos/example/gitops/pulls/7":   static(200, `{"number":7,"html_url":"https://github.com/example/gitops/pull/7","state":"closed","merged":true,"merge_commit_sha":"abc","head":{"ref":"hoist/app-production/x","sha":"def"},"base":{"ref":"main"}}`),
+	})
+	if _, ok, err := c.GetPR(context.Background(), 404); err != nil || ok {
+		t.Fatalf("404: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := c.GetPR(context.Background(), 500); err == nil || ok {
+		t.Fatalf("502: ok=%v err=%v, want an error", ok, err)
+	}
+	pr, ok, err := c.GetPR(context.Background(), 7)
+	if err != nil || !ok || pr.Number != 7 || !pr.Merged || pr.HeadBranch != "hoist/app-production/x" || pr.MergeSHA != "abc" {
+		t.Fatalf("7: ok=%v err=%v pr=%+v", ok, err, pr)
+	}
+}
