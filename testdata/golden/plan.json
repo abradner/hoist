@@ -153,6 +153,7 @@
       "Digest": "sha256:dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01dbfa1e01"
     }
   ],
+  "Restarts": null,
   "Warnings": [
     {
       "Code": "source-disagrees",

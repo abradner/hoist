@@ -106,9 +106,10 @@ type Warning struct {
 // Plan is the result of BuildPlan for one env pair.
 type Plan struct {
 	// Variant says which operation produced this plan and therefore how it should describe
-	// itself — VariantPromote (an env pair, BuildPlan) or VariantDeploy (one image into one
-	// env, BuildDeployPlan). The empty string means VariantPromote, so a Plan built before
-	// this field existed, or by a test that does not care, keeps its original meaning.
+	// itself — VariantPromote (an env pair, BuildPlan), VariantDeploy (one image into one env,
+	// BuildDeployPlan) or VariantRestart (a pod-template annotation, BuildRestartPlan). The
+	// empty string means VariantPromote, so a Plan built before this field existed, or by a
+	// test that does not care, keeps its original meaning.
 	//
 	// It exists only for rendering. Nothing that drives a promotion reads it, or SourceEnv:
 	// engine.DeriveID hashes the target env and the resulting refs, BranchName and the PR
@@ -124,7 +125,11 @@ type Plan struct {
 	// Untouched lists the distinct target-env references no Edit touches: third-party images
 	// (repo outside the promotable prefixes), repos absent from the source env, and — for a
 	// deploy — every repo other than the one being deployed.
-	Untouched   []image.Ref
+	Untouched []image.Ref
+	// Restarts are the planned pod-template annotation writes. Only VariantRestart populates
+	// it, and such a plan has no Edits: a restart changes no image, which is exactly why it
+	// needs a write kind of its own (see RestartEdit).
+	Restarts    []RestartEdit
 	Warnings    []Warning
 	GeneratedAt time.Time
 }
@@ -134,8 +139,14 @@ type Plan struct {
 const (
 	VariantPromote = ""
 	VariantDeploy  = "deploy"
+	VariantRestart = "restart"
 )
 
 // IsDeploy reports whether this plan deploys one named image into one env, rather than
 // promoting an env pair. Used by the rendering layer only.
 func (p Plan) IsDeploy() bool { return p.Variant == VariantDeploy }
+
+// IsRestart reports whether this plan restarts an env's Deployments rather than changing any
+// image. Used by the rendering layer, and by the one place that has to choose between Apply
+// and ApplyRestarts.
+func (p Plan) IsRestart() bool { return p.Variant == VariantRestart }
