@@ -91,7 +91,8 @@ status` logged in, is the whole prerequisite.
 
 ## The three operations
 
-Everything hoist does is one of these. Each is a subcommand and a key on the matrix, with the
+Everything hoist does is one of these. The [user guide](docs/guide.md) walks each screen and key,
+says what to do when a promotion stops, and covers resuming, registry credentials and direct mode. Each is a subcommand and a key on the matrix, with the
 same gates either way, and each has a read-only form that prints what would happen and touches
 nothing: `plan` for a promotion, `--dry-run` on `deploy` and `restart`.
 
