@@ -2,17 +2,37 @@ name: release
 
 # A merge is not a release (AGENTS.md §7): pushing a v* tag is the release step, and it gets its
 # own gate — the full test suite runs at the tag before goreleaser publishes anything.
+#
+# Two jobs on purpose: verification runs with read-only permissions and no persisted credential,
+# so nothing the tests or the repo's own scripts execute can write to the repository; only the
+# publish job, which runs no repository code beyond goreleaser, holds contents: write.
 on:
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -count=1 -race ./...
+      - run: ./scripts/public-safety.sh
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -20,13 +40,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go vet ./...
-      - run: go test -count=1 -race ./...
-      - run: ./scripts/public-safety.sh
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: v2.18.0 # the same pin as mise.toml; a gate fails only for reasons inside the diff
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

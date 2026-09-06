@@ -39,13 +39,21 @@ import (
 var version = "dev"
 
 func versionString() string {
-	if version != "dev" {
-		return version
+	bi, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, bi, ok)
+}
+
+// resolveVersion picks what --version prints: the ldflag when a build set it, else the module
+// version Go embedded (a `go install …@vX.Y.Z` build), else "dev". A checkout build embeds
+// "(devel)", which is no version at all.
+func resolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
+	if ldflag != "dev" {
+		return ldflag
 	}
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+	if ok && bi != nil && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
-	return version
+	return "dev"
 }
 
 // Exit codes. 1 is a runtime failure, 2 a usage error, 3 "not implemented in this milestone".
