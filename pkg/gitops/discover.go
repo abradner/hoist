@@ -84,6 +84,19 @@ func Discover(root, appsRoot string) (*Repo, error) {
 			return nil, fmt.Errorf("env %q: family %q is declared by both Application %q (%s) and %q (%s)", env.Name, name, prev.App, prev.Dir, a.Name, a.SourcePath)
 		}
 		fam := &Family{Name: name, Dir: a.SourcePath, App: a.Name}
+		// A wrapper whose directory is missing is fatal, not a warning: Argo itself cannot
+		// sync such an Application, and a plan built over a repo hoist could only half-read
+		// would be trusted for what it did not see (AGENTS.md §4.2). The message names what
+		// the operator has to open — the wrapper and the path it declares — instead of the
+		// bare os error (issue #12). Checked on the directory itself, before the scan, so a
+		// manifest file that is missing inside a directory that exists (a dangling symlink,
+		// a file deleted mid-scan) keeps its own, file-level error rather than being reported
+		// as a missing family.
+		if dir, rerr := ResolvePath(root, a.SourcePath); rerr == nil {
+			if _, serr := os.Stat(dir); errors.Is(serr, fs.ErrNotExist) {
+				return nil, fmt.Errorf("%s: Application %q: spec.source.path %q does not exist in the repo", a.File, a.Name, a.SourcePath)
+			}
+		}
 		if err := scanFamily(root, fam); err != nil {
 			return nil, fmt.Errorf("scanning Application %q: %w", a.Name, err)
 		}
@@ -101,8 +114,14 @@ func Discover(root, appsRoot string) (*Repo, error) {
 
 // checkRelative is the lexical half of staying inside the repo: after cleaning, p must be
 // relative and must not climb out. Cleaning first is what catches a/../../victim.yaml, which
-// begins innocently and only resolves upward once joined to a root.
+// begins innocently and only resolves upward once joined to a root. Paths are slash-separated
+// by contract, so a backslash is refused outright rather than treated as an ordinary byte: on
+// a POSIX host path.Clean would pass "..\..\victim.yaml" through untouched, and on Windows the
+// same bytes are a climb that only ResolvePath's later filepath.Rel would notice (issue #18).
 func checkRelative(p string) error {
+	if strings.Contains(p, `\`) {
+		return fmt.Errorf("%q must be a slash-separated relative path inside the repo (backslash refused)", p)
+	}
 	c := path.Clean(p)
 	if path.IsAbs(c) || filepath.IsAbs(filepath.FromSlash(c)) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
 		return fmt.Errorf("%q must be a relative path inside the repo", p)
@@ -478,25 +497,45 @@ func findUnmanaged(root, appsRoot string, managed map[string]ArgoApp) ([]string,
 	var out []string
 	seen := map[string]bool{}
 	for _, rt := range roots {
-		base := filepath.Join(root, filepath.FromSlash(rt))
-		err := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		// The same containment every other join gets (ResolvePath's own contract): the walk
+		// starts from the symlink-free directory that was checked, and each entry's
+		// repo-relative name is rebuilt from rt rather than from root, so a checkout whose own
+		// path goes through a symlink (macOS's /tmp, /var) still yields the slash paths the
+		// managed set is keyed by (issue #19).
+		// A family declared at the top of the checkout (spec.source.path with no directory
+		// part) has "." as its parent, which is the root itself: resolved directly, since
+		// checkRelative rightly refuses "." as a path into the repo.
+		var base string
+		var err error
+		if rt == "." {
+			base, err = filepath.EvalSymlinks(filepath.Clean(root))
+		} else {
+			base, err = ResolvePath(root, rt)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("scanning %s for unmanaged directories: %w", rt, err)
+		}
+		err = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if !d.IsDir() {
 				return nil
 			}
-			relFS, err := filepath.Rel(root, p)
+			relFS, err := filepath.Rel(base, p)
 			if err != nil {
 				return err
 			}
-			rel := filepath.ToSlash(relFS)
+			rel := path.Join(rt, filepath.ToSlash(relFS))
 			if rel != rt && strings.HasPrefix(d.Name(), ".") {
 				return fs.SkipDir
 			}
 			// A managed directory is not itself unmanaged, but its subdirectories may be:
 			// keep descending rather than skipping the subtree.
-			if _, isManaged := managed[rel]; isManaged || rel == rt || seen[rel] {
+			// The apps root is skipped here as well as as its own walk root: a family at the
+			// top of the checkout makes the root itself a walk root, from which the apps root
+			// is just another directory holding YAML.
+			if _, isManaged := managed[rel]; isManaged || rel == rt || rel == appsRoot || seen[rel] {
 				return nil
 			}
 			files, err := yamlFiles(p)

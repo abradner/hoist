@@ -10,6 +10,13 @@ hoist plan: app-staging -> app-production                                       
 ┃                                        │            envFrom:                                        
 ┃                                        │              - configMapRef:                               
 ┃                                        │                  name: counta-config                       
+┃                                        │ @@ -65,5 +65,5 @@                                          
+┃                                        │      spec:                                                 
+┃                                        │        containers:                                         
+┃                                        │          - name: worker                                    
+┃                                        │ -          image: ghcr.io/example/counta:v202601151010@sha2
+┃                                        │ +          image: ghcr.io/example/counta:v202602201200@sha2
+┃                                        │            args: ["worker"]                                
 ┃                                        │                                                            
 ┃                                        │ --- a/cluster/apps/app-production/counta/purge-cronjob.yaml
 ┃                                        │ +++ b/cluster/apps/app-production/counta/purge-cronjob.yaml
@@ -20,13 +27,6 @@ hoist plan: app-staging -> app-production                                       
 ┃                                        │ -              image: ghcr.io/example/counta:v202601151010@
 ┃                                        │ +              image: ghcr.io/example/counta:v202602201200@
 ┃                                        │                command: ["bin/rails", "counta:purge"]      
-┃                                        │                                                            
-┃                                        │ --- a/cluster/apps/app-production/marketing/app.yaml       
-┃                                        │ +++ b/cluster/apps/app-production/marketing/app.yaml       
-┃                                        │ @@ -15,6 +15,6 @@                                          
-┃                                        │      spec:                                                 
-┃                                        │        containers:                                         
-┃                                        │          - name: marketing                                 
 ┃                                        │ 
 ┃                                        │ 
 ┃                                        │ 

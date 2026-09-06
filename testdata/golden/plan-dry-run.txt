@@ -1,4 +1,4 @@
-hoist plan: app-staging -> app-production (6 edits in 4 files)
+hoist plan: app-staging -> app-production (7 edits in 4 files)
 
 --- a/cluster/apps/app-production/counta/app.yaml
 +++ b/cluster/apps/app-production/counta/app.yaml
@@ -11,6 +11,13 @@ hoist plan: app-staging -> app-production (6 edits in 4 files)
            envFrom:
              - configMapRef:
                  name: counta-config
+@@ -65,5 +65,5 @@
+     spec:
+       containers:
+         - name: worker
+-          image: ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea
++          image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123
+           args: ["worker"]
 
 --- a/cluster/apps/app-production/counta/purge-cronjob.yaml
 +++ b/cluster/apps/app-production/counta/purge-cronjob.yaml

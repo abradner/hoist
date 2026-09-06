@@ -41,3 +41,25 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+---
+# A second Deployment in a later document of the same file: the golden coverage for
+# file-absolute line numbers past a document boundary (Occurrence.Doc > 0).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: counta-worker
+  namespace: app-staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: counta-worker
+  template:
+    metadata:
+      labels:
+        app: counta-worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123
+          args: ["worker"]

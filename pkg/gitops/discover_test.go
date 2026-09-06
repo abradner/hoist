@@ -86,10 +86,10 @@ func TestDiscoverOccurrencesOnlyInsideContainerItems(t *testing.T) {
 			}
 		}
 	}
-	// staging: web(2) marketing(1) counta(1+1 cronjob) temporal(2) = 7
-	// production: web(3) marketing(1) counta(1 init + 1 + 1 cronjob) temporal(2) = 9
-	if n != 16 {
-		t.Errorf("occurrences = %d, want 16", n)
+	// staging: web(2) marketing(1) counta(1 + 1 worker in a later doc + 1 cronjob) temporal(2) = 8
+	// production: web(3) marketing(1) counta(1 init + 1 + 1 worker + 1 cronjob) temporal(2) = 10
+	if n != 18 {
+		t.Errorf("occurrences = %d, want 18", n)
 	}
 	// Positive control: the ConfigMap really does carry an image key the scanner had to skip.
 	if !bytes.Contains(readFixture(t, "cluster/apps/app-staging/counta/app.yaml"), []byte("kind: ConfigMap")) {
@@ -496,5 +496,143 @@ func TestDiscoverFollowsSymlinkInsideRepo(t *testing.T) {
 		if len(occ) != 1 || occ[0].Ref.Repo != "ghcr.io/example/api" || occ[0].File != "cluster/apps/staging/api/app.yaml" {
 			t.Errorf("%s: occurrences = %+v", name, occ)
 		}
+	}
+}
+
+// A backslash is not a path separator to path.Clean, so on a POSIX host "..\..\victim.yaml"
+// cleans to itself and is not a climb until Windows joins it — the helper's contract is
+// slash-separated, and the contract is enforced rather than described (issue #18). The forward
+// slash form is the positive control.
+func TestCheckRelativeRefusesBackslash(t *testing.T) {
+	for _, p := range []string{`..\..\victim.yaml`, `cluster\apps\x\api`, `cluster/apps\x`} {
+		if err := checkRelative(p); err == nil || !strings.Contains(err.Error(), "backslash") {
+			t.Errorf("checkRelative(%q) = %v; want a backslash refusal", p, err)
+		}
+	}
+	if err := checkRelative("cluster/apps/x/api"); err != nil {
+		t.Errorf("slash path refused: %v", err)
+	}
+	root := writeRepo(t, map[string]string{
+		"cluster/apps/a.yaml":         wrapper("one", `cluster\apps\x\api`, "env"),
+		"cluster/apps/x/api/app.yaml": deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+	})
+	if r, err := Discover(root, ""); err == nil || !strings.Contains(err.Error(), "backslash") {
+		t.Errorf("Discover accepted a backslash spec.source.path: err=%v repo=%+v", err, r)
+	}
+}
+
+// findUnmanaged's walk roots are the apps root and every managed family's parent, all of
+// which Discover has already resolved through scanFamily — so through Discover itself there
+// is no escape to name. The attacker here is a future caller handing findUnmanaged a managed
+// set nothing checked (the ResolvePath doc comment's claim is that every join is contained,
+// not that every current caller happens to be): the parent of the managed directory is a
+// symlink out of the checkout, and the walk must refuse it rather than list what is there
+// (issue #19). A symlink that stays inside the repo is the positive control, and its
+// unmanaged entries are still reported under the repo-relative name, not the resolved one.
+func TestFindUnmanagedRefusesRootOutsideRepo(t *testing.T) {
+	root, outside := symlinkRepo(t, map[string]string{"cluster/apps/api.yaml": "kind: ConfigMap\nmetadata:\n  name: n\n"})
+	symlink(t, root, "cluster/apps/staging", outside)
+	managed := map[string]ArgoApp{"cluster/apps/staging/api": {Name: "api"}}
+	if out, err := findUnmanaged(root, "cluster/apps", managed); err == nil || !strings.Contains(err.Error(), "outside the repo") {
+		t.Fatalf("walked out of the repo: out=%v err=%v", out, err)
+	}
+
+	root, _ = symlinkRepo(t, map[string]string{
+		"cluster/apps/api.yaml":  "kind: ConfigMap\nmetadata:\n  name: n\n",
+		"shared/api/app.yaml":    deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+		"shared/extras/app.yaml": deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+	})
+	symlink(t, root, "cluster/apps/staging", filepath.Join(root, "shared"))
+	out, err := findUnmanaged(root, "cluster/apps", managed)
+	if err != nil {
+		t.Fatalf("symlink inside the repo refused: %v", err)
+	}
+	if len(out) != 1 || out[0] != "cluster/apps/staging/extras" {
+		t.Errorf("unmanaged = %v; want [cluster/apps/staging/extras]", out)
+	}
+}
+
+// A wrapper naming a directory that does not exist is fatal (Argo could not sync it either,
+// and a half-read repo is not one to plan over), but the error names the wrapper file, the
+// Application and the path it declares rather than the bare os error (issue #12).
+func TestDiscoverMissingSourceDirNamesWrapperAndPath(t *testing.T) {
+	root := writeRepo(t, map[string]string{"cluster/apps/a.yaml": wrapper("one", "cluster/apps/x/api", "env")})
+	_, err := Discover(root, "")
+	if err == nil {
+		t.Fatal("Discover succeeded with a dangling wrapper")
+	}
+	for _, want := range []string{"cluster/apps/a.yaml", `Application "one"`, `spec.source.path "cluster/apps/x/api" does not exist`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
+
+// The fixture repo carries an occurrence in a later YAML document of a multi-document file,
+// so every golden built from it (discover, plan, matrix) exercises file-absolute line numbers
+// past a document boundary end to end, not only the unit test above (issue #14). Asserted here
+// so a fixture edit cannot quietly drop the coverage.
+func TestFixtureHasOccurrenceInLaterDocument(t *testing.T) {
+	r, err := Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, env := range r.Envs {
+		for _, f := range env.Families {
+			for _, o := range f.Occurrences {
+				if o.Doc > 0 {
+					found = true
+					if o.Line <= 30 {
+						t.Errorf("%s doc %d: line %d is not file-absolute", o.File, o.Doc, o.Line)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("no fixture occurrence has Doc > 0")
+	}
+}
+
+// A family declared at the top of the checkout (spec.source.path "api", no directory part)
+// has "." as its parent; findUnmanaged walks that parent as the root itself rather than
+// asking ResolvePath for ".", which it rightly refuses. Its sibling directories are still
+// reported unmanaged under their repo-relative names.
+func TestDiscoverTopLevelFamilyDirectory(t *testing.T) {
+	root := writeRepo(t, map[string]string{
+		"apps/a.yaml":       wrapper("one", "api", "env"),
+		"api/app.yaml":      deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+		"extras/app.yaml":   deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),
+		"apps/nested/x.yml": "kind: ConfigMap\nmetadata:\n  name: n\n",
+	})
+	r, err := Discover(root, "apps")
+	if err != nil {
+		t.Fatalf("a top-level family directory was refused: %v", err)
+	}
+	if occ := r.Envs["env"].Families["api"].Occurrences; len(occ) != 1 || occ[0].File != "api/app.yaml" {
+		t.Errorf("occurrences = %+v", occ)
+	}
+	want := []string{"apps/nested", "extras"}
+	if strings.Join(r.Unmanaged, ",") != strings.Join(want, ",") {
+		t.Errorf("Unmanaged = %v, want %v", r.Unmanaged, want)
+	}
+}
+
+// The missing-family error is about the directory, not any file in it: a manifest that is
+// itself missing inside a directory that exists (a dangling symlink here) keeps its own
+// file-level error, so the operator is not sent looking for a directory that is there.
+func TestDiscoverMissingFileInsideExistingFamilyIsNotAMissingFamily(t *testing.T) {
+	root, outside := symlinkRepo(t, map[string]string{"cluster/apps/api.yaml": wrapper("api", "cluster/apps/staging/api", "staging")})
+	symlink(t, root, "cluster/apps/staging/api/app.yaml", filepath.Join(outside, "nowhere", "app.yaml"))
+	_, err := Discover(root, "")
+	if err == nil {
+		t.Fatal("Discover succeeded through a dangling symlink")
+	}
+	if strings.Contains(err.Error(), "does not exist in the repo") {
+		t.Errorf("a missing file was reported as a missing family: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cluster/apps/staging/api/app.yaml") {
+		t.Errorf("error does not name the file: %v", err)
 	}
 }
