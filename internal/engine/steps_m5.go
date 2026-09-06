@@ -411,6 +411,20 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		return Observation{Satisfied: false}, nil
 	}
 	deployments, jobLikes := groupEditsByWorkload(s.Edits)
+	// A restart carries no Edits, so the grouping above finds nothing and this step would
+	// report complete without ever asking the cluster a question — success for a rollout
+	// nobody watched, on the one command whose entire purpose is the rollout (Copilot, PR
+	// #79). Its Deployments come from the restarts instead, with no container expectations:
+	// a restart changes no image, so "is this Deployment complete" is the whole question and
+	// "does it run the ref we wrote" would have no ref to compare.
+	for _, re := range s.Restarts {
+		if re.Kind != "Deployment" {
+			continue
+		}
+		if _, ok := deployments[re.Name]; !ok {
+			deployments[re.Name] = nil
+		}
+	}
 
 	var names []string
 	for name := range deployments {

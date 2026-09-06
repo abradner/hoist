@@ -724,13 +724,13 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 		}
 		return 0
 	case errors.Is(err, engine.ErrWaiting):
-		fmt.Fprintf(stderr, "%s: still waiting for signing approval; re-run to resume\n", cmdName)
+		fmt.Fprintf(stderr, "%s: still waiting for signing approval; %s\n", cmdName, resumeAdvice(s))
 		return exitFailure
 	case errors.Is(err, context.DeadlineExceeded):
-		fmt.Fprintf(stderr, "%s: %s at %s (poll.deadline elapsed); re-run to resume\n", cmdName, s.Phase, redact.Strings(historyDetail(s)))
+		fmt.Fprintf(stderr, "%s: %s at %s (poll.deadline elapsed); %s\n", cmdName, s.Phase, redact.Strings(historyDetail(s)), resumeAdvice(s))
 		return exitFailure
 	case errors.Is(err, context.Canceled):
-		fmt.Fprintf(stderr, "%s: interrupted while %s; re-run to resume\n", cmdName, s.Phase)
+		fmt.Fprintf(stderr, "%s: interrupted while %s; %s\n", cmdName, s.Phase, resumeAdvice(s))
 		return exitFailure
 	default:
 		var blocked *engine.BlockedError
@@ -750,6 +750,18 @@ func historyDetail(s *engine.PromotionState) string {
 		return ""
 	}
 	return s.History[len(s.History)-1].Detail
+}
+
+// resumeAdvice is how to pick an interrupted run back up. "Re-run to resume" is right for a
+// promotion or a deploy, whose identity is the end state they land: the same command derives
+// the same id and finds the same state. It is wrong for a restart, whose identity includes the
+// instant it writes — re-running derives a NEW id and starts a second restart rather than
+// resuming the first (Copilot, PR #79). That one is resumed by id, like any other state.
+func resumeAdvice(s *engine.PromotionState) string {
+	if s != nil && len(s.Restarts) > 0 {
+		return fmt.Sprintf("run `hoist resume %s` to resume (re-running would start a second restart: a restart's id includes the moment it writes)", s.ID)
+	}
+	return "re-run to resume"
 }
 
 // checkDirectPreflight is the CLI's single --direct gate, shared by `hoist promote` and

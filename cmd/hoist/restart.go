@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,6 +101,12 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err := checkCloneCurrentForRestart(context.Background(), eff.repo, *base, plan.Restarts); err != nil {
 		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
 		return exitFailure
+	}
+	if *direct {
+		if err := checkNoMissingWorkloadAtFreshBase(context.Background(), eff.repo, *base, eff.appsRoot, *env, splitFamilies(*family), plan); err != nil {
+			fmt.Fprintf(stderr, "hoist restart: %v\n", err)
+			return exitFailure
+		}
 	}
 
 	f, err := newForge(eff.cfg.GitHub)
@@ -215,6 +222,66 @@ func printRestartPlan(w io.Writer, plan gitops.Plan) {
 		}
 	}
 	fmt.Fprintf(w, "\nNo image changes. Argo rolls the pods because the pod template changed.\n")
+}
+
+// checkNoMissingWorkloadAtFreshBase is checkNoMissingOccurrenceAtFreshBase for a restart:
+// direct mode's only defence against writing a subset of what it claims to write.
+//
+// checkCloneCurrentForRestart compares the files this plan already names, which is enough for
+// the PR path because a PR is reviewed against origin's own tree before it merges. A direct
+// push has no second look, so a Deployment origin/<base> has gained — a new file in a family,
+// or a whole new family — is invisible to a plan built from the local checkout: every file the
+// plan knows about matches, the check passes, and `hoist restart --env X` restarts less than
+// the whole env it just told the operator it restarted (Copilot, PR #79).
+func checkNoMissingWorkloadAtFreshBase(ctx context.Context, cloneDir, base, appsRoot, env string, families []string, plan gitops.Plan) error {
+	snap, cleanup, err := discoverAtFreshBase(ctx, newGit, cloneDir, base)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	freshRepo, err := gitops.Discover(snap, appsRoot)
+	if err != nil {
+		return fmt.Errorf("discovering origin/%s's own current tree: %w", base, err)
+	}
+	// The same instant, so the comparison is about which workloads exist, never about the
+	// timestamps: two plans built a moment apart would otherwise differ in every value.
+	freshPlan, err := gitops.BuildRestartPlan(freshRepo, env, families, restartStampOf(plan))
+	if err != nil {
+		return fmt.Errorf("planning against origin/%s's own current tree: %w", base, err)
+	}
+
+	known := make(map[string]bool, len(plan.Restarts))
+	for _, r := range plan.Restarts {
+		known[fmt.Sprintf("%s#%d", r.File, r.Doc)] = true
+	}
+	var missing []string
+	for _, r := range freshPlan.Restarts {
+		if !known[fmt.Sprintf("%s#%d", r.File, r.Doc)] {
+			missing = append(missing, fmt.Sprintf("%s %s (%s)", r.Kind, r.Name, r.File))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf(
+		"origin/%s has Deployment(s) %s's own local checkout doesn't know about at all: %s — fetch/merge to update your clone and re-run; direct mode never writes a file it can't already see locally",
+		base, cloneDir, strings.Join(missing, ", "),
+	)
+}
+
+// restartStampOf recovers the instant a built restart plan writes, so a second plan built for
+// comparison can be stamped identically.
+func restartStampOf(plan gitops.Plan) time.Time {
+	if len(plan.Restarts) == 0 {
+		return time.Now().UTC()
+	}
+	t, err := time.Parse(time.RFC3339, plan.Restarts[0].New)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return t
 }
 
 // checkCloneCurrentForRestart is checkCloneCurrentForBase for a restart plan: the same

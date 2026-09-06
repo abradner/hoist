@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -208,4 +209,91 @@ func gitStatusPorcelain(t *testing.T, dir string) string {
 		t.Fatalf("git status: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestRestartWatchesItsOwnRollout is Copilot's PR #79 finding, and it was the worst one in the
+// stack: RolledOutStep builds its workload set from s.Edits, a restart has none, so the step
+// found nothing to check and reported complete without asking the cluster a single question.
+// `hoist restart` would print success for a rollout nobody watched — on the one command whose
+// entire purpose is the rollout.
+func TestRestartWatchesItsOwnRollout(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+
+	// A Deployment that never finishes rolling. If the step observes it at all, the run cannot
+	// report success; if it does not, it will.
+	f := &rollout.Fake{}
+	f.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Namespace: "app-production",
+		Name:      "app",
+		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v1@" + strings.Repeat("0", 64)}},
+		Complete:  false,
+		Detail:    "1 of 2 updated replicas are available",
+	})
+	prev := newRollout
+	newRollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
+	t.Cleanup(func() { newRollout = prev })
+
+	var out, errOut bytes.Buffer
+	got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("a restart whose Deployment never completes must not report success:\nstdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "updated replicas") {
+		t.Errorf("the failure should name what it was still waiting for:\n%s", errOut.String())
+	}
+}
+
+// An interrupted restart is resumed by id, not by re-running: re-running writes a new timestamp
+// and therefore derives a new promotion, starting a second restart rather than picking the
+// first back up. The advice has to say so (Copilot, PR #79).
+func TestInterruptedRestartIsResumedById(t *testing.T) {
+	s := &engine.PromotionState{ID: "abc123", Restarts: []gitops.RestartEdit{{File: "x.yaml", Name: "web"}}}
+	if got := resumeAdvice(s); !strings.Contains(got, "hoist resume abc123") {
+		t.Errorf("a restart must be resumed by id, got %q", got)
+	}
+	// A promotion's identity is the end state it lands, so re-running really does resume it.
+	if got := resumeAdvice(&engine.PromotionState{ID: "abc123"}); got != "re-run to resume" {
+		t.Errorf("a promotion resumes by re-running, got %q", got)
+	}
+}
+
+// Two restarts in the same second with different --family selections are different operations
+// and must not derive the same id — the timestamp alone has second resolution, so the workload
+// set is part of the identity too (Copilot, PR #79).
+func TestRestartsOfDifferentFamiliesInOneSecondDiffer(t *testing.T) {
+	r, err := gitops.Discover("../../testdata/repo", "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 6, 3, 0, 0, 0, time.UTC)
+	all, err := gitops.BuildRestartPlan(r, "app-production", nil, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var families []string
+	for name := range r.Envs["app-production"].Families {
+		families = append(families, name)
+	}
+	sort.Strings(families)
+	var ids []string
+	for _, fam := range families {
+		pl, err := gitops.BuildRestartPlan(r, "app-production", []string{fam}, at)
+		if err != nil {
+			continue // a family with no Deployment has nothing to restart
+		}
+		ids = append(ids, engine.DeriveID("example/gitops", pl))
+	}
+	if len(ids) < 2 {
+		t.Skipf("fixture has %d restartable families; need 2+", len(ids))
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			t.Fatalf("two families restarted in the same second derived the same id %q", id)
+		}
+		seen[id] = true
+	}
+	if seen[engine.DeriveID("example/gitops", all)] {
+		t.Error("restarting one family derived the same id as restarting the whole env")
+	}
 }
