@@ -1,0 +1,40 @@
+╭─ hoist · confirm deploy · yaml ──────────────────────────────────────────────────────────────────────────────────────╮
+│ghcr.io/example/web:v9   →   app-production                                                      mode: PR · production│
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks                                         │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│--- a/cluster/apps/app-production/web/app.yaml                                                                        │
+│+++ b/cluster/apps/app-production/web/app.yaml                                                                        │
+│@@ -20,7 +20,7 @@                                                                                                     │
+│       # Production runs three processes from the one image; staging folds queue into worker.                         │
+│       containers:                                                                                                    │
+│         - name: web                                                                                                  │
+│-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d│
+│+          image: ghcr.io/example/web:v9@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd      │
+│           imagePullPolicy: IfNotPresent                                                                              │
+│           ports:                                                                                                     │
+│             - containerPort: 3000                                                                                    │
+│@@ -28,11 +28,11 @@                                                                                                   │
+│             - name: RAILS_ENV                                                                                        │
+│               value: production                                                                                      │
+│         - name: worker                                                                                               │
+│-          image: ghcr.io/example/web:v202601010101                                                                   │
+│+          image: ghcr.io/example/web:v9@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd      │
+│           imagePullPolicy: IfNotPresent                                                                              │
+│           command: ["bundle", "exec", "good_job", "start"]                                                           │
+│         - name: queue                                                                                                │
+│-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d│
+│+          image: ghcr.io/example/web:v9@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd      │
+│           imagePullPolicy: IfNotPresent                                                                              │
+│           command: ["bundle", "exec", "good_job", "start", "--queues=mail"]                                          │
+│ ---                                                                                                                  │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│3 occurrences in 1 file · digest dddddddddddd · verified before commit                              d  back to commits│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                enter deploy · ↑/↓ scroll · d back to commits · esc back

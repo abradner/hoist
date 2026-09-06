@@ -1,0 +1,24 @@
+╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
+│ghcr.io/example/web:v9   →   app-production              mode: PR · production│
+├──────────────────────────────────────────────────────────────────────────────┤
+│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  4a1c2ef  Add rate limiting to the public API                                │
+│  e9b0d31  Fix N+1 query when resolving digests                               │
+│  77c0ffe  db: add index on events.created_at  migration                      │
+│  1b2d3e4  Bump temporal SDK to 1.31                                          │
+│  6f8a90c  Drop the legacy /v1/export endpoint                                │
+│  a3e91b2  db: backfill events.tenant_id  migration                           │
+│  bbbbbbb  older change                                                       │
+│  ccccccc  older change                                                       │
+│  ddddddd  older change                                                       │
+│  eeeeeee  older change                                                       │
+│  fffffff  older change                                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│2 migrations run on this deploy:                                              │
+│  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
+│  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│writes 3 occurrences in 1 file · digest dddddddddddd           d  see the yaml│
+╰──────────────────────────────────────────────────────────────────────────────╯
+                              enter deploy · ↑/↓ scroll · d yaml diff · esc back

@@ -20,6 +20,7 @@ import (
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -633,13 +634,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, false)
+		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, false, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
 	case tags.DirectRequestedMsg:
 		// DirectRequestedMsg is only emitted after the picker's own keypress + huh.Confirm
 		// gesture (tags.DirectRequestedMsg's doc comment), so the confirm screen opens already
 		// in direct mode rather than making the operator repeat the gesture. It still shows
 		// the diff first: the gesture chose a mode, not a change.
-		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, true)
+		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, true, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
 	case deploy.StartMsg:
 		if m.startPromotion == nil {
 			m.notice = "starting a deploy is not wired up"
@@ -730,7 +731,7 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 // A build failure is a notice on the matrix rather than a screen: the operator picked a tag
 // that cannot be written (an unpinned ref, a repo with no occurrence in the env), and the
 // useful response is the reason, not an empty confirm screen.
-func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool) (tea.Model, tea.Cmd) {
+func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
 	pl, err := gitops.BuildDeployPlan(m.repo, target, ref, m.promotable)
 	if err != nil {
@@ -739,13 +740,23 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool) (t
 	// The identical warning cmd/hoist's own `deploy` attaches, from the same helper, so the
 	// confirm screen and the PR body it later renders agree with the CLI's dry run.
 	plan.WarnDeployIntoProduction(&pl, m.envs)
-	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles)}
+	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h)}
 	if direct {
 		ds = deployScreen{ds.WithDirectMode()}
 	}
 	m = m.pop() // the picker has done its job
 	m = m.push(ds)
 	return m, ds.Init()
+}
+
+// deployHistory repacks what the picker learned into the confirm screen's own plain shape:
+// the two packages share no type for it, so neither imports the other.
+func deployHistory(delta *migrate.Delta, declared *tags.Declared, since time.Time, note string) deploy.History {
+	h := deploy.History{Delta: delta, Note: note, Since: since}
+	if declared != nil {
+		h.Declared = declared.Ref
+	}
+	return h
 }
 
 // push adds a screen on top, sized and themed like the rest. The slice is copied so the
