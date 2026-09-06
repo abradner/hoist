@@ -295,11 +295,16 @@ know the base branch:
   branch; refusing to force-push` — someone pushed to the promotion's branch by hand. hoist never
   force-pushes. Delete or fast-forward the branch yourself if that was intended, then `R`.
 - `commit X changes paths beyond this promotion's plan` — the branch's commit touches files the
-  plan did not. hoist refuses to treat it as its own; start fresh (delete the state file under
-  `$XDG_STATE_HOME/hoist/promotions/`) or fix the branch.
+  plan did not. hoist refuses to treat it as its own. Fix the branch — reset `hoist/<env>/<id>` on
+  origin to the base branch, or delete it there — then `R`, and hoist commits again.
 - `found PR #N … but it targets base "x", not "main"` / `… was closed without merging` — a PR on
-  the promotion's branch that hoist did not open, or one that was closed. Reopen it, retarget it,
-  or delete the state file and re-run to open a fresh one.
+  the promotion's branch that hoist did not open, or one that was closed. Retarget or reopen it
+  and `R`; hoist adopts it.
+
+One thing that does *not* help in any of these: deleting the state file. A promotion's id is a
+hash of its inputs, so the same digests into the same env is the same id, the same branch and the
+same PR — hoist will find them again. The state file is only where hoist keeps its notes; the
+branch and the PR are the promotion. A different set of digests is a different promotion.
 
 **Another promotion in flight.** `promotion <id> targeting <env> is still in flight (at <step>:
 …); run hoist resume <id> instead of starting a second one` — exactly that. The guard holds
