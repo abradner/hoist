@@ -457,7 +457,7 @@ func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 }
 
 // TestSkipStagingWarning: promoting straight to a production env that is not the source's
-// configured pair shows the warning, never blocks (AGENTS.md §4.5).
+// configured pair shows the warning, never blocks.
 func TestSkipStagingWarning(t *testing.T) {
 	envs := config.EnvsConfig{
 		Production: []string{"app-production"},

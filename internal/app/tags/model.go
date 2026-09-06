@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/forge"
@@ -396,7 +397,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.selectCurrent(false)
 	case key.Matches(msg, m.keys.Direct):
 		if m.production {
-			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env (AGENTS.md §4.5)", m.target)
+			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
 			return m, nil
 		}
 		return m.selectCurrent(true)
@@ -452,7 +453,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		// unselectable with no operator-visible explanation (round-N finding). Only the absence
 		// of both MetaLoaded and MetaErr means a fetch is genuinely still in flight.
 		if r.MetaErr != nil {
-			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — cannot select without a digest (AGENTS.md principle 3)", r.Tag)
+			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — hoist never writes an image it has no digest for", r.Tag)
 		} else {
 			m.notice = fmt.Sprintf("still loading metadata for %s — try again in a moment", r.Tag)
 		}
@@ -735,9 +736,45 @@ func (m Model) header() string {
 }
 
 func (m Model) viewErr() string {
-	parts := []string{m.header(), m.styles.Notice.Render(m.err.Error())}
+	// Wrapped, not left as one long line. A registry failure is a list — one clause per
+	// credential source — and printing it unwrapped means the terminal clips it after the first
+	// clause, which is the one least likely to be the actionable one: an operator sees
+	// "HOIST_GHCR_TOKEN is not set" and never reaches "cluster: not configured", which is the
+	// clause that tells them what to fix.
+	parts := []string{m.header(), m.styles.Notice.Render(wrapError(m.err.Error(), m.width))}
 	parts = append(parts, ui.StatusBar(m.width, "", "esc back"))
 	return strings.Join(parts, "\n")
+}
+
+// wrapError breaks an error across lines at its own clause separators first, then at spaces,
+// so a credential chain's "source: reason; source: reason" reads one source per line.
+func wrapError(msg string, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	var out []string
+	for _, clause := range strings.Split(msg, "; ") {
+		out = append(out, wrapWords(clause, width))
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapWords(s string, width int) string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return s
+	}
+	var lines []string
+	line := words[0]
+	for _, w := range words[1:] {
+		if ansi.StringWidth(line)+1+ansi.StringWidth(w) > width {
+			lines = append(lines, line)
+			line = w
+			continue
+		}
+		line += " " + w
+	}
+	return strings.Join(append(lines, line), "\n")
 }
 
 func (m Model) viewLoading() string {

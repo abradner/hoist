@@ -30,6 +30,26 @@ marker and the approval token. Digests are promoted, never tags; edits are byte-
 of the image scalar; production is gated by a person. The full rationale, including why this is
 not built on a workflow engine, lives in `AGENTS.md` and `docs/repo-map.md`.
 
+## Rules hoist enforces
+
+When hoist refuses to do something, it is one of these. They are enforced in code, not by
+convention, and the refusal says which one:
+
+- **Production always goes through a PR.** Any env listed under `envs.production` is refused
+  direct mode outright, whatever a flag or a keypress asked for.
+- **Production waits for a person** — a `hoist approve <id>` comment on the PR — unless that env
+  is explicitly set to `approval: auto`.
+- **Nothing written is a bare tag.** Every image reference hoist writes is `tag@sha256:…`, and a
+  tag with no digest is refused rather than resolved on the fly. The tag picker will not let you
+  select a build whose digest it could not read, for the same reason.
+- **A direct commit takes the env's name twice** — `--confirm-direct=<env>` at the CLI, a
+  keypress and a confirmation in the TUI — so a write with no PR is never one flag or one key.
+- **A restart changes no declared reference**, and warns where it may still not be a no-op: an
+  unpinned tag can pull a different build when the replacement pod lands.
+
+The reasoning behind each, and why hoist is not built on a workflow engine, is in `AGENTS.md`
+and `docs/repo-map.md` — those are for people working on hoist, not for people using it.
+
 ## Install
 
 Not yet. When it exists: `go install github.com/abradner/hoist/cmd/hoist@latest`.

@@ -105,7 +105,11 @@ func TestViewSnapshot(t *testing.T) {
 			t.Errorf("line %d is %d cells wide, want <= %d: %q", i+1, w, width, l)
 		}
 	}
-	for _, want := range []string{"family", "app-production", "app-staging", "@≠ v202602201200", "!  2 images", "repo  envs 2 · families 4 · unmanaged 2", "? help"} {
+	// "env app-production" rather than the whole status line: a real env name is long, and at
+	// this fixture's 80 columns the line truncates its tail. What matters is that the SELECTED
+	// env is named at all — it governs every write gesture on this screen and used to appear
+	// nowhere — and it is placed first for exactly that reason.
+	for _, want := range []string{"family", "app-production", "app-staging", "@≠ v202602201200", "!  2 images", "env app-production", "? help"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("view lacks %q", want)
 		}
@@ -1172,7 +1176,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 	if !strings.Contains(v, "app-production is a production env") {
 		t.Fatalf("the confirm screen must name the production target:\n%s", v)
 	}
-	// Informational, never blocking (AGENTS.md §4.5): the diff and the enter hint both stay.
+	// Informational, never blocking: the diff and the enter hint both stay.
 	if !strings.Contains(v, "image:") || !strings.Contains(v, "enter deploy") {
 		t.Fatalf("the warning must not displace the diff or the confirmation:\n%s", v)
 	}
@@ -1362,7 +1366,7 @@ func TestBackgroundColorRethemes(t *testing.T) {
 	if m.(Model).styles.Dark {
 		t.Error("theme did not follow a light background")
 	}
-	if got := plain(m); !strings.Contains(got, "envs 2") {
+	if got := plain(m); !strings.Contains(got, "env app-production") {
 		t.Error("view broke after retheme")
 	}
 	m, _ = m.Update(tea.BackgroundColorMsg{Color: color.Black})

@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -31,17 +32,52 @@ type ImageMeta struct {
 	Labels  map[string]string
 }
 
-// configPlatform is the platform Config resolves a multi-arch index to before reading a
-// config blob: linux/amd64. AGENTS.md's M6 brief allows either a fixed linux/amd64 or "the
-// caller's host arch"; a fixed platform is chosen because hoist's own process architecture
-// (an operator's laptop, frequently arm64 today) has no necessary relationship to the
-// cluster's (this tool's target fleets run amd64 servers) — resolving to whatever arch
-// happens to run hoist would silently read the wrong platform's Created/Labels on an arm64
-// laptop pointed at an amd64 fleet, and do it invisibly (both platforms usually exist in the
-// same index). A repo whose images are genuinely arm64-only, or mixed-fleet, is a real future
-// need but not one anything in this milestone exercises; this is the one place that
-// assumption would need to become a parameter.
-var configPlatform = v1.Platform{OS: "linux", Architecture: "amd64"}
+// preferredPlatform is the child Config reads Created/Labels from when an index carries more
+// than one: linux/amd64, chosen only so a dual-arch index gives the same answer every time.
+//
+// It is a PREFERENCE, not a requirement, and that distinction is the whole point. An earlier
+// version required it, on a stated assumption that "this tool's target fleets run amd64
+// servers". That assumption expired: the first real fleet is arm64, and every image built for
+// it since is a single-child arm64 index — so Config failed on every one of them with "no child
+// with platform linux/amd64", which the tag picker rendered as a bare "load failed" and which
+// made those tags unselectable, since hoist will not write a reference it has no digest for.
+//
+// Created and Labels come from the build, not the architecture, so any linux child answers the
+// question equally well. Preferring one merely keeps a dual-arch index deterministic.
+var preferredPlatform = v1.Platform{OS: "linux", Architecture: "amd64"}
+
+// linuxChild picks the child manifest to read the config blob from: the preferred platform when
+// the index has it, otherwise the first linux child in index order. Attestation manifests
+// (platform unknown/unknown, which every buildx index carries) are never candidates.
+//
+// Returns ok=false with the platforms that ARE present, so the error can say what was found
+// rather than only what was missing — the difference between a two-minute diagnosis and an
+// afternoon of one.
+func linuxChild(idx v1.ImageIndex) (h v1.Hash, available []string, ok bool) {
+	m, err := idx.IndexManifest()
+	if err != nil {
+		return v1.Hash{}, nil, false
+	}
+	var first *v1.Hash
+	for i := range m.Manifests {
+		p := m.Manifests[i].Platform
+		if p == nil || p.OS != "linux" || p.Architecture == "" || p.Architecture == "unknown" {
+			continue
+		}
+		available = append(available, p.OS+"/"+p.Architecture)
+		if p.OS == preferredPlatform.OS && p.Architecture == preferredPlatform.Architecture {
+			return m.Manifests[i].Digest, available, true
+		}
+		if first == nil {
+			d := m.Manifests[i].Digest
+			first = &d
+		}
+	}
+	if first == nil {
+		return v1.Hash{}, available, false
+	}
+	return *first, available, true
+}
 
 // Config implements the Registry interface's AGENTS.md M6 addition: per-digest image
 // metadata read from the image's config blob, never the index. For a multi-arch image, the
@@ -82,11 +118,14 @@ func (c *Client) Config(ctx context.Context, ref image.Ref) (ImageMeta, error) {
 
 	var meta ImageMeta
 	err = c.do(ctx, nref.Context().Registry, func(a authn.Authenticator) error {
-		desc, err := remote.Get(nref, remote.WithContext(ctx), remote.WithAuth(a), remote.WithTransport(c.cfg.Transport), remote.WithPlatform(configPlatform))
+		// Fetched without a platform option so this code, not go-containerregistry, decides
+		// which child to read — the option can only require a platform, and requiring one is
+		// exactly what broke on a single-arch index.
+		desc, err := remote.Get(nref, remote.WithContext(ctx), remote.WithAuth(a), remote.WithTransport(c.cfg.Transport))
 		if err != nil {
 			return err
 		}
-		img, err := desc.Image()
+		img, err := configImage(desc)
 		if err != nil {
 			return err
 		}
@@ -111,4 +150,27 @@ func (c *Client) Config(ctx context.Context, ref image.Ref) (ImageMeta, error) {
 	// never a reason to fail a lookup that already succeeded (cache.go's own doc comment).
 	_ = saveCache(meta)
 	return meta, nil
+}
+
+// configImage resolves a descriptor to the image whose config blob carries Created and Labels:
+// the descriptor itself when it is already a single image manifest, or a linux child when it is
+// an index. desc.Digest — the index's own digest, the one Head returned and the one a pod's
+// imageID reports — is what ImageMeta.Digest keeps; only the config blob is read from the child.
+func configImage(desc *remote.Descriptor) (v1.Image, error) {
+	if !desc.MediaType.IsIndex() {
+		return desc.Image()
+	}
+	idx, err := desc.ImageIndex()
+	if err != nil {
+		return nil, err
+	}
+	h, available, ok := linuxChild(idx)
+	if !ok {
+		if len(available) == 0 {
+			return nil, fmt.Errorf("index %s has no linux child manifest to read image metadata from", desc.Digest)
+		}
+		return nil, fmt.Errorf("index %s has no linux child manifest to read image metadata from; it carries %s",
+			desc.Digest, strings.Join(available, ", "))
+	}
+	return idx.Image(h)
 }
