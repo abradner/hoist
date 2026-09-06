@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -170,5 +172,87 @@ func TestDriveToCompletionDoesNotRetryArgoRefreshNotFound(t *testing.T) {
 	}
 	if refreshCalls != 1 {
 		t.Fatalf("Refresh called %d time(s), want exactly 1 (a retry loop would call it again every poll.argo interval)", refreshCalls)
+	}
+}
+
+// waitingStep is a Step that reports Waiting with whatever detail the test has queued,
+// one per Observe call (the last one repeats), and never Acts.
+type waitingStep struct {
+	name    engine.StepName
+	details []string
+	calls   int
+}
+
+func (w *waitingStep) Name() engine.StepName { return w.name }
+func (w *waitingStep) Observe(context.Context, *engine.PromotionState) (engine.Observation, error) {
+	i := w.calls
+	if i >= len(w.details) {
+		i = len(w.details) - 1
+	}
+	w.calls++
+	return engine.Observation{Waiting: true, Detail: w.details[i]}, nil
+}
+func (w *waitingStep) Act(context.Context, *engine.PromotionState) error { return nil }
+
+// A run parked on a Waiting step prints why, once, and again only when the reason changes —
+// never once per tick, and never nothing at all (issue #68: the first real promotion sat
+// silently at Approved for what looked like a hang). The approval wait also prints the exact
+// comment to post and where, once.
+func TestDriveToCompletionPrintsEachWaitingReasonOnce(t *testing.T) {
+	s := &engine.PromotionState{ID: "abc123", TargetEnv: "app-production", PR: &forge.PR{Number: 7, URL: "https://github.com/me/my-gitops/pull/7"}}
+	step := &waitingStep{name: engine.StepApproved, details: []string{"waiting for `hoist approve abc123` from an approver", "waiting for `hoist approve abc123` from an approver", "a rejection was posted; waiting for a newer approval"}}
+	var errOut bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Approval: config.Duration(5 * time.Millisecond)}
+	err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if step.calls < 4 {
+		t.Fatalf("only %d observes; the loop did not keep polling", step.calls)
+	}
+	out := errOut.String()
+	first := "hoist: approved: waiting: waiting for `hoist approve abc123` from an approver\n"
+	if got := strings.Count(out, first); got != 1 {
+		t.Errorf("first reason printed %d times, want exactly once:\n%s", got, out)
+	}
+	if got := strings.Count(out, "hoist: approved: waiting: a rejection was posted; waiting for a newer approval\n"); got != 1 {
+		t.Errorf("changed reason printed %d times, want exactly once:\n%s", got, out)
+	}
+	if got := strings.Count(out, "hoist: to approve, comment `hoist approve abc123` on https://github.com/me/my-gitops/pull/7\n"); got != 1 {
+		t.Errorf("approval instructions printed %d times, want exactly once:\n%s", got, out)
+	}
+}
+
+// An unchanged reason still gets a heartbeat, on a cadence far slower than any poll interval,
+// so an hour-long wait shows something recent without filling the scrollback.
+func TestWaitingReporterHeartbeatsOnUnchangedReason(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+	r := waitingReporter{w: &out, now: func() time.Time { return now }}
+	s := &engine.PromotionState{History: []engine.HistoryEntry{{Step: engine.StepCIGreen, Detail: "waiting: CI: 1/3 checks complete"}}}
+	for i := 0; i < 5; i++ {
+		r.report(s)
+		now = now.Add(time.Minute)
+	}
+	if got := out.String(); got != "hoist: ci-green: waiting: CI: 1/3 checks complete\n" {
+		t.Fatalf("five minutes of the same reason printed:\n%s", got)
+	}
+	now = now.Add(heartbeatEvery)
+	r.report(s)
+	if !strings.Contains(out.String(), "hoist: still ci-green: waiting: CI: 1/3 checks complete (15m0s so far)\n") {
+		t.Errorf("no heartbeat after %s:\n%s", heartbeatEvery, out.String())
+	}
+	r.report(s)
+	if got := strings.Count(out.String(), "still"); got != 1 {
+		t.Errorf("heartbeat repeated %d times within one interval", got)
+	}
+	// Drive saves after recording the wait, and a failed save appends its own entry after it:
+	// the reason reported is still the wait, never the save failure read off the end.
+	s.History = append(s.History, engine.HistoryEntry{Step: engine.StepCIGreen, Detail: "state save failed: disk full"})
+	r.report(s)
+	if strings.Contains(out.String(), "state save failed") {
+		t.Errorf("a save-failure entry was reported as the waiting reason:\n%s", out.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
@@ -55,13 +56,14 @@ func pollInterval(poll config.PollConfig, phase engine.StepName) time.Duration {
 // retried, not read as a hard failure — logged once and retried after the poll interval, rather
 // than aborting on the first hiccup; ctx cancellation is what actually bounds that retry loop.
 func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.PromotionState, save func(*engine.PromotionState) error, poll config.PollConfig, stderr io.Writer) error {
+	w := waitingReporter{w: stderr, now: time.Now}
 	for {
 		err := engine.Drive(ctx, steps, s, save)
 		switch {
 		case err == nil:
 			return nil
 		case errors.Is(err, engine.ErrWaiting):
-			// fall through to sleep below
+			w.report(s)
 		default:
 			var blocked *engine.BlockedError
 			if errors.As(err, &blocked) {
@@ -92,6 +94,58 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 			return ctx.Err()
 		case <-time.After(pollInterval(poll, s.Phase)):
 		}
+	}
+}
+
+// heartbeatEvery is how long an unchanged wait goes before the CLI says it is still alive. It
+// is deliberately far slower than any poll.* interval: the line exists to tell a healthy
+// hour-long approval wait apart from a hung process, not to narrate every tick.
+const heartbeatEvery = 10 * time.Minute
+
+// waitingReporter prints why the CLI is waiting, once per distinct reason, plus a heartbeat
+// while the reason stays the same. Before it existed a promotion parked at Approved re-derived
+// seven satisfied steps every 30 seconds for up to poll.deadline and printed nothing at all —
+// indistinguishable from a hang from the outside, with the reason sitting unread in the state
+// file's History (issue #68, found on the first real promotion). The reason is exactly what
+// Drive just recorded there — the newest "waiting: …" entry — so the terminal and the state
+// file say the same thing. It is found by searching back rather than read off the end: Drive
+// saves after recording the wait, and a failed save appends its own entry after it.
+type waitingReporter struct {
+	w           io.Writer
+	now         func() time.Time
+	last        string    // the last reason printed, "" before the first
+	lastAt      time.Time // when last was first printed, for the heartbeat
+	hintedToken bool      // the approval instructions are printed once per run
+}
+
+func (r *waitingReporter) report(s *engine.PromotionState) {
+	var e engine.HistoryEntry
+	found := false
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if strings.HasPrefix(s.History[i].Detail, "waiting: ") {
+			e, found = s.History[i], true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	reason := string(e.Step) + ": " + e.Detail
+	now := r.now()
+	if reason == r.last {
+		if now.Sub(r.lastAt) >= heartbeatEvery {
+			fmt.Fprintf(r.w, "hoist: still %s (%s so far)\n", redact.Strings(reason), now.Sub(r.lastAt).Round(time.Minute))
+			r.lastAt = now
+		}
+		return
+	}
+	r.last, r.lastAt = reason, now
+	fmt.Fprintf(r.w, "hoist: %s\n", redact.Strings(reason))
+	// The approval wait has a second gap the first real run hit: the only place the token
+	// was printed was the PR body. Say exactly what to post, and where, the first time.
+	if e.Step == engine.StepApproved && !r.hintedToken && s.PR != nil {
+		r.hintedToken = true
+		fmt.Fprintf(r.w, "hoist: to approve, comment `hoist approve %s` on %s\n", s.ID, s.PR.URL)
 	}
 }
 

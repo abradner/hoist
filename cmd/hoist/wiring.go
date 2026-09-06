@@ -50,9 +50,6 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			// identically so the TUI and the CLI never disagree about what's missing.
 			return engine.PromotionState{}, nil, errors.New("the selected repo has no github: owner/name configured; add repos[].github to the config file")
 		}
-		if forgeErr != nil {
-			return engine.PromotionState{}, nil, forgeErr
-		}
 
 		// The same all-NoOp fast path runPromote's own body applies (promote.go, "changed"
 		// loop plus checkNoOpAgainstBase) before ever calling buildPromotionForConfirm —
@@ -79,6 +76,14 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)
 			}
 			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
+		}
+		// The forge, like the cluster adaptors below, is checked only once a plan has proven
+		// to need one: runPromote and runDeploy both build newForge after their own all-no-op
+		// fast path, so confirming an already-current plan on a machine whose `gh` login has
+		// lapsed says "already current" from every entry point rather than a GitHub auth
+		// failure from this one (issue #55).
+		if forgeErr != nil {
+			return engine.PromotionState{}, nil, forgeErr
 		}
 
 		// The Argo/Deployment adaptors every promotion needs, deferred to here exactly like

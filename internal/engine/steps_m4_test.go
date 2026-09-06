@@ -187,6 +187,12 @@ func TestCIGreenNoneBlockHasNoOverride(t *testing.T) {
 	if obs.Blocked == "" {
 		t.Fatalf("ci.none=block must stay Blocked even with CINoneOverride set, got %+v", obs)
 	}
+	// The recovery the message names must be one that works: a same-id re-run and resume both
+	// keep this promotion's own ci.none, so "change the config and re-run" cannot reach it
+	// (issue #48). What can is abandoning it and starting again.
+	if strings.Contains(obs.Blocked, "change ci.none") || !strings.Contains(obs.Blocked, "abandon this promotion") || !strings.Contains(obs.Blocked, "keeps the ci.none it started with") {
+		t.Errorf("blocked reason advertises an unreachable recovery or omits the reachable one: %q", obs.Blocked)
+	}
 }
 
 // TestCIGreenChecksErrorIsRetryableNotAbsence is Known bug classes' "a 404 on Checks/Comments
