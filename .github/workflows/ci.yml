@@ -47,8 +47,17 @@ jobs:
         with:
           distribution: goreleaser
           version: v2.18.0 # the same pin as mise.toml; an upstream release must not redden a PR
-          args: build --snapshot --clean --single-target
-      - run: ./dist/hoist_linux_arm64*/hoist --version
+          args: build --snapshot --clean
+      # Verify the output, not the instrument: the binary must print the snapshot version the
+      # ldflag injected — a zero exit that printed "dev" would mean -X main.version stopped
+      # applying while the job stayed green.
+      - run: |
+          out="$(./dist/hoist_linux_arm64*/hoist --version)"
+          echo "hoist --version: $out"
+          case "$out" in
+            *-SNAPSHOT-*) ;;
+            *) echo "the ldflag did not apply (expected a *-SNAPSHOT-<sha> version)"; exit 1 ;;
+          esac
 
   public-safety:
     # This repo is public. Nothing that identifies a real cluster may land in it:
