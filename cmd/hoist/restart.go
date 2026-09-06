@@ -130,7 +130,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return 0
 	}
 
-	at := time.Now().UTC()
+	at := distinctRestartStamp(time.Now().UTC(), before)
 	var restarted []string
 	for _, st := range before {
 		if rerr := ro.Restart(ctx, *env, st.Name, at); rerr != nil {
@@ -147,6 +147,36 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
 
 	return watchRestart(ctx, ro, *env, restarted, cfg.Poll, stdout, stderr)
+}
+
+// distinctRestartStamp is now, advanced until its RFC3339 rendering differs from every stamp
+// already on the Deployments about to be restarted.
+//
+// RFC3339 has second resolution, so restarting twice inside one second would otherwise patch the
+// pod template to the value it already holds. That is not a change: no rollout starts, and the
+// watch that follows would see the PREVIOUS rollout already complete and report success for a
+// restart that never happened — directly contradicting this command's own promise that
+// re-running restarts again.
+//
+// Advancing a second rather than switching to sub-second precision keeps the value identical in
+// shape to the one `kubectl rollout restart` writes, which is the whole reason for sharing the
+// key. "One second from now" is still an honest answer to when the restart was asked for.
+func distinctRestartStamp(now time.Time, sts []rollout.DeploymentStatus) time.Time {
+	existing := make(map[string]bool, len(sts))
+	for _, st := range sts {
+		if st.RestartedAt != "" {
+			existing[st.RestartedAt] = true
+		}
+	}
+	// Bounded: each step moves a whole second, and the set it must avoid is finite, so this
+	// terminates after at most len(existing) steps.
+	for i := 0; i <= len(existing); i++ {
+		at := now.Add(time.Duration(i) * time.Second)
+		if !existing[at.Format(time.RFC3339)] {
+			return at
+		}
+	}
+	return now.Add(time.Duration(len(existing)+1) * time.Second)
 }
 
 // restartTargets is the distinct Deployment names the named families declare in env, or every
@@ -213,7 +243,21 @@ func splitFamilies(v string) []string {
 // checkProductionRestart is the whole of production's gate: a second, distinct acknowledgement
 // repeating the env's exact name. An env the config does not list as production needs none.
 func checkProductionRestart(eff effective, env, confirm string, stderr io.Writer) int {
-	if eff.cfg == nil || !eff.cfg.Envs.IsProduction(env) {
+	if eff.cfg == nil {
+		// Fail closed. A flags-only run has no envs.production list, so every env would look
+		// non-production by omission and `hoist --repo /path restart --env <production>` would
+		// walk straight through the gate this function exists to be. checkDirectPreflight
+		// refuses the same shape for the same reason (AGENTS.md §8: never provide a fallback
+		// default for required configuration) — and here the answer cannot even be "refuse
+		// outright", because a restart against an unconfigured repo is a legitimate thing to
+		// want; it is "we cannot tell, so acknowledge it".
+		if confirm != env {
+			fmt.Fprintf(stderr, "hoist restart: no configured repo, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway\n", env, env)
+			return exitUsage
+		}
+		return 0
+	}
+	if !eff.cfg.Envs.IsProduction(env) {
 		return 0
 	}
 	if confirm == "" {

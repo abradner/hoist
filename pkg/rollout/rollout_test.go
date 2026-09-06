@@ -325,11 +325,11 @@ func TestRestartPreservesOtherPodTemplateAnnotations(t *testing.T) {
 	}
 }
 
-// The graceful-restart signals, read from the same fetch that reads everything else. Warnings
-// only: hoist never blocks a restart on them (principle 5).
+// The graceful-restart signals. Each fires only when it is actually true of this Deployment's
+// own settings: an earlier version warned "nothing serves" on replica count alone, which is
+// wrong under the default strategy, and a warning that fires on a Deployment that is fine
+// teaches the operator to stop reading them.
 func TestGracefulRestartConcerns(t *testing.T) {
-	two := int32(2)
-	one := int32(1)
 	for _, tc := range []struct {
 		name  string
 		st    DeploymentStatus
@@ -338,28 +338,42 @@ func TestGracefulRestartConcerns(t *testing.T) {
 	}{
 		{
 			name: "healthy shape says nothing",
-			st:   DeploymentStatus{Replicas: two, Strategy: "RollingUpdate", ReadinessProbes: 1},
+			st:   DeploymentStatus{Replicas: 2, Strategy: "RollingUpdate", MaxUnavailable: 0, MaxSurge: 1, ReadinessProbes: 1},
 			none: true,
 		},
 		{
-			name:  "single replica",
-			st:    DeploymentStatus{Replicas: one, Strategy: "RollingUpdate", ReadinessProbes: 1},
-			wants: []string{"only 1 replica"},
+			// The case the old version got wrong: Kubernetes' 25% default resolves to
+			// maxUnavailable 0 at one replica, so the old pod serves until the new one is
+			// ready. The real risk is redundancy, and the wording now says so.
+			name:  "single replica under the default strategy is a redundancy warning, not a downtime claim",
+			st:    DeploymentStatus{Replicas: 1, Strategy: "RollingUpdate", MaxUnavailable: 0, MaxSurge: 1, ReadinessProbes: 1},
+			wants: []string{"no redundancy"},
 		},
 		{
-			name:  "no readiness probe",
-			st:    DeploymentStatus{Replicas: two, Strategy: "RollingUpdate"},
+			// Same one replica, but configured so it CAN go away first. Now it is downtime.
+			name:  "single replica with maxUnavailable 1 can be down entirely",
+			st:    DeploymentStatus{Replicas: 1, Strategy: "RollingUpdate", MaxUnavailable: 1, MaxSurge: 1, ReadinessProbes: 1},
+			wants: []string{"every pod can be down at once"},
+		},
+		{
+			name:  "no readiness probe is independent of the strategy",
+			st:    DeploymentStatus{Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 0, MaxSurge: 1},
 			wants: []string{"no readiness probe"},
 		},
 		{
-			name:  "recreate stops everything first",
-			st:    DeploymentStatus{Replicas: two, Strategy: "Recreate", ReadinessProbes: 1},
+			name:  "recreate stops everything first, and says only that about the strategy",
+			st:    DeploymentStatus{Replicas: 1, Strategy: "Recreate", ReadinessProbes: 1},
 			wants: []string{"Recreate"},
 		},
 		{
-			name:  "all three at once, in a stable order",
-			st:    DeploymentStatus{Replicas: one, Strategy: "Recreate"},
-			wants: []string{"Recreate", "only 1 replica", "no readiness probe"},
+			name:  "recreate with no probe says both, since they are different facts",
+			st:    DeploymentStatus{Replicas: 2, Strategy: "Recreate"},
+			wants: []string{"Recreate", "no readiness probe"},
+		},
+		{
+			name:  "scaled to zero has nothing to roll",
+			st:    DeploymentStatus{Replicas: 0, Strategy: "RollingUpdate"},
+			wants: []string{"scaled to 0 replicas"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -377,6 +391,48 @@ func TestGracefulRestartConcerns(t *testing.T) {
 				if !strings.Contains(got[i], w) {
 					t.Errorf("concern %d = %q, want it to mention %q", i, got[i], w)
 				}
+			}
+			// A zero-replica Deployment must never be described as having "only 1".
+			if tc.st.Replicas == 0 {
+				for _, c := range got {
+					if strings.Contains(c, "only 1") {
+						t.Errorf("zero replicas reported as one: %q", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The default strategy resolves the way Kubernetes resolves it: 25% maxUnavailable rounds DOWN
+// and 25% maxSurge rounds UP, which at one replica is 0 and 1 — the numbers that decide whether
+// a single-replica rollout actually drops traffic.
+func TestDeploymentResolvesTheRollingUpdateDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		replicas        int32
+		wantUnavailable int32
+		wantSurge       int32
+	}{
+		{name: "one replica", replicas: 1, wantUnavailable: 0, wantSurge: 1},
+		{name: "four replicas", replicas: 4, wantUnavailable: 1, wantSurge: 1},
+		{name: "ten replicas", replicas: 10, wantUnavailable: 2, wantSurge: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := baseDeployment("app-production", "app")
+			r := tc.replicas
+			d.Spec.Replicas = &r
+			d.Spec.Strategy.Type = ""           // unset: RollingUpdate
+			d.Spec.Strategy.RollingUpdate = nil // unset: 25% / 25%
+			st, err := FromClientset(fake.NewSimpleClientset(d)).Deployment(context.Background(), "app-production", "app")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.MaxUnavailable != tc.wantUnavailable {
+				t.Errorf("MaxUnavailable = %d, want %d (25%% of %d rounded down)", st.MaxUnavailable, tc.wantUnavailable, tc.replicas)
+			}
+			if st.MaxSurge != tc.wantSurge {
+				t.Errorf("MaxSurge = %d, want %d (25%% of %d rounded up)", st.MaxSurge, tc.wantSurge, tc.replicas)
 			}
 		})
 	}

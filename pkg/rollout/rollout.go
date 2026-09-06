@@ -23,6 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -61,35 +62,51 @@ type DeploymentStatus struct {
 	// restarted this way. Read so a restart can say what it supersedes, and so a caller can
 	// tell its own stamp from someone else's.
 	RestartedAt string
-	// Replicas, Strategy and ReadinessProbes describe whether a restart of this Deployment can
-	// actually be graceful. They are read here because the read that fetches them is already
-	// being made; hoist warns on them and never blocks (AGENTS.md principle 5), since "roll it
-	// anyway" is a legitimate thing to want and the operator is the one who knows.
+	// The fields below describe whether a restart of this Deployment can actually be graceful.
+	// They are read here because the read that fetches them is already being made; hoist warns
+	// on them and never blocks (AGENTS.md principle 5), since "roll it anyway" is a legitimate
+	// thing to want and the operator is the one who knows.
 	//
-	// Replicas is spec.replicas (1 when unset, matching Kubernetes' own default): a single
-	// replica means the rollout has nothing to keep serving while the new pod starts, whatever
-	// the strategy says. Strategy is spec.strategy.type ("RollingUpdate" when unset).
-	// ReadinessProbes counts containers that declare one — without any, the new pod is
-	// considered available the moment it starts, so a RollingUpdate can cut over to a process
-	// that is not yet serving.
+	// Replicas is spec.replicas (1 when unset, matching Kubernetes' own default). Strategy is
+	// spec.strategy.type ("RollingUpdate" when unset). MaxUnavailable and MaxSurge are that
+	// strategy's own values already RESOLVED against Replicas by Kubernetes' own rules —
+	// percentages round down for unavailable and up for surge — because the raw 25%/25%
+	// defaults say nothing on their own: at one replica they resolve to 0 and 1, which is
+	// precisely the case where a naive "one replica means downtime" claim is wrong.
+	// ReadinessProbes counts containers that declare one.
 	Replicas        int32
 	Strategy        string
+	MaxUnavailable  int32
+	MaxSurge        int32
 	ReadinessProbes int
 }
 
 // GracefulRestartConcerns lists, in a stable order, the reasons a restart of this Deployment is
 // unlikely to be seamless. Empty when there is nothing to say. Informational: the caller shows
 // them and proceeds (principle 5).
+//
+// Each is stated only when it is actually true of this Deployment's own settings. An earlier
+// version warned "only 1 replica: nothing serves while the new pod starts" on replica count
+// alone, which is wrong under the default strategy: 25% maxUnavailable of one replica rounds
+// down to zero, so the old pod keeps serving until the new one is ready. A warning that fires on
+// a Deployment that is in fact fine is worse than none, because it teaches the operator to skip
+// reading them.
 func (d DeploymentStatus) GracefulRestartConcerns() []string {
 	var out []string
-	if d.Strategy == "Recreate" {
+	switch {
+	case d.Replicas == 0:
+		// Nothing to roll, and none of the rest applies.
+		return []string{"scaled to 0 replicas: a restart changes the pod template but starts no pod"}
+	case d.Strategy == "Recreate":
 		out = append(out, "strategy is Recreate: every pod stops before any new one starts")
-	}
-	if d.Replicas <= 1 {
-		out = append(out, "only 1 replica: nothing serves while the new pod starts")
+	case d.MaxUnavailable >= d.Replicas:
+		out = append(out, fmt.Sprintf("maxUnavailable is %d of %d replica(s): every pod can be down at once", d.MaxUnavailable, d.Replicas))
+	case d.Replicas == 1:
+		// The old pod does keep serving here — the risk is what is behind it, which is nothing.
+		out = append(out, "only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails")
 	}
 	if d.ReadinessProbes == 0 {
-		out = append(out, "no readiness probe: a new pod counts as available before it can serve")
+		out = append(out, "no readiness probe: a new pod counts as available the moment it starts, before it can serve")
 	}
 	return out
 }
@@ -196,6 +213,24 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 	if st.Strategy == "" {
 		st.Strategy = "RollingUpdate"
 	}
+	// Resolved by Kubernetes' own rules, not left as raw percentages: maxUnavailable rounds
+	// down, maxSurge rounds up, and both default to 25%. At one replica that is 0 and 1 — the
+	// numbers that decide whether a single-replica rollout actually drops traffic.
+	if st.Strategy == "RollingUpdate" {
+		mu := intstr.FromString("25%")
+		ms := intstr.FromString("25%")
+		if ru := d.Spec.Strategy.RollingUpdate; ru != nil {
+			if ru.MaxUnavailable != nil {
+				mu = *ru.MaxUnavailable
+			}
+			if ru.MaxSurge != nil {
+				ms = *ru.MaxSurge
+			}
+		}
+		u, _ := intstr.GetScaledValueFromIntOrPercent(&mu, int(st.Replicas), false)
+		sg, _ := intstr.GetScaledValueFromIntOrPercent(&ms, int(st.Replicas), true)
+		st.MaxUnavailable, st.MaxSurge = int32(u), int32(sg)
+	}
 	for _, ctr := range d.Spec.Template.Spec.Containers {
 		if ctr.ReadinessProbe != nil {
 			st.ReadinessProbes++
@@ -214,6 +249,14 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 const RestartAnnotation = "kubectl.kubernetes.io/restartedAt"
 
 // Restart implements Rollout.
+//
+// The caller must pass an `at` whose RFC3339 rendering differs from the Deployment's current
+// RestartedAt. RFC3339 has second resolution, so two calls in the same second patch the pod
+// template to the value it already holds — which is not a change, so no rollout starts, and a
+// caller watching for one would see the PREVIOUS rollout's completion and report success for a
+// restart that never happened. This is not enforced here because enforcing it means a read, and
+// a read here would both cost a round trip and race the write; cmd/hoist has already read the
+// Deployment before it calls this, so it is the honest place to hold the constraint.
 //
 // A strategic-merge patch of one annotation, which is what kubectl issues for the same command.
 // Argo does not treat this as drift even with selfHeal on: its diff is a three-way merge, so a

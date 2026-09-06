@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -253,6 +254,80 @@ func TestRestartTargetsAreScopedToTheNamedFamilies(t *testing.T) {
 	for _, name := range all {
 		if strings.Contains(name, "purge") {
 			t.Errorf("a CronJob was included as a restart target: %v", all)
+		}
+	}
+}
+
+// A flags-only run has no envs.production list, so hoist cannot tell whether the target is
+// production. It must fail closed: the same omission hazard checkDirectPreflight refuses, and
+// the one I cited as precedent while leaving this branch open (Copilot, PR #81).
+func TestRestartFailsClosedWithNoConfiguredRepo(t *testing.T) {
+	// The fixture repo's app-production holds several families; register every Deployment it
+	// declares so the run is exercising the gate, not a missing fixture.
+	r, err := gitops.Discover("../../testdata/repo", "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := restartTargets(r, "app-production", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sts []rollout.DeploymentStatus
+	for _, n := range names {
+		st := rolled("app-production")
+		st.Name = n
+		sts = append(sts, st)
+	}
+	restartFake(t, sts...)
+	// No --config at all: flags only.
+	args := []string{"--repo", "../../testdata/repo", "restart", "--env", "app-production"}
+
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("an unconfigured run must not restart an env it cannot classify:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "cannot tell whether app-production is production") {
+		t.Errorf("the refusal should say why it cannot decide:\n%s", errOut.String())
+	}
+
+	// Acknowledged, it proceeds — the gate is "we cannot tell, so say so", not a blanket refusal.
+	out.Reset()
+	errOut.Reset()
+	if got := run(append(args, "--confirm-production", "app-production"), &out, &errOut); got != 0 {
+		t.Errorf("an acknowledged unconfigured restart should proceed: %s", errOut.String())
+	}
+}
+
+// RFC3339 has second resolution, so restarting twice inside one second would patch the pod
+// template to the value it already holds — no change, no rollout, and the watch that follows
+// would report the PREVIOUS rollout's completion as this one's (Copilot, PR #81).
+func TestRestartStampAlwaysDiffersFromWhatIsThere(t *testing.T) {
+	now := time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)
+	nowStamp := now.Format(time.RFC3339)
+
+	// Nothing there: now is fine.
+	if got := distinctRestartStamp(now, []rollout.DeploymentStatus{{}}); !got.Equal(now) {
+		t.Errorf("with no existing stamp it should use now, got %s", got)
+	}
+	// The exact stamp is already on one of them: it must move.
+	sts := []rollout.DeploymentStatus{{RestartedAt: nowStamp}}
+	got := distinctRestartStamp(now, sts)
+	if got.Format(time.RFC3339) == nowStamp {
+		t.Fatalf("planned the stamp already on the Deployment: nothing would roll")
+	}
+	// And it is still a plain RFC3339 second stamp, the shape kubectl writes.
+	if _, err := time.Parse(time.RFC3339, got.Format(time.RFC3339)); err != nil {
+		t.Errorf("stamp is not plain RFC3339: %v", err)
+	}
+	// Several Deployments occupying consecutive seconds: it steps past all of them.
+	var occupied []rollout.DeploymentStatus
+	for i := 0; i < 3; i++ {
+		occupied = append(occupied, rollout.DeploymentStatus{RestartedAt: now.Add(time.Duration(i) * time.Second).Format(time.RFC3339)})
+	}
+	g2 := distinctRestartStamp(now, occupied).Format(time.RFC3339)
+	for _, st := range occupied {
+		if g2 == st.RestartedAt {
+			t.Errorf("stamp %s collides with an existing one", g2)
 		}
 	}
 }
