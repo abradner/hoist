@@ -472,8 +472,8 @@ Deployment is `go install github.com/abradner/hoist/cmd/hoist@latest`, which res
 `v*` tag once one exists (and `main` until then), plus prebuilt binaries from goreleaser
 (`.goreleaser.yaml`) on every tag push (`.github/workflows/release.yml`: `go vet`, the race suite
 and the public-safety grep run at the tag before anything is published). `ci.yml`'s
-`release-config` job snapshot-builds this platform's binary on every PR and runs its `--version`,
-so the config cannot rot between tags. A Homebrew tap needs its own repo and is not built (issue
+`release-config` job snapshot-builds every target on every PR and asserts the linux/arm64 binary
+prints its `*-SNAPSHOT-<sha>` version, so neither the config nor the ldflag can rot between tags. A Homebrew tap needs its own repo and is not built (issue
 in the tracker). The version string is the ldflag when goreleaser set it, else the module version
 Go embeds for a `go install` at a tag, else `dev` (`versionString`, `cmd/hoist/main.go`).
 

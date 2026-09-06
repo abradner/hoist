@@ -35,8 +35,9 @@ jobs:
 
   release-config:
     # .goreleaser.yaml is only otherwise exercised when a tag is pushed, which is the worst
-    # moment to find it broken. A snapshot build of this platform's binary proves the config
-    # and the ldflags (the artifact, not the linter — AGENTS.md §8).
+    # moment to find it broken. A snapshot build of every target a tag publishes proves the
+    # config and the ldflags (the artifact, not the linter — AGENTS.md §8); CGO is off, so the
+    # four cross-builds cost seconds.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5

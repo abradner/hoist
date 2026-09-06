@@ -1,7 +1,8 @@
 # goreleaser builds the release binaries when a v* tag is pushed (.github/workflows/release.yml)
-# and is run against every PR as `build --snapshot --single-target` (ci.yml, release-config) so a
-# broken config fails before a tag does. Verify locally with `mise exec -- goreleaser check`, or
-# `mise exec -- goreleaser build --snapshot --clean --single-target` for the binary itself.
+# and is run against every PR as `build --snapshot --clean` — every target below — with the
+# linux/arm64 binary's --version asserted (ci.yml, release-config), so a broken config or a
+# lost ldflag fails before a tag does. Verify locally with `mise exec -- goreleaser check`, or
+# `mise exec -- goreleaser build --snapshot --clean --single-target` for this machine's binary.
 version: 2
 
 project_name: hoist
