@@ -436,3 +436,13 @@ func TestRestartPlanHasNoImageEdits(t *testing.T) {
 		t.Errorf("SourceEnv = %q, want empty", pl.SourceEnv)
 	}
 }
+
+// A public plan builder handed no repo returns an error, like its two siblings — it does not
+// panic (Copilot, PR #78).
+func TestBuildRestartPlanRefusesANilRepo(t *testing.T) {
+	if _, err := BuildRestartPlan(nil, "app-staging", nil, restartAt); err == nil {
+		t.Fatal("expected an error for a nil repo")
+	} else if !strings.Contains(err.Error(), "nil repo") {
+		t.Errorf("wording should match BuildPlan's own, got %v", err)
+	}
+}

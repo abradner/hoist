@@ -77,6 +77,11 @@ type RestartEdit struct {
 // content of the change: two restarts of the same family must be distinguishable, and a caller
 // that cannot control it cannot write a test.
 func BuildRestartPlan(r *Repo, env string, families []string, at time.Time) (Plan, error) {
+	// Same refusal, same wording as BuildPlan and BuildDeployPlan: a public plan builder
+	// handed no repo returns an error, it does not panic (Copilot, PR #78).
+	if r == nil {
+		return Plan{}, errors.New("nil repo")
+	}
 	e, ok := r.Envs[env]
 	if !ok {
 		return Plan{}, fmt.Errorf("unknown env %q", env)
