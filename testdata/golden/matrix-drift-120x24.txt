@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │! c: cluster not asked: kube context "my-cluster" is not in the kubeconfig                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c · families 8 · unmanaged 0                                      p promote • d deploy • R restart • ? help • q quit
+env c                                                                  p promote • d deploy • r resume • ? help • q quit

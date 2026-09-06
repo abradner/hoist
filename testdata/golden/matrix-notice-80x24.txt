@@ -21,4 +21,4 @@
 │credential for ghcr.io; cluster: not configured (registries[].cluster); op:   │
 │not configured (registries[].op)                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env a · families 8 · unmanag… p promote • d deploy • R restart • ? help • q quit
+env a                          p promote • d deploy • r resume • ? help • q quit

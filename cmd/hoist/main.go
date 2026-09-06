@@ -578,7 +578,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		blameRef = sha
 	}
 	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef)
-	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn)
+	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn).WithInFlight(buildInFlightFuncs(cfg))
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure

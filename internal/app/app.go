@@ -95,6 +95,29 @@ type promotionBuiltMsg struct {
 	deadlineAt time.Time
 }
 
+// InFlight is how the root lists what is promoting right now for the matrix's pane, and
+// re-drives one of them on the flight screen (M10: the TUI's `hoist promotions` and `hoist
+// resume`). List re-observes every state file against the forge and the cluster — AGENTS.md
+// §4.1, never the recorded phase — so it is called off the Update stack, at boot and then
+// every Poll.Approval while the matrix is the top screen. Resume builds the same state and
+// DriveFunc `hoist resume <id>` would. Both nil means the feature is not wired (a flags-only
+// run, a test): the pane stays absent and r says so.
+type InFlight struct {
+	List   func(ctx context.Context) ([]flight.Summary, error)
+	Resume func(ctx context.Context, id string) (engine.PromotionState, flight.DriveFunc, error)
+}
+
+// inFlightMsg carries one listing back; gen drops a listing from before the matrix was
+// replaced (it never is today, but the guard costs nothing) or one that raced a newer one.
+type inFlightMsg struct {
+	gen  uint64
+	list []flight.Summary
+	err  error
+}
+
+// inFlightTickMsg is the poll: re-list, but only when the matrix is on top.
+type inFlightTickMsg struct{}
+
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
 // what a screen needs to open the plan screen (internal/app/plan) or the tag picker
 // (internal/app/tags) without app.New having to be called again — the repo, the promotable
@@ -121,6 +144,9 @@ type Model struct {
 	// consume it can land one at a time; zero means "no history available" and each screen
 	// degrades to a named gap.
 	history history.Funcs
+	// inFlight is InFlight's pair (WithInFlight); listGen stamps each listing.
+	inFlight InFlight
+	listGen  uint64
 
 	// startPromotion, poll, openURL and openPRMode are Promotion's fields, unpacked here —
 	// see Promotion's own doc comment for what each one is and why a nil Start/OpenURL
@@ -208,6 +234,54 @@ func (m Model) WithHistory(h history.Funcs) Model {
 // for cmd/hoist's own wiring test.
 func (m Model) History() history.Funcs { return m.history }
 
+// WithInFlight supplies the in-flight listing and resume functions (cmd/hoist's
+// buildInFlightFuncs). See InFlight.
+func (m Model) WithInFlight(f InFlight) Model {
+	m.inFlight = f
+	return m
+}
+
+// listInFlight issues one listing for the current generation, or nil when List is not wired.
+func (m Model) listInFlight() tea.Cmd {
+	if m.inFlight.List == nil {
+		return nil
+	}
+	gen, list, deadline := m.listGen, m.inFlight.List, m.poll.Deadline
+	return func() tea.Msg {
+		ctx := context.Background()
+		if deadline > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, deadline)
+			defer cancel()
+		}
+		summaries, err := list(ctx)
+		return inFlightMsg{gen: gen, list: summaries, err: err}
+	}
+}
+
+// inFlightTick schedules the next listing at Poll.Approval — the cadence the engine itself
+// re-observes an approval at — with a floor so a zero config never spins.
+func (m Model) inFlightTick() tea.Cmd {
+	if m.inFlight.List == nil {
+		return nil
+	}
+	every := m.poll.Approval
+	if every < 5*time.Second {
+		every = 30 * time.Second
+	}
+	return tea.Tick(every, func(time.Time) tea.Msg { return inFlightTickMsg{} })
+}
+
+// matrixOnTop reports whether the matrix is the screen being shown — the only time a
+// listing is worth the forge calls, since only the matrix draws the pane.
+func (m Model) matrixOnTop() bool {
+	if len(m.stack) == 0 {
+		return false
+	}
+	_, ok := m.stack[len(m.stack)-1].(matrixScreen)
+	return ok
+}
+
 // driftFunc adapts the plan screen's resolve function into the matrix's DriftFunc: the
 // pod-sourced resolutions for one env are what that env is running. The same adaptor, the
 // same credentials, one call per env at boot — nothing new is opened for the matrix. nil
@@ -240,7 +314,7 @@ func (m Model) Init() tea.Cmd {
 	if len(m.stack) > 0 {
 		screenCmd = m.stack[len(m.stack)-1].Init()
 	}
-	return tea.Batch(tea.RequestBackgroundColor, screenCmd)
+	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.listInFlight(), m.inFlightTick())
 }
 
 // Update handles window size, theme and the global keys, and forwards everything else to
@@ -268,6 +342,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.capturesText() {
 				return m, tea.Quit
 			}
+		}
+	case inFlightMsg:
+		if msg.gen != m.listGen {
+			return m, nil
+		}
+		return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.SetInFlight(msg.list, msg.err) }), nil
+	case inFlightTickMsg:
+		if !m.matrixOnTop() {
+			return m, m.inFlightTick()
+		}
+		return m, tea.Batch(m.listInFlight(), m.inFlightTick())
+	case matrix.ResumeMsg:
+		if m.inFlight.Resume == nil {
+			m.notice = "resuming a promotion is not wired up"
+			return m, nil
+		}
+		resume, deadline := m.inFlight.Resume, m.poll.Deadline
+		m.buildGen++
+		gen := m.buildGen
+		if m.buildCancel != nil {
+			m.buildCancel()
+		}
+		var deadlineAt time.Time
+		if deadline > 0 {
+			deadlineAt = time.Now().Add(deadline)
+		}
+		ctx := context.Background()
+		var cancelDeadline context.CancelFunc
+		if !deadlineAt.IsZero() {
+			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		m.buildCancel = cancel
+		id := msg.ID
+		return m, func() tea.Msg {
+			defer cancel()
+			if cancelDeadline != nil {
+				defer cancelDeadline()
+			}
+			// The same promotionBuiltMsg path a confirmed plan takes: the flight screen is
+			// pushed with the resumed state and drives it from wherever Observe finds it.
+			state, driveFn, err := resume(ctx, id)
+			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
 		}
 	case matrix.OpenPlanMsg:
 		target := ""
@@ -301,7 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.buildCancel()
 			m.buildCancel = nil
 		}
-		return m.pop(), nil
+		return m.popAndRelist()
 	case plan.StartMsg:
 		if m.startPromotion == nil {
 			// Mirrors ResolveFunc's own nil convention: a caller that hasn't wired
@@ -424,7 +541,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fs.Cancel()
 			}
 		}
-		return m.pop(), nil
+		return m.popAndRelist()
 	case flight.OpenPRMsg:
 		// openPRMode's three shapes (see Promotion.OpenPRMode's own doc comment): "display"
 		// never attempts a launch at all — nothing here needs m.openURL, so a headless/SSH
@@ -487,7 +604,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.stack) > 1 {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
-		return m, nil
+		return m, m.listInFlight()
 	case matrix.OpenRestartMsg:
 		return m.openRestart(msg.Family, msg.Target)
 	case apprestart.BackMsg:
@@ -642,6 +759,33 @@ func (m Model) pop() Model {
 		return m
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
+	return m
+}
+
+// popAndRelist pops and, when that lands on the matrix, re-lists what is in flight at once
+// rather than waiting for the next tick: the operator just came back from a screen that may
+// have started or finished a promotion.
+func (m Model) popAndRelist() (Model, tea.Cmd) {
+	m = m.pop()
+	if m.matrixOnTop() {
+		return m, m.listInFlight()
+	}
+	return m, nil
+}
+
+// withMatrix applies f to the matrix screen wherever it sits in the stack (see
+// withMatrixNotice for why the whole stack is searched).
+func (m Model) withMatrix(f func(matrix.Model) matrix.Model) Model {
+	for i, s := range m.stack {
+		ms, ok := s.(matrixScreen)
+		if !ok {
+			continue
+		}
+		stack := append([]Screen(nil), m.stack...)
+		stack[i] = matrixScreen{f(ms.Model)}
+		m.stack = stack
+		return m
+	}
 	return m
 }
 

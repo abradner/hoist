@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -15,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -78,21 +80,29 @@ type Model struct {
 	// has to say which one to deploy (#85: "d picks the first sorted image, silently").
 	chooser       *huh.Select[string]
 	chooserTarget string
+	chooserResume bool // the chooser picks a promotion to resume, not an image
+
+	// inflight is what the root listed as promoting right now (SetInFlight), drawn as the
+	// pane under the table (inflight.go); inflightErr when the listing itself failed. now
+	// ages them; a test pins it.
+	inflight    []flight.Summary
+	inflightErr string
+	now         func() time.Time
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Refresh, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Resume, OpenPR, Refresh, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the footer: the writes first, since they are what an
 // operator is looking for the key of.
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Promote, k.DeployNew, k.Restart, k.Help, k.Quit}
+	return []key.Binding{k.Promote, k.DeployNew, k.Resume, k.Help, k.Quit}
 }
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Refresh, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Resume, k.OpenPR, k.Refresh, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
@@ -109,6 +119,10 @@ func defaultKeyMap() keyMap {
 		// opens is still a confirmation, so R asks rather than does — but it asks for a write,
 		// and the shift key is a cheap way to keep it out of reach of a mistyped r.
 		Restart: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "restart")),
+		// r and enter both open the in-flight promotion on the flight screen: r is the verb
+		// (`hoist resume`), enter is "details" for an operator reading the pane.
+		Resume:  key.NewBinding(key.WithKeys("r", "enter"), key.WithHelp("r", "resume")),
+		OpenPR:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open PR")),
 		Refresh: key.NewBinding(key.WithKeys("f5", "ctrl+r"), key.WithHelp("F5", "re-read the cluster")),
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -157,6 +171,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, drift D
 		running:    Running{},
 		pending:    map[string]bool{},
 		driftErr:   map[string]string{},
+		now:        time.Now,
 		// The first generation is minted here, not in Init: Init has a value receiver and
 		// returns only a command, so a generation minted there would never reach the model
 		// the root keeps, and every answer would be dropped as stale.
@@ -284,6 +299,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, func() tea.Msg { return OpenRestartMsg{Family: family, Target: env} }
+		case key.Matches(msg, m.keys.Resume):
+			switch len(m.inflight) {
+			case 0:
+				if msg.String() == "r" {
+					m.notice = "nothing in flight to resume"
+				}
+				return m, nil
+			case 1:
+				id := m.inflight[0].ID
+				return m, func() tea.Msg { return ResumeMsg{ID: id} }
+			default:
+				return m.openResumeChooser()
+			}
+		case key.Matches(msg, m.keys.OpenPR):
+			for _, s := range m.inflight {
+				if s.PR != nil && s.PR.URL != "" {
+					url := s.PR.URL
+					return m, func() tea.Msg { return flight.OpenPRMsg{URL: url} }
+				}
+			}
+			m.notice = "nothing in flight has a PR to open"
+			return m, nil
 		case key.Matches(msg, m.keys.DeployNew):
 			env := m.CurrentEnv()
 			if env == "" {
@@ -323,6 +360,21 @@ func (m Model) openChooser(env string, repos []string) (Model, tea.Cmd) {
 	return m, tea.Batch(sel.Init(), sel.Focus())
 }
 
+// openResumeChooser asks which of several in-flight promotions to open.
+func (m Model) openResumeChooser() (Model, tea.Cmd) {
+	opts := make([]huh.Option[string], 0, len(m.inflight))
+	for _, s := range m.inflight {
+		opts = append(opts, huh.NewOption(s.ID+"  "+pair(s)+"  "+s.Verdict(), s.ID))
+	}
+	sel := huh.NewSelect[string]().Title("resume which promotion?").Options(opts...)
+	sel.WithKeyMap(huh.NewDefaultKeyMap())
+	sel.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.chooser = sel
+	m.chooserTarget = ""
+	m.chooserResume = true
+	return m, tea.Batch(sel.Init(), sel.Focus())
+}
+
 func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -332,13 +384,16 @@ func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.chooser.GetFiltering() {
 			break // enter ends the filter first; a second enter chooses
 		}
-		repo, _ := m.chooser.GetValue().(string) // GetValue, never a captured field
-		target := m.chooserTarget
-		m.chooser = nil
-		if repo == "" {
+		choice, _ := m.chooser.GetValue().(string) // GetValue, never a captured field
+		target, resume := m.chooserTarget, m.chooserResume
+		m.chooser, m.chooserResume = nil, false
+		if choice == "" {
 			return m, nil
 		}
-		return m, func() tea.Msg { return OpenTagsMsg{ImageRepo: repo, Target: target} }
+		if resume {
+			return m, func() tea.Msg { return ResumeMsg{ID: choice} }
+		}
+		return m, func() tea.Msg { return OpenTagsMsg{ImageRepo: choice, Target: target} }
 	}
 	_, cmd := m.chooser.Update(msg)
 	return m, cmd
@@ -397,9 +452,14 @@ func (m Model) View() string {
 	if notes := m.notes(); notes != "" {
 		frame.Sections = append(frame.Sections, notes)
 	}
+	frame.Panes = []string{m.inflightPane(m.paneBudget())}
 	view := frame.Render(m.styles, m.width, m.height)
 	if m.chooser != nil {
-		return ui.Dialog(m.styles, view, "deploy", m.chooser.View(), m.width, m.height)
+		title := "deploy"
+		if m.chooserResume {
+			title = "resume"
+		}
+		return ui.Dialog(m.styles, view, title, m.chooser.View(), m.width, m.height)
 	}
 	return view
 }
@@ -412,6 +472,21 @@ func (m Model) title() string {
 // clipped — #85's "long errors are clipped"), else what the cluster said about the cursor's
 // column, then the help line when toggled. Empty when there is nothing to say.
 func (m Model) notes() string {
+	lines := m.baseNotes()
+	if m.paneRows(m.paneBudget()) == 0 {
+		if l := m.inflightLine(); l != "" {
+			lines = append(lines, ansi.Truncate(l, max(m.width-2, 1), "…"))
+		}
+	}
+	if m.showHelp {
+		lines = append(lines, m.styles.Help.Render(m.help.ShortHelpView(m.keys.FullHelp()[0])))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// baseNotes is notes without the in-flight fold and the help line — what the pane budget
+// is computed against, so the two cannot ask each other in a loop.
+func (m Model) baseNotes() []string {
 	inner := max(m.width-2, 1)
 	var lines []string
 	switch {
@@ -433,10 +508,17 @@ func (m Model) notes() string {
 			}
 		}
 	}
-	if m.showHelp {
-		lines = append(lines, m.styles.Help.Render(m.help.ShortHelpView(m.keys.FullHelp()[0])))
-	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+// paneBudget is how many rows the in-flight pane may take: what is left after the frame's
+// chrome, the base notes (plus the help line when shown) and a table tall enough to keep
+// its families on screen.
+func (m Model) paneBudget() int {
+	notes := len(m.baseNotes()) + boolInt(m.showHelp)
+	rows := ui.BodyHeight(m.height, 1+boolInt(notes > 0)) - notes
+	table := len(m.matrix.Rows) + 1
+	return rows - max(table, minTableRows)
 }
 
 // driftLines is one sentence per drifted family in env: the cursor's row first, then the
@@ -514,8 +596,9 @@ func (m Model) layout() Model {
 	if notes != "" {
 		sections++
 	}
-	// The table fills what the frame leaves after the notes, so the box reaches the footer.
-	rows := ui.BodyHeight(m.height, sections) - lipgloss.Height(notes)*boolInt(notes != "")
+	// The table fills what the frame leaves after the notes and the in-flight pane, so the
+	// box reaches the footer (or the pane does).
+	rows := ui.BodyHeight(m.height, sections) - lipgloss.Height(notes)*boolInt(notes != "") - m.paneRows(m.paneBudget())
 	cols := fit(m.columns(), m.width-2)
 	m.tbl.SetColumns(cols)
 	m.tbl.SetRows(m.rows(cols))
@@ -571,7 +654,15 @@ func (m Model) statusBar() string {
 	if env != "" && m.IsProduction(env) {
 		envWord = m.styles.Production.Render(env + " (production)")
 	}
-	left := m.styles.Status.Render(fmt.Sprintf("env %s · families %d · unmanaged %d", envWord, len(m.matrix.Rows), len(m.repo.Unmanaged)))
+	// The env alone on the left: it governs every write gesture, and at 80 columns the
+	// family and unmanaged counts were what the hints truncated away first (the header row
+	// shows the families anyway; unmanaged directories are in the notes when they matter).
+	left := m.styles.Status.Render("env " + envWord)
+	// The unmanaged count only when the bar has room for it whole: a truncated "2 unmana…"
+	// says less than nothing.
+	if n := len(m.repo.Unmanaged); n > 0 && m.width >= 100 {
+		left += m.styles.Dim.Render(fmt.Sprintf(" · %d unmanaged", n))
+	}
 	right := m.styles.Hint.Render(m.help.ShortHelpView(m.keys.ShortHelp()))
 	return ui.StatusBar(m.width, left, right)
 }

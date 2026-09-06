@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env app-production · familie… p promote • d deploy • R restart • ? help • q quit
+env app-production             p promote • d deploy • r resume • ? help • q quit

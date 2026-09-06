@@ -1,5 +1,5 @@
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY      ▸ A                   B                    C ⚠                   │
+│ FAMILY      ▸ A                   B                    C                     │
 │ absent      v1            pinned                       v9    pinned          │
 │ drift       v1          unpinned  v2           pinned  v2  unpinned          │
 │ empty                             no images                                  │
@@ -13,12 +13,12 @@
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
+│5pr6sd333t   app-staging → app-production   started 12m ago                   │
+│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge              │
+│○ argo refresh  ○ argo sync  ○ rollout                                        │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│↑/k up • ↓/j down • ←/h env • →/l env • p promote • P promote to… • d deploy …│
+│blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 env a                          p promote • d deploy • r resume • ? help • q quit
