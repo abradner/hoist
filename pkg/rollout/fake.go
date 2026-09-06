@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Fake is an in-memory Rollout for tests in other packages (internal/engine's step tests in
@@ -19,7 +20,21 @@ type Fake struct {
 	JobLikes    map[jobKey]JobLikeStatus
 	// DeploymentErr and JobLikeErr, when set, are returned by every call to the matching
 	// method instead of the configured/zero-value behavior.
-	DeploymentErr, JobLikeErr error
+	DeploymentErr, JobLikeErr, RestartErr error
+	// Strict makes an unknown Deployment return ErrNotFound, as the real client does, instead
+	// of a zero-value status. Opt-in rather than the default because most tests here configure
+	// only the Deployments they care about and rely on the zero value for the rest — but a test
+	// about ABSENCE cannot use a fake that reports everything as present, and shipping code that
+	// distinguishes the two deserves a fake that can too.
+	Strict bool
+	// OnRestart, when set, runs on every successful Restart — how a test models what the real
+	// API server does next (the pods actually rolling), since the fake has no controller.
+	OnRestart func(namespace, name string, at time.Time)
+	// RestartLandsDespiteErr models the one outcome a patch cannot report: the API server
+	// committed the write and the response was lost. With it set alongside RestartErr, the
+	// stamp is recorded AND the error returned — which is the only way to exercise a caller's
+	// did-it-actually-land recovery. Without it, RestartErr means the write did not happen.
+	RestartLandsDespiteErr bool
 
 	Calls []string
 }
@@ -35,6 +50,30 @@ func (f *Fake) SetDeployment(namespace, name string, st DeploymentStatus) {
 		f.Deployments = map[depKey]DeploymentStatus{}
 	}
 	f.Deployments[depKey{namespace, name}] = st
+}
+
+// Restart implements Rollout: records the call, stamps the recorded status's annotation so a
+// later Deployment read can see it, and runs OnRestart.
+func (f *Fake) Restart(_ context.Context, namespace, name string, at time.Time) error {
+	f.mu.Lock()
+	f.Calls = append(f.Calls, fmt.Sprintf("Restart %s/%s", namespace, name))
+	err, hook := f.RestartErr, f.OnRestart
+	st, known := f.Deployments[depKey{namespace, name}]
+	if (err == nil || f.RestartLandsDespiteErr) && known {
+		st.RestartedAt = at.UTC().Format(RestartStampLayout)
+		f.Deployments[depKey{namespace, name}] = st
+	}
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !known {
+		return fmt.Errorf("restarting Deployment %s/%s: %w", namespace, name, ErrNotFound)
+	}
+	if hook != nil {
+		hook(namespace, name, at)
+	}
+	return nil
 }
 
 // SetJobLike records namespace/name/kind's current status, thread-safely.
@@ -55,7 +94,11 @@ func (f *Fake) Deployment(_ context.Context, namespace, name string) (Deployment
 	if f.DeploymentErr != nil {
 		return DeploymentStatus{}, f.DeploymentErr
 	}
-	return f.Deployments[depKey{namespace, name}], nil
+	st, ok := f.Deployments[depKey{namespace, name}]
+	if !ok && f.Strict {
+		return DeploymentStatus{}, fmt.Errorf("reading Deployment %s/%s: %w", namespace, name, ErrNotFound)
+	}
+	return st, nil
 }
 
 // JobLike implements Rollout.

@@ -5,7 +5,13 @@
 // wrapper over kubernetes.Interface, redaction at every error boundary, a fake clientset for
 // tests. Nothing here knows what a "promotion" is or what image a caller wanted — that
 // comparison is internal/engine's job (AGENTS.md §4.3: pkg/* is activity-shaped, with no
-// domain knowledge of the orchestration above it); this package only reads cluster facts.
+// domain knowledge of the orchestration above it).
+//
+// This package reads cluster facts, with exactly one exception: Restart stamps a Deployment's
+// pod-template restart annotation, which is what makes its pods roll. That is the whole of the
+// write surface here, and it holds the same position pkg/argo.Refresh holds there — one named
+// write beside otherwise read-only methods, so "does this package write" has a short answer
+// rather than a survey.
 //
 // The rollout-completeness check is deploymentRolloutComplete below: logic ported from
 // k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go (Apache License 2.0) rather than
@@ -16,19 +22,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// ErrNotFound is wrapped by Deployment and JobLike when the named object does not exist.
+// ErrNotFound is wrapped by Deployment, JobLike and Restart when the named object does not
+// exist. For Restart it is terminal: a Deployment that is not there was not restarted, and no
+// retry changes that.
 var ErrNotFound = errors.New("rollout: object not found")
 
 // ContainerImage is one container's current, live image reference, as the Deployment's own
@@ -55,6 +68,78 @@ type DeploymentStatus struct {
 	// Detail is a short, kubectl-style human-readable line: what's still pending, or why the
 	// deadline was exceeded, or that the rollout finished.
 	Detail string
+	// RestartedAt is the pod template's RestartAnnotation value, "" when it has never been
+	// restarted this way. Read so a restart can say what it supersedes, and so a caller can
+	// tell its own stamp from someone else's.
+	RestartedAt string
+	// The fields below describe whether a restart of this Deployment can actually be graceful.
+	// They are read here because the read that fetches them is already being made; hoist warns
+	// on them and never blocks (AGENTS.md principle 5), since "roll it anyway" is a legitimate
+	// thing to want and the operator is the one who knows.
+	//
+	// Replicas is spec.replicas (1 when unset, matching Kubernetes' own default). Strategy is
+	// spec.strategy.type ("RollingUpdate" when unset). MaxUnavailable and MaxSurge are that
+	// strategy's own values already RESOLVED against Replicas by Kubernetes' own rules —
+	// percentages round down for unavailable and up for surge — because the raw 25%/25%
+	// defaults say nothing on their own: at one replica they resolve to 0 and 1, which is
+	// precisely the case where a naive "one replica means downtime" claim is wrong.
+	// ReadinessProbes counts containers that declare one.
+	Replicas        int32
+	Strategy        string
+	MaxUnavailable  int32
+	MaxSurge        int32
+	ReadinessProbes int
+}
+
+// GracefulRestartConcerns lists, in a stable order, the reasons a restart of this Deployment is
+// unlikely to be seamless. Empty when there is nothing to say. Informational: the caller shows
+// them and proceeds (principle 5).
+//
+// Each is stated only when it is actually true of this Deployment's own settings. An earlier
+// version warned "only 1 replica: nothing serves while the new pod starts" on replica count
+// alone, which is wrong under the default strategy: 25% maxUnavailable of one replica rounds
+// down to zero, so the old pod keeps serving until the new one is ready. A warning that fires on
+// a Deployment that is in fact fine is worse than none, because it teaches the operator to skip
+// reading them.
+func (d DeploymentStatus) GracefulRestartConcerns() []string {
+	var out []string
+	switch {
+	case d.Replicas == 0:
+		// Nothing to roll, and none of the rest applies.
+		return []string{"scaled to 0 replicas: a restart changes the pod template but starts no pod"}
+	case d.Strategy == "Recreate":
+		out = append(out, "strategy is Recreate: every pod stops before any new one starts")
+	case d.MaxUnavailable >= d.Replicas:
+		out = append(out, fmt.Sprintf("maxUnavailable is %d of %d replica(s): every pod can be down at once", d.MaxUnavailable, d.Replicas))
+	case d.Replicas == 1:
+		// The old pod does keep serving here — the risk is what is behind it, which is nothing.
+		out = append(out, "only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails")
+	}
+	if d.ReadinessProbes == 0 {
+		out = append(out, "no readiness probe: a new pod counts as available the moment it starts, before it can serve")
+	}
+	// The one that undercuts "a restart changes nothing about what runs". It is true of the
+	// DECLARED reference and only that: a container on a mutable tag can pull a different digest
+	// when its replacement lands on a node without the image cached, or on every pull under
+	// imagePullPolicy: Always. This repo's own fixtures carry bare-tag Deployments, and so does
+	// the target repo, so this is not a hypothetical.
+	if un := d.unpinnedImages(); len(un) > 0 {
+		out = append(out, fmt.Sprintf("unpinned image(s) %s: a replacement pod can pull a different build than the one running now, so this restart may not be a no-op",
+			strings.Join(un, ", ")))
+	}
+	return out
+}
+
+// unpinnedImages lists this Deployment's live container references that name no digest, sorted.
+func (d DeploymentStatus) unpinnedImages() []string {
+	var out []string
+	for _, img := range d.Images {
+		if !strings.Contains(img.Image, "@sha256:") {
+			out = append(out, img.Image)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // JobLikeStatus is a Job or CronJob's current state, report-only (AGENTS.md invariant 4:
@@ -64,13 +149,19 @@ type JobLikeStatus struct {
 	Detail                string
 }
 
-// Rollout is what internal/engine's RolledOutStep (and `hoist watch`) need from the cluster's
-// workloads. Every method reads; nothing here writes.
+// Rollout is what internal/engine's RolledOutStep, `hoist watch` and `hoist restart` need from
+// the cluster's workloads. Every method reads except Restart, which is this package's only
+// write — see its own doc comment, and the package doc above.
 type Rollout interface {
 	// Deployment reads namespace/name's current images and rollout completeness.
 	Deployment(ctx context.Context, namespace, name string) (DeploymentStatus, error)
 	// JobLike reads namespace/name's current state, for kind "Job" or "CronJob".
 	JobLike(ctx context.Context, namespace, name, kind string) (JobLikeStatus, error)
+	// Restart rolls namespace/name's pods without changing what it runs, by stamping the pod
+	// template's restart annotation — exactly what `kubectl rollout restart` does. It is the
+	// ONE write in this package; everything else here reads (see the package doc, and
+	// pkg/argo.Refresh, which holds the same position there).
+	Restart(ctx context.Context, namespace, name string, at time.Time) error
 }
 
 // client is Rollout over a client-go clientset, mirroring pkg/k8s.client's shape exactly.
@@ -112,6 +203,13 @@ func NewFromKubeconfig(kubeconfigContext string) (Rollout, string, error) {
 		return nil, "", fmt.Errorf("rollout: kube context %q: %w", name, err)
 	}
 	hide := redact.Host(rest.Host)
+	// client-go's default warning handler writes API-server warnings straight to stderr through
+	// klog, in klog's own format, unfiltered and outside every boundary this package maintains:
+	// a `restricted:latest` PodSecurity warning landed mid-output on the first real restart,
+	// between hoist's own lines, with a raw server message hoist had never seen (§4.4 —
+	// everything this package emits goes through pkg/redact first). hoist reports what it needs
+	// to itself, so the handler is silenced rather than re-plumbed.
+	rest.WarningHandler = restclient.NoWarnings{}
 	cs, err := kubernetes.NewForConfig(rest)
 	if err != nil {
 		return nil, "", fmt.Errorf("rollout: kube context %q: %s", name, redact.Error(err, hide...))
@@ -138,8 +236,95 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 	for _, ctr := range d.Spec.Template.Spec.InitContainers {
 		st.Images = append(st.Images, ContainerImage{Name: ctr.Name, Init: true, Image: ctr.Image})
 	}
+	st.RestartedAt = d.Spec.Template.Annotations[RestartAnnotation]
+	st.Replicas = 1 // Kubernetes' own default when spec.replicas is unset.
+	if d.Spec.Replicas != nil {
+		st.Replicas = *d.Spec.Replicas
+	}
+	st.Strategy = string(d.Spec.Strategy.Type)
+	if st.Strategy == "" {
+		st.Strategy = "RollingUpdate"
+	}
+	// Resolved by Kubernetes' own rules, not left as raw percentages: maxUnavailable rounds
+	// down, maxSurge rounds up, and both default to 25%. At one replica that is 0 and 1 — the
+	// numbers that decide whether a single-replica rollout actually drops traffic.
+	if st.Strategy == "RollingUpdate" {
+		mu := intstr.FromString("25%")
+		ms := intstr.FromString("25%")
+		if ru := d.Spec.Strategy.RollingUpdate; ru != nil {
+			if ru.MaxUnavailable != nil {
+				mu = *ru.MaxUnavailable
+			}
+			if ru.MaxSurge != nil {
+				ms = *ru.MaxSurge
+			}
+		}
+		u, _ := intstr.GetScaledValueFromIntOrPercent(&mu, int(st.Replicas), false)
+		sg, _ := intstr.GetScaledValueFromIntOrPercent(&ms, int(st.Replicas), true)
+		st.MaxUnavailable, st.MaxSurge = int32(u), int32(sg)
+	}
+	for _, ctr := range d.Spec.Template.Spec.Containers {
+		if ctr.ReadinessProbe != nil {
+			st.ReadinessProbes++
+		}
+	}
 	st.Complete, st.DeadlineExceeded, st.Detail = deploymentRolloutComplete(d)
 	return st, nil
+}
+
+// RestartAnnotation is the pod-template annotation Restart stamps. Deliberately kubectl's own
+// key: `kubectl rollout restart` writes exactly this, so a restart hoist causes is
+// indistinguishable from one an operator caused by hand, and either tool can see the other's.
+//
+// Nothing in Kubernetes treats the key specially. Any change to the pod template starts a
+// rollout; this one is chosen because it changes nothing else.
+const RestartAnnotation = "kubectl.kubernetes.io/restartedAt"
+
+// RestartStampLayout is how Restart renders its timestamp: RFC3339 with a fixed nine fractional
+// digits. See Restart for why the sub-second part is load-bearing.
+const RestartStampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// Restart implements Rollout.
+//
+// The stamp carries nanoseconds, and that is a correctness decision rather than a cosmetic one.
+// kubectl writes plain RFC3339, at second resolution — but two restarts within one second then
+// patch the pod template to the value it already holds, which is not a change: no rollout
+// starts, and a caller watching for one sees the PREVIOUS rollout finish and reports success for
+// a restart that never happened. Comparing against the value already on the object does not fix
+// it either, because two processes reading in the same second both see the same "before" and
+// both compute the same "after". Nanoseconds remove the collision instead of detecting it, and
+// nothing reads this value back as a duration — it only has to differ, and be a string.
+//
+// A fixed `at` for a whole invocation is also what makes a retry safe: patching the same
+// Deployment with the same stamp twice is idempotent, so a caller that cannot tell whether its
+// patch landed can simply repeat it.
+//
+// A strategic-merge patch of one annotation, which is what kubectl issues for the same command.
+// Argo does not treat this as drift even with selfHeal on: its diff is a three-way merge, so a
+// field Argo never set and that is absent from the manifest is owned by someone else and left
+// alone — the same reason `kubectl apply` does not delete fields it never wrote. (Verified
+// against the target cluster: annotations added this way have survived weeks on self-healing
+// Applications that report Synced. An earlier design wrote this into the manifest instead, on
+// the assumption that Argo would revert it; that assumption was wrong and cost a commit, a PR,
+// a CI run and an approval for what is one API call.)
+func (c *client) Restart(ctx context.Context, namespace, name string, at time.Time) error {
+	if namespace == "" || name == "" {
+		return errors.New("rollout: restart needs a namespace and a name")
+	}
+	// An explicit nine-digit layout, not time.RFC3339Nano, which strips trailing zeros and
+	// would occasionally render a second-resolution string — the exact case this avoids.
+	// Quoted by the JSON encoding itself: an annotation value must reach the API server as a
+	// string.
+	stamp := at.UTC().Format(RestartStampLayout)
+	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, RestartAnnotation, stamp))
+	_, err := c.cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("restarting Deployment %s/%s: %w", namespace, name, ErrNotFound)
+		}
+		return fmt.Errorf("restarting Deployment %s/%s: %s", namespace, name, c.describe(err))
+	}
+	return nil
 }
 
 // JobLike implements Rollout.
