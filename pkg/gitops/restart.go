@@ -325,7 +325,11 @@ func ApplyRestarts(root string, restarts []RestartEdit) (changed []string, err e
 	before := map[string][]byte{}
 	after := map[string][]byte{}
 	for _, f := range files {
-		b, rerr := readFile(root, f)
+		// Read the path ResolvePath already checked and that the write below will use, never
+		// re-resolve: an in-repo symlink changed in between would otherwise have the bytes read
+		// from the new target and written to the old one (Copilot, PR #78). gitops.Apply reads
+		// through its own stored path for the same reason.
+		b, rerr := os.ReadFile(paths[f])
 		if rerr != nil {
 			return nil, rerr
 		}
