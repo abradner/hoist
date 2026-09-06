@@ -111,10 +111,12 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 				// move the refs and turn a resolution change into a phantom missing
 				// occurrence. Edit.New is the resolved ref for its repo by construction.
 				digests := make(map[string]image.Ref, len(p.Edits))
+				reasons := make(map[string]string, len(p.Edits))
 				for _, e := range p.Edits {
 					digests[e.New.Repo] = e.New
+					reasons[e.New.Repo] = "the confirmed plan's own edit"
 				}
-				return gitops.BuildPlan(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests)
+				return gitops.BuildPlanWith(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests, reasons)
 			}
 			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, tuiBase, eff.appsRoot, p, buildFresh); err != nil {
 				return engine.PromotionState{}, nil, err

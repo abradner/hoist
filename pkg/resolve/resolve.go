@@ -399,6 +399,25 @@ func Digests(res map[string]Resolution) map[string]image.Ref {
 	return out
 }
 
+// Reasons names, per resolved repo, where its digest came from, in the words a plan's
+// source-disagrees warning should use for the override Digests hands it: "resolved from
+// pods" for a running-pod digest, and the resolution's own Detail for a caller override
+// (issue #25).
+func Reasons(res map[string]Resolution) map[string]string {
+	out := map[string]string{}
+	for repo, r := range res {
+		if !r.Resolved() {
+			continue
+		}
+		if r.Source == SourceOverride {
+			out[repo] = r.Detail
+			continue
+		}
+		out[repo] = "resolved from " + string(r.Source)
+	}
+	return out
+}
+
 // Warnings collects every resolution's warnings in repo order.
 func Warnings(res map[string]Resolution) []gitops.Warning {
 	var out []gitops.Warning

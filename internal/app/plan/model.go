@@ -275,7 +275,7 @@ func (m Model) loadCmd() tea.Cmd {
 			outcome = out
 		}
 		digests := resolve.Digests(outcome.Resolutions)
-		pl, err := gitops.BuildPlan(repo, source, target, promotable, digests)
+		pl, err := gitops.BuildPlanWith(repo, source, target, promotable, digests, resolve.Reasons(outcome.Resolutions))
 		if err == nil {
 			pl.Warnings = append(resolve.Warnings(outcome.Resolutions), pl.Warnings...)
 		}
