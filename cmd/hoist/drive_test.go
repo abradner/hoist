@@ -248,6 +248,13 @@ func TestWaitingReporterHeartbeatsOnUnchangedReason(t *testing.T) {
 	if got := strings.Count(out.String(), "still"); got != 1 {
 		t.Errorf("heartbeat repeated %d times within one interval", got)
 	}
+	// "so far" counts from when the reason first appeared, not from the previous heartbeat:
+	// a three-hour approval wait must not keep reporting ten minutes.
+	now = now.Add(heartbeatEvery)
+	r.report(s)
+	if !strings.Contains(out.String(), "(25m0s so far)") {
+		t.Errorf("second heartbeat does not count from the start of the wait:\n%s", out.String())
+	}
 	// Drive saves after recording the wait, and a failed save appends its own entry after it:
 	// the reason reported is still the wait, never the save failure read off the end.
 	s.History = append(s.History, engine.HistoryEntry{Step: engine.StepCIGreen, Detail: "state save failed: disk full"})

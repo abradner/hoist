@@ -114,7 +114,8 @@ type waitingReporter struct {
 	w           io.Writer
 	now         func() time.Time
 	last        string    // the last reason printed, "" before the first
-	lastAt      time.Time // when last was first printed, for the heartbeat
+	startedAt   time.Time // when last was first printed: the heartbeat's "so far" counts from here
+	lastBeat    time.Time // when last was last printed (first print or heartbeat), for cadence
 	hintedToken bool      // the approval instructions are printed once per run
 }
 
@@ -133,13 +134,13 @@ func (r *waitingReporter) report(s *engine.PromotionState) {
 	reason := string(e.Step) + ": " + e.Detail
 	now := r.now()
 	if reason == r.last {
-		if now.Sub(r.lastAt) >= heartbeatEvery {
-			fmt.Fprintf(r.w, "hoist: still %s (%s so far)\n", redact.Strings(reason), now.Sub(r.lastAt).Round(time.Minute))
-			r.lastAt = now
+		if now.Sub(r.lastBeat) >= heartbeatEvery {
+			fmt.Fprintf(r.w, "hoist: still %s (%s so far)\n", redact.Strings(reason), now.Sub(r.startedAt).Round(time.Minute))
+			r.lastBeat = now
 		}
 		return
 	}
-	r.last, r.lastAt = reason, now
+	r.last, r.startedAt, r.lastBeat = reason, now, now
 	fmt.Fprintf(r.w, "hoist: %s\n", redact.Strings(reason))
 	// The approval wait has a second gap the first real run hit: the only place the token
 	// was printed was the PR body. Say exactly what to post, and where, the first time.

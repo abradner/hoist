@@ -335,8 +335,9 @@ const maxCommentPages = 10
 // commentsQuery builds one page's query for Comments. A zero since means "no lower bound" and
 // is omitted rather than formatted: GitHub rejects since=0001-01-01T00:00:00Z outright (HTTP
 // 422, "The since parameter needs to be in ISO 8601 format" — confirmed against the live API
-// on 2026-09-06, read-only), so formatting the zero value would have failed every call that
-// asked for everything (issue #35).
+// on 2026-09-06, read-only). No in-tree caller passes a zero time today (ApprovedStep anchors
+// on the commit time), so this was latent: the first caller to ask for everything would have
+// got a 422 for it (issue #35).
 func commentsQuery(since time.Time, page int) url.Values {
 	q := url.Values{"per_page": {"100"}, "page": {fmt.Sprint(page)}}
 	if !since.IsZero() {

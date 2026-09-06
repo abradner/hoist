@@ -583,8 +583,22 @@ func TestFixtureHasOccurrenceInLaterDocument(t *testing.T) {
 			for _, o := range f.Occurrences {
 				if o.Doc > 0 {
 					found = true
-					if o.Line <= 30 {
-						t.Errorf("%s doc %d: line %d is not file-absolute", o.File, o.Doc, o.Line)
+					// File-absolute means past the separator that opens this document, not
+					// counted from it: find that "---" in the file and compare.
+					lines := bytes.Split(readFixture(t, o.File), []byte{'\n'})
+					seps := 0
+					opens := 0
+					for i, l := range lines {
+						if bytes.Equal(bytes.TrimSpace(l), []byte("---")) {
+							seps++
+							if seps == o.Doc {
+								opens = i + 1
+								break
+							}
+						}
+					}
+					if opens == 0 || o.Line <= opens {
+						t.Errorf("%s doc %d: line %d is not file-absolute (document opens at line %d)", o.File, o.Doc, o.Line, opens)
 					}
 				}
 			}

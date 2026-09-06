@@ -629,7 +629,7 @@ func TestPlanUntouchedDistinguishesNarrowedFirstPartyFromThirdParty(t *testing.T
 			t.Errorf("output lacks %q:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "counta:v202601151010@sha256:abad1dea") && strings.Contains(s, "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea  (third-party") {
+	if strings.Contains(s, "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea  (third-party") {
 		t.Errorf("a first-party repo is labelled third-party:\n%s", s)
 	}
 	out.Reset()

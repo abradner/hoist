@@ -305,10 +305,12 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 			if probeErr != nil && i < mi {
 				// A plain unsatisfied step before the merge is ambiguous once the probe has
 				// failed: a promotion that already merged and deleted its branch reads exactly
-				// like one that never pushed. Waiting and Blocked above are not ambiguous —
-				// they prove a live PR the walk is still short of merging — so only this shape
-				// surfaces the probe's own error, as the old unconditional return did, rather
-				// than let findInFlight take a finished promotion for one stuck at Pushed.
+				// like one that never pushed. A Waiting or Blocked stop above is not: it
+				// proves a PR this promotion has not finished with (unmerged, or merged with
+				// its branch still to delete — the step it names may then be stale, the
+				// verdict "not terminal" is not), so only this shape surfaces the probe's own
+				// error, as the old unconditional return did, rather than let findInFlight
+				// take a finished promotion for one stuck at Pushed.
 				return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), probeErr)
 			}
 			return false, last, nil
@@ -415,7 +417,9 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 			if probeErr != nil && i < mi {
 				// As in ObserveAll: a plain unsatisfied step before the merge could be a
 				// promotion that merged and cleaned up its branch, so the probe's failure is
-				// the honest answer here, not a false "still at Pushed".
+				// the honest answer here, not a false "still at Pushed". A Waiting or Blocked
+				// stop is kept as-is: it proves a promotion that is not terminal, even if the
+				// step it names is stale because the merge happened and its probe failed.
 				return false, statuses, &StepError{Step: steps[mi].Name(), Op: "observe", Err: probeErr}
 			}
 			return false, statuses, nil
