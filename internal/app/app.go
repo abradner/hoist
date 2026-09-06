@@ -243,11 +243,20 @@ func (m Model) WithInFlight(f InFlight) Model {
 }
 
 // listInFlight issues one listing for the current generation, or nil when List is not wired.
-func (m Model) listInFlight() tea.Cmd {
+func (m Model) listInFlight() (Model, tea.Cmd) {
 	if m.inFlight.List == nil {
-		return nil
+		return m, nil
 	}
-	gen, list, deadline := m.listGen, m.inFlight.List, m.poll.Deadline
+	// Each listing gets a new generation, so a slow earlier one that lands after a faster
+	// later one is dropped rather than painting an older snapshot over a newer pane.
+	m.listGen++
+	return m, m.listInFlightAt(m.listGen)
+}
+
+// listInFlightAt is the listing command for one generation; Init uses the current one, since
+// its model copy is discarded and the root must still recognise the answer.
+func (m Model) listInFlightAt(gen uint64) tea.Cmd {
+	list, deadline := m.inFlight.List, m.poll.Deadline
 	return func() tea.Msg {
 		ctx := context.Background()
 		if deadline > 0 {
@@ -258,6 +267,13 @@ func (m Model) listInFlight() tea.Cmd {
 		summaries, err := list(ctx)
 		return inFlightMsg{gen: gen, list: summaries, err: err}
 	}
+}
+
+// WithDrift hands the matrix a resolver of its own for asking the cluster what each env
+// runs — cmd/hoist builds a pods-only one, since a registry fallback answers a question the
+// drift column never asked.
+func (m Model) WithDrift(resolveFn plan.ResolveFunc) Model {
+	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithDrift(driftFunc(m.repo, resolveFn)) })
 }
 
 // inFlightTick schedules the next listing at Poll.Approval — the cadence the engine itself
@@ -315,7 +331,9 @@ func (m Model) Init() tea.Cmd {
 	if len(m.stack) > 0 {
 		screenCmd = m.stack[len(m.stack)-1].Init()
 	}
-	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.listInFlight(), m.inFlightTick())
+	// Init's model copy is discarded, so the boot listing carries the current generation;
+	// every later one (a tick, a pop) increments through listInFlight's returned model.
+	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.listInFlightAt(m.listGen), m.inFlightTick())
 }
 
 // Update handles window size, theme and the global keys, and forwards everything else to
@@ -344,6 +362,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
+	case matrix.DriftMsg:
+		// The matrix's own async answer, routed to it wherever it sits: the default below
+		// forwards to the top screen only, and an env whose answer landed while the plan or
+		// picker was open stayed "resolving…" for good (Copilot, #110).
+		return m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms }), nil
 	case inFlightMsg:
 		if msg.gen != m.listGen {
 			return m, nil
@@ -353,7 +376,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.matrixOnTop() {
 			return m, m.inFlightTick()
 		}
-		return m, tea.Batch(m.listInFlight(), m.inFlightTick())
+		m, list := m.listInFlight()
+		return m, tea.Batch(list, m.inFlightTick())
 	case matrix.ResumeMsg:
 		if m.inFlight.Resume == nil {
 			m.notice = "resuming a promotion is not wired up"
@@ -605,7 +629,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.stack) > 1 {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
-		return m, m.listInFlight()
+		return m.listInFlight()
 	case matrix.OpenRestartMsg:
 		return m.openRestart(msg.Family, msg.Target)
 	case apprestart.BackMsg:
@@ -788,7 +812,7 @@ func (m Model) pop() Model {
 func (m Model) popAndRelist() (Model, tea.Cmd) {
 	m = m.pop()
 	if m.matrixOnTop() {
-		return m, m.listInFlight()
+		return m.listInFlight()
 	}
 	return m, nil
 }

@@ -14,7 +14,8 @@
 // image line per occurrence, verified before git add). When the history cannot be resolved
 // the diff is the only evidence left and becomes the body again, with the reason stated.
 // What it still shares with the plan screen is the rule that no write happens without the
-// operator seeing the bytes: the diff is always one key away, never absent.
+// bytes available to look at: the diff is always one key away, never absent, and enter
+// means the same thing from either view — whether the operator looked is their call.
 package deploy
 
 import (

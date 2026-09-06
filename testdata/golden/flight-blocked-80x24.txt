@@ -13,10 +13,10 @@
 │· argo sync                                                                   │
 │· rollout                                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked — resolve the conflict, then R to re-observe                          │
+│blocked — branch hoist/app-production/abcd1234 already exists with different  │
+│content                                                                       │
+│R to re-observe once resolved                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-
-
 
 
 

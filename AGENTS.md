@@ -197,8 +197,11 @@ no borders: from M10 on, a screen's `View` is `ui.Frame{Title, Sections, Footer}
 w, h)` (a titled rounded box with rules between sections, the footer always the terminal's last
 line), two panes are `ui.Columns`, a sub-pane is `ui.Box`, and every `huh.Confirm` is drawn
 through `ui.Dialog` (lipgloss's `Canvas`/`Layer` compositor, centred over the dimmed parent — the
-one place the compositor is used; everything else composes with `JoinVertical`). Those helpers are
-built from lipgloss's own `Border`, `JoinHorizontal`/`JoinVertical` and `Place`; a screen that
+one place the compositor is used; everything else composes with `JoinVertical`). Those helpers take
+their glyphs from lipgloss's own `Border` (every edge, junction and the title rule), join panes
+with `JoinHorizontal`, and pad rows by cell width (`ansi.StringWidth`, `ansi.Truncate`) — the one
+thing they do by hand, because a frame's body is a list of already-rendered lines and `Place`
+would re-measure what `Frame` has just measured; a screen that
 hand-assembles `─` and `│` is reimplementing `borders.go` and will get the width arithmetic wrong
 the way the pre-M10 screens did (padded strings, a hints line wherever content ended, versions
 wrapping mid-token — #85). Relative times go through `ui.Ago`/`ui.Until`/`ui.Span` with a `now
@@ -393,12 +396,13 @@ the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (`q` quits,
 `?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs; every cell carries its state as a
 word — pinned, unpinned, split, external, drifted — and a production column is marked `⚠` in the
-header and named in the footer (#86, M10); `d` opens the tag picker (a chooser first when the cell
-holds several first-party images); what is promoting right now is listed under the table — re-observed
-against the forge and cluster at boot and every `poll.approval`, expanded to the step strip and the
-`hoist approve <id>` command when the terminal has the rows, one line when it does not — and `r` (or
-`enter` on it) reopens it on the flight screen, `o` opens its PR: the TUI's `hoist promotions` and
-`hoist resume` (M10) — `internal/app/tags`, M6 — for the current cell's first-party
+header and named in the footer (#86, M10); what is promoting right now is listed under the table —
+re-observed against the forge and cluster at boot and every `poll.approval`, finished ones left
+out, expanded to the step strip and the `hoist approve <id>` command when the terminal has the
+rows, one line when it does not — and `r` (or `enter` on it) reopens it on the flight screen, `o`
+opens its PR, each asking which when several are in flight: the TUI's `hoist promotions` and
+`hoist resume` (M10). `d` opens the tag picker — `internal/app/tags`, M6; a chooser first when the
+cell holds several first-party images — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
 repo's git tag dates for ordering when `repos[].apps` names one, and its own `D` key walks the
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the

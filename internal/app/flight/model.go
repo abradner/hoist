@@ -497,6 +497,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Back):
 		return m, func() tea.Msg { return BackMsg{} }
 	}
+	if m.showLog {
+		// The log is a viewport: unmatched keys (↑/↓, PageUp/PageDown, g/G) scroll it. Without
+		// this, l showed the first page of a long history and nothing moved it.
+		var cmd tea.Cmd
+		m.log, cmd = m.log.Update(msg)
+		return m, cmd
+	}
 	return m, nil
 }
 
@@ -636,13 +643,22 @@ func (m Model) stepsSection() string {
 	sum := Summary{ID: m.state.ID, PR: m.state.PR, Rows: m.rows, Done: m.done}
 	strip := sum.StepStrip()
 	if ansi.StringWidth(strip) > m.width-2 {
-		parts := strings.Split(strip, "  ")
-		for i, p := range parts {
-			if strings.HasSuffix(p, " merge") || strings.HasSuffix(p, " push to base") {
-				strip = strings.Join(parts[:i+1], "  ") + "\n" + strings.Join(parts[i+1:], "  ")
-				break
+		// Pack whole steps onto lines no wider than the frame's interior: a fixed break
+		// after the merge still overflowed on terminals narrower than the first half.
+		var lines []string
+		line := ""
+		for _, p := range strings.Split(strip, "  ") {
+			switch {
+			case line == "":
+				line = p
+			case ansi.StringWidth(line)+2+ansi.StringWidth(p) <= m.width-2:
+				line += "  " + p
+			default:
+				lines = append(lines, line)
+				line = p
 			}
 		}
+		strip = strings.Join(append(lines, line), "\n")
 	}
 	if step, ok := ActiveStep(m.rows); ok {
 		for _, r := range m.rows {
@@ -667,6 +683,11 @@ func (m Model) actionSection() string {
 		return m.styles.Warn.Render(text) + "\n\n    " + m.styles.Accent.Render(command)
 	case m.stopped:
 		if _, blocked := BlockedStep(m.rows); blocked {
+			// The step's own reason first — a CI policy block, a failed check, a missing
+			// Application — and the generic advice only where there is none.
+			if text != "" {
+				return m.styles.Bad.Render(ansi.Wrap("blocked — "+text, max(m.width-2, 20), "")) + "\n" + m.styles.Dim.Render("R to re-observe once resolved")
+			}
 			return m.styles.Bad.Render("blocked — resolve the conflict, then R to re-observe")
 		}
 		return m.styles.Bad.Render("stopped — see the error below; R retries")
@@ -714,7 +735,10 @@ func (m Model) statusLeft() string {
 }
 
 func (m Model) hint() string {
-	return "o open PR · R re-observe · x abort · l log · esc back"
+	if _, ok := PRURL(m.state); ok {
+		return "o open PR · R re-observe · x abort · l log · esc back"
+	}
+	return "R re-observe · x abort · l log · esc back"
 }
 
 // pollInterval mirrors cmd/hoist/drive.go's own pollInterval exactly. It is duplicated

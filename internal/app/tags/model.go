@@ -563,6 +563,16 @@ func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// historyPending reports whether tag's delta was asked for and has not answered yet — the one
+// state in which reviewing the change would throw the history away.
+func (m Model) historyPending(tag string) bool {
+	if m.histFn.Delta == nil || m.declared == nil {
+		return false
+	}
+	st, asked := m.deltas[tag]
+	return asked && !st.Loaded
+}
+
 // currentCommits is the loaded delta's commits for the cursor tag, nil when none.
 func (m Model) currentCommits() []migrate.Commit {
 	st, ok := m.deltas[m.selectedTag]
@@ -595,7 +605,7 @@ func (m Model) historyNote() string {
 	if m.histFn.Delta == nil {
 		return fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo)
 	}
-	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, "", m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), 1)
+	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, "", m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), 1, -1)
 	if len(lines) > 0 && lines[0].Role != "head" {
 		return lines[0].Text
 	}
@@ -667,6 +677,12 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		} else {
 			m.notice = fmt.Sprintf("still loading metadata for %s — try again in a moment", r.Tag)
 		}
+		return m, nil
+	}
+	if m.historyPending(r.Tag) {
+		// The confirm screen leads with this history and never refetches it; leaving now
+		// would cancel the load and show the no-history form for a mapped image.
+		m.notice = fmt.Sprintf("still reading %s's commits — try again in a moment", r.Tag)
 		return m, nil
 	}
 	if !direct {
@@ -755,6 +771,7 @@ func (m Model) updateFilter(msg tea.Msg) (Model, tea.Cmd) {
 		rows := m.filtered()
 		if IndexOf(rows, m.selectedTag) < 0 && len(rows) > 0 {
 			m.selectedTag = rows[0].Tag
+			m.commitIdx = 0 // a new tag's commits, so the cursor starts over (Copilot, #112)
 		}
 		var fetchCmd tea.Cmd
 		m, fetchCmd = m.fetchVisible()
@@ -1223,7 +1240,11 @@ func (m Model) paneSection() string {
 	if m.histFn.Delta == nil {
 		return m.styles.Dim.Render(fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo))
 	}
-	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, declared, m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), m.paneRows())
+	at := -1
+	if m.focus == focusCommits {
+		at = m.commitIdx
+	}
+	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, declared, m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), m.paneRows(), at)
 	out := make([]string, 0, len(lines))
 	for _, l := range lines {
 		text := m.wrap(l.Text)
@@ -1265,8 +1286,14 @@ func (m Model) viewReading() string {
 	}
 	c := commits[m.commitIdx]
 	st := m.deltas[m.selectedTag]
+	// Forward: the commit is in the cursor tag and not in what the env declares. A rollback
+	// lists the commits being removed, so the containment reads the other way round.
+	in, notIn := m.selectedTag, tagOrDigest(st.Delta.From.Ref)
+	if st.Delta.Direction == migrate.DirectionRollback {
+		in, notIn = notIn, in
+	}
 	head := m.styles.Title.Render(history.ShortSHA(c.SHA)+"   "+c.Subject) + "\n" +
-		m.styles.Dim.Render(fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, len(commits), m.selectedTag, tagOrDigest(st.Delta.From.Ref), c.Author, ui.Ago(m.now(), c.Date)))
+		m.styles.Dim.Render(fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, len(commits), in, notIn, c.Author, ui.Ago(m.now(), c.Date)))
 	body := c.Body
 	if strings.TrimSpace(body) == "" {
 		body = m.styles.Dim.Render("(no body)")

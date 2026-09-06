@@ -21,4 +21,4 @@
 
 
 
-                           o open PR · R re-observe · x abort · l log · esc back
+                                       R re-observe · x abort · l log · esc back

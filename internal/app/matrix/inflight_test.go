@@ -124,7 +124,7 @@ func TestResumeKeys(t *testing.T) {
 	q := parked("9xy8wv777u", "", "app-staging", 3)
 	two := withPane(120, 40, p, q)
 	two, _ = two.Update(uitest.Key("r"))
-	if two.chooser == nil || !two.chooserResume {
+	if two.chooser == nil || two.chooserKind != chooserResume {
 		t.Fatal("r with two in flight must ask which")
 	}
 	if v := ansi.Strip(two.View()); !strings.Contains(v, "resume which promotion?") || !strings.Contains(v, "9xy8wv777u") {
@@ -138,7 +138,7 @@ func TestResumeKeys(t *testing.T) {
 	if msg, ok := cmd().(ResumeMsg); !ok || msg.ID != "9xy8wv777u" {
 		t.Fatalf("chose %+v", cmd())
 	}
-	if two.chooser != nil || two.chooserResume {
+	if two.chooser != nil || two.chooserKind != chooserImage {
 		t.Fatal("the chooser must close and reset")
 	}
 }

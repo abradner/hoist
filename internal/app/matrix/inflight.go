@@ -10,6 +10,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // The in-flight pane (M10, #85 screen 05/06): what is promoting right now, on the entry
@@ -32,10 +33,17 @@ type ResumeMsg struct {
 // directory unreadable), shown in the pane's place; a per-promotion re-observation failure
 // travels inside its Summary.
 func (m Model) SetInFlight(list []flight.Summary, err error) Model {
-	m.inflight = append([]flight.Summary(nil), list...)
+	// A finished promotion is not in flight: `hoist promotions` lists every state file, the
+	// pane lists what is still moving, or stuck — and r never offers to resume a done one.
+	m.inflight = m.inflight[:0:0]
+	for _, s := range list {
+		if !s.Done {
+			m.inflight = append(m.inflight, s)
+		}
+	}
 	m.inflightErr = ""
 	if err != nil {
-		m.inflightErr = err.Error()
+		m.inflightErr = redact.Strings(err.Error())
 	}
 	return m
 }
@@ -100,6 +108,10 @@ func (m Model) expandedSections() []string {
 		text, command := s.Action()
 		var action string
 		switch {
+		case command != "" && ansi.StringWidth(text)+4+ansi.StringWidth(command) > m.width-2:
+			// The command is the executable part: when the two do not share the line, it
+			// gets its own rather than losing its tail to the box's truncation.
+			action = m.styles.Warn.Render(text) + "\n    " + m.styles.Accent.Render(command)
 		case command != "":
 			action = m.styles.Warn.Render(text) + "    " + m.styles.Accent.Render(command)
 		case text != "":
@@ -149,11 +161,17 @@ func (m Model) styleParts(parts []string) []string {
 
 // compactLine is the narrow form: "⟳ 5pr6sd333t → app-production   blocked on approval · 12m".
 func (m Model) compactLine(s flight.Summary) string {
-	return m.styles.Accent.Render("⟳ "+s.ID+" → "+s.Target) + "   " + m.styles.Warn.Render(s.Verdict()) + m.styles.Dim.Render(" · "+ui.Span(m.now().Sub(s.StartedAt)))
+	// The target can be a 63-character namespace; the verdict is what must survive, so the
+	// target is the part that gives way.
+	target := ansi.Truncate(s.Target, 24, "…")
+	return m.styles.Accent.Render("⟳ "+s.ID+" → "+target) + "   " + m.styles.Warn.Render(s.Verdict()) + m.styles.Dim.Render(" · "+ui.Span(m.now().Sub(s.StartedAt)))
 }
 
 // inflightLine is the one-line fold for the notes section when no pane fits at all.
 func (m Model) inflightLine() string {
+	if m.inflightErr != "" {
+		return m.styles.Warn.Render("⟳ cannot list promotions: " + m.inflightErr)
+	}
 	if len(m.inflight) == 0 {
 		return ""
 	}

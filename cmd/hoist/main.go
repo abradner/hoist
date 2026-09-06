@@ -578,7 +578,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		blameRef = sha
 	}
 	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef)
-	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn).WithInFlight(buildInFlightFuncs(cfg))
+	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn).WithInFlight(buildInFlightFuncs(cfg)).WithDrift(buildDriftResolveFunc(cfg, eff.cfg, eff.promotable))
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
@@ -596,7 +596,19 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 // the error per call and degrades to "digest sources: none" with a warning line (AGENTS.md
 // principle 5), rather than this function failing to open the TUI at all.
 func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
-	opts, optsErr := resolutionOptions(cfg, rc, resolveFlags{})
+	return buildResolveFuncWith(cfg, rc, prefixes, resolveFlags{})
+}
+
+// buildDriftResolveFunc is the matrix's cluster question: pods only, whatever
+// digest_sources the config orders for planning. A manifest or registry answer is not
+// "what the cluster runs", and a config that lists no pods source would otherwise make
+// the drift column say "asking the cluster" and then never ask it.
+func buildDriftResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
+	return buildResolveFuncWith(cfg, rc, prefixes, resolveFlags{digestSources: "pods"})
+}
+
+func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []string, rf resolveFlags) plan.ResolveFunc {
+	opts, optsErr := resolutionOptions(cfg, rc, rf)
 	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
 		if optsErr != nil {
 			return plan.ResolveOutcome{}, optsErr
