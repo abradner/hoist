@@ -16,6 +16,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
@@ -217,9 +218,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			// a Confirm used standalone rather than inside a huh.Form ignores every keypress.
 			m.confirm.WithKeyMap(huh.NewDefaultKeyMap())
 			m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-			if m.width > 0 {
-				m.confirm.WithWidth(m.width)
-			}
+			m.confirm.WithWidth(m.dialogWidth())
 			return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 		}
 		return m.start()
@@ -303,49 +302,86 @@ func (m Model) render() Model {
 	var b strings.Builder
 	switch m.state {
 	case stateReading:
-		b.WriteString("reading " + m.env + "…\n")
+		b.WriteString(m.styles.Dim.Render("reading " + m.env + "…"))
 	default:
-		fmt.Fprintf(&b, "%d Deployment(s) in %s\n\n", len(m.plan.Targets), m.env)
+		fmt.Fprintf(&b, "%s\n", m.styles.Title.Render(fmt.Sprintf("%d Deployment(s) in %s", len(m.plan.Targets), m.env)))
 		for _, st := range m.plan.Targets {
 			mark := " "
 			switch {
 			case m.done[st.Name]:
-				mark = "✔"
+				mark = m.styles.Good.Render("✔")
 			case m.state == stateRolling:
-				mark = "…"
+				mark = m.styles.Warn.Render("…")
 			}
 			was := st.RestartedAt
 			if was == "" {
 				was = "never restarted this way"
 			}
-			fmt.Fprintf(&b, " %s %s  (%d replica(s), %s, last restart: %s)\n", mark, st.Name, st.Replicas, st.Strategy, was)
+			fmt.Fprintf(&b, "\n %s %s  %s\n", mark, m.styles.Accent.Render(st.Name), m.styles.Dim.Render(fmt.Sprintf("%d replica(s) · %s · last restart: %s", st.Replicas, st.Strategy, was)))
 			for _, c := range st.GracefulRestartConcerns() {
-				fmt.Fprintf(&b, "     warning: %s\n", c)
+				// Wrapped to what the frame and the indent leave, every continuation line
+				// indented under the "!": a concern is one sentence and reads as one.
+				const indent = "     "
+				wrapped := ansi.Wrap("! "+c, max(m.width-2-len(indent)-2, 20), "")
+				for i, line := range strings.Split(wrapped, "\n") {
+					pad := indent
+					if i > 0 {
+						pad = indent + "  "
+					}
+					fmt.Fprintf(&b, "%s%s\n", pad, m.styles.Warn.Render(line))
+				}
 			}
 		}
 		for _, name := range m.plan.Absent {
-			fmt.Fprintf(&b, "   %s\n     warning: declared in the repo but not in the cluster — not restarted\n", name)
+			fmt.Fprintf(&b, "\n   %s\n     %s\n", m.styles.Dim.Render(name), m.styles.Warn.Render("! declared in the repo but not in the cluster — not restarted"))
 		}
 	}
-	m.body.SetContent(b.String())
+	m.body.SetContent(strings.TrimRight(b.String(), "\n"))
 	return m
 }
 
-// View renders the screen. Every rendered string passes through redact.Strings at this one
-// boundary, the same convention the other screens use.
+// View renders the screen in the frame: the header, the target list, a notes section for
+// the notice, and the footer; the production confirmation is a dialog over it. Every
+// rendered string passes through redact.Strings at this one boundary, the same convention
+// the other screens use.
 func (m Model) View() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "hoist restart: %s / %s%s\n", m.env, m.family, productionLabel(m.production))
-	if m.confirm != nil {
-		b.WriteString(m.confirm.View())
-		return redact.Strings(b.String())
+	if m.width <= 0 || m.height <= 0 {
+		m.width, m.height = 80, 24
 	}
-	b.WriteString(m.body.View())
+	m = m.layout()
+	sections := []string{m.headerSection(), m.body.View()}
 	if m.notice != "" {
-		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render(m.notice))
+		sections = append(sections, m.styles.Notice.Render(ansi.Wrap(m.notice, max(m.width-2, 20), "")))
 	}
-	b.WriteString("\n" + m.styles.Hint.Render(m.hint()))
-	return redact.Strings(b.String())
+	view := ui.Frame{Title: "hoist · restart", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height)
+	if m.confirm != nil {
+		view = ui.Dialog(m.styles, view, "production", m.confirm.View(), m.width, m.height)
+	}
+	return redact.Strings(view)
+}
+
+func (m Model) headerSection() string {
+	left := m.styles.Title.Render(m.env) + " / " + m.styles.Title.Render(m.family)
+	right := m.styles.Dim.Render(m.stateWord())
+	if m.production {
+		right = m.styles.Production.Render("production") + "   " + right
+	}
+	return ui.StatusBar(max(m.width-2, 1), left, right)
+}
+
+func (m Model) stateWord() string {
+	switch m.state {
+	case stateReading:
+		return "reading"
+	case stateConfirm:
+		return "not yet restarted"
+	case stateRolling:
+		return "rolling"
+	case stateDone:
+		return "all rolled"
+	default:
+		return "failed"
+	}
 }
 
 func (m Model) hint() string {
@@ -363,28 +399,39 @@ func (m Model) hint() string {
 	}
 }
 
-func productionLabel(production bool) string {
-	if production {
-		return "   · production"
-	}
-	return ""
-}
+func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 
-// SetSize implements the screen contract.
-func (m Model) SetSize(width, height int) Model {
-	m.width, m.height = width, height
-	m.body.SetWidth(width)
-	if h := height - 4; h > 0 {
-		m.body.SetHeight(h)
+// layout sizes the body viewport to what the frame leaves.
+func (m Model) layout() Model {
+	sections := 2
+	fixed := 1
+	if m.notice != "" {
+		sections++
+		fixed += strings.Count(ansi.Wrap(m.notice, max(m.width-2, 20), ""), "\n") + 1
 	}
+	m.body.SetWidth(m.width - 2)
+	m.body.SetHeight(max(ui.BodyHeight(m.height, sections)-fixed, 3))
 	if m.confirm != nil {
-		m.confirm.WithWidth(width)
+		m.confirm.WithWidth(m.dialogWidth())
 	}
 	return m
 }
 
+// SetSize implements the screen contract. The body's lines are wrapped for a width, so a
+// width change re-renders them — a viewport only clips what it was handed, and a body
+// rendered for 120 columns shown at 80 lost the end of every concern (the 80×24 golden
+// pinned exactly that until this was added).
+func (m Model) SetSize(width, height int) Model {
+	changed := width != m.width
+	m.width, m.height = width, height
+	if changed {
+		m = m.render()
+	}
+	return m.layout()
+}
+
 // SetStyles implements the screen contract.
-func (m Model) SetStyles(s ui.Styles) Model { m.styles = s; return m }
+func (m Model) SetStyles(s ui.Styles) Model { m.styles = s; return m.render() }
 
 // CapturesText reports whether a keypress belongs to this screen's own input — true only while
 // the production confirmation is open.

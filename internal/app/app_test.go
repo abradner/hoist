@@ -268,7 +268,7 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	if n := len(m.(Model).stack); n != 2 {
 		t.Fatalf("stack has %d screens after a successful promotionBuiltMsg, want 2", n)
 	}
-	if v := plain(m); !strings.Contains(v, "app-staging -> app-production") || !strings.Contains(v, wantState.ID) {
+	if v := plain(m); !strings.Contains(v, "app-staging → app-production") || !strings.Contains(v, wantState.ID) {
 		t.Errorf("flight screen view missing the real state's envs/id:\n%s", v)
 	}
 }
@@ -1475,7 +1475,7 @@ func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
 	if _, ok := stack[len(stack)-1].(restartScreen); !ok {
 		t.Fatalf("top screen is %T, want the restart screen", stack[len(stack)-1])
 	}
-	if v := plain(tm); !strings.Contains(v, "hoist restart") {
+	if v := plain(tm); !strings.Contains(v, "hoist · restart") {
 		t.Errorf("the screen should name the operation:\n%s", v)
 	}
 }
@@ -1565,7 +1565,7 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	if n := len(m.(Model).stack); n != 2 {
 		t.Fatalf("stack has %d screens after resume, want 2 (matrix, flight)", n)
 	}
-	if v := plain(m); !strings.Contains(v, "5pr6sd333t") || !strings.Contains(v, "app-staging -> app-production") {
+	if v := plain(m); !strings.Contains(v, "5pr6sd333t") || !strings.Contains(v, "app-staging → app-production") {
 		t.Fatalf("flight screen not showing the resumed promotion:\n%s", v)
 	}
 	// A tick while the flight screen is on top does not list; back on the matrix it does.

@@ -1,0 +1,24 @@
+╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+│abcd1234   app-staging → app-production                     started 4 days ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                      │
+│✗ commit                                                                      │
+│    branch hoist/app-production/abcd1234 already exists with different content│
+│· push                                                                        │
+│· PR                                                                          │
+│· CI                                                                          │
+│· approval                                                                    │
+│· merge                                                                       │
+│· argo refresh                                                                │
+│· argo sync                                                                   │
+│· rollout                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│blocked — resolve the conflict, then R to re-observe                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+blocked: resolve the conf… o open PR · R re-observe · x abort · l log · esc back

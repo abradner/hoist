@@ -10,6 +10,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -460,15 +461,15 @@ func TestBackKey(t *testing.T) {
 func TestLogToggle(t *testing.T) {
 	m := New(fixtureState(), PollDurations{}, nil)
 	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
-	if strings.Contains(m.View(), "History:") {
+	if strings.Contains(m.View(), "acted") {
 		t.Fatal("history shown before l was pressed")
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if !strings.Contains(m.View(), "History:") || !strings.Contains(m.View(), "acted") {
+	if !strings.Contains(m.View(), "history") || !strings.Contains(m.View(), "acted") {
 		t.Errorf("history not shown after l:\n%s", m.View())
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if strings.Contains(m.View(), "History:") {
+	if strings.Contains(m.View(), "acted") {
 		t.Error("history still shown after a second l")
 	}
 }
@@ -596,7 +597,9 @@ func TestDriveResultUpdatesRowsOnError(t *testing.T) {
 	m, _ = m.Update(batch[1]())
 
 	v := m.View()
-	if !strings.Contains(v, GlyphDone) {
+	// At 80×10 the step list degrades to the one-line strip, so a completed step reads as
+	// StripDone there and as GlyphDone on a taller terminal; either proves the rows updated.
+	if !strings.Contains(v, GlyphDone) && !strings.Contains(v, StripDone) {
 		t.Errorf("view after an errored-but-informative drive result shows no completed step:\n%s", v)
 	}
 	for _, done := range []engine.StepName{engine.StepBranched, engine.StepCommitted, engine.StepPushed, engine.StepPROpened} {
@@ -845,7 +848,7 @@ func TestViewFixedSize(t *testing.T) {
 			st(engine.StepCIGreen, engine.Observation{Waiting: true, Detail: "CI: 2/3 checks complete"}),
 		})
 		got := m.View()
-		for _, want := range []string{"app-staging -> app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "R re-observe", "x abort", "l log"} {
+		for _, want := range []string{"app-staging → app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "R re-observe", "x abort", "l log"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q:\n%s", want, got)
 			}
@@ -908,8 +911,8 @@ func TestViewFixedSize(t *testing.T) {
 func assertFits(t *testing.T, view string, width int) {
 	t.Helper()
 	for i, l := range strings.Split(view, "\n") {
-		if w := len([]rune(l)); w > width+8 { // generous slack: no ansi width helper needed here, just a sanity bound
-			t.Errorf("line %d is suspiciously wide (%d): %q", i+1, w, l)
+		if w := ansi.StringWidth(l); w > width {
+			t.Errorf("line %d is %d wide, over %d: %q", i+1, w, width, l)
 		}
 	}
 }
@@ -991,17 +994,14 @@ func TestHeaderNamesADeployAsADeploy(t *testing.T) {
 	s := fixtureState()
 	s.SourceEnv = ""
 	m := New(s, PollDurations{}, nil).SetSize(120, 20).SetStyles(ui.NewStyles(true))
-	v := m.View()
-	if strings.Contains(v, "->") {
-		t.Errorf("a deploy has no source env, so its header has no arrow:\n%s", v)
-	}
-	if !strings.Contains(v, "hoist deploy") || !strings.Contains(v, s.TargetEnv) {
-		t.Errorf("the header should name the deploy and its env:\n%s", v)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "hoist · deploy · in flight") || !strings.Contains(v, "deploy → "+s.TargetEnv) {
+		t.Errorf("the header should name the deploy and its env, with no source:\n%s", v)
 	}
 
 	// A promotion keeps both, so this is a discrimination and not a flattening.
 	p := New(fixtureState(), PollDurations{}, nil).SetSize(120, 20).SetStyles(ui.NewStyles(true))
-	if pv := p.View(); !strings.Contains(pv, "hoist promote") || !strings.Contains(pv, "->") {
+	if pv := ansi.Strip(p.View()); !strings.Contains(pv, "hoist · promotion · in flight") || !strings.Contains(pv, "app-staging → app-production") {
 		t.Errorf("a promotion still moves between two envs:\n%s", pv)
 	}
 }

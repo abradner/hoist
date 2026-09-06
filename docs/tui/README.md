@@ -1,6 +1,7 @@
 # TUI redesign mockups
 
-`mockups.html` is six screens of a proposed hoist TUI — matrix, tag picker, deploy confirm,
+`mockups.html` is six screens of a proposed hoist TUI (M10 built them; see the frame notes
+below for where the build departed from the proposal) — matrix, tag picker, deploy confirm,
 flight, rollout, and the in-flight panel — drawn as real terminal frames rather than described
 in prose. Open it in a browser.
 
@@ -38,3 +39,22 @@ Each screen carries its own reasoning inline, but the through-line is:
 Every name here is invented — `my-gitops`, `me`, `ghcr.io/example/…`, `app-staging`,
 `app-production`. This repo is public and its docs name no real repo, operator, cluster or app.
 The substitutions are length-neutral so the measured frame widths still hold.
+
+## What M10 built, and where it departed
+
+Frames 1–12 were the proposal; M10 (#85) built them with these departures, each for a
+reason found on contact with real widths and data:
+
+- **Plan confirm** keeps two panes — the tickable repo list on the left, the repo under the
+  cursor's impact (commits, migrations, warnings as sentences) on the right, the yaml behind
+  `d` — rather than one column with `tab`-expanded blocks. The ticking, the filter and the
+  diff stay where they were; the header carries the shared image-repo prefix so versions
+  never wrap.
+- **Tag picker**: the header says what the env *declares* (the manifest, dated by a blame of
+  its line), never "now running" — this screen has no cluster read, and a claim it cannot
+  support is a bug (AGENTS.md principle 1).
+- **In-flight pane** is a pane under the table (`JoinVertical`), not an overlay; only the
+  `huh.Confirm` dialogs use the compositor. The pane's step strip wraps after the merge at
+  narrow widths rather than truncating the post-merge steps.
+- **Flight screen** (frame 13, added by M10 rather than proposed): the step list degrades to
+  the same strip on a short terminal so the blocked reason and the command always fit.
