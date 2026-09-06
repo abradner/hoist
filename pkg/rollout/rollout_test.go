@@ -246,3 +246,156 @@ contexts:
 		t.Errorf("error lost its context: %v", err)
 	}
 }
+
+// Restart is hoist's one write here, and it must be the same write kubectl makes: a strategic
+// merge patch stamping the pod template's restart annotation, changing nothing else. Driven
+// through client-go's own fake so the patch shape is verified rather than assumed.
+func TestRestartStampsThePodTemplateAndNothingElse(t *testing.T) {
+	before := baseDeployment("app-production", "app")
+	cs := fake.NewSimpleClientset(before)
+	r := FromClientset(cs)
+
+	at := time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC)
+	if err := r.Restart(context.Background(), "app-production", "app", at); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	got, err := cs.AppsV1().Deployments("app-production").Get(context.Background(), "app", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := at.Format(time.RFC3339)
+	if got.Spec.Template.Annotations[RestartAnnotation] != want {
+		t.Errorf("annotation = %q, want %q", got.Spec.Template.Annotations[RestartAnnotation], want)
+	}
+	// Nothing else moved: the images are what they were.
+	if len(got.Spec.Template.Spec.Containers) != len(before.Spec.Template.Spec.Containers) {
+		t.Fatalf("container count changed")
+	}
+	for i, c := range got.Spec.Template.Spec.Containers {
+		if c.Image != before.Spec.Template.Spec.Containers[i].Image {
+			t.Errorf("container %s image changed from %q to %q — a restart changes no image",
+				c.Name, before.Spec.Template.Spec.Containers[i].Image, c.Image)
+		}
+	}
+
+	// And the read path reports it, so a caller can say what it supersedes.
+	st, err := r.Deployment(context.Background(), "app-production", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.RestartedAt != want {
+		t.Errorf("RestartedAt = %q, want %q", st.RestartedAt, want)
+	}
+}
+
+// A Deployment that is not there is ErrNotFound, the same sentinel every other method here
+// uses — so a caller can tell "gone" from a transient failure.
+func TestRestartOnAMissingDeploymentIsNotFound(t *testing.T) {
+	r := FromClientset(fake.NewSimpleClientset())
+	err := r.Restart(context.Background(), "app-production", "nope", time.Now())
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// An existing pod-template annotation survives: the patch adds a key, it does not replace the
+// map. A strategic merge patch does this; a plain replace would silently drop, say, a
+// Prometheus scrape annotation.
+func TestRestartPreservesOtherPodTemplateAnnotations(t *testing.T) {
+	// A different namespace and name on purpose: the patch must go where it is told, not to
+	// coordinates baked into the call.
+	d := baseDeployment("app-staging", "worker")
+	d.Spec.Template.Annotations = map[string]string{"prometheus.io/scrape": "true"}
+	cs := fake.NewSimpleClientset(d)
+	r := FromClientset(cs)
+
+	if err := r.Restart(context.Background(), "app-staging", "worker", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cs.AppsV1().Deployments("app-staging").Get(context.Background(), "worker", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Template.Annotations["prometheus.io/scrape"] != "true" {
+		t.Errorf("an unrelated annotation was lost: %v", got.Spec.Template.Annotations)
+	}
+	if got.Spec.Template.Annotations[RestartAnnotation] == "" {
+		t.Error("the restart annotation was not written")
+	}
+}
+
+// The graceful-restart signals, read from the same fetch that reads everything else. Warnings
+// only: hoist never blocks a restart on them (principle 5).
+func TestGracefulRestartConcerns(t *testing.T) {
+	two := int32(2)
+	one := int32(1)
+	for _, tc := range []struct {
+		name  string
+		st    DeploymentStatus
+		wants []string
+		none  bool
+	}{
+		{
+			name: "healthy shape says nothing",
+			st:   DeploymentStatus{Replicas: two, Strategy: "RollingUpdate", ReadinessProbes: 1},
+			none: true,
+		},
+		{
+			name:  "single replica",
+			st:    DeploymentStatus{Replicas: one, Strategy: "RollingUpdate", ReadinessProbes: 1},
+			wants: []string{"only 1 replica"},
+		},
+		{
+			name:  "no readiness probe",
+			st:    DeploymentStatus{Replicas: two, Strategy: "RollingUpdate"},
+			wants: []string{"no readiness probe"},
+		},
+		{
+			name:  "recreate stops everything first",
+			st:    DeploymentStatus{Replicas: two, Strategy: "Recreate", ReadinessProbes: 1},
+			wants: []string{"Recreate"},
+		},
+		{
+			name:  "all three at once, in a stable order",
+			st:    DeploymentStatus{Replicas: one, Strategy: "Recreate"},
+			wants: []string{"Recreate", "only 1 replica", "no readiness probe"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.st.GracefulRestartConcerns()
+			if tc.none {
+				if len(got) != 0 {
+					t.Fatalf("expected nothing to say, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.wants) {
+				t.Fatalf("got %d concerns %v, want %d", len(got), got, len(tc.wants))
+			}
+			for i, w := range tc.wants {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("concern %d = %q, want it to mention %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
+// And they come off the live spec, not from a caller's guess.
+func TestDeploymentReadsTheGracefulRestartSignals(t *testing.T) {
+	d := baseDeployment("app-production", "app")
+	d.Spec.Replicas = nil // unset: Kubernetes defaults to 1, and so must this
+	d.Spec.Strategy.Type = ""
+	cs := fake.NewSimpleClientset(d)
+	st, err := FromClientset(cs).Deployment(context.Background(), "app-production", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Replicas != 1 {
+		t.Errorf("Replicas = %d, want Kubernetes' own default of 1", st.Replicas)
+	}
+	if st.Strategy != "RollingUpdate" {
+		t.Errorf("Strategy = %q, want Kubernetes' own default", st.Strategy)
+	}
+}

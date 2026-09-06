@@ -22,7 +22,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/abradner/hoist/pkg/redact"
@@ -55,6 +57,41 @@ type DeploymentStatus struct {
 	// Detail is a short, kubectl-style human-readable line: what's still pending, or why the
 	// deadline was exceeded, or that the rollout finished.
 	Detail string
+	// RestartedAt is the pod template's RestartAnnotation value, "" when it has never been
+	// restarted this way. Read so a restart can say what it supersedes, and so a caller can
+	// tell its own stamp from someone else's.
+	RestartedAt string
+	// Replicas, Strategy and ReadinessProbes describe whether a restart of this Deployment can
+	// actually be graceful. They are read here because the read that fetches them is already
+	// being made; hoist warns on them and never blocks (AGENTS.md principle 5), since "roll it
+	// anyway" is a legitimate thing to want and the operator is the one who knows.
+	//
+	// Replicas is spec.replicas (1 when unset, matching Kubernetes' own default): a single
+	// replica means the rollout has nothing to keep serving while the new pod starts, whatever
+	// the strategy says. Strategy is spec.strategy.type ("RollingUpdate" when unset).
+	// ReadinessProbes counts containers that declare one — without any, the new pod is
+	// considered available the moment it starts, so a RollingUpdate can cut over to a process
+	// that is not yet serving.
+	Replicas        int32
+	Strategy        string
+	ReadinessProbes int
+}
+
+// GracefulRestartConcerns lists, in a stable order, the reasons a restart of this Deployment is
+// unlikely to be seamless. Empty when there is nothing to say. Informational: the caller shows
+// them and proceeds (principle 5).
+func (d DeploymentStatus) GracefulRestartConcerns() []string {
+	var out []string
+	if d.Strategy == "Recreate" {
+		out = append(out, "strategy is Recreate: every pod stops before any new one starts")
+	}
+	if d.Replicas <= 1 {
+		out = append(out, "only 1 replica: nothing serves while the new pod starts")
+	}
+	if d.ReadinessProbes == 0 {
+		out = append(out, "no readiness probe: a new pod counts as available before it can serve")
+	}
+	return out
 }
 
 // JobLikeStatus is a Job or CronJob's current state, report-only (AGENTS.md invariant 4:
@@ -71,6 +108,11 @@ type Rollout interface {
 	Deployment(ctx context.Context, namespace, name string) (DeploymentStatus, error)
 	// JobLike reads namespace/name's current state, for kind "Job" or "CronJob".
 	JobLike(ctx context.Context, namespace, name, kind string) (JobLikeStatus, error)
+	// Restart rolls namespace/name's pods without changing what it runs, by stamping the pod
+	// template's restart annotation — exactly what `kubectl rollout restart` does. It is the
+	// ONE write in this package; everything else here reads (see the package doc, and
+	// pkg/argo.Refresh, which holds the same position there).
+	Restart(ctx context.Context, namespace, name string, at time.Time) error
 }
 
 // client is Rollout over a client-go clientset, mirroring pkg/k8s.client's shape exactly.
@@ -112,6 +154,13 @@ func NewFromKubeconfig(kubeconfigContext string) (Rollout, string, error) {
 		return nil, "", fmt.Errorf("rollout: kube context %q: %w", name, err)
 	}
 	hide := redact.Host(rest.Host)
+	// client-go's default warning handler writes API-server warnings straight to stderr through
+	// klog, in klog's own format, unfiltered and outside every boundary this package maintains:
+	// a `restricted:latest` PodSecurity warning landed mid-output on the first real restart,
+	// between hoist's own lines, with a raw server message hoist had never seen (§4.4 —
+	// everything this package emits goes through pkg/redact first). hoist reports what it needs
+	// to itself, so the handler is silenced rather than re-plumbed.
+	rest.WarningHandler = restclient.NoWarnings{}
 	cs, err := kubernetes.NewForConfig(rest)
 	if err != nil {
 		return nil, "", fmt.Errorf("rollout: kube context %q: %s", name, redact.Error(err, hide...))
@@ -138,8 +187,58 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 	for _, ctr := range d.Spec.Template.Spec.InitContainers {
 		st.Images = append(st.Images, ContainerImage{Name: ctr.Name, Init: true, Image: ctr.Image})
 	}
+	st.RestartedAt = d.Spec.Template.Annotations[RestartAnnotation]
+	st.Replicas = 1 // Kubernetes' own default when spec.replicas is unset.
+	if d.Spec.Replicas != nil {
+		st.Replicas = *d.Spec.Replicas
+	}
+	st.Strategy = string(d.Spec.Strategy.Type)
+	if st.Strategy == "" {
+		st.Strategy = "RollingUpdate"
+	}
+	for _, ctr := range d.Spec.Template.Spec.Containers {
+		if ctr.ReadinessProbe != nil {
+			st.ReadinessProbes++
+		}
+	}
 	st.Complete, st.DeadlineExceeded, st.Detail = deploymentRolloutComplete(d)
 	return st, nil
+}
+
+// RestartAnnotation is the pod-template annotation Restart stamps. Deliberately kubectl's own
+// key: `kubectl rollout restart` writes exactly this, so a restart hoist causes is
+// indistinguishable from one an operator caused by hand, and either tool can see the other's.
+//
+// Nothing in Kubernetes treats the key specially. Any change to the pod template starts a
+// rollout; this one is chosen because it changes nothing else.
+const RestartAnnotation = "kubectl.kubernetes.io/restartedAt"
+
+// Restart implements Rollout.
+//
+// A strategic-merge patch of one annotation, which is what kubectl issues for the same command.
+// Argo does not treat this as drift even with selfHeal on: its diff is a three-way merge, so a
+// field Argo never set and that is absent from the manifest is owned by someone else and left
+// alone — the same reason `kubectl apply` does not delete fields it never wrote. (Verified
+// against the target cluster: annotations added this way have survived weeks on self-healing
+// Applications that report Synced. An earlier design wrote this into the manifest instead, on
+// the assumption that Argo would revert it; that assumption was wrong and cost a commit, a PR,
+// a CI run and an approval for what is one API call.)
+func (c *client) Restart(ctx context.Context, namespace, name string, at time.Time) error {
+	if namespace == "" || name == "" {
+		return errors.New("rollout: restart needs a namespace and a name")
+	}
+	// RFC3339, quoted by the JSON encoding itself — the value must reach the API server as a
+	// string, since an annotation value is one.
+	stamp := at.UTC().Format(time.RFC3339)
+	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, RestartAnnotation, stamp))
+	_, err := c.cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("restarting Deployment %s/%s: %w", namespace, name, ErrNotFound)
+		}
+		return fmt.Errorf("restarting Deployment %s/%s: %s", namespace, name, c.describe(err))
+	}
+	return nil
 }
 
 // JobLike implements Rollout.

@@ -344,7 +344,18 @@ writes one caller-named ref into every occurrence of that image repo in `--env`,
 identical engine pipeline (`gitops.BuildDeployPlan`, which unlike `BuildPlan` treats the repo
 being absent from the target env as an error — there is nothing to write). It takes `promote`'s
 flags minus `--from`, plus the same `--direct`/`--confirm-direct` pair, and its rendered artifacts
-say *deploy*, never *promote*. `hoist watch --app <name>` (M5) is a read-only companion, independent
+say *deploy*, never *promote*. `hoist restart --env <env> [--family a,b]` (M9) rolls an env's Deployments without changing what
+they run, and is the one command that deliberately writes to the cluster instead of to git: it
+stamps `kubectl.kubernetes.io/restartedAt` on the live pod template exactly as `kubectl rollout
+restart` does. Argo does not treat that as drift even with `selfHeal: true` — its diff is a
+three-way merge, so a field Argo never set and that is absent from the manifest is left alone,
+the same reason `kubectl apply` does not delete fields it never wrote. There is therefore no
+plan, no branch, no PR, no state file and nothing to resume; re-running restarts again, which is
+the operation. Production is gated not by §4.5's PR-and-approval pair (nothing is committed, so
+there is nothing to review) but by `--confirm-production=<env>` repeating the env exactly, the
+same shape `--confirm-direct` uses. Before anything rolls it names every target with its replica
+count, strategy and last restart, and warns — never blocks — where a restart will not be graceful.
+`hoist watch --app <name>` (M5) is a read-only companion, independent
 of any promotion: it prints one Application's current sync/health/revision and the rollout
 progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
 the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
