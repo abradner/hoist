@@ -294,7 +294,10 @@ func TestApplyWritesOnlyPlannedFiles(t *testing.T) {
 	for _, e := range p.Edits {
 		found := false
 		for _, o := range envOccurrences(r2.Envs["app-production"]) {
-			if o.File == e.File && o.Path == e.Path {
+			// Doc is part of the identity: two documents in one file carry the same
+			// containers[0].image path (counta and counta-worker), and matching on file
+			// and path alone would compare each against the other's style.
+			if o.File == e.File && o.Doc == e.Doc && o.Path == e.Path {
 				found = true
 				if o.Ref != e.New || o.Style != e.Style {
 					t.Errorf("%s %s: after apply %s style=%d, want %s style=%d", o.File, o.Path, o.Ref, o.Style, e.New, e.Style)

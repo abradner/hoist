@@ -46,6 +46,23 @@
               }
             },
             {
+              "File": "cluster/apps/app-production/counta/app.yaml",
+              "Doc": 3,
+              "Line": 68,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "counta-worker",
+              "Container": "worker",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202601151010@sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202601151010",
+                "Digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea"
+              }
+            },
+            {
               "File": "cluster/apps/app-production/counta/purge-cronjob.yaml",
               "Doc": 0,
               "Line": 16,
@@ -207,6 +224,23 @@
               "Kind": "Deployment",
               "Name": "counta",
               "Container": "counta",
+              "Path": "spec.template.spec.containers[0].image",
+              "Raw": "ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123",
+              "Ref": {
+                "Repo": "ghcr.io/example/counta",
+                "Tag": "v202602201200",
+                "Digest": "sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123"
+              }
+            },
+            {
+              "File": "cluster/apps/app-staging/counta/app.yaml",
+              "Doc": 3,
+              "Line": 64,
+              "Col": 18,
+              "Style": 0,
+              "Kind": "Deployment",
+              "Name": "counta-worker",
+              "Container": "worker",
               "Path": "spec.template.spec.containers[0].image",
               "Raw": "ghcr.io/example/counta:v202602201200@sha256:c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123",
               "Ref": {

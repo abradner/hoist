@@ -21,6 +21,7 @@ func TestBuildPlanOneEditPerTargetOccurrence(t *testing.T) {
 	}
 	want := []key{
 		{"cluster/apps/app-production/counta/app.yaml", "counta", countaNew},
+		{"cluster/apps/app-production/counta/app.yaml", "worker", countaNew},
 		{"cluster/apps/app-production/counta/purge-cronjob.yaml", "purge", countaNew},
 		{"cluster/apps/app-production/marketing/app.yaml", "marketing", mktNew},
 		{"cluster/apps/app-production/web/app.yaml", "web", webNew},

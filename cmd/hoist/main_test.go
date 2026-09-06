@@ -84,9 +84,10 @@ func TestPlanDryRunPrintsOneChangedLinePerOccurrence(t *testing.T) {
 			minus++
 		}
 	}
-	// 6 occurrences in production: web ×3, counta ×2 (app + cronjob), marketing ×1.
-	if plus != 6 || minus != 6 {
-		t.Errorf("diff has %d added / %d removed lines, want 6/6:\n%s", plus, minus, s)
+	// 7 occurrences in production: web ×3, counta ×3 (app, worker in a later document of
+	// the same file, cronjob), marketing ×1.
+	if plus != 7 || minus != 7 {
+		t.Errorf("diff has %d added / %d removed lines, want 7/7:\n%s", plus, minus, s)
 	}
 	for _, want := range []string{
 		"--- a/cluster/apps/app-production/counta/purge-cronjob.yaml",
@@ -121,8 +122,8 @@ func TestPlanTakesRootFlagsAsDefaults(t *testing.T) {
 			plus++
 		}
 	}
-	if plus != 6 {
-		t.Errorf("diff has %d added lines, want 6:\n%s", plus, out.String())
+	if plus != 7 {
+		t.Errorf("diff has %d added lines, want 7:\n%s", plus, out.String())
 	}
 	// The other shared flags travel the same way: a root --promotable that excludes
 	// everything is BuildPlan's "no promotable" error, not the default prefix.
@@ -473,7 +474,7 @@ func TestConfigSingleRepoIsPickedWithNoFlags(t *testing.T) {
 	if code := run([]string{"--config", cfgPath, "plan", "--from", "app-staging", "--to", "app-production", "--dry-run"}, &out, &errOut); code != 0 {
 		t.Fatalf("plan without --repo: exit %d; stderr: %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "(6 edits in 4 files)") || !strings.Contains(out.String(), "third-party: outside ghcr.io/example/") {
+	if !strings.Contains(out.String(), "(7 edits in 4 files)") || !strings.Contains(out.String(), "third-party: outside ghcr.io/example/") {
 		t.Errorf("plan did not use the configured repo and prefixes:\n%s", out.String())
 	}
 	// Command-line flags beat the file at either level.

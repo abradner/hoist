@@ -126,6 +126,13 @@ count changed. Verify runs before `git add`, always. *Why:* the target repo uses
 `imagePullPolicy: IfNotPresent`, so a re-tagged image is silently not deployed; and a
 one-line-per-occurrence diff is the whole review surface for a production change.
 
+Discovery is all-or-nothing: an `Application` wrapper whose `spec.source.path` does not exist
+fails `gitops.Discover` (naming the wrapper, the Application and the path) rather than becoming a
+warning. Principle 5 was weighed and does not apply — Argo could not sync that wrapper either, and
+a plan built over a repo hoist could only half-read would be trusted for exactly the part it did
+not see. An *unmanaged* directory is the mirror case and stays informational: nothing there is
+promoted, so nothing is misreported (decided in issue #12).
+
 ### 4.3 `pkg/` is activity-shaped
 
 `pkg/*` packages never import `internal/`, never import a workflow engine, and expose functions of
