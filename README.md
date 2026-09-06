@@ -14,9 +14,11 @@ environment's Deployments without changing anything they declare.
 The interesting part is what happens after you press enter: hoist commits to a worktree, opens the
 PR, waits for CI, waits for a person to comment `hoist approve <id>` (production only, by default),
 squash-merges, asks Argo CD to refresh, and follows the rollout — telling you at every step what
-it is doing and what it is waiting for. Kill it at any point and `hoist resume <id>` (or
+it is doing and what it is waiting for. Kill it once it is under way and `hoist resume <id>` (or
 `hoist resume --env <target>`) picks up where the world actually is, not where a log file says it
-was.
+was. (The one narrow exception is the first second or so before its state file exists: a process
+killed there leaves a claim file naming the target env, and the next attempt tells you where it
+is so you can delete it.)
 
 ## What it looks like
 
