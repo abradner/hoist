@@ -108,6 +108,13 @@ type InFlight struct {
 	Resume func(ctx context.Context, id string) (engine.PromotionState, flight.DriveFunc, error)
 }
 
+// openURLResultMsg is the browser launcher's answer for one URL, delivered by the command
+// flight.OpenPRMsg's handler issues (#56: the launch used to run inside Update).
+type openURLResultMsg struct {
+	url string
+	err error
+}
+
 // inFlightMsg carries one listing back; gen drops a listing from before the matrix was
 // replaced (it never is today, but the guard costs nothing) or one that raced a newer one.
 type inFlightMsg struct {
@@ -591,14 +598,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
 			return m, nil
 		}
-		launchErr := m.openURL(msg.URL)
+		// The launcher can block for up to browser_launch_timeout; it runs as a command and
+		// reports back through openURLResultMsg, so Update never waits on it (#56).
+		open, url := m.openURL, msg.URL
+		return m, func() tea.Msg { return openURLResultMsg{url: url, err: open(url)} }
+	case openURLResultMsg:
 		switch {
-		case m.openPRMode == "both" && launchErr != nil:
-			m.notice = fmt.Sprintf("%s (could not open automatically: %v)", msg.URL, launchErr)
+		case m.openPRMode == "both" && msg.err != nil:
+			m.notice = fmt.Sprintf("%s (could not open automatically: %v)", msg.url, msg.err)
 		case m.openPRMode == "both":
-			m.notice = msg.URL
-		case launchErr != nil:
-			m.notice = fmt.Sprintf("could not open %s: %v", msg.URL, launchErr)
+			m.notice = msg.url
+		case msg.err != nil:
+			m.notice = fmt.Sprintf("could not open %s: %v", msg.url, msg.err)
 		}
 		return m, nil
 	case flight.AbortMsg:

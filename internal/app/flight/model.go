@@ -367,6 +367,10 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		// exactly the transient kind that's supposed to keep retrying on its own (Copilot
 		// review, PR #50 round 5).
 		m.stopped = false
+		var stepErr *engine.StepError
+		if errors.As(msg.err, &stepErr) {
+			return m, m.scheduleTickAfter(stepErr.Step)
+		}
 		return m, m.scheduleTick()
 	}
 	m.errNotice = ""
@@ -448,16 +452,57 @@ func retryableStep(step engine.StepName) bool {
 	}
 }
 
+// renewDeadline rebuilds the drive context for another poll.Deadline from now (or an
+// uncancelled one when no deadline is configured), cancelling the exhausted one.
+func (m Model) renewDeadline() Model {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.poll.Deadline > 0 {
+		m.deadlineAt = m.now().Add(m.poll.Deadline)
+		m.ctx, m.cancel = context.WithDeadline(context.Background(), m.deadlineAt)
+	} else {
+		m.deadlineAt = time.Time{}
+		m.ctx, m.cancel = context.WithCancel(context.Background())
+	}
+	return m
+}
+
 // scheduleTick waits pollInterval's answer for whichever step is currently active before
 // firing the next poll (AGENTS.md invariant 4: the actual waiting lives in the caller's own
 // loop, never inside a Step's Act — this is that loop's TUI-driven twin).
 func (m Model) scheduleTick() tea.Cmd {
-	phase, ok := ActiveStep(m.rows)
-	if !ok && len(m.order) > 0 {
-		phase = m.order[len(m.order)-1]
+	return tea.Tick(m.tickDelay(""), func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// scheduleTickAfter is scheduleTick for a retry after a Status error: Status returns only the
+// rows before the step whose Observe failed, so ActiveStep finds nothing and the interval
+// would fall back to the last step's — 2s against a 30s approval poll (#61). The failing
+// step is known from the error itself, and names the cadence.
+func (m Model) scheduleTickAfter(failed engine.StepName) tea.Cmd {
+	return tea.Tick(m.tickDelay(failed), func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// tickDelay is the wait before the next poll: the configured interval for the active step
+// (or for failed, when given), capped at what is left of the deadline (#59) — a 1s deadline
+// with a 20s CI interval used to report 19s late. Never below zero; a passed deadline polls
+// at once so the deadline error surfaces instead of a sleep hiding it.
+func (m Model) tickDelay(failed engine.StepName) time.Duration {
+	phase := failed
+	if phase == "" {
+		if active, ok := ActiveStep(m.rows); ok {
+			phase = active
+		} else if len(m.order) > 0 {
+			phase = m.order[len(m.order)-1]
+		}
 	}
 	d := pollInterval(m.poll, phase)
-	return tea.Tick(d, func(time.Time) tea.Msg { return tickMsg{} })
+	if !m.deadlineAt.IsZero() {
+		if left := m.deadlineAt.Sub(m.now()); left < d {
+			d = max(left, 0)
+		}
+	}
+	return d
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -476,6 +521,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		if m.busy || m.done {
 			return m, nil
+		}
+		if m.ctx != nil && m.ctx.Err() != nil {
+			// The shared drive context was built once from the screen's deadline; once that
+			// has passed, a retry on it fails before it starts. R is the operator asking for
+			// another go, so it gets another window of poll.Deadline — the decision #57
+			// asked for, taken this way because "R does nothing" was the other option.
+			m = m.renewDeadline()
+			m.notice = "deadline had passed — a fresh window for this retry"
 		}
 		m.busy = true
 		return m, tea.Batch(m.driveCmd(), m.spinner.Tick)

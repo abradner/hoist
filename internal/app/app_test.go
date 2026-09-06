@@ -842,10 +842,7 @@ func TestFlightOpenPRMsgCallsOpenURL(t *testing.T) {
 		return nil
 	}}
 	m := sizedWithPromotion(t, promo)
-	m, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
-	if cmd != nil {
-		t.Error("OpenPRMsg produced a command")
-	}
+	m = openPR(t, m)
 	if got != "https://example.invalid/pr/1" {
 		t.Errorf("OpenURL called with %q, want the PR URL", got)
 	}
@@ -861,7 +858,7 @@ func TestFlightOpenPRMsgShowsErrorFromOpenURL(t *testing.T) {
 		return errors.New("no such browser")
 	}}
 	m := sizedWithPromotion(t, promo)
-	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	m = openPR(t, m)
 	if v := plain(m); !strings.Contains(v, "no such browser") {
 		t.Errorf("view missing the OpenURL error notice:\n%s", v)
 	}
@@ -897,7 +894,7 @@ func TestFlightOpenPRMsgDisplayModeNeverCallsOpenURL(t *testing.T) {
 func TestFlightOpenPRMsgDisplayModeWorksWithNilOpenURL(t *testing.T) {
 	promo := Promotion{OpenPRMode: "display"}
 	m := sizedWithPromotion(t, promo)
-	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	m = openPR(t, m)
 	v := plain(m)
 	if !strings.Contains(v, "https://example.invalid/pr/1") {
 		t.Errorf("view missing the URL:\n%s", v)
@@ -916,7 +913,7 @@ func TestFlightOpenPRMsgBothModeShowsURLOnSuccess(t *testing.T) {
 		OpenURL:    func(_ string) error { return nil },
 	}
 	m := sizedWithPromotion(t, promo)
-	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	m = openPR(t, m)
 	if v := plain(m); !strings.Contains(v, "https://example.invalid/pr/1") {
 		t.Errorf("view missing the URL after a successful launch in both mode:\n%s", v)
 	}
@@ -931,7 +928,7 @@ func TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure(t *testing.T) {
 		OpenURL:    func(_ string) error { return errors.New("no such browser") },
 	}
 	m := sizedWithPromotion(t, promo)
-	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	m = openPR(t, m)
 	v := plain(m)
 	if !strings.Contains(v, "https://example.invalid/pr/1") {
 		t.Errorf("view missing the URL after a failed launch in both mode:\n%s", v)
@@ -1053,7 +1050,7 @@ func TestFlightBackMsgCancelsInFlightDriveCmd(t *testing.T) {
 // every screen's own notice field — it should not linger forever once the operator moves on.
 func TestRootNoticeClearsOnNextKeypress(t *testing.T) {
 	m := sized(t)
-	m, _ = m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	m = openPR(t, m)
 	if !strings.Contains(plain(m), "not wired yet") {
 		t.Fatal("setup: notice not shown after OpenPRMsg")
 	}
@@ -1599,5 +1596,34 @@ func TestInFlightUnwiredDegrades(t *testing.T) {
 	}
 	if v := plain(m); strings.Contains(v, "in flight") {
 		t.Fatalf("no pane without a listing:\n%s", v)
+	}
+}
+
+// openPR delivers flight.OpenPRMsg the way the runtime does: the handler returns a command
+// that runs the launcher (#56: it used to run inside Update and freeze the loop), and the
+// command's result is fed back. "display" mode returns no command at all.
+func openPR(t *testing.T, m tea.Model) tea.Model {
+	t.Helper()
+	m, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+	return m
+}
+
+// The launcher runs outside Update: the handler returns a command and the launcher is not
+// called until that command runs, so a slow browser cannot block the event loop (#56).
+func TestFlightOpenPRLaunchesOutsideUpdate(t *testing.T) {
+	calls := 0
+	m := sizedWithPromotion(t, Promotion{OpenURL: func(string) error { calls++; return nil }})
+	_, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
+	if cmd == nil {
+		t.Fatal("OpenPRMsg must return the launch as a command")
+	}
+	if calls != 0 {
+		t.Fatal("the launcher ran inside Update")
+	}
+	if _, ok := cmd().(openURLResultMsg); !ok || calls != 1 {
+		t.Fatalf("running the command: calls=%d", calls)
 	}
 }

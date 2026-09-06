@@ -13,7 +13,7 @@ func TestStatusBar(t *testing.T) {
 		width       int
 		left, right string
 		want        string // the visible text: got with ANSI sequences stripped
-		styled      bool   // the input carried styling, and the output must still
+		styled      bool   // the left side carried styling; the output must still carry it
 	}{
 		{"fits", 20, "left", "right", "left           right", false},
 		{"exact", 10, "left", "right", "left right", false},
@@ -34,8 +34,8 @@ func TestStatusBar(t *testing.T) {
 		if w := ansi.StringWidth(got); tc.width > 0 && w != tc.width {
 			t.Errorf("%s: width %d, want %d: %q", tc.name, w, tc.width, got)
 		}
-		if tc.styled == !strings.Contains(got, "\x1b[") {
-			t.Errorf("%s: styled=%v but output is %q", tc.name, tc.styled, got)
+		if gotStyled := strings.Contains(got, "\x1b["); gotStyled != tc.styled {
+			t.Errorf("%s: output styled=%v, want %v: %q", tc.name, gotStyled, tc.styled, got)
 		}
 	}
 	// The styled case is only a control if Render actually emitted styling.
