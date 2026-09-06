@@ -1,10 +1,15 @@
 package restart
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // Targets reads the family→Deployment mapping out of the repo, because "family" is a concept the
@@ -55,5 +60,34 @@ func TestTargetsAreScopedToTheNamedFamilies(t *testing.T) {
 		if all[i-1] > all[i] {
 			t.Errorf("targets are not sorted: %v", all)
 		}
+	}
+}
+
+// A transient read failure leaves that Deployment unfinished rather than failing the whole
+// watch. By the time anything calls Observe the pods have already been restarted and there is no
+// resume mode to come back through, so one connection reset would otherwise force the operator to
+// abandon monitoring or restart everything again just to watch it (Copilot, PR #81).
+func TestObserveKeepsWatchingThroughATransientReadError(t *testing.T) {
+	f := &rollout.Fake{}
+	f.SetDeployment("app-staging", "web", rollout.DeploymentStatus{Namespace: "app-staging", Name: "web"})
+	f.DeploymentErr = errors.New("connection reset by peer")
+
+	at := time.Date(2026, 9, 6, 6, 0, 0, 0, time.UTC)
+	got, err := Observe(context.Background(), f, "app-staging", []string{"web"}, at)
+	if err != nil {
+		t.Fatalf("a transient read must not fail the watch: %v", err)
+	}
+	if len(got) != 1 || got[0].Done || got[0].Superseded || got[0].Blocked != "" {
+		t.Fatalf("the Deployment should simply be unfinished, got %+v", got)
+	}
+	if !strings.Contains(got[0].Detail, "could not read it just now") {
+		t.Errorf("the detail should say why it is still pending: %q", got[0].Detail)
+	}
+
+	// A Deployment that has gone away is different: it is not coming back mid-rollout, and
+	// waiting for it is waiting for nothing.
+	f.DeploymentErr = fmt.Errorf("reading Deployment: %w", rollout.ErrNotFound)
+	if _, err := Observe(context.Background(), f, "app-staging", []string{"web"}, at); !errors.Is(err, rollout.ErrNotFound) {
+		t.Errorf("a missing Deployment must end the watch, got %v", err)
 	}
 }

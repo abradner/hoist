@@ -344,8 +344,8 @@ writes one caller-named ref into every occurrence of that image repo in `--env`,
 identical engine pipeline (`gitops.BuildDeployPlan`, which unlike `BuildPlan` treats the repo
 being absent from the target env as an error — there is nothing to write). It takes `promote`'s
 flags minus `--from`, plus the same `--direct`/`--confirm-direct` pair, and its rendered artifacts
-say *deploy*, never *promote*. `hoist restart --env <env> [--family a,b]` (M9) rolls an env's Deployments without changing what
-they run, and is the one command that deliberately writes to the cluster instead of to git: it
+say *deploy*, never *promote*. `hoist restart --env <env> [--family a,b]` (M9) rolls an env's Deployments without changing the image
+references they declare, and is the one command that deliberately writes to the cluster instead of to git: it
 stamps `kubectl.kubernetes.io/restartedAt` on the live pod template exactly as `kubectl rollout
 restart` does. Argo does not treat that as drift even with `selfHeal: true` — its diff is a
 three-way merge, so a field Argo never set and that is absent from the manifest is left alone,
@@ -354,7 +354,9 @@ plan, no branch, no PR, no state file and nothing to resume; re-running restarts
 the operation. Production is gated not by §4.5's PR-and-approval pair (nothing is committed, so
 there is nothing to review) but by `--confirm-production=<env>` repeating the env exactly, the
 same shape `--confirm-direct` uses. Before anything rolls it names every target with its replica
-count, strategy and last restart, and warns — never blocks — where a restart will not be graceful.
+count, strategy and last restart, and warns — never blocks — where a restart will not be graceful,
+including where a container's reference is unpinned: a mutable tag can pull a different build when
+the replacement pod lands, so "the same images" is a claim only a digest can support.
 The same operation is on the matrix as `R`, which restarts the family under the cursor through
 the same `internal/restart` core — capital, because it asks for a write — and shows the target
 list with its warnings before taking the confirmation; production there takes a `huh.Confirm`

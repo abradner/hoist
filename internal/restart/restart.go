@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -204,13 +205,28 @@ type Progress struct {
 }
 
 // Observe reads where each named Deployment has got to, against the stamp this restart wrote.
+//
+// A transient read failure leaves that Deployment simply unfinished rather than failing the
+// whole watch. The pods have already been restarted by the time anything calls this, and there
+// is no resume mode to come back through — so one connection reset would otherwise force the
+// operator to either abandon monitoring or restart everything a second time to watch it. This
+// is the same call the promotion path's own loop already retries (cmd/hoist/drive.go).
+// ErrNotFound is the exception: a Deployment that has gone away is not coming back mid-rollout,
+// and waiting for it is waiting for nothing.
 func Observe(ctx context.Context, ro rollout.Rollout, env string, names []string, at time.Time) ([]Progress, error) {
 	want := Stamp(at)
 	out := make([]Progress, 0, len(names))
 	for _, name := range names {
 		st, err := ro.Deployment(ctx, env, name)
 		if err != nil {
-			return nil, err
+			if errors.Is(err, rollout.ErrNotFound) {
+				return nil, err
+			}
+			// Redacted here rather than at each caller's own render: this is the one place a
+			// raw cluster error enters a Progress, and pkg/rollout's own errors are scrubbed
+			// only of what it knows to scrub.
+			out = append(out, Progress{Name: name, Detail: "could not read it just now: " + redact.Strings(err.Error())})
+			continue
 		}
 		pr := Progress{Name: name, Detail: st.Detail}
 		switch {
