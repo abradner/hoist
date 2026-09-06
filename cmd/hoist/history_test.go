@@ -135,9 +135,22 @@ func TestBuildHistoryFuncsLiveAgeWithoutForge(t *testing.T) {
 	}
 }
 
-func TestBuildHistoryFuncsZeroWithoutApps(t *testing.T) {
-	h := buildHistoryFuncs(nil, &config.RepoConfig{}, nil, nil, nil, "")
-	if h.Delta != nil || h.Mapped != nil {
-		t.Fatal("no apps mapping: a zero Funcs, so screens degrade without a call")
+// No apps mapping means no delta — but the live age blames the gitops repo, which needs no
+// mapping, so it is still wired (an empty repos[].apps used to lose "since 4 weeks ago" too).
+func TestBuildHistoryFuncsWithoutAppsKeepsLiveAge(t *testing.T) {
+	gitopsForge := &forge.Fake{Blames: map[string]map[int]forge.LineOrigin{"head f.yaml": {3: {SHA: "1111"}}}}
+	h := buildHistoryFuncs(nil, &config.RepoConfig{}, nil, gitopsForge, nil, "head")
+	if h.Delta != nil || h.Revision != nil {
+		t.Fatal("no apps mapping: no delta or revision func, so screens degrade without a call")
+	}
+	if h.Mapped == nil || h.Mapped("ghcr.io/example/x") {
+		t.Fatal("Mapped must answer false for every repo")
+	}
+	if h.LiveAge == nil {
+		t.Fatal("LiveAge must be wired without an apps mapping")
+	}
+	age, err := h.LiveAge(context.Background(), gitops.Occurrence{File: "f.yaml", Line: 3})
+	if err != nil || age.SHA != "1111" {
+		t.Fatalf("age=%+v err=%v", age, err)
 	}
 }

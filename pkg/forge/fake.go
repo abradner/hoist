@@ -57,6 +57,7 @@ type Fake struct {
 	Comparisons map[string]Comparison
 	CompareErr  error
 	FilesBySHA  map[string][]string
+	FilesCapped map[string]bool
 	FilesErr    error
 	Touching    map[string][]string
 	TouchingErr error
@@ -323,8 +324,8 @@ func (f *Fake) Compare(_ context.Context, base, head string) (Comparison, error)
 	return c, nil
 }
 
-// CommitFiles implements Forge against FilesBySHA. Never truncated: a test wanting the
-// truncated branch drives it through Comparison.FilesTruncated instead.
+// CommitFiles implements Forge against FilesBySHA; a sha listed in FilesCapped is reported
+// truncated, the forge's "300 files and counting" answer.
 func (f *Fake) CommitFiles(_ context.Context, sha string) ([]string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -332,7 +333,7 @@ func (f *Fake) CommitFiles(_ context.Context, sha string) ([]string, bool, error
 	if f.FilesErr != nil {
 		return nil, false, f.FilesErr
 	}
-	return append([]string(nil), f.FilesBySHA[sha]...), false, nil
+	return append([]string(nil), f.FilesBySHA[sha]...), f.FilesCapped[sha], nil
 }
 
 // CommitsTouching implements Forge against Touching (keyed "ref path"); since is recorded in

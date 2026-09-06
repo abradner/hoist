@@ -76,13 +76,17 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	switch {
 	case d.Prefix == "":
 		migrations = " · migrations not tracked for this app"
+	case len(d.Migrations) == 0 && d.MigrationsIncomplete:
+		// The attribution could not see everything (a truncated compare, or a capped file
+		// list): zero is not the answer, and saying nothing would read as zero.
+		migrations = " · migrations unknown (the history is incomplete)"
 	case d.MigrationCommits > 0 || len(d.Migrations) > 0:
 		word := "migrations"
 		if len(d.Migrations) == 1 {
 			word = "migration"
 		}
 		migrations = fmt.Sprintf(" · %d %s", len(d.Migrations), word)
-		if d.Truncated {
+		if d.MigrationsIncomplete {
 			migrations += " (at least)"
 		}
 	}
@@ -90,7 +94,16 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	case migrate.DirectionSame:
 		return fmt.Sprintf("%s is what %s declares", cursor, target)
 	case migrate.DirectionRollback:
-		return fmt.Sprintf("%s is %s behind %s — a rollback%s", cursor, commits(), declared, strings.Replace(migrations, "migration", "migration reverted", 1))
+		// "2 migrations reverted", "1 migration reverted"; the untracked form is unchanged.
+		reverted := migrations
+		switch {
+		case len(d.Migrations) == 0:
+		case strings.Contains(migrations, " migrations"):
+			reverted = strings.Replace(migrations, " migrations", " migrations reverted", 1)
+		default:
+			reverted = strings.Replace(migrations, " migration", " migration reverted", 1)
+		}
+		return fmt.Sprintf("%s is %s behind %s — a rollback%s", cursor, commits(), declared, reverted)
 	case migrate.DirectionDiverged:
 		return fmt.Sprintf("%s and %s diverged: %s only in %s%s", cursor, declared, commits(), cursor, migrations)
 	default:
@@ -98,10 +111,11 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	}
 }
 
-// Lines renders a pane's lines for one delta: the head, then up to room-1 commits and a
-// "…N more" trailer. A gap — no app repo, an unresolved revision, a forge error — is one
-// sentence. room is the lines available; the head always fits.
-func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, room int) []Line {
+// Lines renders a pane's lines for one delta: the head, then up to room-1 commits windowed
+// so that the commit at index at is among them, with "…N earlier" and "…N more" trailers for
+// what the window leaves out. A gap — no app repo, an unresolved revision, a forge error — is
+// one sentence. room is the lines available; the head always fits. at is -1 for no cursor.
+func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, room, at int) []Line {
 	switch {
 	case !mapped:
 		return []Line{{Text: fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", imageRepo), Role: "gap", Index: -1}}
@@ -115,16 +129,15 @@ func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, ro
 	}
 	d := st.Delta
 	lines := []Line{{Text: Summary(d, cursor, declared, target), Role: "head", Index: -1}}
-	if len(d.Commits) == 0 || room <= 1 {
+	n := len(d.Commits)
+	if n == 0 || room <= 1 {
 		return lines
 	}
-	show := room - 1
-	more := 0
-	if len(d.Commits) > show {
-		more = len(d.Commits) - (show - 1)
-		show--
+	start, end := window(n, room-1, at)
+	if start > 0 {
+		lines = append(lines, Line{Text: fmt.Sprintf("…%d earlier", start), Role: "more", Index: -1})
 	}
-	for i := 0; i < show && i < len(d.Commits); i++ {
+	for i := start; i < end; i++ {
 		c := d.Commits[i]
 		role := "commit"
 		if len(c.Migrations) > 0 {
@@ -132,10 +145,44 @@ func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, ro
 		}
 		lines = append(lines, Line{Text: fmt.Sprintf("%s  %s", ShortSHA(c.SHA), c.Subject), Role: role, Index: i})
 	}
-	if more > 0 {
-		lines = append(lines, Line{Text: fmt.Sprintf("…%d more", more), Role: "more", Index: -1})
+	if end < n {
+		lines = append(lines, Line{Text: fmt.Sprintf("…%d more", n-end), Role: "more", Index: -1})
 	}
 	return lines
+}
+
+// window picks [start, end) of n commits for room lines, keeping index at visible: the
+// trailers ("…N earlier", "…N more") each take a line when present. A cursor past what the
+// first page shows used to vanish, while enter opened a commit the operator never saw.
+func window(n, room, at int) (start, end int) {
+	if room <= 0 {
+		return 0, 0
+	}
+	if n <= room {
+		return 0, n
+	}
+	if at < 0 {
+		at = 0
+	}
+	if at >= n {
+		at = n - 1
+	}
+	// A first page has one trailer ("more"); a later page has "earlier" and maybe "more".
+	fit := room - 1
+	if at < fit {
+		return 0, fit
+	}
+	fit = room - 2 // both trailers
+	if fit < 1 {
+		fit = 1
+	}
+	start = at - fit + 1
+	end = start + fit
+	if end >= n { // last page: no "more" trailer, so one more row fits
+		end = n
+		start = max(0, n-(room-1))
+	}
+	return start, end
 }
 
 // ShortSHA is the first seven characters of a sha.

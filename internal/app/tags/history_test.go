@@ -213,3 +213,73 @@ func TestStaleHistoryResultIsDiscarded(t *testing.T) {
 }
 
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
+
+// The confirm screen leads with the history it is handed and never refetches it; leaving the
+// picker while the cursor tag's delta is still loading would cancel that load and show the
+// no-history form for a mapped image. space waits until the answer is in.
+func TestSpaceWaitsForTheCursorTagsHistory(t *testing.T) {
+	m := historyModel(t, fourteenAhead, liveAge34Days)
+	m.deltas["v3"] = history.State{} // asked, not answered — a fetch in flight
+	m, cmd := m.Update(uitest.Key("space"))
+	if cmd != nil {
+		t.Fatalf("space emitted %T while the history was pending", cmd())
+	}
+	if !strings.Contains(m.notice, "still reading v3's commits") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	// Positive control: once answered, the same key reviews the change.
+	d, _ := fourteenAhead(context.Background(), image.Ref{}, image.Ref{Tag: "v3"})
+	m.deltas["v3"] = history.State{Loaded: true, Delta: d}
+	if _, cmd = m.Update(uitest.Key("space")); cmd == nil {
+		t.Fatal("space emitted nothing once the history had loaded")
+	} else if msg, ok := cmd().(SelectedMsg); !ok || msg.Delta == nil {
+		t.Fatalf("got %+v", cmd())
+	}
+}
+
+// Filtering to a different tag starts its commit cursor over: a cursor carried from the
+// previous tag could point past the new tag's commits, and enter would open nothing.
+func TestFilterResetsTheCommitCursor(t *testing.T) {
+	m := historyModel(t, fourteenAhead, liveAge34Days)
+	m = uitest.Keys(m, updateFn, "tab", "down", "down")
+	if m.commitIdx != 2 {
+		t.Fatalf("idx = %d", m.commitIdx)
+	}
+	m = uitest.Keys(m, updateFn, "esc", "/", "v", "2")
+	if m.selectedTag != "v2" || m.commitIdx != 0 {
+		t.Fatalf("tag=%q idx=%d; want v2 with the cursor reset", m.selectedTag, m.commitIdx)
+	}
+}
+
+// The commit pane follows the cursor into the second page rather than rendering 0..k
+// whatever the cursor says.
+func TestCommitPaneFollowsTheCursor(t *testing.T) {
+	m := historyModel(t, fourteenAhead, liveAge34Days)
+	m = uitest.Keys(m, updateFn, "tab", "down", "down", "down", "down", "down", "down", "down", "down")
+	v := ansi.Strip(m.View())
+	if m.commitIdx != 8 || !strings.Contains(v, "earlier") {
+		t.Fatalf("idx=%d, pane lacks the earlier trailer:\n%s", m.commitIdx, v)
+	}
+	cursorSHA := history.ShortSHA(m.currentCommits()[8].SHA)
+	if !strings.Contains(v, "▸ "+cursorSHA) && !strings.Contains(v, cursorSHA) {
+		t.Fatalf("pane does not show the commit under the cursor (%s):\n%s", cursorSHA, v)
+	}
+}
+
+// A rollback lists the commits being removed: they are in what the env declares and not in
+// the tag under the cursor, so the detail line reads the other way round.
+func TestRollbackDetailReadsTheOtherWay(t *testing.T) {
+	rollback := func(ctx context.Context, from, to image.Ref) (migrate.Delta, error) {
+		d, err := fourteenAhead(ctx, from, to)
+		if to.Tag == "v3" {
+			d.Direction = migrate.DirectionRollback
+		}
+		return d, err
+	}
+	m := historyModel(t, rollback, liveAge34Days)
+	m = uitest.Keys(m, updateFn, "tab", "enter")
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "1 of 14 in v1 · not in v3") {
+		t.Fatalf("rollback detail must say the commit is in v1 and not in v3:\n%s", v)
+	}
+}

@@ -233,7 +233,7 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 		t.Fatalf("cluster error not shown for c:\n%s", v)
 	}
 	// A stale answer (an earlier generation) is dropped.
-	stale := driftMsg{gen: m.gen - 1, env: "a", running: map[string]image.Ref{"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}
+	stale := DriftMsg{gen: m.gen - 1, env: "a", running: map[string]image.Ref{"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}
 	m2, _ := m.Update(stale)
 	if strings.Contains(ansi.Strip(m2.View()), "v99") {
 		t.Fatal("a stale generation's answer was applied")

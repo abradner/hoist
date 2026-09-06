@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	ghapi "github.com/cli/go-gh/v2/pkg/api"
 
 	"github.com/abradner/hoist/pkg/forge"
@@ -57,9 +58,9 @@ func toCommit(r commitResponse) forge.Commit {
 	body = strings.TrimSpace(body)
 	return forge.Commit{
 		SHA:     r.SHA,
-		Subject: redact.Strings(strings.TrimSpace(subject)),
-		Body:    redact.Strings(body),
-		Author:  redact.Strings(r.Commit.Author.Name),
+		Subject: cleanLine(strings.TrimSpace(subject)),
+		Body:    clean(body),
+		Author:  cleanLine(r.Commit.Author.Name),
 		Date:    r.Commit.Author.Date,
 	}
 }
@@ -74,6 +75,13 @@ func (c *Client) ResolveRef(ctx context.Context, ref string) (string, bool, erro
 	if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		var herr *ghapi.HTTPError
 		if errors.As(err, &herr) && (herr.StatusCode == http.StatusNotFound || herr.StatusCode == http.StatusUnprocessableEntity) {
+			if herr.StatusCode == http.StatusNotFound {
+				// A 404 is also what a private repo the token cannot read answers; only a
+				// visible repo's 404 means "no such ref" (repoVisible).
+				if verr := c.repoVisible(ctx); verr != nil {
+					return "", false, verr
+				}
+			}
 			return "", false, nil
 		}
 		return "", false, translateErr("resolving "+ref, err)
@@ -99,34 +107,157 @@ type compareResponse struct {
 // forge.ErrUnknownRef, wrapped with the same scope hint translateErr gives — an unknown ref and
 // a private repo the token cannot see are the same status code.
 func (c *Client) Compare(ctx context.Context, base, head string) (forge.Comparison, error) {
+	const perPage = 100
 	var out forge.Comparison
-	for page := 1; page <= maxComparePages; page++ {
-		q := url.Values{"per_page": {"100"}, "page": {fmt.Sprint(page)}}
+	fetch := func(page int) (compareResponse, error) {
+		q := url.Values{"per_page": {fmt.Sprint(perPage)}, "page": {fmt.Sprint(page)}}
 		path := fmt.Sprintf("repos/%s/%s/compare/%s...%s?%s", c.owner, c.repo, url.PathEscape(base), url.PathEscape(head), q.Encode())
 		var resp compareResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, path, nil, &resp); err != nil {
 			var herr *ghapi.HTTPError
 			if errors.As(err, &herr) && herr.StatusCode == http.StatusNotFound {
-				return forge.Comparison{}, fmt.Errorf("%w: %w", forge.ErrUnknownRef, translateErr(fmt.Sprintf("comparing %s...%s", base, head), err))
+				if verr := c.repoVisible(ctx); verr != nil {
+					return resp, verr
+				}
+				return resp, fmt.Errorf("%w: %w", forge.ErrUnknownRef, translateErr(fmt.Sprintf("comparing %s...%s", base, head), err))
 			}
-			return forge.Comparison{}, translateErr(fmt.Sprintf("comparing %s...%s", base, head), err)
+			return resp, translateErr(fmt.Sprintf("comparing %s...%s", base, head), err)
 		}
-		if page == 1 {
-			out.Status, out.AheadBy, out.BehindBy, out.Total = resp.Status, resp.AheadBy, resp.BehindBy, resp.TotalCommits
-			for _, f := range resp.Files {
-				out.Files = append(out.Files, redact.Strings(f.Filename))
-			}
-			out.FilesTruncated = len(resp.Files) >= githubFilesCap
+		return resp, nil
+	}
+	first, err := fetch(1)
+	if err != nil {
+		return forge.Comparison{}, err
+	}
+	out.Status, out.AheadBy, out.BehindBy, out.Total = first.Status, first.AheadBy, first.BehindBy, first.TotalCommits
+	for _, f := range first.Files {
+		out.Files = append(out.Files, cleanLine(f.Filename))
+	}
+	out.FilesTruncated = len(first.Files) >= githubFilesCap
+
+	// GitHub pages a comparison oldest first. When the range fits in maxComparePages the
+	// walk is 1..n; when it does not, the pages that matter are the LAST ones — the caller
+	// documents Commits as the newest len(Commits) of Total, and a migration in the newest
+	// fifty of a 350-commit range is exactly the one that must not fall off the end.
+	lastPage := (out.Total + perPage - 1) / perPage
+	firstPage := 1
+	if lastPage > maxComparePages {
+		firstPage = lastPage - maxComparePages + 1
+	}
+	pages := []compareResponse{}
+	if firstPage == 1 {
+		pages = append(pages, first)
+	}
+	for page := max(firstPage, 2); page <= lastPage && page <= firstPage+maxComparePages-1; page++ {
+		resp, err := fetch(page)
+		if err != nil {
+			return forge.Comparison{}, err
 		}
+		pages = append(pages, resp)
+		if len(resp.Commits) < perPage {
+			break
+		}
+	}
+	for _, resp := range pages {
 		for _, r := range resp.Commits {
 			out.Commits = append(out.Commits, toCommit(r))
 		}
-		if len(resp.Commits) < 100 {
-			break
+	}
+	if firstPage > 1 {
+		// The last pages alone hold fewer than the bound when the total is not a multiple
+		// of the page size; the page just before firstPage fills the gap — page 1 when that
+		// is the one, otherwise fetched — so the result is the newest bound, contiguous.
+		if need := maxComparePages*perPage - len(out.Commits); need > 0 {
+			before := first
+			if firstPage-1 != 1 {
+				var err error
+				if before, err = fetch(firstPage - 1); err != nil {
+					return forge.Comparison{}, err
+				}
+			}
+			if need <= len(before.Commits) {
+				var fill []forge.Commit
+				for _, r := range before.Commits[len(before.Commits)-need:] {
+					fill = append(fill, toCommit(r))
+				}
+				out.Commits = append(fill, out.Commits...)
+			}
 		}
 	}
 	out.Truncated = len(out.Commits) < out.Total
 	return out, nil
+}
+
+// repoVisible answers, once per Client, whether the token can see the repository at all:
+// GitHub answers 404 for a missing ref and for a private repository the token cannot read,
+// and the Forge contract says a scope failure is an error, never ok=false — pkg/migrate reads
+// ok=false as "try the next source" and would otherwise degrade every revision to unknown
+// without a word about why. nil means visible; the error carries translateErr's scope hint.
+func (c *Client) repoVisible(ctx context.Context) error {
+	c.visMu.Lock()
+	defer c.visMu.Unlock()
+	if c.visKnown {
+		return c.visErr
+	}
+	var resp struct {
+		FullName string `json:"full_name"`
+	}
+	err := c.rest.DoWithContext(ctx, http.MethodGet, fmt.Sprintf("repos/%s/%s", c.owner, c.repo), nil, &resp)
+	if err == nil {
+		c.visKnown = true
+		return nil
+	}
+	verr := translateErr(fmt.Sprintf("reading %s/%s (the repository itself is not visible to this token)", c.owner, c.repo), err)
+	// Only a definitive answer is remembered: 404 and 403 say the token cannot see the
+	// repository. A cancelled context, a 5xx or an exhausted rate limit is the moment's
+	// answer, and caching it would replay a stale failure for the rest of the session.
+	var herr *ghapi.HTTPError
+	if errors.As(err, &herr) && (herr.StatusCode == http.StatusNotFound || herr.StatusCode == http.StatusForbidden) && !rateLimited(herr) {
+		c.visKnown, c.visErr = true, verr
+	}
+	return verr
+}
+
+// rateLimited recognises GitHub's two rate-limit shapes — a primary limit (403 with
+// X-Ratelimit-Remaining: 0) and a secondary one (403/429 whose message says so) — which are
+// the moment's answer, never the repository's visibility.
+func rateLimited(herr *ghapi.HTTPError) bool {
+	if herr.StatusCode == http.StatusTooManyRequests || herr.Headers.Get("X-Ratelimit-Remaining") == "0" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(herr.Message), "rate limit")
+}
+
+// clean strips terminal control sequences from upstream text before it is ever styled or
+// rendered: a commit subject is whatever its author typed, and a crafted OSC/CSI sequence in
+// one would otherwise reach the operator's terminal verbatim the moment the picker opens.
+// ANSI escapes go through ansi.Strip; the remaining C0 controls are dropped except newline
+// and tab, which commit bodies legitimately carry. redact.Strings runs after, as before.
+// Anything that is one line on a screen — a subject, an author, a file name (git allows
+// both bytes in a path) — goes through cleanLine, which drops those two as well.
+func clean(s string) string {
+	s = ansi.Strip(s)
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	return redact.Strings(s)
+}
+
+// cleanLine is clean for single-line text: newline and tab go too, so a file name cannot
+// add rows to a confirm screen.
+func cleanLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return -1
+		}
+		return r
+	}, clean(s))
 }
 
 // CommitFiles implements forge.Forge: GET .../commits/{sha}, whose files[] pages at 100 like
@@ -142,7 +273,7 @@ func (c *Client) CommitFiles(ctx context.Context, sha string) ([]string, bool, e
 			return nil, false, translateErr("listing files of commit "+sha, err)
 		}
 		for _, f := range resp.Files {
-			files = append(files, redact.Strings(f.Filename))
+			files = append(files, cleanLine(f.Filename))
 		}
 		lastFull = len(resp.Files) >= 100
 		if !lastFull {

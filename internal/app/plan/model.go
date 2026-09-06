@@ -182,6 +182,12 @@ type Model struct {
 	diff     string
 	showYAML bool
 
+	// ctx scopes every history request this screen issues; cancel runs when the screen is
+	// left (esc, or enter handing off to the flight screen), so a delta still loading does
+	// not keep calling the forge for a screen nobody is looking at.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	confirming    bool
 	confirmDirect *huh.Confirm
 	// confirmValue is huh's write target only; the answer is read from the widget
@@ -221,12 +227,21 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		deltas:     map[string]history.State{},
 		styles:     ui.NewStyles(true),
 	}
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	if target == "" || forcePrompt {
 		m.state = stateSelectEnv
 		m.buildEnvSelect()
 	} else {
 		m.state = stateLoading
 		m.status = fmt.Sprintf("resolving digests from %s pods…", source)
+	}
+	return m
+}
+
+// leave cancels the screen's outstanding history requests; every path off the screen calls it.
+func (m Model) leave() Model {
+	if m.cancel != nil {
+		m.cancel()
 	}
 	return m
 }
@@ -347,7 +362,10 @@ func (m Model) historyCmds() tea.Cmd {
 	if m.histFn.Delta == nil {
 		return nil
 	}
-	delta, gen := m.histFn.Delta, m.gen
+	delta, gen, ctx := m.histFn.Delta, m.gen, m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cmds := make([]tea.Cmd, 0, len(m.rows))
 	for _, r := range m.rows {
 		if r.Disabled {
@@ -356,7 +374,7 @@ func (m Model) historyCmds() tea.Cmd {
 		from, to, repo := r.Old, r.New, r.Repo
 		m.deltas[repo] = history.State{}
 		cmds = append(cmds, func() tea.Msg {
-			d, err := delta(context.Background(), from, to)
+			d, err := delta(ctx, from, to)
 			return historyMsg{gen: gen, repo: repo, delta: d, err: err}
 		})
 	}
@@ -384,7 +402,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		if key.Matches(msg, m.keys.Back) && !m.confirming {
-			return m, func() tea.Msg { return BackMsg{} }
+			return m.leave(), func() tea.Msg { return BackMsg{} }
 		}
 	}
 
@@ -454,7 +472,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		ticked := append([]string(nil), m.ticked...)
 		plan, outcome, mode, source, target := m.plan, m.outcome, m.mode, m.source, m.target
-		return m, func() tea.Msg {
+		return m.leave(), func() tea.Msg {
 			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target}
 		}
 	case key.Matches(kmsg, m.keys.Mode):
@@ -467,7 +485,9 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		return m, tea.Batch(m.confirmDirect.Init(), m.confirmDirect.Focus())
 	case key.Matches(kmsg, m.keys.YAML):
 		m.showYAML = !m.showYAML
-		return m.refreshRight(), nil
+		m = m.refreshRight()
+		m.viewport.GotoTop() // two unrelated documents; a scroll offset from one hides the other's head
+		return m, nil
 	case key.Matches(kmsg, m.keys.SwitchPane):
 		if m.focus == focusLeft {
 			m.focus = focusRight
@@ -781,7 +801,7 @@ func (m Model) totalsSection() string {
 	for _, r := range m.ticked {
 		ticked[r] = true
 	}
-	repos, commits, migrations, loading, missing, unresolved := 0, 0, 0, 0, 0, 0
+	repos, commits, migrations, loading, missing, unresolved, capped := 0, 0, 0, 0, 0, 0, 0
 	for _, r := range m.rows {
 		if r.Disabled {
 			unresolved++
@@ -802,6 +822,9 @@ func (m Model) totalsSection() string {
 		default:
 			commits += len(st.Delta.Commits)
 			migrations += len(st.Delta.Migrations)
+			if st.Delta.MigrationsIncomplete {
+				capped++
+			}
 		}
 	}
 	parts := []string{m.styles.Title.Render(plural(repos, "repo") + " ticked")}
@@ -809,7 +832,13 @@ func (m Model) totalsSection() string {
 		parts = append(parts, m.styles.Title.Render(plural(commits, "commit")))
 	}
 	if migrations > 0 {
-		parts = append(parts, m.styles.Warn.Render(plural(migrations, "migration")))
+		word := plural(migrations, "migration")
+		if capped > 0 {
+			word += " (at least)"
+		}
+		parts = append(parts, m.styles.Warn.Render(word))
+	} else if capped > 0 {
+		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("migrations unknown for %d", capped)))
 	}
 	if loading > 0 {
 		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("history loading for %d", loading)))
@@ -969,7 +998,7 @@ func (m Model) impactBody() string {
 		lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", r.Repo), width, "")))
 	} else {
 		st := m.deltas[r.Repo]
-		for _, l := range history.Lines(st, tagOrDigest(r.New), tagOrDigest(r.Old), m.target, r.Repo, mapped, 200) {
+		for _, l := range history.Lines(st, tagOrDigest(r.New), tagOrDigest(r.Old), m.target, r.Repo, mapped, 200, -1) {
 			switch l.Role {
 			case "head":
 				lines = append(lines, m.styles.Title.Render(ansi.Wrap(l.Text, width, "")))

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ghapi "github.com/cli/go-gh/v2/pkg/api"
@@ -38,6 +39,11 @@ type Client struct {
 	// on a Client built through newWithClient, the M3 test seam; newWithClients supplies one.
 	gql         *ghapi.GraphQLClient
 	owner, repo string
+	// visMu/visKnown/visErr memoise repoVisible (history.go): one probe per Client, since
+	// every 404 the history methods see has to ask the same question.
+	visMu    sync.Mutex
+	visKnown bool
+	visErr   error
 }
 
 // New builds a Client for ownerRepo ("owner/name", RepoConfig.GitHub), authenticating
@@ -597,14 +603,15 @@ func translateErr(op string, err error) error {
 		// CommitsTouching, plus Tags' own N+1) make it the likeliest 403 an operator will now
 		// see — so name it, with the reset time, rather than send them to `gh auth status`
 		// for a token that is fine.
-		if herr.StatusCode == http.StatusForbidden || herr.StatusCode == http.StatusTooManyRequests {
-			if herr.Headers.Get("X-Ratelimit-Remaining") == "0" {
-				reset := "shortly"
-				if secs, perr := strconv.ParseInt(herr.Headers.Get("X-Ratelimit-Reset"), 10, 64); perr == nil {
-					reset = "at " + time.Unix(secs, 0).Local().Format("15:04")
-				}
-				return fmt.Errorf("github: %s: HTTP %d %s (GitHub API rate limit exhausted; it resets %s)", op, herr.StatusCode, msg, reset)
+		if rateLimited(herr) {
+			// Primary (X-Ratelimit-Remaining: 0, with a reset time) or secondary (a 429, or a
+			// 403 whose message says so, with no reset header) — the same predicate
+			// repoVisible uses to know a 403 is not the repository's visibility.
+			reset := "shortly"
+			if secs, perr := strconv.ParseInt(herr.Headers.Get("X-Ratelimit-Reset"), 10, 64); perr == nil {
+				reset = "at " + time.Unix(secs, 0).Local().Format("15:04")
 			}
+			return fmt.Errorf("github: %s: HTTP %d %s (GitHub API rate limit exhausted; it resets %s)", op, herr.StatusCode, msg, reset)
 		}
 		if herr.StatusCode == http.StatusForbidden || herr.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("github: %s: HTTP %d %s (the gh token may be missing the repo scope this needs — check `gh auth status`, and `gh auth refresh -s repo` if so)", op, herr.StatusCode, msg)

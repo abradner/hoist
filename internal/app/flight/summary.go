@@ -7,6 +7,7 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // Summary is one promotion as the matrix's in-flight pane shows it (M10, #85 screen 05): the
@@ -35,7 +36,7 @@ func Summarize(s engine.PromotionState, done bool, statuses []engine.StepStatus,
 		StartedAt: StartedAt(s), PR: s.PR, Done: done,
 	}
 	if err != nil {
-		out.Err = err.Error()
+		out.Err = redact.Strings(err.Error())
 		out.Rows = DeriveRows(OrderFor(s), false, nil)
 		return out
 	}

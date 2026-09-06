@@ -14,6 +14,7 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
@@ -839,6 +840,7 @@ func TestViewFixedSize(t *testing.T) {
 
 	t.Run("mid CI waiting", func(t *testing.T) {
 		m := New(fixtureState(), PollDurations{}, nil)
+		m.state.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"} // a PR exists, so o is offered
 		m = m.SetSize(100, 30).SetStyles(styles)
 		m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
 			st(engine.StepBranched, engine.Observation{Satisfied: true}),
@@ -1005,3 +1007,39 @@ func TestHeaderNamesADeployAsADeploy(t *testing.T) {
 		t.Errorf("a promotion still moves between two envs:\n%s", pv)
 	}
 }
+
+// o is offered only when there is a PR to open: a direct promotion never has one, and a hint
+// for a key that can only answer "no PR to open yet" is a hint that lies.
+func TestHintOffersOpenPROnlyWithAPR(t *testing.T) {
+	m := New(fixtureState(), PollDurations{}, nil).SetSize(100, 30).SetStyles(ui.NewStyles(true))
+	if v := ansi.Strip(m.View()); strings.Contains(v, "o open PR") {
+		t.Fatalf("no PR yet, but the hint offers o:\n%s", v)
+	}
+	m.state.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "o open PR") {
+		t.Fatalf("a PR exists, but the hint does not offer o:\n%s", v)
+	}
+}
+
+// The log is a viewport that the arrow keys scroll: the retained viewport must be the sized
+// one, not the zero-sized one New built (layout used to run only on View's copy).
+func TestLogScrollsByKeypress(t *testing.T) {
+	st := fixtureState()
+	for i := 0; i < 60; i++ {
+		st.History = append(st.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
+	}
+	m := New(st, PollDurations{}, nil).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m, _ = m.Update(uitest.Key("l"))
+	if !m.showLog || m.log.YOffset() != 0 {
+		t.Fatalf("after l: showLog=%v offset=%d", m.showLog, m.log.YOffset())
+	}
+	m = uitest.Keys(m, updateFn, "down", "down", "down")
+	if m.log.YOffset() != 3 {
+		t.Fatalf("three downs scrolled to %d; want 3", m.log.YOffset())
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "entry 3") {
+		t.Fatalf("view does not show the scrolled log:\n%s", v)
+	}
+}
+
+func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }

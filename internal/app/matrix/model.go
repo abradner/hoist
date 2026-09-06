@@ -35,10 +35,19 @@ const maxCellWidth = 44
 // value, never an adaptor).
 type DriftFunc func(ctx context.Context, env string) (map[string]image.Ref, error)
 
-// driftMsg is one env's answer. gen is the refresh generation it belongs to, so a slow
+// chooserKind names what the dialog under m.chooser is choosing between.
+type chooserKind int
+
+const (
+	chooserImage  chooserKind = iota // d on a cell with several first-party images
+	chooserResume                    // r with several promotions in flight
+	chooserOpenPR                    // o with several in flight that have PRs
+)
+
+// DriftMsg is one env's answer. gen is the refresh generation it belongs to, so a slow
 // answer from before a refresh (F5) or a previous instance of this screen is dropped rather
 // than painting stale drift over a newer answer.
-type driftMsg struct {
+type DriftMsg struct {
 	gen     uint64
 	env     string
 	running map[string]image.Ref
@@ -80,7 +89,7 @@ type Model struct {
 	// has to say which one to deploy (#85: "d picks the first sorted image, silently").
 	chooser       *huh.Select[string]
 	chooserTarget string
-	chooserResume bool // the chooser picks a promotion to resume, not an image
+	chooserKind   chooserKind // what the open chooser picks: an image, a promotion to resume, a PR to open
 
 	// inflight is what the root listed as promoting right now (SetInFlight), drawn as the
 	// pane under the table (inflight.go); inflightErr when the listing itself failed. now
@@ -225,7 +234,7 @@ func (m Model) askCluster() tea.Cmd {
 		env := env
 		cmds = append(cmds, func() tea.Msg {
 			running, err := drift(context.Background(), env)
-			return driftMsg{gen: gen, env: env, running: running, err: err}
+			return DriftMsg{gen: gen, env: env, running: running, err: err}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -234,9 +243,9 @@ func (m Model) askCluster() tea.Cmd {
 // Update handles the screen's keys and forwards the rest to the table. Quit is the root's.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case driftMsg:
+	case DriftMsg:
 		if msg.gen != m.gen {
-			return m, nil // an earlier generation's answer; see driftMsg
+			return m, nil // an earlier generation's answer; see DriftMsg
 		}
 		delete(m.pending, msg.env)
 		if msg.err != nil {
@@ -310,17 +319,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				id := m.inflight[0].ID
 				return m, func() tea.Msg { return ResumeMsg{ID: id} }
 			default:
-				return m.openResumeChooser()
+				return m.openInFlightChooser(chooserResume, m.inflight)
 			}
 		case key.Matches(msg, m.keys.OpenPR):
-			for _, s := range m.inflight {
-				if s.PR != nil && s.PR.URL != "" {
-					url := s.PR.URL
-					return m, func() tea.Msg { return flight.OpenPRMsg{URL: url} }
-				}
+			// With several in flight, o asks which — the first in id order would be an
+			// arbitrary PR, and the pane has no cursor to say otherwise (Copilot, #111).
+			withPR := m.withPR()
+			switch len(withPR) {
+			case 0:
+				m.notice = "nothing in flight has a PR to open"
+				return m, nil
+			case 1:
+				url := withPR[0].PR.URL
+				return m, func() tea.Msg { return flight.OpenPRMsg{URL: url} }
+			default:
+				return m.openInFlightChooser(chooserOpenPR, withPR)
 			}
-			m.notice = "nothing in flight has a PR to open"
-			return m, nil
 		case key.Matches(msg, m.keys.DeployNew):
 			env := m.CurrentEnv()
 			if env == "" {
@@ -360,38 +374,65 @@ func (m Model) openChooser(env string, repos []string) (Model, tea.Cmd) {
 	return m, tea.Batch(sel.Init(), sel.Focus())
 }
 
-// openResumeChooser asks which of several in-flight promotions to open.
-func (m Model) openResumeChooser() (Model, tea.Cmd) {
-	opts := make([]huh.Option[string], 0, len(m.inflight))
-	for _, s := range m.inflight {
+// openInFlightChooser asks which of several in-flight promotions r or o meant.
+func (m Model) openInFlightChooser(kind chooserKind, from []flight.Summary) (Model, tea.Cmd) {
+	opts := make([]huh.Option[string], 0, len(from))
+	for _, s := range from {
 		opts = append(opts, huh.NewOption(s.ID+"  "+pair(s)+"  "+s.Verdict(), s.ID))
 	}
-	sel := huh.NewSelect[string]().Title("resume which promotion?").Options(opts...)
+	title := "resume which promotion?"
+	if kind == chooserOpenPR {
+		title = "open which promotion's PR?"
+	}
+	sel := huh.NewSelect[string]().Title(title).Options(opts...)
 	sel.WithKeyMap(huh.NewDefaultKeyMap())
 	sel.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.chooser = sel
 	m.chooserTarget = ""
-	m.chooserResume = true
+	m.chooserKind = kind
 	return m, tea.Batch(sel.Init(), sel.Focus())
+}
+
+// withPR is the in-flight promotions that have a PR to open, in pane order.
+func (m Model) withPR() []flight.Summary {
+	var out []flight.Summary
+	for _, s := range m.inflight {
+		if s.PR != nil && s.PR.URL != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.chooser = nil
+		// The kind resets with the dialog: an escaped resume chooser used to leave the
+		// next image chooser emitting ResumeMsg with an image repo as the id (Copilot, #111).
+		m.chooser, m.chooserKind = nil, chooserImage
 		return m, nil
 	case "enter":
 		if m.chooser.GetFiltering() {
 			break // enter ends the filter first; a second enter chooses
 		}
 		choice, _ := m.chooser.GetValue().(string) // GetValue, never a captured field
-		target, resume := m.chooserTarget, m.chooserResume
-		m.chooser, m.chooserResume = nil, false
+		target, kind := m.chooserTarget, m.chooserKind
+		m.chooser, m.chooserKind = nil, chooserImage
 		if choice == "" {
 			return m, nil
 		}
-		if resume {
+		switch kind {
+		case chooserResume:
 			return m, func() tea.Msg { return ResumeMsg{ID: choice} }
+		case chooserOpenPR:
+			for _, s := range m.withPR() {
+				if s.ID == choice {
+					url := s.PR.URL
+					return m, func() tea.Msg { return flight.OpenPRMsg{URL: url} }
+				}
+			}
+			m.notice = "that promotion no longer has a PR to open"
+			return m, nil
 		}
 		return m, func() tea.Msg { return OpenTagsMsg{ImageRepo: choice, Target: target} }
 	}
@@ -453,15 +494,27 @@ func (m Model) View() string {
 		frame.Sections = append(frame.Sections, notes)
 	}
 	frame.Panes = []string{m.inflightPane(m.paneBudget())}
-	view := frame.Render(m.styles, m.width, m.height)
+	// Every string the pane renders — a Summary's Err, a step's Detail, the drift error —
+	// passes redact once here, at the render boundary, the convention the other screens use.
+	view := redact.Strings(frame.Render(m.styles, m.width, m.height))
 	if m.chooser != nil {
 		title := "deploy"
-		if m.chooserResume {
+		switch m.chooserKind {
+		case chooserResume:
 			title = "resume"
+		case chooserOpenPR:
+			title = "open PR"
 		}
-		return ui.Dialog(m.styles, view, title, m.chooser.View(), m.width, m.height)
+		return ui.Dialog(m.styles, view, title, redact.Strings(m.chooser.View()), m.width, m.height)
 	}
 	return view
+}
+
+// WithDrift replaces the cluster-asking function New was given — the root uses it to hand
+// the matrix a pods-only resolver built after New.
+func (m Model) WithDrift(drift DriftFunc) Model {
+	m.drift = drift
+	return m
 }
 
 func (m Model) title() string {

@@ -26,6 +26,7 @@ func TestResolveRefFoldsNotFoundAndAmbiguousIntoNotOK(t *testing.T) {
 	for _, status := range []int{404, 422} {
 		c := newTestClient(t, map[string]func(*http.Request) (int, string){
 			"GET /repos/example/gitops/commits/v9": static(status, `{"message":"nope"}`),
+			"GET /repos/example/gitops":            static(200, `{"full_name":"example/gitops"}`),
 		})
 		sha, ok, err := c.ResolveRef(context.Background(), "v9")
 		if err != nil || ok || sha != "" {
@@ -84,6 +85,11 @@ func TestComparePaginatesAndReportsTruncation(t *testing.T) {
 	if len(cmp.Commits) != 300 || cmp.Total != 350 || !cmp.Truncated {
 		t.Fatalf("len=%d total=%d truncated=%v; want 300/350/true", len(cmp.Commits), cmp.Total, cmp.Truncated)
 	}
+	// GitHub pages oldest first; the bound keeps the NEWEST 300 (commits 50..349), because a
+	// migration in the newest fifty is the one that must not fall off the end.
+	if cmp.Commits[0].SHA != shas[50] || cmp.Commits[299].SHA != shas[349] {
+		t.Fatalf("kept %s..%s; want the newest 300 (%s..%s)", cmp.Commits[0].SHA, cmp.Commits[299].SHA, shas[50], shas[349])
+	}
 	if cmp.Status != "ahead" || cmp.AheadBy != 350 {
 		t.Fatalf("status=%q ahead=%d", cmp.Status, cmp.AheadBy)
 	}
@@ -111,6 +117,7 @@ func TestCompareShortRangeIsNotTruncated(t *testing.T) {
 func TestCompareUnknownRefIsTyped(t *testing.T) {
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/compare/aaa...bbb": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":                   static(200, `{"full_name":"example/gitops"}`),
 	})
 	_, err := c.Compare(context.Background(), "aaa", "bbb")
 	if !errors.Is(err, forge.ErrUnknownRef) {
@@ -246,5 +253,177 @@ func TestTranslateErrNamesRateLimitExhaustion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), reset.Local().Format("15:04")) {
 		t.Fatalf("err = %q; want the reset time", err)
+	}
+}
+
+// A 404 is what GitHub answers for a missing ref AND for a private repository the token cannot
+// read. Only the first is ok=false; the second is a scope error, per the Forge contract —
+// pkg/migrate would otherwise degrade every revision to "unknown" without saying why.
+func TestResolveRefTreatsAnInvisibleRepoAsAScopeError(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":            static(404, `{"message":"Not Found"}`),
+	})
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if ok || err == nil || !strings.Contains(err.Error(), "repo scope") || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("ok=%v err=%v; want a scope error naming the repository", ok, err)
+	}
+	// Compare's 404 goes the same way, and the probe runs once per Client.
+	c2 := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/compare/aaa...bbb": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops/commits/v9":        static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops":                   static(404, `{"message":"Not Found"}`),
+	})
+	_, err = c2.Compare(context.Background(), "aaa", "bbb")
+	if errors.Is(err, forge.ErrUnknownRef) || err == nil || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("err = %v; want a scope error, not ErrUnknownRef", err)
+	}
+	if _, _, err2 := c2.ResolveRef(context.Background(), "v9"); err2 == nil {
+		t.Fatal("second 404 on the same client must reuse the probe's answer")
+	}
+}
+
+// Commit text is whatever its author typed: a crafted escape sequence in a subject must never
+// reach the operator's terminal. Two layers hold that: go-gh's REST client rewrites C0 control
+// bytes in response bodies to caret notation (ESC becomes the two characters "^["), and clean
+// strips whatever still arrives as a real control byte — the layer a transport without that
+// courtesy (a GitLab adaptor, a future go-gh) would rely on.
+func TestCommitTextIsStrippedOfTerminalControls(t *testing.T) {
+	const commit = `{"sha":"c1","commit":{"message":"fix: \u001b]0;evil\u0007 \u001b[31mred\u001b[0m\u0000 done\n\nbody\ttab \u001b[2J","author":{"name":"Dev\u001b[1m","date":"2026-03-01T00:00:00Z"},"committer":{"date":"2026-03-01T00:00:00Z"}}}`
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/compare/aaa...bbb": static(200, `{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"commits":[`+commit+`],"files":[{"filename":"a\u001b[2Jb"}]}`),
+	})
+	cmp, err := c.Compare(context.Background(), "aaa", "bbb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{cmp.Commits[0].Subject, cmp.Commits[0].Body, cmp.Commits[0].Author, cmp.Files[0]} {
+		for _, r := range s {
+			if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f {
+				t.Fatalf("control byte %#x survived in %q", r, s)
+			}
+		}
+	}
+	if !strings.Contains(cmp.Commits[0].Body, "\t") {
+		t.Fatalf("a tab is legitimate commit-body text and must survive: %q", cmp.Commits[0].Body)
+	}
+	// Positive control on clean itself, with real control bytes rather than go-gh's carets.
+	if got := clean("fix: \x1b]0;evil\x07 \x1b[31mred\x1b[0m\x00 done\n\tbody"); got != "fix:  red done\n\tbody" {
+		t.Fatalf("clean = %q", got)
+	}
+}
+
+// The newest bound must be contiguous whatever the total: for 450 commits the last pages
+// hold 3..5 (250 commits) and the fill is the tail of page 2, not of page 1 (Copilot, #124).
+func TestCompareKeepsTheNewestContiguousCommits(t *testing.T) {
+	for _, total := range []int{300, 301, 350, 450, 1001} {
+		shas := make([]string, total)
+		for i := range shas {
+			shas[i] = fmt.Sprintf("%040d", i)
+		}
+		pagesHit := map[int]bool{}
+		c := newTestClient(t, map[string]func(*http.Request) (int, string){
+			"GET /repos/example/gitops/compare/aaa...bbb": func(r *http.Request) (int, string) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+				pagesHit[page] = true
+				var items []string
+				for _, s := range paginate(shas, page, per) {
+					items = append(items, commitJSON(s, "s"))
+				}
+				return 200, fmt.Sprintf(`{"status":"ahead","ahead_by":%d,"behind_by":0,"total_commits":%d,"commits":[%s],"files":[]}`, total, total, strings.Join(items, ","))
+			},
+		})
+		cmp, err := c.Compare(context.Background(), "aaa", "bbb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := min(total, 300)
+		if len(cmp.Commits) != want || cmp.Commits[0].SHA != shas[total-want] || cmp.Commits[want-1].SHA != shas[total-1] {
+			t.Fatalf("total %d: got %d commits %s..%s; want the newest %d (%s..%s)", total, len(cmp.Commits), cmp.Commits[0].SHA, cmp.Commits[len(cmp.Commits)-1].SHA, want, shas[total-want], shas[total-1])
+		}
+		for i := 1; i < len(cmp.Commits); i++ {
+			if cmp.Commits[i].SHA != shas[total-want+i] {
+				t.Fatalf("total %d: gap at %d", total, i)
+			}
+		}
+		if cmp.Truncated != (total > 300) {
+			t.Fatalf("total %d: truncated=%v", total, cmp.Truncated)
+		}
+		if !pagesHit[1] {
+			t.Fatalf("total %d: page 1 (metadata, files) was never read", total)
+		}
+	}
+}
+
+// A transient probe failure must not be remembered: a 5xx while the network hiccups would
+// otherwise make every later 404 on this client a "not visible" error for the session.
+func TestRepoVisibilityCachesOnlyDefinitiveAnswers(t *testing.T) {
+	probes := 0
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops": func(*http.Request) (int, string) {
+			probes++
+			if probes == 1 {
+				return 503, `{"message":"unavailable"}`
+			}
+			return 200, `{"full_name":"example/gitops"}`
+		},
+	})
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err == nil {
+		t.Fatal("the first probe failed; that must surface as an error")
+	}
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if err != nil || ok {
+		t.Fatalf("after the probe recovered: ok=%v err=%v; want a plain not-found", ok, err)
+	}
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err != nil || probes != 2 {
+		t.Fatalf("a visible repo is remembered: probes=%d err=%v", probes, err)
+	}
+}
+
+// A file name is one line on a confirm screen; git allows a newline in a path, and a
+// migration file named with one would add rows to the deploy screen's migration list.
+func TestFileNamesAndSubjectsAreOneLine(t *testing.T) {
+	if got := cleanLine("db/migrate/1.rb\nextra row\tcell"); got != "db/migrate/1.rbextra rowcell" {
+		t.Fatalf("cleanLine = %q", got)
+	}
+	if got := clean("body line\n\tindented"); got != "body line\n\tindented" {
+		t.Fatalf("clean must keep a body's newline and tab: %q", got)
+	}
+}
+
+// A 403 that is a rate limit is the moment's answer, not the repository's visibility, and
+// must not pin "not visible" on the client for the session.
+func TestRateLimitedProbeIsNotCached(t *testing.T) {
+	probes := 0
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops": func(*http.Request) (int, string) {
+			probes++
+			if probes == 1 {
+				return 403, `{"message":"API rate limit exceeded for user"}`
+			}
+			return 200, `{"full_name":"example/gitops"}`
+		},
+	})
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err == nil {
+		t.Fatal("the rate-limited probe must surface as an error")
+	}
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if err != nil || ok || probes != 2 {
+		t.Fatalf("after the limit lifted: ok=%v err=%v probes=%d; want a plain not-found from a second probe", ok, err, probes)
+	}
+}
+
+// A secondary rate limit is a 403 with no X-Ratelimit-Remaining header and a message that
+// says so; the guidance must be the rate-limit one, not "missing the repo scope".
+func TestSecondaryRateLimitIsNamedAsOne(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(403, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`),
+	})
+	_, _, err := c.ResolveRef(context.Background(), "v9")
+	if err == nil || !strings.Contains(err.Error(), "rate limit exhausted") || strings.Contains(err.Error(), "repo scope") {
+		t.Fatalf("err = %v; want the rate-limit guidance, not the scope one", err)
 	}
 }

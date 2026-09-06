@@ -14,7 +14,8 @@
 // image line per occurrence, verified before git add). When the history cannot be resolved
 // the diff is the only evidence left and becomes the body again, with the reason stated.
 // What it still shares with the plan screen is the rule that no write happens without the
-// operator seeing the bytes: the diff is always one key away, never absent.
+// bytes available to look at: the diff is always one key away, never absent, and enter
+// means the same thing from either view — whether the operator looked is their call.
 package deploy
 
 import (
@@ -407,9 +408,14 @@ func (m Model) summarySection() string {
 		if d.Direction == migrate.DirectionRollback {
 			word += " reverted"
 		}
+		if d.MigrationsIncomplete {
+			word += " (at least)"
+		}
 		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("%d %s", n, word)))
 	} else if d.Prefix == "" {
 		parts = append(parts, m.styles.Dim.Render("migrations not tracked"))
+	} else if d.MigrationsIncomplete {
+		parts = append(parts, m.styles.Warn.Render("migrations unknown — the history is incomplete"))
 	}
 	if m.history.Declared.Repo != "" {
 		replacing := "replacing " + tagOrDigest(m.history.Declared)
