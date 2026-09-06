@@ -80,6 +80,15 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			if err := checkCloneCurrentForRestart(ctx, eff.repo, tuiBase, p.Restarts); err != nil {
 				return engine.PromotionState{}, nil, err
 			}
+			if opts.Direct {
+				// The same fresh-base cross-check the CLI's own --direct runs: a Deployment
+				// origin/<base> has gained is invisible to a plan built from this checkout,
+				// and a direct push has no PR to catch it. The family selection is recovered
+				// from the plan, which is what actually crossed this boundary.
+				if err := checkNoMissingWorkloadAtFreshBase(ctx, eff.repo, tuiBase, eff.appsRoot, p.TargetEnv, familiesOfRestart(r, p), p); err != nil {
+					return engine.PromotionState{}, nil, err
+				}
+			}
 		} else if !anyRealEdit(p.Edits) {
 			if p.SourceEnv == "" {
 				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -317,4 +318,31 @@ func checkCloneCurrentForRestart(ctx context.Context, cloneDir, base string, res
 		files = append(files, gitops.Edit{Occurrence: gitops.Occurrence{File: re.File}})
 	}
 	return checkCloneCurrentForBase(ctx, newGit, cloneDir, base, files)
+}
+
+// familiesOfRestart recovers which families a built restart plan covers, so a plan built for
+// comparison against origin's tree can be given the same selection. Derived from the plan's own
+// files rather than carried alongside it: the plan is what crossed the boundary, and a second
+// copy of the selection could disagree with the files it is supposed to describe.
+func familiesOfRestart(r *gitops.Repo, plan gitops.Plan) []string {
+	env, ok := r.Envs[plan.TargetEnv]
+	if !ok {
+		return nil
+	}
+	byDir := make(map[string]string, len(env.Families))
+	for name, f := range env.Families {
+		byDir[f.Dir] = name
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, re := range plan.Restarts {
+		name, ok := byDir[path.Dir(re.File)]
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
