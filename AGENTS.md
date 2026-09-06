@@ -409,12 +409,24 @@ age relative to now and whether the paired staging env's manifest carries it, an
 the commits between the declared build and the one under the cursor with the migrations among them
 (`pkg/migrate` — `tab` into the list, `enter` reads a commit in full, `space` reviews the change;
 a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
-browsing the matrix, the picker and the
+the confirm screens lead with the work, not the mechanism (M10): the deploy confirm says
+"rolling out N commits · M migrations · replacing v1, live 34 days" over the commit list, the plan
+confirm keeps the ticked set on the left and the hovered repo's commits and migrations on the
+right with the common image-repo prefix lifted into the header so a version never wraps, and on
+both `d` toggles the yaml diff into view and `enter` means the same from either; the flight and
+restart screens are framed the same way, with the blocked reason and its command
+(`hoist approve <id>`) as their own section, which a short terminal keeps by collapsing the step
+list to a one-line strip rather than dropping the verdict. Browsing the matrix, the picker and the
 plan/confirm screen they open into is read-only, but confirming a
 plan there (Enter on either confirm screen) drives a real promotion or deploy exactly like
 `promote`/`deploy` above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same
-`internal/engine` pipeline. Golden files under `testdata/golden/` regenerate with
-`mise exec -- go test ./pkg/gitops ./internal/app ./internal/app/plan ./internal/app/tags -update`; the fixture repo is `testdata/repo`
+`internal/engine` pipeline. The two faces are held in step by `internal/parity`: a registry test
+that parses the subcommand dispatch, every flag set and every navigation message the TUI root
+switches on, and fails when any of them has no row, or when a row with one side empty cites no
+issue — so a new subcommand, flag or screen lands with its parity stated or not at all (the open
+gaps are #101–#105). Golden files under `testdata/golden/` regenerate with
+`mise exec -- go test ./pkg/gitops ./internal/app/... ./internal/ui/... -update` (one shared flag
+for the screens, in `internal/ui/uitest`; files are `<name>-<w>x<h>.txt`); the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
@@ -776,6 +788,37 @@ test lives** (if one exists).
    asserts `op` execs zero times without an `OpRef`; `TestPlanBuildsOnlyTheAdaptorsItNeeds` in
    `cmd/hoist/resolution_test.go` asserts the CLI builds no cluster or registry adaptor beyond what
    `--digest-sources` actually calls for.
+6. **A `huh.Confirm` built without a keymap ignores every key, and a test that sets the bool
+   the key would have set cannot notice.** What happened: the tag picker's `D` gesture shipped
+   broken in M6 (#43) and was fixed in M8 (#73), which is where the real-keypress test pattern
+   came from; the plan screen's mode-switch dialog (`m`, then `y`/`enter`) shipped broken in PR
+   #27 and stayed broken through every PR until the M10 train (#85) — the M8 fix was applied to
+   the screen it was found on, not searched for. Both had passing tests the whole time. Root
+   cause, two halves: `huh.NewConfirm()` ships a zero `KeyMap`, so `y`, `enter` and the arrows do
+   nothing unless `.WithKeyMap(huh.NewDefaultKeyMap())` is called on the standalone field; and
+   `Value(&m.confirmed)` binds a pointer into the *copy* of the value-typed model that built the
+   widget, so even a keypress that lands writes to a field no later `Update` reads. The tests
+   drove neither — they set `m.confirmed = true` and asserted the transition. Rule: every
+   standalone huh field gets `WithKeyMap(huh.NewDefaultKeyMap())`, its answer is read back with
+   `GetValue()`, and a gesture's test presses the keys through `uitest.Keys`/`Drain` and asserts
+   the emitted message — never the bool. Regression tests: `TestModeToggleAfterConfirm` in
+   `internal/app/plan/model_test.go` (fails with `WithKeyMap` removed — verified by mutant),
+   `TestDirectGestureCompletesThroughRealInput` in `internal/app/tags/model_test.go`,
+   `TestModeToggleCompletesThroughRealInput` in `internal/app/deploy/model_test.go`.
+7. **A hand-rolled test drain that unpacks one level of `tea.BatchMsg` silently drops the
+   commands inside a nested batch.** What happened: the tag picker's `Init` returned a `Batch` of
+   a spinner tick and a `Batch` of fetches; the per-package `drain` helper ran the outer batch's
+   commands, saw a `BatchMsg` come back, and stopped — the fetch results never arrived and the
+   test asserted against a screen that had loaded nothing — one debugging round in the M10
+   train's tag-picker PR (#85). Root cause: `tea.Batch` of batches is a legal, common shape (a screen that embeds
+   components each with their own `Init`), and a drain that treats `BatchMsg` as a leaf is
+   correct for exactly the fixtures it was written against. Rule: tests drive commands through
+   `uitest.Drain`, which recurses into every `BatchMsg` (and drops spinner ticks) — no package
+   keeps its own `drain`/`runInit`. A new `Init` that returns a batch of batches needs no new
+   test helper; if a test is asserting against an unloaded screen, check the drain before the
+   screen. Regression coverage: every `internal/app/<screen>` test that renders a loaded golden
+   goes through `Drain`; the plan package's older `runInit` is the one exception left and is
+   covered because its batch is flat.
 
 ## 10. Maintaining This Document
 
