@@ -9,6 +9,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
@@ -114,6 +115,11 @@ type Model struct {
 	// Zero when no cluster is configured; R then says so rather than opening a screen that
 	// cannot do anything.
 	restartFn apprestart.Funcs
+	// history is what the tag picker and both confirm screens call for commit history and the
+	// migration delta (M10). Set through WithHistory rather than New so the screens that
+	// consume it can land one at a time; zero means "no history available" and each screen
+	// degrades to a named gap.
+	history history.Funcs
 
 	// startPromotion, poll, openURL and openPRMode are Promotion's fields, unpacked here —
 	// see Promotion's own doc comment for what each one is and why a nil Start/OpenURL
@@ -189,6 +195,17 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
+
+// WithHistory supplies the commit-history and migration-delta functions (cmd/hoist's
+// buildHistoryFuncs). See Model.history.
+func (m Model) WithHistory(h history.Funcs) Model {
+	m.history = h
+	return m
+}
+
+// History returns what WithHistory set — for the screen constructors in later M10 PRs and
+// for cmd/hoist's own wiring test.
+func (m Model) History() history.Funcs { return m.history }
 
 // Init asks the terminal for its background colour so the palette can follow it, and starts
 // whatever the top (only, at boot) screen's own Init needs.

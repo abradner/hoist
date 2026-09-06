@@ -570,7 +570,16 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	tagsFn := buildTagsFunc(cfg, eff.cfg)
 	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
-	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn), tea.WithOutput(stdout)).Run(); err != nil {
+	// The checkout's HEAD is what the plan's line numbers were read from, so it is what the
+	// live-age blame asks the forge about; the default branch is the fallback for a HEAD that
+	// was never pushed. Resolving it is one local git call and never a reason not to open.
+	blameRef := ""
+	if sha, ok, err := newGit.RevParse(context.Background(), r.Root, "HEAD"); err == nil && ok {
+		blameRef = sha
+	}
+	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef)
+	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn)
+	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}

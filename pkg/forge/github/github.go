@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,10 @@ const maxSearchPages = 3
 // Client implements forge.Forge against api.github.com (or a GitHub Enterprise host, via the
 // gh environment's own resolution — this package does not special-case it).
 type Client struct {
-	rest        *ghapi.RESTClient
+	rest *ghapi.RESTClient
+	// gql is the GraphQL client BlameLines (graphql.go) needs — GitHub has no REST blame. Nil
+	// on a Client built through newWithClient, the M3 test seam; newWithClients supplies one.
+	gql         *ghapi.GraphQLClient
 	owner, repo string
 }
 
@@ -47,7 +51,16 @@ func New(ownerRepo string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: resolving gh auth: %w", err)
 	}
-	return &Client{rest: rest, owner: owner, repo: repo}, nil
+	gql, err := ghapi.DefaultGraphQLClient()
+	if err != nil {
+		return nil, fmt.Errorf("github: resolving gh auth for GraphQL: %w", err)
+	}
+	return &Client{rest: rest, gql: gql, owner: owner, repo: repo}, nil
+}
+
+// newWithClients is newWithClient with a GraphQL client too, for graphql.go's tests.
+func newWithClients(rest *ghapi.RESTClient, gql *ghapi.GraphQLClient, owner, repo string) *Client {
+	return &Client{rest: rest, gql: gql, owner: owner, repo: repo}
 }
 
 // newWithClient is the seam pkg/forge/github's own tests use: a *ghapi.RESTClient built with
@@ -580,6 +593,19 @@ func translateErr(op string, err error) error {
 		// repo), but it is still upstream text nothing here wrote, so it goes through
 		// redact.Strings before reaching the operator like every other adaptor's output does.
 		msg := redact.Strings(herr.Message)
+		// A rate-limit exhaustion is also a 403, and M10's history calls (Compare,
+		// CommitsTouching, plus Tags' own N+1) make it the likeliest 403 an operator will now
+		// see — so name it, with the reset time, rather than send them to `gh auth status`
+		// for a token that is fine.
+		if herr.StatusCode == http.StatusForbidden || herr.StatusCode == http.StatusTooManyRequests {
+			if herr.Headers.Get("X-Ratelimit-Remaining") == "0" {
+				reset := "shortly"
+				if secs, perr := strconv.ParseInt(herr.Headers.Get("X-Ratelimit-Reset"), 10, 64); perr == nil {
+					reset = "at " + time.Unix(secs, 0).Local().Format("15:04")
+				}
+				return fmt.Errorf("github: %s: HTTP %d %s (GitHub API rate limit exhausted; it resets %s)", op, herr.StatusCode, msg, reset)
+			}
+		}
 		if herr.StatusCode == http.StatusForbidden || herr.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("github: %s: HTTP %d %s (the gh token may be missing the repo scope this needs — check `gh auth status`, and `gh auth refresh -s repo` if so)", op, herr.StatusCode, msg)
 		}

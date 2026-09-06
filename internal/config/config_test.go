@@ -74,6 +74,7 @@ func TestLoadFullFile(t *testing.T) {
 			Kube:          KubeConfig{Context: "my-cluster", ArgoNamespace: "argocd"},
 			DigestSources: []string{"pods", "registry"},
 			Apps:          map[string]string{"ghcr.io/me/app": "me/app"},
+			Migrations:    map[string]string{"ghcr.io/me/app": "db/migrate/"}, // filled by Normalize
 		}},
 		Registries: []RegistryConfig{{
 			Prefix: "ghcr.io/me/", Auth: []string{"env", "cluster"},
@@ -232,6 +233,7 @@ func TestUnknownFieldIsRejected(t *testing.T) {
 		"registries:\n  - prefix: ghcr.io/\n    token: abc\n",
 		"pol: { ci: 1s }\n",
 		"repos:\n  - path: /x\n    dir: /y\n", // derived fields are not file keys either
+		"repos:\n  - path: /x\n    apps: { ghcr.io/me/app: me/app }\n    migration: { ghcr.io/me/app: db/migrate/ }\n",
 	} {
 		p := write(t, body)
 		_, err := Load(p)
@@ -246,6 +248,27 @@ func TestUnknownFieldIsRejected(t *testing.T) {
 	// Positive control: the same shape with the right key loads.
 	if _, err := Load(write(t, "repos:\n  - path: /x\n    apps_root: y\n")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Every apps entry gets the Rails migrations default unless the file says otherwise; an
+// explicit value, including "none", is kept as written (pkg/migrate normalises it on use).
+func TestMigrationsDefaultPerAppsEntry(t *testing.T) {
+	c, err := Load(write(t, "repos:\n  - path: /x\n    apps: { ghcr.io/me/app: me/app, ghcr.io/me/web: me/web }\n    migrations: { ghcr.io/me/web: none }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Repos[0].Migrations
+	if got["ghcr.io/me/app"] != DefaultMigrationsPath || got["ghcr.io/me/web"] != "none" {
+		t.Fatalf("Migrations = %v", got)
+	}
+	// No apps: no migrations map is invented.
+	c, err = Load(write(t, "repos:\n  - path: /x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Repos[0].Migrations != nil {
+		t.Fatalf("Migrations = %v; want nil without apps", c.Repos[0].Migrations)
 	}
 }
 
@@ -270,6 +293,9 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"github shape", "repos:\n  - path: /x\n    github: justme\n", "repos[0].github: want owner/name"},
 		{"apps value shape", "repos:\n  - path: /x\n    apps: { ghcr.io/me/app: app }\n", "repos[0].apps.ghcr.io/me/app: want owner/name"},
 		{"apps key with tag", "repos:\n  - path: /x\n    apps: { ghcr.io/me/app:v1: me/app }\n", "repos[0].apps.ghcr.io/me/app:v1: key must be an image repo"},
+		{"migrations without apps", "repos:\n  - path: /x\n    migrations: { ghcr.io/me/app: db/migrate/ }\n", "repos[0].migrations.ghcr.io/me/app: no matching apps entry"},
+		{"migrations absolute", "repos:\n  - path: /x\n    apps: { ghcr.io/me/app: me/app }\n    migrations: { ghcr.io/me/app: /db/migrate }\n", "repos[0].migrations.ghcr.io/me/app: \"/db/migrate\" is absolute"},
+		{"migrations escapes", "repos:\n  - path: /x\n    apps: { ghcr.io/me/app: me/app }\n    migrations: { ghcr.io/me/app: ../x }\n", "repos[0].migrations.ghcr.io/me/app: \"../x\" escapes"},
 		{"auth enum", "registries:\n  - prefix: ghcr.io/\n    auth: [gh]\n", "registries[0].auth[0]: want one of env|keychain|cluster|op"},
 		{"auth empty", "registries:\n  - prefix: ghcr.io/\n    auth: []\n", "registries[0].auth: must not be empty"},
 		{"cluster half", "registries:\n  - prefix: ghcr.io/\n    cluster: { namespace: ns }\n", "registries[0].cluster: needs both namespace and secret"},
