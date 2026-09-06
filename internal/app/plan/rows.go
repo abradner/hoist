@@ -38,6 +38,8 @@ type Row struct {
 	Disabled bool
 	// Reason explains Disabled; "" otherwise.
 	Reason string
+	// Files is the number of distinct target-env files this repo's edits touch.
+	Files int
 }
 
 // Label is the row text: "repo  old → new  (n occurrences)  [source]", with a leading "!"
@@ -53,6 +55,31 @@ func (r Row) Label() string {
 	}
 	return fmt.Sprintf("%s%s  %s → %s  (%d occurrence%s)  [%s]",
 		marker, r.Repo, tagOrDigest(r.Old), tagOrDigest(r.New), r.Count, plural, r.Source)
+}
+
+// ShortLabel is the row text for the left pane (M10): the repo without the prefix every
+// row shares (CommonPrefix, shown once in the header), the versions, and "!" when the row
+// carries warnings — short enough that the version never wraps mid-token at the pane's
+// width; the occurrence count and source moved to the right pane's own head line.
+func (r Row) ShortLabel(prefix string, width int) string {
+	marker := ""
+	if len(r.Warnings) > 0 {
+		marker = "! "
+	}
+	label := fmt.Sprintf("%s%s  %s → %s", marker, strings.TrimPrefix(r.Repo, prefix), tagOrDigest(r.Old), tagOrDigest(r.New))
+	if width > 0 && len(label) > width {
+		// Truncated with "…", never wrapped: a sha- tag can be forty characters and huh
+		// would otherwise break it mid-token. The right pane's head line carries both
+		// versions in full.
+		label = fmt.Sprintf("%s%s  → %s", marker, strings.TrimPrefix(r.Repo, prefix), tagOrDigest(r.New))
+		if len(label) > width {
+			runes := []rune(label)
+			if width > 1 {
+				label = string(runes[:width-1]) + "…"
+			}
+		}
+	}
+	return label
 }
 
 // tagOrDigest is the tag, or a shortened digest for a tag-less reference — the same
@@ -94,11 +121,16 @@ func DeriveRows(pl gitops.Plan, res map[string]resolve.Resolution) []Row {
 	rows := make([]Row, 0, len(repos))
 	for _, repo := range repos {
 		edits := byRepo[repo]
+		files := map[string]bool{}
+		for _, e := range edits {
+			files[e.File] = true
+		}
 		row := Row{
 			Repo:     repo,
 			Old:      edits[0].Ref,
 			New:      edits[0].New,
 			Count:    len(edits),
+			Files:    len(files),
 			Source:   "manifest",
 			Warnings: warningsByRepo[repo],
 		}

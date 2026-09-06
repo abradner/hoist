@@ -250,7 +250,7 @@ type Model struct {
 	// asked for yet, one present with Loaded false is in flight.
 	histFn   history.Funcs
 	declared *Declared
-	deltas   map[string]deltaState
+	deltas   map[string]history.State
 	age      migrate.LineAge
 	ageErr   error
 	ageKnown bool
@@ -311,7 +311,7 @@ func New(imageRepo, target string, o Options) Model {
 		metaFn:             o.Meta,
 		histFn:             o.History,
 		declared:           o.Declared,
-		deltas:             map[string]deltaState{},
+		deltas:             map[string]history.State{},
 		now:                now,
 		state:              stateLoading,
 		keys:               defaultKeyMap(),
@@ -373,7 +373,7 @@ func (m Model) historyCmd(tag string) tea.Cmd {
 	if _, asked := m.deltas[tag]; asked {
 		return nil
 	}
-	m.deltas[tag] = deltaState{}
+	m.deltas[tag] = history.State{}
 	delta, gen, ctx := m.histFn.Delta, m.generation, m.ctx
 	from := m.declared.Ref
 	to := image.Ref{Repo: m.imageRepo, Tag: tag}
@@ -406,7 +406,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if msg.gen != m.generation {
 			return m, nil
 		}
-		m.deltas[msg.tag] = deltaState{Loaded: true, Delta: msg.delta, Err: msg.err}
+		m.deltas[msg.tag] = history.State{Loaded: true, Delta: msg.delta, Err: msg.err}
 		return m, nil
 	case ageMsg:
 		if msg.gen != m.generation {
@@ -595,7 +595,7 @@ func (m Model) historyNote() string {
 	if m.histFn.Delta == nil {
 		return fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo)
 	}
-	lines := PaneLines(m.deltas[m.selectedTag], m.selectedTag, "", m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), 1)
+	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, "", m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), 1)
 	if len(lines) > 0 && lines[0].Role != "head" {
 		return lines[0].Text
 	}
@@ -1223,7 +1223,7 @@ func (m Model) paneSection() string {
 	if m.histFn.Delta == nil {
 		return m.styles.Dim.Render(fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo))
 	}
-	lines := PaneLines(m.deltas[m.selectedTag], m.selectedTag, declared, m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), m.paneRows())
+	lines := history.Lines(m.deltas[m.selectedTag], m.selectedTag, declared, m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), m.paneRows())
 	out := make([]string, 0, len(lines))
 	for _, l := range lines {
 		text := m.wrap(l.Text)
@@ -1265,7 +1265,7 @@ func (m Model) viewReading() string {
 	}
 	c := commits[m.commitIdx]
 	st := m.deltas[m.selectedTag]
-	head := m.styles.Title.Render(short(c.SHA)+"   "+c.Subject) + "\n" +
+	head := m.styles.Title.Render(history.ShortSHA(c.SHA)+"   "+c.Subject) + "\n" +
 		m.styles.Dim.Render(fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, len(commits), m.selectedTag, tagOrDigest(st.Delta.From.Ref), c.Author, ui.Ago(m.now(), c.Date)))
 	body := c.Body
 	if strings.TrimSpace(body) == "" {

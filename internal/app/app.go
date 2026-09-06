@@ -392,7 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.envs.Pairs != nil {
 			target = m.envs.Pairs[msg.Source]
 		}
-		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.resolveFn)}
+		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.resolveFn, m.history)}
 		m = m.push(ps)
 		return m, ps.Init()
 	case deploy.BackMsg:
