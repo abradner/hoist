@@ -299,12 +299,13 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 			last = StepStatus{Step: step.Name(), Observation: obs}
 		}
 		if last.Blocked != "" || last.Waiting {
-			if probeErr != nil && i <= phaseIndex(steps, StepPROpened) {
-				// Only a stop past PROpened proves a PR this promotion has not finished
-				// with. Committed or Pushed can Block after a completed promotion too — a
-				// branch recreated on origin at another sha — so a stop there, with the
-				// merge unverifiable, surfaces the probe's error rather than a stale step
-				// (Copilot on PR #95).
+			if probeErr != nil && i < phaseIndex(steps, StepPROpened) {
+				// Only a stop at or past PROpened proves a PR this promotion has not finished
+				// with: PROpened itself Blocks only after finding one (wrong base, or closed
+				// unmerged), which is definitive and actionable. Committed or Pushed can Block
+				// after a completed promotion too — a branch recreated on origin at another
+				// sha — so a stop there, with the merge unverifiable, surfaces the probe's
+				// error rather than a stale step (Copilot on PRs #95 and #99).
 				return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), probeErr)
 			}
 			return false, last, nil
@@ -313,7 +314,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 			if probeErr != nil && i < mi {
 				// A plain unsatisfied step before the merge is ambiguous once the probe has
 				// failed: a promotion that already merged and deleted its branch reads exactly
-				// like one that never pushed. A Waiting or Blocked stop past PROpened is not:
+				// like one that never pushed. A Waiting or Blocked stop at or past PROpened is not:
 				// it proves a PR this promotion has not finished with (unmerged, or merged
 				// with its branch still to delete — the step it names may then be stale, the
 				// verdict "not terminal" is not). Every other shape surfaces the probe's own
@@ -419,9 +420,9 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 		}
 		statuses = append(statuses, st)
 		if st.Blocked != "" || st.Waiting {
-			if probeErr != nil && i <= phaseIndex(steps, StepPROpened) {
-				// As in ObserveAll: a Blocked stop at or before PROpened does not prove a
-				// live PR, so the probe's error is the honest answer there.
+			if probeErr != nil && i < phaseIndex(steps, StepPROpened) {
+				// As in ObserveAll: a Blocked stop before PROpened does not prove a live PR,
+				// so the probe's error is the honest answer there; at PROpened it does.
 				return false, statuses, &StepError{Step: steps[mi].Name(), Op: "observe", Err: probeErr}
 			}
 			return false, statuses, nil
@@ -431,7 +432,7 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 				// As in ObserveAll: a plain unsatisfied step before the merge could be a
 				// promotion that merged and cleaned up its branch, so the probe's failure is
 				// the honest answer here, not a false "still at Pushed". A Waiting or Blocked
-				// stop past PROpened is kept as-is: it proves a promotion that is not
+				// stop at or past PROpened is kept as-is: it proves a promotion that is not
 				// terminal, even if the step it names is stale because the merge happened and
 				// its probe failed.
 				return false, statuses, &StepError{Step: steps[mi].Name(), Op: "observe", Err: probeErr}

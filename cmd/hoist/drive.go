@@ -59,10 +59,11 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 	w := waitingReporter{w: stderr, now: time.Now}
 	for {
 		err := engine.Drive(ctx, steps, s, save)
+		waiting := errors.Is(err, engine.ErrWaiting)
 		switch {
 		case err == nil:
 			return nil
-		case errors.Is(err, engine.ErrWaiting):
+		case waiting:
 			w.report(s)
 		default:
 			var blocked *engine.BlockedError
@@ -92,7 +93,10 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 		// The sleep is taken in heartbeat-sized pieces so a poll interval longer than
 		// heartbeatEvery (poll.approval accepts any duration) still shows the run is alive
 		// between observations; report on the same state prints nothing unless a heartbeat is
-		// due, and never touches the remote (Copilot on PR #94).
+		// due, and never touches the remote (Copilot on PR #94). Only a pass that actually
+		// waited heartbeats: a retried StepError records no new wait, and a heartbeat off an
+		// older entry would claim the run is still waiting on a step it has moved past
+		// (Copilot on PR #99).
 		remaining := pollInterval(poll, s.Phase)
 		for remaining > 0 {
 			nap := min(remaining, heartbeatEvery)
@@ -102,7 +106,9 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 			case <-time.After(nap):
 			}
 			remaining -= nap
-			w.report(s)
+			if waiting {
+				w.report(s)
+			}
 		}
 	}
 }

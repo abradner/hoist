@@ -1141,3 +1141,34 @@ func TestPromoteRefusesBaseDeletedOnOrigin(t *testing.T) {
 		t.Fatalf("no PR should have been created: %+v", f.PRs())
 	}
 }
+
+// The other two shapes of checkCloneCurrentForBase's base classification, each a real branch
+// of the code (AGENTS.md §8): a base that exists only locally (never pushed) and one that
+// exists only on origin (fetched, never checked out). Each names what is missing and what to
+// do, and neither opens a PR.
+func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "branch", "local-only", "main")
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "local-only"}, &out, &errOut); got == 0 {
+		t.Fatalf("local-only base: expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `origin has no branch "local-only", only`) || !strings.Contains(errOut.String(), "push it") {
+		t.Errorf("local-only base: %s", errOut.String())
+	}
+
+	runGitHost(t, clone, "branch", "origin-only", "main")
+	runGitHost(t, clone, "push", "-q", "origin", "origin-only")
+	runGitHost(t, clone, "branch", "-D", "origin-only")
+	out.Reset()
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "origin-only"}, &out, &errOut); got == 0 {
+		t.Fatalf("origin-only base: expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `has no local branch "origin-only", only origin/origin-only`) || !strings.Contains(errOut.String(), "git branch origin-only origin/origin-only") {
+		t.Errorf("origin-only base: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}

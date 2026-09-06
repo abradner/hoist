@@ -454,6 +454,20 @@ func TestStatusProbeFailureSurfacesOnABlockBeforePROpened(t *testing.T) {
 	if _, _, err := ObserveAll(ctx(), blockedEarly, &PromotionState{}); !errors.Is(err, probeErr) {
 		t.Errorf("ObserveAll: a Block at Pushed with the probe failing must surface the probe error, got %v", err)
 	}
+	// PROpened itself Blocks only after finding a PR (wrong base, or closed unmerged): that
+	// is definitive and actionable, so the boundary is exclusive — a Block there is kept.
+	blockedAtPROpened := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepPROpened, obs: Observation{Blocked: "found PR #4 for the branch, but it targets base \"release\", not \"main\""}},
+		stepStub{name: StepCIGreen},
+		stepStub{name: StepMerged, err: probeErr},
+	}
+	if _, statuses, err := Status(ctx(), blockedAtPROpened, &PromotionState{}); err != nil || len(statuses) != 2 || statuses[1].Blocked == "" {
+		t.Errorf("Status: a Block at PROpened is definitive and must be kept; err=%v statuses=%+v", err, statuses)
+	}
+	if _, last, err := ObserveAll(ctx(), blockedAtPROpened, &PromotionState{}); err != nil || last.Step != StepPROpened || last.Blocked == "" {
+		t.Errorf("ObserveAll: a Block at PROpened is definitive and must be kept; err=%v last=%+v", err, last)
+	}
 	blockedAtCI := []Step{
 		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
 		stepStub{name: StepPROpened, obs: Observation{Satisfied: true}},

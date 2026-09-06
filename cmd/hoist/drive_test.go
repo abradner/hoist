@@ -289,3 +289,40 @@ func TestDriveToCompletionHeartbeatsInsideALongPollSleep(t *testing.T) {
 		t.Errorf("only %d heartbeats printed during a poll sleep longer than the heartbeat:\n%s", got, errOut.String())
 	}
 }
+
+// A retried StepError records no new wait, so no heartbeat is printed for it: a heartbeat off
+// an older "waiting:" entry would claim the run is still waiting on a step it has moved past
+// (Copilot, PR #99). The step here errors transiently on every observe; History carries an
+// old CI wait; nothing but the retry notice may be printed.
+func TestDriveToCompletionDoesNotHeartbeatOnARetriedError(t *testing.T) {
+	prev := heartbeatEvery
+	heartbeatEvery = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = prev })
+	s := &engine.PromotionState{TargetEnv: "app-production", History: []engine.HistoryEntry{{Step: engine.StepCIGreen, Detail: "waiting: CI: 1/3 checks complete"}}}
+	step := &erroringStep{name: engine.StepApproved, err: errors.New("GET /comments: 502")}
+	var errOut bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
+	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if strings.Contains(errOut.String(), "still ci-green") || strings.Contains(errOut.String(), "hoist: ci-green:") {
+		t.Errorf("a retried error produced a heartbeat off an older wait:\n%s", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "(retrying)") {
+		t.Errorf("the retry notice itself is missing:\n%s", errOut.String())
+	}
+}
+
+// erroringStep is a Step whose Observe always fails with err.
+type erroringStep struct {
+	name engine.StepName
+	err  error
+}
+
+func (e *erroringStep) Name() engine.StepName { return e.name }
+func (e *erroringStep) Observe(context.Context, *engine.PromotionState) (engine.Observation, error) {
+	return engine.Observation{}, e.err
+}
+func (e *erroringStep) Act(context.Context, *engine.PromotionState) error { return nil }
