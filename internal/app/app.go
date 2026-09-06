@@ -618,7 +618,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		production := plan.IsProduction(msg.Target, m.envs)
 		stagingEnv, stagingTags, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
-		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, mapped, production, stagingEnv, stagingTags, hasMismatch, listFn, metaFn)}
+		opts := tags.Options{
+			Mapped: mapped, Production: production,
+			StagingEnv: stagingEnv, StagingTags: stagingTags, HasStagingMismatch: hasMismatch,
+			List: listFn, Meta: metaFn,
+			History: m.history,
+		}
+		if d, ok := tags.DeclaredIn(m.repo, msg.ImageRepo, msg.Target); ok {
+			opts.Declared = &d
+		}
+		ts := tagsScreen{tags.New(msg.ImageRepo, msg.Target, opts)}
 		m = m.push(ts)
 		return m, ts.Init()
 	case tags.BackMsg:

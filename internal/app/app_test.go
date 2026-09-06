@@ -1078,7 +1078,7 @@ func TestDeployNewPushesTagsScreen(t *testing.T) {
 	}
 	// No tagsFn was supplied (sized(t) passes nil), so the picker's own error state shows
 	// rather than hanging — proving the nil case is handled, not just the happy path.
-	if v := plain(m); !strings.Contains(v, "hoist tags:") {
+	if v := plain(m); !strings.Contains(v, "hoist · deploy") || !strings.Contains(v, "ghcr.io/example/counta  →  app-production") {
 		t.Errorf("tags screen view missing its own header:\n%s", v)
 	}
 	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})

@@ -1,0 +1,30 @@
+╭─ hoist · deploy · commit ────────────────────────────────────────────────────────────────────────╮
+│77c0ffe   db: add index on events.created_at                                                      │
+│3 of 14 in v3 · not in v1 · dev · 11 days ago                                                     │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│The purge cronjob scans events by created_at every hour.                                          │
+│                                                                                                  │
+│Expect around 4 minutes on production-sized data.                                                 │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│migrations in this commit:                                                                        │
+│  db/migrate/20260225T101500_add_events_created_at_index.rb                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                    ↑/↓ next commit · space review the change · esc back to the list

@@ -404,7 +404,12 @@ repo's git tag dates for ordering when `repos[].apps` names one, and its own `D`
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
 deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
 written: it shows the diff the pick would make and takes Enter, so no write in hoist skips a diff
-and a confirmation); browsing the matrix, the picker and the
+and a confirmation); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
+age relative to now and whether the paired staging env's manifest carries it, and under the cursor
+the commits between the declared build and the one under the cursor with the migrations among them
+(`pkg/migrate` — `tab` into the list, `enter` reads a commit in full, `space` reviews the change;
+a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
+browsing the matrix, the picker and the
 plan/confirm screen they open into is read-only, but confirming a
 plan there (Enter on either confirm screen) drives a real promotion or deploy exactly like
 `promote`/`deploy` above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same

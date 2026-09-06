@@ -5,16 +5,21 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/forge"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 )
@@ -49,6 +54,27 @@ type MetaFunc func(ctx context.Context, tag string) (registry.ImageMeta, error)
 // connection itself (AGENTS.md §4.8, mirroring plan.ResolveFunc's own wiring).
 type BuildFunc func(imageRepo string) (mapped bool, listFn ListFunc, metaFn MetaFunc)
 
+// Options is everything New takes beyond the image repo and the target env (M10: nine
+// positional parameters had become a call nobody could read). Mapped is RepoConfig.Apps'
+// static answer (see BuildFunc); Production gates the D key (the UI-side half of AGENTS.md
+// §4.5 — internal/engine.DirectCommitGateStep is the half that matters); StagingEnv,
+// StagingTags and HasStagingMismatch are StagingMismatch's result, computed by the root from
+// data already discovered; List and Meta are nil-safe (a nil List reports an error state
+// rather than hanging). History is the commit-history bundle (nil funcs degrade to a named
+// gap); Declared is what the target env declares today (nil for a first deploy); Now is the
+// clock relative dates are worded against, time.Now when nil.
+type Options struct {
+	Mapped, Production bool
+	StagingEnv         string
+	StagingTags        []string
+	HasStagingMismatch bool
+	List               ListFunc
+	Meta               MetaFunc
+	History            history.Funcs
+	Declared           *Declared
+	Now                func() time.Time
+}
+
 type state int
 
 const (
@@ -56,31 +82,38 @@ const (
 	stateReady
 )
 
+// focus is which pane the arrow keys move: the tag table or the commit list.
+type focus int
+
+const (
+	focusTags focus = iota
+	focusCommits
+)
+
 // BackMsg pops back to whatever's under the tags screen (AGENTS.md §4.8 pattern:
 // matrix.OpenPlanMsg/plan.BackMsg's shape, reused here).
 type BackMsg struct{}
 
-// SelectedMsg is emitted on Enter, once the chosen row's metadata has loaded: the operator
-// picked tag via the normal PR-mode path. This package only reports the choice — AGENTS.md
-// §4.8 ("a screen names the transition, the root decides what it means"); wiring this into an
-// actual promotion is the next milestone's "deploy new image" flow this picker exists for
-// (see model.go's package doc and this repo's own AGENTS.md §8 "building structure where no
-// convention is stated is a decision": no write path from the TUI exists anywhere in this
-// codebase yet — hoist promote is CLI-only — so this screen stops at reporting the choice
-// rather than inventing one).
+// SelectedMsg is emitted on space ("review the change"), once the chosen row's metadata has
+// loaded: the operator picked tag via the normal PR-mode path. This package only reports the
+// choice — AGENTS.md §4.8 ("a screen names the transition, the root decides what it means").
+// Delta carries the commit history already loaded for the tag, when there is one, so the
+// confirm screen leads with it without a second fetch; Declared is what the env declares now.
 type SelectedMsg struct {
 	ImageRepo, Tag, Digest string
 	// Target is the env this picker was opened for. Carried on the message rather than
 	// left for the root to remember: the root would have to hold per-screen state to
 	// recover it, and a message that does not say what it is about is how the wrong env
 	// gets written.
-	Target string
+	Target   string
+	Delta    *migrate.Delta
+	Declared *Declared
 }
 
 // DirectRequestedMsg is emitted only once the operator has completed the keypress + huh.
 // Confirm gesture AGENTS.md invariant 5 requires — never on the keypress alone, and never for
 // a production target (the 'D' key is not offered at all when Production is true — see
-// keyMap/updateReady). This message is UI-side politeness only, exactly like plan.Model's own
+// keyMap/onKey). This message is UI-side politeness only, exactly like plan.Model's own
 // modeLabel/skipNotice: the actual, unbypassable enforcement lives in
 // internal/engine.DirectCommitGateStep, which independently refuses a production env even if
 // this screen (or any future caller) got this message wrong (invariant 5's "not UI-only
@@ -88,7 +121,9 @@ type SelectedMsg struct {
 type DirectRequestedMsg struct {
 	ImageRepo, Tag, Digest string
 	// Target, as on SelectedMsg.
-	Target string
+	Target   string
+	Delta    *migrate.Delta
+	Declared *Declared
 }
 
 // nextGeneration hands out this process's next tag-picker generation id. Package-level and
@@ -98,27 +133,23 @@ type DirectRequestedMsg struct {
 // cannot serve this purpose.
 var nextGeneration atomic.Int64
 
-// listLoadedMsg and metaLoadedMsg both carry imageRepo and gen, the picker instance that
-// requested them: loadCmd/fetchCmd close over m.imageRepo and m.generation at the moment the
-// command is created, and onListLoaded/onMetaLoaded discard a result whose gen doesn't match
-// this model's own current one. internal/app's root routes a message to whatever screen is
-// currently on top of its stack by type alone, not by which Model instance produced the
-// tea.Cmd that resolves to it — if an operator leaves this picker while its own list/meta
-// commands are still in flight and opens a picker for a different image repo, a stale result
-// landing in the new picker would otherwise silently populate it with another repo's
-// rows/metadata (common tag names like "latest" make this look plausible rather than obviously
-// wrong).
+// listLoadedMsg, metaLoadedMsg, historyMsg and ageMsg all carry gen, the picker instance that
+// requested them: each command closes over m.generation at the moment it is created, and the
+// handlers discard a result whose gen doesn't match this model's own current one.
+// internal/app's root routes a message to whatever screen is currently on top of its stack by
+// type alone, not by which Model instance produced the tea.Cmd that resolves to it — if an
+// operator leaves this picker while its own commands are still in flight and opens a picker
+// for a different image repo, a stale result landing in the new picker would otherwise
+// silently populate it with another repo's rows/metadata (common tag names like "latest" make
+// this look plausible rather than obviously wrong).
 //
 // gen, not imageRepo, is what actually discriminates instances: imageRepo scopes only by
 // REPOSITORY, and two picker instances for the SAME repo are common — closing this picker while
 // its commands are still in flight, then immediately reopening a new picker for the identical
-// repo, gives the new instance the identical imageRepo value. A stale result from the OLD
-// instance would still land on the NEW one under an imageRepo-only check (this was finding 2's
-// round-1 gap: the fix for cross-repo leaks scoped by imageRepo alone, and this doc comment
-// used to claim — incorrectly — that reopening a model was isolated by repo alone). gen is
-// assigned fresh by New for every instance regardless of repo, so it discriminates same-repo
-// reopens exactly as it discriminates cross-repo ones; imageRepo is kept on these messages for
-// context/debugging only, not as part of the discard decision.
+// repo, gives the new instance the identical imageRepo value. gen is assigned fresh by New for
+// every instance regardless of repo, so it discriminates same-repo reopens exactly as it
+// discriminates cross-repo ones; imageRepo is kept on these messages for context/debugging
+// only, not as part of the discard decision.
 type listLoadedMsg struct {
 	imageRepo string
 	gen       int64
@@ -136,17 +167,37 @@ type metaLoadedMsg struct {
 	err       error
 }
 
+// historyMsg is one tag's delta against the declared reference.
+type historyMsg struct {
+	gen   int64
+	tag   string
+	delta migrate.Delta
+	err   error
+}
+
+// ageMsg is the declared occurrence's live age (when its manifest line last changed).
+type ageMsg struct {
+	gen int64
+	age migrate.LineAge
+	err error
+}
+
 type keyMap struct {
-	Up, Down, Filter, Direct, Enter, Back key.Binding
+	Up, Down, Filter, Direct, Review, Read, Pane, Back key.Binding
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "move")),
 		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Direct: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "direct commit")),
-		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		// Space reviews the change (opens the confirm screen); enter reads the commit under
+		// the cursor. Inspecting is the cheap default and moving toward a write takes a
+		// different, deliberate key (docs/tui/mockups.html, screen 02).
+		Review: key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "review the change")),
+		Read:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "read commit")),
+		Pane:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "commits")),
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
 }
@@ -167,16 +218,16 @@ type Model struct {
 	// listLoadedMsg/metaLoadedMsg's own doc comment.
 	generation int64
 
-	// ctx/cancel scope every listFn/metaFn call this instance ever makes (loadCmd/fetchCmd
-	// close over ctx, never context.Background()). cancel is called once the operator leaves
-	// this picker for good — Esc (onKey's Back handling, both in and out of the confirm
-	// dialog), a plain Enter selection, or a confirmed direct-mode request (round-N finding,
-	// Codex P2, "cancel tag loads when leaving the picker"): without it, a load already in
-	// flight when the picker closes keeps running to completion in the background even though
-	// its eventual result is already discarded by the generation guard above — for a mapped
-	// repo, ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests, so
-	// repeatedly opening and closing pickers could pile up obsolete crawls consuming the API
-	// rate limit, or leave one hanging behind a slow request, for no operator-visible reason.
+	// ctx/cancel scope every listFn/metaFn/history call this instance ever makes (the
+	// commands close over ctx, never context.Background()). cancel is called once the operator
+	// leaves this picker for good — Esc (onKey's Back handling, both in and out of the confirm
+	// dialog), a review selection, or a confirmed direct-mode request (round-N finding, Codex
+	// P2, "cancel tag loads when leaving the picker"): without it, a load already in flight
+	// when the picker closes keeps running to completion in the background even though its
+	// eventual result is already discarded by the generation guard above — for a mapped repo,
+	// ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests, so repeatedly
+	// opening and closing pickers could pile up obsolete crawls consuming the API rate limit,
+	// or leave one hanging behind a slow request, for no operator-visible reason.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -187,11 +238,29 @@ type Model struct {
 	listFn ListFunc
 	metaFn MetaFunc
 
+	// history (M10): what the target env declares, the commit delta per tag against it, and
+	// the declared line's live age. deltas is keyed by tag; a tag absent from it has not been
+	// asked for yet, one present with Loaded false is in flight.
+	histFn   history.Funcs
+	declared *Declared
+	deltas   map[string]deltaState
+	age      migrate.LineAge
+	ageErr   error
+	ageKnown bool
+	now      func() time.Time
+
 	state state
 	err   error
 
 	rows        []Row
 	selectedTag string
+
+	// focus is which list the arrow keys move; commitIdx the cursor in the commit pane;
+	// reading is the commit-detail view (mockup 08), a mode of this screen rather than a
+	// screen of its own, so the picker's context and its loads survive a look at one commit.
+	focus     focus
+	commitIdx int
+	reading   bool
 
 	filtering   bool
 	filterInput textinput.Model
@@ -213,48 +282,43 @@ type Model struct {
 	width, height int
 }
 
-// New builds the tag picker for imageRepo, choosing a tag for target. mapped is whether
-// RepoConfig.Apps has an entry for imageRepo (a config-known fact, passed in rather than
-// inferred — see rows.go's DeriveRows) — used only as the model's initial value until the
-// first list result arrives; onListLoaded then overwrites it with that call's own observed
-// mapped value (ListFunc's doc comment), since the config can say mapped while the forge
-// lookup itself still fails at runtime. production is whether target is listed in
-// envs.production, which gates the 'D' (direct commit) key entirely — the UI-side half of
-// AGENTS.md invariant 5; internal/engine.DirectCommitGateStep is the half that actually
-// matters. stagingEnv/stagingTags/hasMismatch are rows.StagingMismatch's own result, computed
-// by the caller (cmd/hoist) once up front from data already discovered rather than a second
-// registry call — see StagingMismatch's doc comment; stagingTags carries every distinct tag
-// StagingMismatch found (round-N finding: never just the first one it happened to see), and
-// viewReady renders either the single agreed tag or an explicit disagreement across all of
-// them. listFn/metaFn are nil-safe: a nil listFn immediately reports an error state rather
-// than hanging in stateLoading forever.
-func New(imageRepo, target string, mapped, production bool, stagingEnv string, stagingTags []string, hasStagingMismatch bool, listFn ListFunc, metaFn MetaFunc) Model {
+// New builds the tag picker for imageRepo, choosing a tag for target. See Options.
+func New(imageRepo, target string, o Options) Model {
 	ctx, cancel := context.WithCancel(context.Background())
+	now := o.Now
+	if now == nil {
+		now = time.Now
+	}
 	return Model{
 		imageRepo:          imageRepo,
 		target:             target,
-		mapped:             mapped,
-		production:         production,
+		mapped:             o.Mapped,
+		production:         o.Production,
 		generation:         nextGeneration.Add(1),
 		ctx:                ctx,
 		cancel:             cancel,
-		stagingEnv:         stagingEnv,
-		stagingTags:        stagingTags,
-		hasStagingMismatch: hasStagingMismatch,
-		listFn:             listFn,
-		metaFn:             metaFn,
+		stagingEnv:         o.StagingEnv,
+		stagingTags:        o.StagingTags,
+		hasStagingMismatch: o.HasStagingMismatch,
+		listFn:             o.List,
+		metaFn:             o.Meta,
+		histFn:             o.History,
+		declared:           o.Declared,
+		deltas:             map[string]deltaState{},
+		now:                now,
 		state:              stateLoading,
 		keys:               defaultKeyMap(),
 		spinner:            spinner.New(spinner.WithSpinner(spinner.Line)),
 		filterInput:        textinput.New(),
+		styles:             ui.NewStyles(true),
 	}
 }
 
-// Init starts the spinner and the async tag/git-tag list load. Listing talks to a registry
-// (and, when mapped, a forge), so it is a tea.Cmd here, never run inside Update (AGENTS.md
-// §4.3).
+// Init starts the spinner, the async tag/git-tag list load and, when the env declares this
+// image already, the blame that dates that declaration. Listing talks to a registry (and,
+// when mapped, a forge), so it is a tea.Cmd here, never run inside Update (AGENTS.md §4.3).
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadCmd())
+	return tea.Batch(m.spinner.Tick, m.loadCmd(), m.ageCmd())
 }
 
 func (m Model) loadCmd() tea.Cmd {
@@ -293,6 +357,37 @@ func (m Model) fetchCmd(tag string) tea.Cmd {
 	}
 }
 
+// historyCmd asks for tag's delta against the declared reference, or nil when there is no
+// way to (no history wired, no declared reference, or the tag already asked for).
+func (m Model) historyCmd(tag string) tea.Cmd {
+	if m.histFn.Delta == nil || m.declared == nil || tag == "" {
+		return nil
+	}
+	if _, asked := m.deltas[tag]; asked {
+		return nil
+	}
+	m.deltas[tag] = deltaState{}
+	delta, gen, ctx := m.histFn.Delta, m.generation, m.ctx
+	from := m.declared.Ref
+	to := image.Ref{Repo: m.imageRepo, Tag: tag}
+	return func() tea.Msg {
+		d, err := delta(ctx, from, to)
+		return historyMsg{gen: gen, tag: tag, delta: d, err: err}
+	}
+}
+
+// ageCmd dates the declared occurrence's manifest line, once.
+func (m Model) ageCmd() tea.Cmd {
+	if m.histFn.LiveAge == nil || m.declared == nil {
+		return nil
+	}
+	liveAge, gen, ctx, occ := m.histFn.LiveAge, m.generation, m.ctx, m.declared.Occurrence
+	return func() tea.Msg {
+		age, err := liveAge(ctx, occ)
+		return ageMsg{gen: gen, age: age, err: err}
+	}
+}
+
 // Update handles the async loads, the spinner tick, and the screen's own keys.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -300,6 +395,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.onListLoaded(msg)
 	case metaLoadedMsg:
 		return m.onMetaLoaded(msg)
+	case historyMsg:
+		if msg.gen != m.generation {
+			return m, nil
+		}
+		m.deltas[msg.tag] = deltaState{Loaded: true, Delta: msg.delta, Err: msg.err}
+		return m, nil
+	case ageMsg:
+		if msg.gen != m.generation {
+			return m, nil
+		}
+		m.age, m.ageErr, m.ageKnown = msg.age, msg.err, true
+		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -333,7 +440,9 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 	if len(m.rows) > 0 {
 		m.selectedTag = m.rows[0].Tag
 	}
-	return m.fetchVisible()
+	var fetch tea.Cmd
+	m, fetch = m.fetchVisible()
+	return m, tea.Batch(fetch, m.historyCmd(m.selectedTag))
 }
 
 func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
@@ -375,6 +484,9 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		return m.updateConfirm(msg)
 	}
+	if m.reading {
+		return m.updateReading(msg)
+	}
 	if key.Matches(msg, m.keys.Back) {
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
 		return m, func() tea.Msg { return BackMsg{} }
@@ -386,14 +498,37 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Filter):
 		m.filtering = true
+		m.focus = focusTags
 		m.filterInput.SetValue(m.filterQuery)
 		m.filterInput.CursorEnd()
 		return m, m.filterInput.Focus()
+	case key.Matches(msg, m.keys.Pane):
+		if m.focus == focusTags && len(m.currentCommits()) > 0 {
+			m.focus = focusCommits
+		} else {
+			m.focus = focusTags
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.Up):
+		if m.focus == focusCommits {
+			m.commitIdx = max(m.commitIdx-1, 0)
+			return m, nil
+		}
 		return m.moveCursor(-1)
 	case key.Matches(msg, m.keys.Down):
+		if m.focus == focusCommits {
+			m.commitIdx = min(m.commitIdx+1, max(len(m.currentCommits())-1, 0))
+			return m, nil
+		}
 		return m.moveCursor(1)
-	case key.Matches(msg, m.keys.Enter):
+	case key.Matches(msg, m.keys.Read):
+		if len(m.currentCommits()) == 0 {
+			m.notice = "no commit to read here — space reviews the change"
+			return m, nil
+		}
+		m.reading = true
+		return m, nil
+	case key.Matches(msg, m.keys.Review):
 		return m.selectCurrent(false)
 	case key.Matches(msg, m.keys.Direct):
 		if m.production {
@@ -403,6 +538,41 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.selectCurrent(true)
 	}
 	return m, nil
+}
+
+// updateReading handles the commit-detail view: ↑/↓ walk the commits, esc returns to the list.
+func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.reading = false
+	case key.Matches(msg, m.keys.Up):
+		m.commitIdx = max(m.commitIdx-1, 0)
+	case key.Matches(msg, m.keys.Down):
+		m.commitIdx = min(m.commitIdx+1, max(len(m.currentCommits())-1, 0))
+	case key.Matches(msg, m.keys.Review):
+		m.reading = false
+		return m.selectCurrent(false)
+	}
+	return m, nil
+}
+
+// currentCommits is the loaded delta's commits for the cursor tag, nil when none.
+func (m Model) currentCommits() []migrate.Commit {
+	st, ok := m.deltas[m.selectedTag]
+	if !ok || !st.Loaded || st.Err != nil {
+		return nil
+	}
+	return st.Delta.Commits
+}
+
+// currentDelta is the loaded delta for the cursor tag, for the selection messages.
+func (m Model) currentDelta() *migrate.Delta {
+	st, ok := m.deltas[m.selectedTag]
+	if !ok || !st.Loaded || st.Err != nil {
+		return nil
+	}
+	d := st.Delta
+	return &d
 }
 
 // CapturesText implements app.Screen (via tagsScreen's thin delegate in internal/app/screen.go).
@@ -430,7 +600,10 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 		idx = len(rows) - 1
 	}
 	m.selectedTag = rows[idx].Tag
-	return m.fetchVisible()
+	m.commitIdx = 0
+	var fetch tea.Cmd
+	m, fetch = m.fetchVisible()
+	return m, tea.Batch(fetch, m.historyCmd(m.selectedTag))
 }
 
 // selectCurrent emits SelectedMsg or, once the operator has confirmed, opens the huh.Confirm
@@ -461,8 +634,10 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	}
 	if !direct {
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
-		tag, digest := r.Tag, r.Meta.Digest
-		return m, func() tea.Msg { return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target} }
+		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
+		return m, func() tea.Msg {
+			return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared}
+		}
 	}
 	m.confirming = true
 	m.confirmValue = false
@@ -475,9 +650,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 	// only by a test reaching past the widget to set the bool (Copilot, PR #72).
 	m.confirmDirect.WithKeyMap(huh.NewDefaultKeyMap())
 	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	if m.width > 0 {
-		m.confirmDirect.WithWidth(m.width)
-	}
+	m.confirmDirect.WithWidth(m.dialogWidth())
 	return m, tea.Batch(m.confirmDirect.Init(), m.confirmDirect.Focus())
 }
 
@@ -494,9 +667,9 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		r := rows[idx]
 		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
-		tag, digest := r.Tag, r.Meta.Digest
+		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
 		return m, func() tea.Msg {
-			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target}
+			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared}
 		}
 	}
 	f, cmd := m.confirmDirect.Update(msg)
@@ -546,28 +719,67 @@ func (m Model) updateFilter(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		var fetchCmd tea.Cmd
 		m, fetchCmd = m.fetchVisible()
-		cmd = tea.Batch(cmd, fetchCmd)
+		cmd = tea.Batch(cmd, fetchCmd, m.historyCmd(m.selectedTag))
 	}
 	return m, cmd
 }
 
-// pageSize is how many rows fetchVisible keeps warm around the cursor: the visible body
-// height when known, else a small fixed window so a picker that hasn't been sized yet (a
-// snapshot test at a fixed size, in particular) still fetches something sane.
-func (m Model) pageSize() int {
-	if m.height > 4 {
-		return max(m.height-4, 5)
+// Fixed rows the frame spends outside the tag table: the meta section's lines and the
+// commit pane's, so pageSize and the render agree on what is visible.
+const (
+	paneRowsWide   = 8 // head + up to 7 commit lines, when the terminal is tall
+	paneRowsNarrow = 4
+	minPageSize    = 3
+)
+
+// paneRows is how many lines the commit pane gets: none when there is no way to have one,
+// one for a gap sentence, else a share of the height.
+func (m Model) paneRows() int {
+	if m.histFn.Delta == nil || m.declared == nil {
+		return 1
 	}
-	return 15
+	if m.height >= 30 {
+		return paneRowsWide
+	}
+	return paneRowsNarrow
+}
+
+// metaLines is the meta section's own line count: the repo→target line, the declared line
+// when there is one, the staging note when there is one, the filter line when active.
+func (m Model) metaLines() int {
+	n := 1
+	if m.declared != nil {
+		n++
+	}
+	if m.hasStagingMismatch {
+		n += lipgloss.Height(m.wrap(m.stagingNote()))
+	}
+	if m.filtering || m.filterQuery != "" {
+		n++
+	}
+	return n
+}
+
+// pageSize is how many tag rows the table shows and fetchVisible keeps warm around the
+// cursor: what the frame has left after its chrome, the meta section and the commit pane —
+// with a floor, and a fixed default before the screen has a size at all (a snapshot test).
+func (m Model) pageSize() int {
+	if m.height <= 0 {
+		return 15
+	}
+	body := ui.BodyHeight(m.height, 3) - m.metaLines() - m.paneRows() - 1 // header row
+	if m.notice != "" {
+		body--
+	}
+	return max(body, minPageSize)
 }
 
 // visibleWindow computes the half-open [start,end) slice of rows this screen keeps warm and
 // draws, centered on (or otherwise including) the cursor — the single source of truth both
-// fetchVisible (what gets a MetaFunc call) and viewReady (what actually gets rendered) share, so
-// the two can never drift apart (AGENTS.md §8, layered checks: one definition of "visible", not
-// two that can disagree about what's on screen). rows is the caller's own m.filtered() result,
-// passed in rather than recomputed here so a caller that already has it doesn't pay for it
-// twice.
+// fetchVisible (what gets a MetaFunc call) and the render share, so the two can never drift
+// apart (AGENTS.md §8, layered checks: one definition of "visible", not two that can disagree
+// about what's on screen). rows is the caller's own m.filtered() result, passed in rather
+// than recomputed here so a caller that already has it doesn't pay for it twice.
 func (m Model) visibleWindow(rows []Row) (start, end int) {
 	if len(rows) == 0 {
 		return 0, 0
@@ -617,7 +829,7 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 		// and reordering the list), or it retries unboundedly for as long as the picker stays
 		// open and the row remains visible. No explicit retry action exists yet this round
 		// (the finding allows either shape) — a failed row simply stays settled, rendered via
-		// createdCell/digestCell's own "load failed"/"—" cases, until this Model is torn down
+		// builtCell/digestCell's own "load failed"/"—" cases, until this Model is torn down
 		// and a fresh one (a new generation) is opened.
 		if m.rows[i].MetaLoaded || m.rows[i].MetaLoading || m.rows[i].MetaErr != nil {
 			continue
@@ -632,14 +844,16 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
 	if m.confirmDirect != nil {
-		m.confirmDirect.WithWidth(width)
+		m.confirmDirect.WithWidth(m.dialogWidth())
 	}
-	m.filterInput.SetWidth(max(width-10, 10))
+	m.filterInput.SetWidth(max(width-14, 10))
 	return m
 }
 
-// SetStyles applies the palette's dark/light flag to huh's own Charm theme (AGENTS.md §4.7:
-// a component's own theming is not a layout library).
+func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
+
+// SetStyles applies the palette (and its dark/light flag to huh's own Charm theme —
+// AGENTS.md §4.7: a component's own theming is not a layout library).
 func (m Model) SetStyles(s ui.Styles) Model {
 	m.styles = s
 	if m.confirmDirect != nil {
@@ -648,21 +862,88 @@ func (m Model) SetStyles(s ui.Styles) Model {
 	return m
 }
 
-// View renders the current state. Every rendered string passes through redact.Strings once
-// more here (AGENTS.md §4.4/R-002), matching plan.Model.View's own final-boundary pattern.
+// View renders the current state in the M10 frame. Every rendered string passes through
+// redact.Strings once more here (AGENTS.md §4.4/R-002), matching plan.Model.View's own
+// final-boundary pattern.
 func (m Model) View() string {
+	if m.width <= 0 || m.height <= 0 {
+		// A screen the root has not sized yet (a test calling View directly) still renders
+		// something readable rather than nothing.
+		m.width, m.height = 80, 24
+	}
 	var out string
 	switch {
 	case m.err != nil:
 		out = m.viewErr()
 	case m.state == stateLoading:
 		out = m.viewLoading()
-	case m.confirming:
-		out = strings.Join([]string{m.header(), m.confirmDirect.View(), ui.StatusBar(m.width, "", "enter confirm · esc back")}, "\n")
+	case m.reading:
+		out = m.viewReading()
 	default:
 		out = m.viewReady()
 	}
+	if m.confirming && m.confirmDirect != nil {
+		out = ui.Dialog(m.styles, out, "direct commit", m.confirmDirect.View(), m.width, m.height)
+	}
 	return redact.Strings(out)
+}
+
+func (m Model) title() string { return "hoist · deploy" }
+
+// metaSection is the frame's first section: the repo and target, what the env declares
+// today and for how long, the staging note, and the filter line.
+func (m Model) metaSection() string {
+	lines := []string{m.styles.Title.Render(m.imageRepo) + "  →  " + m.styles.Title.Render(m.target) + m.productionChip()}
+	if m.declared != nil {
+		lines = append(lines, m.declaredLine())
+	}
+	if m.hasStagingMismatch {
+		lines = append(lines, m.styles.Notice.Render(m.wrap(m.stagingNote())))
+	}
+	switch {
+	case m.filtering:
+		lines = append(lines, "filter: "+m.filterInput.View())
+	case m.filterQuery != "":
+		lines = append(lines, m.styles.Dim.Render(fmt.Sprintf("filter: %q (esc in filter mode to clear)", m.filterQuery)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) productionChip() string {
+	if !m.production {
+		return ""
+	}
+	return "   " + m.styles.Production.Render("production")
+}
+
+// declaredLine words what the env declares: "app-production declares  v1 · 111111111111 ·
+// since 34 days ago". "Declares", never "runs": this is the manifest, not the cluster.
+func (m Model) declaredLine() string {
+	ref := m.declared.Ref
+	parts := []string{m.styles.Dim.Render(m.target + " declares"), "  " + m.styles.Accent.Render(tagOrDigest(ref))}
+	if ref.Digest != "" {
+		parts = append(parts, " · "+ShortDigest(ref.Digest))
+	}
+	switch {
+	case m.ageKnown && m.ageErr == nil:
+		since := "since " + ui.Ago(m.now(), m.age.Since)
+		if m.age.Approximate {
+			since += " (approximately)"
+		}
+		parts = append(parts, m.styles.Dim.Render(" · "+since))
+	case m.ageKnown:
+		parts = append(parts, m.styles.Dim.Render(" · age unknown"))
+	case m.histFn.LiveAge != nil:
+		parts = append(parts, m.styles.Dim.Render(" · since …"))
+	}
+	return strings.Join(parts, "")
+}
+
+func tagOrDigest(r image.Ref) string {
+	if r.Tag != "" {
+		return r.Tag
+	}
+	return ShortDigest(r.Digest)
 }
 
 // stagingNote renders the paired staging env's committed manifest tag(s) for this image repo:
@@ -675,10 +956,10 @@ func (m Model) View() string {
 // alongside an empty m.stagingTags (see its own doc comment).
 //
 // Known gap, deliberately not closed here (issue #74): when the paired staging env has no
-// occurrence of this image repo AT ALL, StagingMismatch reports ok=false and viewReady
-// suppresses this note entirely — so the strongest "this has never been through staging" case
-// is the one case that gets no verdict. Closing it means StagingMismatch distinguishing "no
-// pair configured" from "pair exists, nothing of this repo in it", which is the same return
+// occurrence of this image repo AT ALL, StagingMismatch reports ok=false and the note is
+// suppressed entirely — so the strongest "this has never been through staging" case is the
+// one case that gets no verdict. Closing it means StagingMismatch distinguishing "no pair
+// configured" from "pair exists, nothing of this repo in it", which is the same return
 // reshaping #74 already needs for digests. Until then nothing here, and nothing in
 // docs/repo-map.md, may describe this note as covering that case.
 func (m Model) stagingNote() string {
@@ -729,11 +1010,7 @@ func (m Model) stagingRuns(tag string) bool {
 	return false
 }
 
-func (m Model) header() string {
-	left := fmt.Sprintf("hoist tags: %s -> %s", m.imageRepo, m.target)
-	right := "revision: " + Revision + " (pkg/migrate, later)"
-	return ui.StatusBar(m.width, left, right)
-}
+func (m Model) wrap(s string) string { return ansi.Wordwrap(s, max(m.width-2, 20), "") }
 
 func (m Model) viewErr() string {
 	// Wrapped, not left as one long line. A registry failure is a list — one clause per
@@ -741,9 +1018,8 @@ func (m Model) viewErr() string {
 	// clause, which is the one least likely to be the actionable one: an operator sees
 	// "HOIST_GHCR_TOKEN is not set" and never reaches "cluster: not configured", which is the
 	// clause that tells them what to fix.
-	parts := []string{m.header(), m.styles.Notice.Render(wrapError(m.err.Error(), m.width))}
-	parts = append(parts, ui.StatusBar(m.width, "", "esc back"))
-	return strings.Join(parts, "\n")
+	body := m.styles.Notice.Render(wrapError(m.err.Error(), max(m.width-2, 20)))
+	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), body}, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("esc back"))}.Render(m.styles, m.width, m.height)
 }
 
 // wrapError breaks an error across lines at its own clause separators first, then at spaces,
@@ -754,61 +1030,29 @@ func wrapError(msg string, width int) string {
 	}
 	var out []string
 	for _, clause := range strings.Split(msg, "; ") {
-		out = append(out, wrapWords(clause, width))
+		out = append(out, ansi.Wordwrap(clause, width, ""))
 	}
 	return strings.Join(out, "\n")
 }
 
-func wrapWords(s string, width int) string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return s
-	}
-	var lines []string
-	line := words[0]
-	for _, w := range words[1:] {
-		if ansi.StringWidth(line)+1+ansi.StringWidth(w) > width {
-			lines = append(lines, line)
-			line = w
-			continue
-		}
-		line += " " + w
-	}
-	return strings.Join(append(lines, line), "\n")
-}
-
 func (m Model) viewLoading() string {
-	parts := []string{m.header(), m.spinner.View() + " listing tags…"}
-	parts = append(parts, ui.StatusBar(m.width, "", "esc back"))
-	return strings.Join(parts, "\n")
+	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), m.spinner.View() + " listing tags…"}, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("esc back"))}.Render(m.styles, m.width, m.height)
 }
 
 func (m Model) viewReady() string {
-	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n")
-	if m.filtering {
-		fmt.Fprintf(&b, "filter: %s\n", m.filterInput.View())
-	} else if m.filterQuery != "" {
-		fmt.Fprintf(&b, "filter: %q (esc in filter mode to clear)\n", m.filterQuery)
-	}
-	if m.hasStagingMismatch {
-		// "committed manifest tag", not "currently running" (finding 5, round 2): stagingTags
-		// comes from StagingMismatch, which reads only the gitops repo's own parsed
-		// occurrences — never live cluster or Argo state (this package has no such connection
-		// wired in at all, AGENTS.md §4.8). Argo not having synced yet, an incomplete rollout,
-		// or the live workload otherwise differing from git would make "currently running" a
-		// false claim about live state, precisely while the operator is deciding whether to
-		// bypass staging via direct mode.
-		b.WriteString(m.styles.Notice.Render(m.stagingNote()))
-		b.WriteString("\n")
-	}
-	b.WriteString(m.tableHeader())
-	b.WriteString("\n")
+	sections := []string{m.metaSection(), m.tableSection(), m.paneSection()}
+	return ui.Frame{Title: m.title(), Sections: sections, Footer: m.footer()}.Render(m.styles, m.width, m.height)
+}
 
+// tableSection is the header row and the visible window of tag rows, plus the notices that
+// belong to the table.
+func (m Model) tableSection() string {
 	rows := m.filtered()
+	widths := m.columnWidths(rows)
+	var b strings.Builder
+	b.WriteString(m.styles.Header.Render(m.tableRow(widths, "", "TAG", "BUILT", "DIGEST", "")))
 	if len(rows) == 0 {
-		b.WriteString("  (no matching tags)\n")
+		b.WriteString("\n  (no matching tags)")
 	}
 	// Windowed to the same [start,end) fetchVisible uses (visibleWindow), so the cursor's row
 	// is always among what's drawn — moving the cursor past one screen's worth of rows must
@@ -817,13 +1061,11 @@ func (m Model) viewReady() string {
 	dividerShown := false
 	for _, r := range rows[start:end] {
 		if m.mapped && !r.HasGitDate && !dividerShown {
-			b.WriteString(strings.Repeat("─", 4) + " unordered (no matching git tag) " + strings.Repeat("─", 4) + "\n")
+			b.WriteString("\n" + m.styles.Dim.Render("── unordered (no matching git tag) ──"))
 			dividerShown = true
 		}
-		b.WriteString(m.rowLine(r))
-		b.WriteString("\n")
+		b.WriteString("\n" + m.rowLine(widths, r))
 	}
-
 	// Finding 4 (round 5): for an unmapped repo, Created-based ordering (invariant 3's fallback)
 	// is only actually established among rows fetchVisible has already loaded — AGENTS.md
 	// invariant 4's deliberate laziness (New's own doc comment) means a row outside every window
@@ -843,46 +1085,68 @@ func (m Model) viewReady() string {
 			}
 		}
 		if pending > 0 {
-			b.WriteString(m.styles.Notice.Render(fmt.Sprintf(
+			b.WriteString("\n" + m.styles.Notice.Render(fmt.Sprintf(
 				"%d tag(s) outside the visible window haven't been evaluated yet — Created order isn't fully established",
 				pending,
 			)))
-			b.WriteString("\n")
 		}
 	}
-
 	if m.notice != "" {
-		b.WriteString(m.styles.Notice.Render(m.notice))
-		b.WriteString("\n")
+		b.WriteString("\n" + m.styles.Notice.Render(m.wrap(m.notice)))
 	}
-	help := "↑/↓ move · / filter · enter select"
-	if !m.production {
-		help += " · D direct commit"
-	}
-	b.WriteString(ui.StatusBar(m.width, "", help))
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }
 
-func (m Model) tableHeader() string {
-	return fmt.Sprintf("  %-30s %-25s %-14s %s", "TAG", "CREATED", "DIGEST", "REV")
+// columnWidths sizes the four columns to the visible rows: the tag column to its widest
+// tag (bounded), BUILT and DIGEST fixed, the provenance column with the rest.
+func (m Model) columnWidths(rows []Row) [4]int {
+	tag := len("TAG")
+	for _, r := range rows {
+		tag = max(tag, ansi.StringWidth(r.Tag))
+	}
+	tag = min(tag, max(m.width/3, 12))
+	return [4]int{tag, 13, 12, 0}
 }
 
-func (m Model) rowLine(r Row) string {
+func (m Model) tableRow(w [4]int, marker, tag, built, digest, prov string) string {
+	return fmt.Sprintf("%-2s%-*s  %-*s  %-*s  %s", marker, w[0], ansi.Truncate(tag, w[0], "…"), w[1], built, w[2], digest, prov)
+}
+
+func (m Model) rowLine(w [4]int, r Row) string {
 	marker := "  "
 	if r.Tag == m.selectedTag {
-		marker = "> "
+		marker = "▸ "
 	}
-	created := m.createdCell(r)
-	digest := m.digestCell(r)
-	return fmt.Sprintf("%s%-30s %-25s %-14s %s", marker, r.Tag, created, digest, Revision)
+	line := m.tableRow(w, marker, r.Tag, m.builtCell(r), m.digestCell(r), m.provenance(r))
+	if r.Tag == m.selectedTag && m.focus == focusTags {
+		return m.styles.Selected.Render(line)
+	}
+	return line
 }
 
-func (m Model) createdCell(r Row) string {
+// provenance is the fourth column: where else this tag is — "in app-staging" when the
+// paired staging env's committed manifest carries it, "◂ declared here" for what the target
+// env declares now. Both are tag comparisons, and the staging note says what that proves.
+func (m Model) provenance(r Row) string {
+	var parts []string
+	if m.declared != nil && m.declared.Ref.Tag == r.Tag {
+		parts = append(parts, m.styles.Accent.Render("◂ declared here"))
+	}
+	if m.hasStagingMismatch && m.stagingRuns(r.Tag) {
+		parts = append(parts, m.styles.Good.Render("in "+m.stagingEnv))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// builtCell is when the build was made, relative to now: the app repo's git tag date when
+// the repo is mapped, else the registry's Created — the same source DeriveRows/Reorder order
+// the rows by.
+func (m Model) builtCell(r Row) string {
 	switch {
 	case r.HasGitDate:
-		return r.GitDate.Format("2006-01-02 15:04")
+		return ui.Ago(m.now(), r.GitDate)
 	case r.MetaLoaded:
-		return r.Meta.Created.Format("2006-01-02 15:04")
+		return ui.Ago(m.now(), r.Meta.Created)
 	case r.MetaErr != nil:
 		return "load failed"
 	case r.MetaLoading:
@@ -903,4 +1167,88 @@ func (m Model) digestCell(r Row) string {
 	default:
 		return "…"
 	}
+}
+
+// paneSection is the commit pane for the cursor tag.
+func (m Model) paneSection() string {
+	if m.selectedTag == "" {
+		return m.styles.Dim.Render("no tag under the cursor")
+	}
+	declared := "what " + m.target + " declares"
+	if m.declared != nil {
+		declared = tagOrDigest(m.declared.Ref)
+	}
+	if m.declared == nil {
+		return m.styles.Dim.Render(fmt.Sprintf("no commit history — %s does not declare %s yet, so there is nothing to compare with", m.target, m.imageRepo))
+	}
+	if m.histFn.Delta == nil {
+		return m.styles.Dim.Render(fmt.Sprintf("no commit history — %s has no app repo in repos[].apps", m.imageRepo))
+	}
+	lines := PaneLines(m.deltas[m.selectedTag], m.selectedTag, declared, m.target, m.imageRepo, m.histFn.Mapped == nil || m.histFn.Mapped(m.imageRepo), m.paneRows())
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		text := m.wrap(l.Text)
+		switch l.Role {
+		case "head":
+			if strings.Contains(l.Text, "migration") && !strings.Contains(l.Text, "not tracked") {
+				head, rest, _ := strings.Cut(l.Text, " · ")
+				text = m.styles.Title.Render(head) + " · " + m.styles.Warn.Render(rest)
+			} else {
+				text = m.styles.Title.Render(l.Text)
+			}
+		case "commit", "migration":
+			marker := "  "
+			if m.focus == focusCommits && l.Index == m.commitIdx {
+				marker = "▸ "
+			}
+			text = marker + l.Text
+			if l.Role == "migration" {
+				text = marker + m.styles.Warn.Render(ansi.Truncate(l.Text, max(m.width-2-2-12, 10), "…")) + "  " + m.styles.Warn.Render("migration")
+			}
+			if marker == "▸ " {
+				text = m.styles.Selected.Render(ansi.Strip(text))
+			}
+		case "more", "gap", "wait":
+			text = m.styles.Dim.Render(text)
+		}
+		out = append(out, text)
+	}
+	return strings.Join(out, "\n")
+}
+
+// viewReading is the commit-detail view (mockup 08): subject, position, the full body, and
+// the migration files the commit carries.
+func (m Model) viewReading() string {
+	commits := m.currentCommits()
+	if len(commits) == 0 || m.commitIdx >= len(commits) {
+		m.reading = false
+		return m.viewReady()
+	}
+	c := commits[m.commitIdx]
+	st := m.deltas[m.selectedTag]
+	head := m.styles.Title.Render(short(c.SHA)+"   "+c.Subject) + "\n" +
+		m.styles.Dim.Render(fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, len(commits), m.selectedTag, tagOrDigest(st.Delta.From.Ref), c.Author, ui.Ago(m.now(), c.Date)))
+	body := c.Body
+	if strings.TrimSpace(body) == "" {
+		body = m.styles.Dim.Render("(no body)")
+	} else {
+		body = m.wrap(body)
+	}
+	sections := []string{head, body}
+	if len(c.Migrations) > 0 {
+		sections = append(sections, m.styles.Warn.Render("migrations in this commit:\n  "+strings.Join(c.Migrations, "\n  ")))
+	}
+	return ui.Frame{Title: "hoist · deploy · commit", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("↑/↓ next commit · space review the change · esc back to the list"))}.Render(m.styles, m.width, m.height)
+}
+
+func (m Model) footer() string {
+	help := "↑/↓ move · / filter · space review the change"
+	if len(m.currentCommits()) > 0 {
+		help = "↑/↓ move · tab commits · enter read commit · space review the change"
+	}
+	if !m.production {
+		help += " · D direct"
+	}
+	help += " · esc back"
+	return ui.StatusBar(m.width, "", m.styles.Hint.Render(help))
 }
