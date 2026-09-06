@@ -735,7 +735,10 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 	default:
 		var blocked *engine.BlockedError
 		if errors.As(err, &blocked) {
-			fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(blocked.Error()))
+			// The recovery hint belongs here too. A rollout blocked after the merge (a
+			// progress deadline, a Degraded Application) is exactly the case where re-running
+			// a restart would start a second one rather than pick this up (Copilot, PR #79).
+			fmt.Fprintf(stderr, "%s: %s; %s\n", cmdName, redact.Strings(blocked.Error()), resumeAdvice(s))
 			return exitFailure
 		}
 		fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))

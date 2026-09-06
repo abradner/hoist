@@ -315,3 +315,28 @@ func TestRestartsOfDifferentFamiliesInOneSecondDiffer(t *testing.T) {
 		t.Error("restarting one family derived the same id as restarting the whole env")
 	}
 }
+
+// A rollout blocked after the merge is exactly the case where re-running a restart starts a
+// second one, so the recovery hint has to reach that branch too (Copilot, PR #79).
+func TestBlockedRestartAlsoAdvisesResumeById(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	f := &rollout.Fake{}
+	f.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Namespace:        "app-production",
+		Name:             "app",
+		Images:           []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v1@" + strings.Repeat("0", 64)}},
+		DeadlineExceeded: true,
+		Detail:           "progress deadline exceeded",
+	})
+	prev := newRollout
+	newRollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
+	t.Cleanup(func() { newRollout = prev })
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got == 0 {
+		t.Fatalf("a blocked rollout must not report success:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "hoist resume ") {
+		t.Errorf("a blocked restart must be resumed by id, not by re-running:\n%s", errOut.String())
+	}
+}

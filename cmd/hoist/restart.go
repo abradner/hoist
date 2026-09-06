@@ -102,11 +102,15 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
 		return exitFailure
 	}
-	if *direct {
-		if err := checkNoMissingWorkloadAtFreshBase(context.Background(), eff.repo, *base, eff.appsRoot, *env, splitFamilies(*family), plan); err != nil {
-			fmt.Fprintf(stderr, "hoist restart: %v\n", err)
-			return exitFailure
-		}
+	// Both modes, unlike promote and deploy, where this check is direct-only. Their omission
+	// is visible: a promotion that misses an occurrence leaves a file the reviewer can see is
+	// absent from a diff full of image changes. A restart's omission is invisible — the file
+	// that should have been touched simply has no diff line, in a PR whose every hunk looks
+	// identical — so a PR is not the second look here that it is there, and `restart --env X`
+	// could silently restart less than the env it just claimed (Copilot, PR #79).
+	if err := checkNoMissingWorkloadAtFreshBase(context.Background(), eff.repo, *base, eff.appsRoot, *env, splitFamilies(*family), plan); err != nil {
+		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
+		return exitFailure
 	}
 
 	f, err := newForge(eff.cfg.GitHub)
