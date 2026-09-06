@@ -1092,3 +1092,21 @@ func TestPromoteRedactsRegisteredSecretInDriverError(t *testing.T) {
 		t.Fatalf("stderr should carry the redaction marker, got: %s", errOut.String())
 	}
 }
+
+// A --base that names no branch is reported as exactly that, not as uncommitted local
+// changes in every planned file — the old fold sent the operator looking for edits that did
+// not exist when the cause was a typo or an unfetched branch (issue #34).
+func TestPromoteRefusesUnknownBaseByName(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "nope"}
+	var out, errOut bytes.Buffer
+	if got := run(args, &out, &errOut); got == 0 {
+		t.Fatalf("expected a non-zero exit for an unknown base; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `"nope" does not resolve`) || strings.Contains(errOut.String(), "uncommitted") {
+		t.Fatalf("stderr should name the missing base, not dirty files: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}

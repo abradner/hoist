@@ -488,3 +488,38 @@ func mustStatePath(t *testing.T, id string) string {
 	}
 	return p
 }
+
+// An already-current plan says so from the TUI even when the forge could not be built: the
+// CLI's promote and deploy both check the all-no-op fast path before newForge, and the TUI
+// must not disagree with them about when a GitHub login is needed (issue #55).
+func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
+	cfgPath, clone, _ := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
+	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
+	if err := os.WriteFile(prodFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, clone, "add", ".")
+	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
+	runGitHost(t, clone, "push", "-q", "origin", "main")
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ro, cerr := tuiCluster(t)
+	forgeErr := errors.New("gh: not logged in")
+	start := buildStartPromotion(eff, r, newGit, nil, forgeErr, a, ro, cerr)
+	_, _, err = start(context.Background(), plan, app.StartOpts{})
+	if err == nil || !strings.Contains(err.Error(), "already current") {
+		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)
+	}
+	if errors.Is(err, forgeErr) {
+		t.Errorf("the forge error reached the operator for a plan that never needed the forge: %v", err)
+	}
+}

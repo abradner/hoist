@@ -88,10 +88,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		return fmt.Errorf("fetching origin/%s to confirm the clone is current: %w", base, err)
 	}
 
-	// localOK is deliberately ignored: base's own local branch not resolving at all is caught
-	// per-file below (LsTreeBlob against base fails, which the dirty bucket already treats as
-	// untrustworthy) — nothing here needs it as a bool in its own right.
-	localSHA, _, err := g.RevParse(ctx, cloneDir, base)
+	localSHA, localOK, err := g.RevParse(ctx, cloneDir, base)
 	if err != nil {
 		return err
 	}
@@ -99,6 +96,16 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	originSHA, originOK, err := g.RevParse(ctx, cloneDir, originRef)
 	if err != nil {
 		return err
+	}
+	// A base that does not resolve at all used to fall through to the per-file check, where
+	// every LsTreeBlob against it failed and the whole plan was reported as "uncommitted local
+	// changes" — a safe refusal, but one that sent the operator looking for edits that did not
+	// exist when the real cause was a typo in --base or a branch never fetched (issue #34).
+	if !localOK {
+		if originOK {
+			return fmt.Errorf("%s has no local branch %q, only %s — check out or fetch it locally (`git branch %s %s`) and re-run", cloneDir, base, originRef, base, originRef)
+		}
+		return fmt.Errorf("%q does not resolve in %s and origin has no such branch — check the --base name and re-run", base, cloneDir)
 	}
 	// targetRef is exactly what pkg/git.Exec.Worktree's own resolveBase would build a brand-new
 	// promotion branch from: origin/<base> whenever that ref exists at all — the bare local

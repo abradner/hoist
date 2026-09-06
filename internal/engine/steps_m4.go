@@ -191,7 +191,11 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 	}
 	switch s.CINone {
 	case "block":
-		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; hoist has no override for block — wait for real checks, or change ci.none to prompt/green in config and re-run"}, nil
+		// The recovery named here has to be one that actually works: this promotion keeps the
+		// ci.none it started with (runResume and a same-id re-run restore it from the state
+		// file, never from current config — PromotionState's policy fields), so "change the
+		// config and re-run" was a path that could not reach this promotion (issue #48).
+		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; block has no override, and this promotion keeps the ci.none it started with, so a config change does not apply to it — wait for the checks to report and re-run, or abandon this promotion (delete its state file, <id>.json under hoist's promotions state directory; `hoist promotions` lists the id) and start again with ci.none set to prompt or green"}, nil
 	case "green":
 		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green"}, nil
 	default: // "prompt", and any empty value a caller forgot to fill from Normalize's default
