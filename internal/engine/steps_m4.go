@@ -27,6 +27,14 @@ package engine
 // not a direct fact about the commit being approved. CommitTime reads the real thing an
 // approval comment has to postdate, so ApprovedStep's own doc comment can state the anchor
 // without leaning on Pushed's and Merged's checks to make an earlier PR unreachable.
+//
+// The cost of that anchor is accepted, not overlooked: a committer date is workstation
+// metadata, and a clock set ahead of GitHub's would filter out a real approval posted right
+// after the PR opened until that future instant passes. hoist is a single-operator tool whose
+// commits are made on the operator's own NTP-synced machine, so the skew in play is seconds and
+// sinceSlop already absorbs it; the alternative anchor (PR.CreatedAt) fails in the direction
+// that matters for a production gate — a force-push after the PR opened — and is not taken
+// (issue #47, decided rather than deferred).
 import (
 	"context"
 	"fmt"
@@ -138,9 +146,10 @@ func (c CIGreenStep) now() time.Time {
 // from under a promotion is exactly that case). total==0 is a grace-period Waiting, then the
 // ci.none policy: green satisfies, prompt Blocks with an override path (CINoneOverride, set by
 // `hoist resume --override-ci-none`), block Blocks with none at all — an operator who chose
-// block gets no in-band bypass, only "wait for real checks" or "change ci.none and resume",
-// which is the entire point of choosing the stricter of the two non-green policies over the
-// milder one.
+// block gets no in-band bypass, only "wait for real checks" or "abandon this promotion and
+// start one under a different ci.none" (a config change never reaches a promotion already
+// under way — PromotionState's policy fields), which is the entire point of choosing the
+// stricter of the two non-green policies over the milder one.
 func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	if s.PR == nil {
 		return Observation{Satisfied: false}, nil
@@ -351,7 +360,7 @@ func (MergedStep) Name() StepName { return StepMerged }
 // correct test (round 3, finding #2: a blob comparison would misclassify an ordinary later
 // re-promotion to the same env, which legitimately changes the same paths, as a revert).
 func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
-	pr, ok, err := m.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
+	pr, ok, err := findOwnPR(ctx, m.Forge, s)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -458,25 +467,66 @@ func (m MergedStep) mergeWasReverted(ctx context.Context, s *PromotionState, mer
 	// check here: RevParse's `git rev-parse --verify --quiet` treats any well-formed 40-hex-char
 	// string as "verified" even when no such object exists in this clone at all — it only
 	// validates the string parses as a revision, never that the object is actually present.
+	//
+	// Either negative answer is only evidence when the clone actually holds history: a shallow
+	// clone is cut off at its depth, so a merge that is still perfectly part of origin's
+	// history can be absent locally, or present but disconnected from the tip. Reporting that
+	// as a revert would tell the operator a completed promotion needs redoing — and make
+	// findInFlight refuse the env — on the strength of a clone that never had the evidence
+	// (issue #46). So a shallow clone is named as the reason, with the fetch that fixes it.
+	shallowBlock := func(what string) (bool, string, error) {
+		shallow, serr := m.Git.IsShallow(ctx, s.CloneDir)
+		if serr != nil {
+			return false, "", fmt.Errorf("checking whether %s is a shallow clone: %w", s.CloneDir, serr)
+		}
+		if !shallow {
+			return true, what, nil
+		}
+		return true, fmt.Sprintf(
+			"%s is a shallow clone, so it cannot show whether this promotion's merge commit %s is still part of %s's history (origin is at %s) — run `git fetch --unshallow origin` in that clone and resume; nothing was reverted as far as hoist can tell",
+			s.CloneDir, mergeSHA, s.Base, baseSHA,
+		), nil
+	}
 	if exists, oerr := m.Git.ObjectExists(ctx, s.CloneDir, mergeSHA); oerr != nil {
 		return false, "", fmt.Errorf("checking whether this clone has this promotion's merge commit %s: %w", mergeSHA, oerr)
 	} else if !exists {
-		return true, fmt.Sprintf(
+		return shallowBlock(fmt.Sprintf(
 			"this promotion's merge commit %s is no longer resolvable in this clone (origin's %s is now at %s) — the target may have been reset or rebuilt outside hoist; a fresh promotion is needed, not a retry of this one",
 			mergeSHA, s.Base, baseSHA,
-		), nil
+		))
 	}
 	isAncestor, err := m.Git.IsAncestor(ctx, s.CloneDir, mergeSHA, baseSHA)
 	if err != nil {
 		return false, "", fmt.Errorf("checking whether merge %s is still part of %s's history: %w", mergeSHA, s.Base, err)
 	}
 	if !isAncestor {
-		return true, fmt.Sprintf(
+		return shallowBlock(fmt.Sprintf(
 			"this promotion's merge commit %s is no longer part of %s's history (origin is now at %s) — the target may have been reset or rebuilt outside hoist; a fresh promotion is needed, not a retry of this one",
 			mergeSHA, s.Base, baseSHA,
-		), nil
+		))
 	}
 	return false, "", nil
+}
+
+// findOwnPR is how every step looks up this promotion's PR: by its number, once one has been
+// recorded, and only then by branch name and body marker. The number is the state file being
+// an index of where to look (AGENTS.md §4.1) — the forge is still asked, and the answer is
+// still checked to be this promotion's own by head branch — not evidence of what happened.
+// Before this, a completed promotion whose branch was long deleted was findable only through
+// FindPR's bounded body-marker scan of closed PRs, so once enough later PRs had merged past
+// that window it read as never opened, and findInFlight could take it for still in flight
+// (issue #45).
+func findOwnPR(ctx context.Context, f forge.Forge, s *PromotionState) (forge.PR, bool, error) {
+	if s.PR != nil && s.PR.Number > 0 {
+		pr, ok, err := f.GetPR(ctx, s.PR.Number)
+		if err != nil {
+			return forge.PR{}, false, err
+		}
+		if ok && pr.HeadBranch == s.Branch {
+			return pr, true, nil
+		}
+	}
+	return f.FindPR(ctx, s.Branch, Marker(s.ID))
 }
 
 // Act implements Step.
@@ -502,7 +552,7 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 			// not a silent success. As elsewhere (Observe's own stale-head pre-check above), an
 			// empty head on either side means "unknown, not a basis to refuse" — only an
 			// actual, known mismatch is treated as impostor content.
-			fresh, ok, ferr := m.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
+			fresh, ok, ferr := findOwnPR(ctx, m.Forge, s)
 			headOK := fresh.HeadSHA == "" || expected == "" || fresh.HeadSHA == expected
 			if ferr == nil && ok && fresh.Merged && fresh.Base == s.Base && headOK {
 				s.PR = &fresh

@@ -103,6 +103,12 @@ type Forge interface {
 	// open PRs and, if that search is empty, recently closed/merged ones within a bound.
 	// ok=false means no matching PR exists yet, not an error.
 	FindPR(ctx context.Context, headBranch, bodyMarker string) (PR, bool, error)
+	// GetPR fetches one pull request by number, ok=false when no such PR exists. It is the
+	// exact lookup a caller uses once a promotion has recorded its PR's number (the state file
+	// as an index of where to look — AGENTS.md §4.1), in place of FindPR's bounded body-marker
+	// scan, which cannot find a merged, branch-deleted PR once enough later PRs have closed
+	// past its window (issue #45). The caller still checks the returned PR is its own.
+	GetPR(ctx context.Context, number int) (PR, bool, error)
 	// Checks reports the check-run rollup for sha. Stubbed/minimal is fine for M3; M4 extends
 	// it into a gate.
 	Checks(ctx context.Context, sha string) (CheckSummary, error)

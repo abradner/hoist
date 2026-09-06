@@ -366,7 +366,7 @@ func (PROpenedStep) Name() StepName { return StepPROpened }
 // the conflict named rather than hoist quietly trying to open a second PR for the same branch
 // (which the forge would then itself refuse).
 func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
-	pr, ok, err := p.Forge.FindPR(ctx, s.Branch, Marker(s.ID))
+	pr, ok, err := findOwnPR(ctx, p.Forge, s)
 	if err != nil {
 		return Observation{}, err
 	}

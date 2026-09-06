@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -975,5 +976,80 @@ func TestResumeAfterKillDuringApprovalConvergesWithoutDuplicating(t *testing.T) 
 	}
 	if len(f.PRs()) != 1 || !f.PRs()[0].Merged {
 		t.Fatalf("expected exactly one, merged PR: %+v", f.PRs())
+	}
+}
+
+// A shallow clone cannot show whether a merge commit is still in the base's history, so a
+// missing object there is not evidence of a revert: the Blocked reason names the shallow clone
+// and the fetch that fixes it, never "the target may have been reset" (issue #46). The same
+// unresolvable sha in a full clone keeps the revert wording — the control.
+func TestMergedUnresolvableMergeSHAInShallowCloneNamesTheClone(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	g := git.Exec{}
+	step := MergedStep{Forge: f, Git: g}
+	const bogusMergeSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if _, err := f.MergePR(ctx(), s.PR.Number, bogusMergeSHA); err != nil {
+		t.Fatalf("seeding the fake merge: %v", err)
+	}
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(obs.Blocked, "reset or rebuilt") || strings.Contains(obs.Blocked, "shallow") {
+		t.Fatalf("full clone control: %q", obs.Blocked)
+	}
+
+	// Cut the same clone off at depth 1: git marks it shallow the moment a depth-limited
+	// fetch lands, exactly the state a `git clone --depth` checkout is in.
+	cmd := exec.Command("git", "fetch", "--quiet", "--depth", "1", "origin", "main")
+	cmd.Dir = s.CloneDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("making the clone shallow: %v\n%s", err, out)
+	}
+	if shallow, err := g.IsShallow(ctx(), s.CloneDir); err != nil || !shallow {
+		t.Fatalf("test bug: clone is not shallow (shallow=%v err=%v)", shallow, err)
+	}
+	obs, err = step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied || obs.Blocked == "" {
+		t.Fatalf("shallow clone must Block, not satisfy or wait: %+v", obs)
+	}
+	for _, want := range []string{"shallow clone", "git fetch --unshallow", bogusMergeSHA, "nothing was reverted as far as hoist can tell"} {
+		if !strings.Contains(obs.Blocked, want) {
+			t.Errorf("Blocked reason lacks %q: %s", want, obs.Blocked)
+		}
+	}
+	if strings.Contains(obs.Blocked, "reset or rebuilt") {
+		t.Errorf("Blocked reason still claims a revert the clone cannot show: %s", obs.Blocked)
+	}
+}
+
+// Once a promotion has recorded its PR's number, every step finds the PR by that number and
+// only falls back to FindPR's branch-and-marker search when the number no longer names its
+// own PR (issue #45). With FindPR failing outright, the number is the only way in — so a
+// working lookup here proves the number was used; a PR whose head branch is not this
+// promotion's falls through to FindPR, which is the control.
+func TestStepsFindTheirPRByRecordedNumber(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.FindErr = errors.New("FindPR: scan exhausted")
+	for name, step := range map[string]Step{"pr-opened": PROpenedStep{Forge: f}, "merged": MergedStep{Forge: f, Git: git.Exec{}}} {
+		obs, err := step.Observe(ctx(), s)
+		if err != nil {
+			t.Errorf("%s: fell back to FindPR with a recorded PR number: %v", name, err)
+		}
+		if name == "pr-opened" && !obs.Satisfied {
+			t.Errorf("%s: %+v", name, obs)
+		}
+	}
+	other := *s
+	other.Branch = "hoist/app-production/someone-else"
+	if _, err := (PROpenedStep{Forge: f}).Observe(ctx(), &other); err == nil {
+		t.Error("a recorded number whose PR has a different head branch must fall through to FindPR")
 	}
 }

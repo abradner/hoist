@@ -191,8 +191,11 @@ func TestResumeEnvSurfacesObservationErrorInsteadOfSilentlyExcluding(t *testing.
 	id := states[0].ID
 
 	// A transient forge failure — nothing to do with this promotion's actual state — hits every
-	// candidate's re-observation from here on.
+	// candidate's re-observation from here on. Both lookups fail: once a promotion has recorded
+	// its PR number the steps fetch it by number first (issue #45), so a FindPR-only outage
+	// would be invisible to a candidate that has one.
 	f.FindErr = errors.New("transient: GitHub API returned 502")
+	f.GetErr = f.FindErr
 
 	out.Reset()
 	errOut.Reset()

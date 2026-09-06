@@ -378,3 +378,57 @@ func TestStatusSkipsPastMergedButStillWalksTheStepsAfterIt(t *testing.T) {
 		t.Errorf("statuses[0] = %+v, want the merge recorded as satisfied", statuses[0])
 	}
 }
+
+// Status's Merged probe is a short-circuit, never the only look at the merge (issue #60): while
+// a promotion is still at CI or approval, a transient failure of that FindPR must not come back
+// typed StepMerged — the one step no retry classifier treats as transient — and stop a caller's
+// polling for good. The walk still reaches MergedStep once every earlier step is satisfied, and
+// there the same error surfaces (the control).
+func TestStatusMergedProbeFailureIsInvisibleBeforeTheMerge(t *testing.T) {
+	probeErr := errors.New("GET /repos/.../pulls: 502")
+	waiting := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepCIGreen, obs: Observation{Waiting: true, Detail: "CI: 1/3 checks complete"}},
+		stepStub{name: StepMerged, err: probeErr},
+		stepStub{name: StepRolledOut},
+	}
+	done, statuses, err := Status(ctx(), waiting, &PromotionState{})
+	if err != nil {
+		t.Fatalf("Status surfaced the Merged probe's error while CI is still waiting: %v", err)
+	}
+	if done || len(statuses) != 2 || statuses[1].Step != StepCIGreen || !statuses[1].Waiting {
+		t.Errorf("statuses = %+v, want the walk to stop at CI waiting", statuses)
+	}
+	if _, last, err := ObserveAll(ctx(), waiting, &PromotionState{}); err != nil || last.Step != StepCIGreen {
+		t.Fatalf("ObserveAll while CI is still waiting: last=%+v err=%v", last, err)
+	}
+	ready := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepCIGreen, obs: Observation{Satisfied: true}},
+		stepStub{name: StepMerged, err: probeErr},
+		stepStub{name: StepRolledOut},
+	}
+	_, _, err = Status(ctx(), ready, &PromotionState{})
+	var stepErr *StepError
+	if !errors.As(err, &stepErr) || stepErr.Step != StepMerged {
+		t.Errorf("with every earlier step satisfied the merge's own error must surface as StepMerged: %v", err)
+	}
+	if _, _, err := ObserveAll(ctx(), ready, &PromotionState{}); !errors.Is(err, probeErr) {
+		t.Errorf("ObserveAll with every earlier step satisfied: %v", err)
+	}
+	// A plain unsatisfied step before the merge is ambiguous: a promotion that already merged
+	// and deleted its branch reads exactly like one that never pushed. There the probe's
+	// failure must surface, or findInFlight would refuse a new promotion over a finished one.
+	ambiguous := []Step{
+		stepStub{name: StepBranched, obs: Observation{Satisfied: true}},
+		stepStub{name: StepPushed, obs: Observation{Satisfied: false}},
+		stepStub{name: StepMerged, err: probeErr},
+		stepStub{name: StepRolledOut},
+	}
+	if _, _, err := Status(ctx(), ambiguous, &PromotionState{}); !errors.As(err, &stepErr) || stepErr.Step != StepMerged {
+		t.Errorf("Status stopping plain-unsatisfied before the merge must surface the probe error: %v", err)
+	}
+	if _, _, err := ObserveAll(ctx(), ambiguous, &PromotionState{}); !errors.Is(err, probeErr) {
+		t.Errorf("ObserveAll stopping plain-unsatisfied before the merge must surface the probe error: %v", err)
+	}
+}
