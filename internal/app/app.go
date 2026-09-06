@@ -11,9 +11,11 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
+	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -107,6 +109,11 @@ type Model struct {
 	envs       config.EnvsConfig
 	resolveFn  plan.ResolveFunc
 	tagsFn     tags.BuildFunc
+	// restartFn is everything the restart screen needs from the cluster, supplied by the root's
+	// own caller (cmd/hoist) so this package opens no connection of its own (AGENTS.md §4.8).
+	// Zero when no cluster is configured; R then says so rather than opening a screen that
+	// cannot do anything.
+	restartFn apprestart.Funcs
 
 	// startPromotion, poll, openURL and openPRMode are Promotion's fields, unpacked here —
 	// see Promotion's own doc comment for what each one is and why a nil Start/OpenURL
@@ -166,7 +173,7 @@ type Model struct {
 // calls to list and fetch registry/forge data for one image repo; nil opens the picker with no
 // data source (it reports the resulting error itself, same as a resolveFn failure does for
 // plan). The theme starts dark and is replaced when the terminal reports its background.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion, tagsFn tags.BuildFunc) Model {
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion, tagsFn tags.BuildFunc, restartFn apprestart.Funcs) Model {
 	m := Model{
 		styles:         ui.NewStyles(true),
 		repo:           repo,
@@ -178,6 +185,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		openURL:        promo.OpenURL,
 		openPRMode:     promo.OpenPRMode,
 		tagsFn:         tagsFn,
+		restartFn:      restartFn,
 	}
 	return m.push(matrixScreen{matrix.New(repo, promotable)})
 }
@@ -437,6 +445,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
 		return m, nil
+	case matrix.OpenRestartMsg:
+		return m.openRestart(msg.Family, msg.Target)
+	case apprestart.BackMsg:
+		return m.pop(), nil
 	case matrix.OpenTagsMsg:
 		var mapped bool
 		var listFn tags.ListFunc
@@ -520,6 +532,26 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
+}
+
+// openRestart pushes the restart screen for one family in one env. The Deployment names come
+// from the repo here, in the root, for the same reason openDeploy builds its plan here: the
+// matrix names a choice, and working out what that choice would touch is the root's job
+// (AGENTS.md §4.8).
+//
+// The matrix is NOT popped, unlike the deploy path: a restart is small and repeatable, and
+// backing out of the confirmation should land on the cell it started from.
+func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
+	if m.restartFn.Read == nil {
+		return m.withMatrixNotice("restarting needs a cluster connection, and none is configured"), nil
+	}
+	names, err := restart.Targets(m.repo, target, []string{family})
+	if err != nil {
+		return m.withMatrixNotice(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
+	}
+	rs := restartScreen{apprestart.New(target, family, names, plan.IsProduction(target, m.envs), m.restartFn, m.styles)}
+	m = m.push(rs)
+	return m, rs.Init()
 }
 
 // openDeploy builds the plan for one image into one env and pushes the confirm screen for it.

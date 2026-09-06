@@ -139,3 +139,32 @@ func TestPromoteWithNoEnvsShowsNoticeInsteadOfOpeningPlan(t *testing.T) {
 		t.Errorf("P with no envs: View() lacks the notice:\n%s", m3.View())
 	}
 }
+
+// R asks to restart the family under the cursor in the current env. It names a family rather
+// than an image because a restart changes no image: what it rolls is every Deployment the family
+// declares, which is the unit an Argo Application already covers.
+func TestRestartKeyEmitsOpenRestartMsg(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd == nil {
+		t.Fatal("R produced no command")
+	}
+	msg, ok := cmd().(OpenRestartMsg)
+	if !ok {
+		t.Fatalf("R emitted %T, want OpenRestartMsg", cmd())
+	}
+	if msg.Target != m.CurrentEnv() {
+		t.Errorf("Target = %q, want the current env %q", msg.Target, m.CurrentEnv())
+	}
+	if msg.Family != m.CurrentFamily() || msg.Family == "" {
+		t.Errorf("Family = %q, want the family under the cursor %q", msg.Family, m.CurrentFamily())
+	}
+
+	// Lower-case r is not it: the restart key is capital because it asks for a write, and a
+	// mistyped r should not land on it.
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"}); cmd != nil {
+		if _, ok := cmd().(OpenRestartMsg); ok {
+			t.Error("lower-case r must not start a restart")
+		}
+	}
+}

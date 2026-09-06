@@ -261,6 +261,14 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 		}
 		u, _ := intstr.GetScaledValueFromIntOrPercent(&mu, int(st.Replicas), false)
 		sg, _ := intstr.GetScaledValueFromIntOrPercent(&ms, int(st.Replicas), true)
+		// Kubernetes' own fencepost rule: a rollout that may neither add a pod nor remove one
+		// could never progress, so the controller forces maxUnavailable to 1 when both resolve
+		// to zero (deployment_util.ResolveFenceposts). Skipping it here would have the warning
+		// claim the old pod stays up under, say, maxUnavailable 1% with maxSurge 0 at one
+		// replica — precisely the configuration where the controller does take it down.
+		if u == 0 && sg == 0 {
+			u = 1
+		}
 		st.MaxUnavailable, st.MaxSurge = int32(u), int32(sg)
 	}
 	for _, ctr := range d.Spec.Template.Spec.Containers {

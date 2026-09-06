@@ -10,8 +10,10 @@ import (
 
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/flight"
+	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
@@ -321,4 +323,33 @@ func deployRefOf(p gitops.Plan) image.Ref {
 		return image.Ref{}
 	}
 	return p.Edits[0].New
+}
+
+// buildRestartFuncs adapts internal/restart's core into the plain function values the restart
+// screen takes, so internal/app never reaches for pkg/rollout or a kubeconfig itself
+// (AGENTS.md §4.8) — the same shape buildResolveFunc and buildTagsFunc already give the plan
+// and picker screens.
+//
+// A zero Funcs when the cluster could not be reached: the screen's own Read is then nil, and
+// the root says so on the matrix rather than opening a screen that can do nothing.
+func buildRestartFuncs(ro rollout.Rollout, rolloutErr error, poll config.PollConfig) apprestart.Funcs {
+	if rolloutErr != nil || ro == nil {
+		return apprestart.Funcs{}
+	}
+	interval := time.Duration(poll.Rollout)
+	if interval <= 0 {
+		interval = 3 * time.Second
+	}
+	return apprestart.Funcs{
+		Read: func(ctx context.Context, env string, names []string) (restart.Plan, error) {
+			return restart.Read(ctx, ro, env, names)
+		},
+		Do: func(ctx context.Context, p restart.Plan, at time.Time) ([]string, error) {
+			return restart.Do(ctx, ro, p, at)
+		},
+		Observe: func(ctx context.Context, env string, names []string, at time.Time) ([]restart.Progress, error) {
+			return restart.Observe(ctx, ro, env, names, at)
+		},
+		Interval: interval,
+	}
 }

@@ -541,7 +541,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
 	tagsFn := buildTagsFunc(cfg, eff.cfg)
-	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn), tea.WithOutput(stdout)).Run(); err != nil {
+	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
+	if _, err := tea.NewProgram(app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn), tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}

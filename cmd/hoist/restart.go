@@ -8,11 +8,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -80,7 +80,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintln(stderr, "hoist restart: --family was given but names no family; omit it to restart every family in --env")
 		return exitUsage
 	}
-	targets, err := restartTargets(r, *env, families)
+	targets, err := restart.Targets(r, *env, families)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
 		return exitFailure
@@ -110,28 +110,13 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// Read every target first, so the operator sees the whole set — and every reason a restart
 	// of it would not be graceful — before any of it rolls.
-	before := make([]rollout.DeploymentStatus, 0, len(targets))
-	var absent []string
-	for _, t := range targets {
-		st, rerr := ro.Deployment(ctx, *env, t)
-		if rerr != nil {
-			// A Deployment the repo declares but the cluster does not have is a real mismatch
-			// worth seeing — a family not deployed yet, a rename that landed in git only — but
-			// it is not a reason to refuse to restart the ones that ARE there. Named in the
-			// listing so the set is never quietly smaller than it looks (principle 5). Any
-			// other read failure is a genuine failure and stops here.
-			if errors.Is(rerr, rollout.ErrNotFound) {
-				absent = append(absent, t)
-				continue
-			}
-			fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
-			return exitFailure
-		}
-		st.Name = t // the name asked for, never whatever the read echoed back
-		before = append(before, st)
+	pl, err := restart.Read(ctx, ro, *env, targets)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
+		return exitFailure
 	}
-	printRestartTargets(stdout, *env, usedContext, before, absent)
-	if len(before) == 0 {
+	printRestartTargets(stdout, *env, usedContext, pl)
+	if len(pl.Targets) == 0 {
 		fmt.Fprintf(stderr, "hoist restart: none of %s's Deployments exist in the cluster\n", *env)
 		return exitFailure
 	}
@@ -142,124 +127,19 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 
 	at := time.Now().UTC()
-	var restarted []string
-	for _, st := range before {
-		if rerr := restartOne(ctx, ro, *env, st.Name, at); rerr != nil {
-			fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
-			// Say what did roll before the failure: some pods are already restarting, and an
-			// operator needs to know which.
-			if len(restarted) > 0 {
-				fmt.Fprintf(stderr, "hoist restart: already restarted: %s\n", strings.Join(restarted, ", "))
-			}
-			return exitFailure
+	restarted, rerr := restart.Do(ctx, ro, pl, at)
+	if rerr != nil {
+		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
+		// Say what did roll before the failure: some pods are already restarting, and an
+		// operator needs to know which.
+		if len(restarted) > 0 {
+			fmt.Fprintf(stderr, "hoist restart: already restarted: %s\n", strings.Join(restarted, ", "))
 		}
-		restarted = append(restarted, st.Name)
+		return exitFailure
 	}
 	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
 
 	return watchRestart(ctx, ro, *env, restarted, at, cfg.Poll, stdout, stderr)
-}
-
-// restartOne patches one Deployment and resolves the one ambiguous outcome the patch has: the
-// API server can commit the change and the connection can still fail before the response
-// arrives. Reporting that as a failure is wrong in a way that matters — the pods are already
-// rolling, and an operator who re-runs would roll them a second time.
-//
-// So a failed patch is followed by a read: if the annotation already carries this invocation's
-// own stamp, the write landed and the error was only in hearing about it. Safe because the stamp
-// is fixed for the whole invocation and unique to it (rollout.RestartStampLayout), so finding it
-// there cannot mean someone else's restart.
-//
-// ErrNotFound is terminal either way: a Deployment that is not there was not restarted, and no
-// amount of re-reading changes that.
-func restartOne(ctx context.Context, ro rollout.Rollout, env, name string, at time.Time) error {
-	err := ro.Restart(ctx, env, name, at)
-	if err == nil || errors.Is(err, rollout.ErrNotFound) {
-		return err
-	}
-	// One read is not enough: the outage that lost the patch's response can lose this read too,
-	// and reporting failure then is the very mistake this exists to avoid. So retry — the patch
-	// as readily as the read, since re-patching with the same stamp is idempotent — a few times
-	// with a short backoff, and give up only when the outcome is still genuinely unknown.
-	want := at.UTC().Format(rollout.RestartStampLayout)
-	for attempt := 0; attempt < restartConfirmAttempts; attempt++ {
-		select {
-		case <-ctx.Done():
-			return err
-		case <-time.After(restartConfirmBackoff):
-		}
-		st, rerr := ro.Deployment(ctx, env, name)
-		if rerr == nil {
-			if st.RestartedAt == want {
-				return nil // the write landed; only the response was lost
-			}
-			// The read worked and this stamp is not there, so the patch really did fail.
-			// Retrying it is safe (same stamp, idempotent) and is the useful thing to do.
-			if perr := ro.Restart(ctx, env, name, at); perr == nil {
-				return nil
-			} else if errors.Is(perr, rollout.ErrNotFound) {
-				return perr
-			}
-		}
-	}
-	return err
-}
-
-// How hard restartOne tries to learn whether an ambiguous patch landed. Deliberately small: the
-// question is "did the write take", not "wait out an outage", and the caller's own deadline
-// still bounds everything above this.
-const (
-	restartConfirmAttempts = 3
-	restartConfirmBackoff  = 500 * time.Millisecond
-)
-
-// restartTargets is the distinct Deployment names the named families declare in env, or every
-// family's when none are named.
-//
-// Read from the GitOps repo rather than by listing the namespace, because "family" is a concept
-// the repo defines and the cluster does not: a namespace holds several families' workloads
-// (asn-production alone holds half a dozen), so listing it would restart far more than asked.
-// gitops.Discover already records each occurrence's Kind and Name, so this needs no new parsing.
-func restartTargets(r *gitops.Repo, env string, families []string) ([]string, error) {
-	e, ok := r.Envs[env]
-	if !ok {
-		return nil, fmt.Errorf("unknown env %q", env)
-	}
-	only := map[string]bool{}
-	for _, f := range families {
-		if _, ok := e.Families[f]; !ok {
-			return nil, fmt.Errorf("%s has no family %q", env, f)
-		}
-		only[f] = true
-	}
-	seen := map[string]bool{}
-	var out []string
-	for name, fam := range e.Families {
-		if len(only) > 0 && !only[name] {
-			continue
-		}
-		for _, occ := range fam.Occurrences {
-			// Deployments only. A Job or CronJob has no rollout to trigger, and re-running one
-			// is a different operation with different consequences.
-			if occ.Kind != "Deployment" || seen[occ.Name] {
-				continue
-			}
-			seen[occ.Name] = true
-			out = append(out, occ.Name)
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("%s has no Deployment to restart%s", env, onlyLabel(families))
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func onlyLabel(families []string) string {
-	if len(families) == 0 {
-		return ""
-	}
-	return " in " + strings.Join(families, ", ")
 }
 
 // splitFamilies turns the comma-separated --family value into a slice, dropping empties so
@@ -307,9 +187,9 @@ func checkProductionRestart(eff effective, env, confirm string, stderr io.Writer
 
 // printRestartTargets names what will roll, what it supersedes, and every reason it will not be
 // graceful — before anything is written.
-func printRestartTargets(w io.Writer, env, kubeContext string, sts []rollout.DeploymentStatus, absent []string) {
-	fmt.Fprintf(w, "restart %s (context %s): %d Deployment(s)\n\n", env, kubeContext, len(sts))
-	for _, st := range sts {
+func printRestartTargets(w io.Writer, env, kubeContext string, pl restart.Plan) {
+	fmt.Fprintf(w, "restart %s (context %s): %d Deployment(s)\n\n", env, kubeContext, len(pl.Targets))
+	for _, st := range pl.Targets {
 		was := st.RestartedAt
 		if was == "" {
 			was = "never restarted this way"
@@ -319,7 +199,7 @@ func printRestartTargets(w io.Writer, env, kubeContext string, sts []rollout.Dep
 			fmt.Fprintf(w, "    warning: %s\n", c)
 		}
 	}
-	for _, name := range absent {
+	for _, name := range pl.Absent {
 		fmt.Fprintf(w, "  %s\n    warning: declared in the repo but not in the cluster — not restarted\n", name)
 	}
 }
@@ -328,7 +208,6 @@ func printRestartTargets(w io.Writer, env, kubeContext string, sts []rollout.Dep
 // within the configured deadline. This is the same question RolledOutStep asks of a promotion,
 // asked directly: there is no promotion here to hang a step on.
 func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []string, at time.Time, poll config.PollConfig, stdout, stderr io.Writer) int {
-	want := at.UTC().Format(rollout.RestartStampLayout)
 	interval := time.Duration(poll.Rollout)
 	if interval <= 0 {
 		interval = 3 * time.Second
@@ -340,30 +219,26 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 	}
 	pending := append([]string(nil), names...)
 	for {
+		progress, err := restart.Observe(ctx, ro, env, pending, at)
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
+			return exitFailure
+		}
 		var still []string
-		for _, name := range pending {
-			st, err := ro.Deployment(ctx, env, name)
-			if err != nil {
-				fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
-				return exitFailure
-			}
+		for _, pr := range progress {
 			switch {
-			case st.DeadlineExceeded:
-				fmt.Fprintf(stderr, "hoist restart: %s: %s\n", name, st.Detail)
+			case pr.Superseded:
+				// Something else restarted it while this one was in flight, so the rollout now
+				// running is not this command's to report as its own success.
+				fmt.Fprintf(stderr, "hoist restart: %s was restarted by something else while this one was in flight; the pods are rolling, but not for this command\n", pr.Name)
 				return exitFailure
-			case st.RestartedAt != want:
-				// Someone else's stamp is on the pod template, so the rollout being watched is
-				// theirs, not this one's. Reporting it as this restart's success would be a
-				// lie, and a plausible one — a concurrent `hoist restart` or `kubectl rollout
-				// restart` is exactly how this happens. hoist stops claiming the outcome rather
-				// than trying to win the race (Copilot, PR #81).
-				fmt.Fprintf(stderr, "hoist restart: %s was restarted by something else while this one was in flight (its stamp is %s, not %s); the pods are rolling, but not for this command\n",
-					name, orNever(st.RestartedAt), want)
+			case pr.Blocked != "":
+				fmt.Fprintf(stderr, "hoist restart: %s: %s\n", pr.Name, pr.Blocked)
 				return exitFailure
-			case st.Complete:
-				fmt.Fprintf(stdout, "  %s: %s\n", name, st.Detail)
+			case pr.Done:
+				fmt.Fprintf(stdout, "  %s: %s\n", pr.Name, pr.Detail)
 			default:
-				still = append(still, name)
+				still = append(still, pr.Name)
 			}
 		}
 		if len(still) == 0 {
@@ -378,12 +253,4 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 		case <-time.After(interval):
 		}
 	}
-}
-
-// orNever renders an empty restart stamp readably.
-func orNever(s string) string {
-	if s == "" {
-		return "none"
-	}
-	return s
 }

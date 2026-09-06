@@ -13,6 +13,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -453,5 +454,38 @@ func TestDeploymentReadsTheGracefulRestartSignals(t *testing.T) {
 	}
 	if st.Strategy != "RollingUpdate" {
 		t.Errorf("Strategy = %q, want Kubernetes' own default", st.Strategy)
+	}
+}
+
+// Kubernetes' fencepost rule: a rollout that may neither add a pod nor remove one could never
+// progress, so the controller forces maxUnavailable to 1 when both resolve to zero. Without it
+// the warning would claim the old pod stays up in exactly the configuration where the controller
+// takes it down (Copilot, PR #81).
+func TestDeploymentAppliesTheFencepostRule(t *testing.T) {
+	d := baseDeployment("app-production", "app")
+	one := int32(1)
+	d.Spec.Replicas = &one
+	d.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
+	mu := intstr.FromString("1%") // scales down to 0 at one replica
+	ms := intstr.FromInt32(0)
+	d.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{MaxUnavailable: &mu, MaxSurge: &ms}
+
+	st, err := FromClientset(fake.NewSimpleClientset(d)).Deployment(context.Background(), "app-production", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.MaxUnavailable != 1 {
+		t.Fatalf("MaxUnavailable = %d, want 1: with surge 0 the controller has no other way to progress", st.MaxUnavailable)
+	}
+	// And the warning follows: this pod really can be taken down first.
+	concerns := st.GracefulRestartConcerns()
+	found := false
+	for _, c := range concerns {
+		if strings.Contains(c, "every pod can be down at once") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the downtime warning, got %v", concerns)
 	}
 }
