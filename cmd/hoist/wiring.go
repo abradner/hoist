@@ -51,12 +51,6 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		if forgeErr != nil {
 			return engine.PromotionState{}, nil, forgeErr
 		}
-		if clusterErr != nil {
-			// The Argo/Deployment adaptors every promotion now needs, deferred here exactly
-			// like forgeErr: a session that only browses the matrix never opens a cluster
-			// connection and should not fail to start because one could not be built.
-			return engine.PromotionState{}, nil, clusterErr
-		}
 
 		// The same all-NoOp fast path runPromote's own body applies (promote.go, "changed"
 		// loop plus checkNoOpAgainstBase) before ever calling buildPromotionForConfirm —
@@ -83,6 +77,17 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)
 			}
 			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
+		}
+
+		// The Argo/Deployment adaptors every promotion needs, deferred to here exactly like
+		// forgeErr: a session that only browses the matrix never opens a cluster connection
+		// and should not fail to start because one could not be built. Checked AFTER the
+		// no-op fast path above, so confirming an already-current tag on a machine with a
+		// broken kubeconfig says "nothing to deploy" rather than blaming the cluster for a
+		// promotion that was never going to touch it — the order the CLI already uses
+		// (Copilot, PR #72).
+		if clusterErr != nil {
+			return engine.PromotionState{}, nil, clusterErr
 		}
 
 		// checkCloneCurrentForBase above only validates the files THIS plan already knows
