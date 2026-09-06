@@ -2,8 +2,6 @@ package plan
 
 import (
 	"context"
-	"flag"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,19 +9,16 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/google/go-cmp/cmp"
 
+	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
-
-var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
-
-const goldenDir = "../../../testdata/golden"
 
 func discoverFixture(t *testing.T) *gitops.Repo {
 	t.Helper()
@@ -63,7 +58,7 @@ func runInit(t *testing.T, m Model) Model {
 func readyModel(t *testing.T, envs config.EnvsConfig) Model {
 	t.Helper()
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", false, nil)
+	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", false, nil, history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -86,7 +81,7 @@ func TestAsyncLoad(t *testing.T) {
 		}
 		return ResolveOutcome{KubeContext: "test-context", RegistryAuth: "env"}, nil
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	if m.state != stateLoading {
 		t.Fatalf("state = %v, want stateLoading", m.state)
 	}
@@ -143,7 +138,7 @@ func TestResolveErrorFailsTheScreen(t *testing.T) {
 	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
 		return ResolveOutcome{}, errCannotReachCluster
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {
 		t.Fatal("m.err = nil, want the resolve error to fail the screen")
@@ -192,7 +187,7 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 			},
 		}, nil
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -210,7 +205,7 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 			t.Errorf("registered secret leaked into %s:\n%s", name, body)
 		}
 	}
-	if !strings.Contains(m.leftBody(), "token <redacted> rejected") {
+	if flat := strings.Join(strings.Fields(ansi.Strip(m.leftBody())), " "); !strings.Contains(flat, "token <redacted> rejected") {
 		t.Errorf("leftBody: expected <redacted> in place of the secret:\n%s", m.leftBody())
 	}
 	if !strings.Contains(m.rightBody(), "token <redacted> rejected") {
@@ -233,21 +228,42 @@ func TestModeToggleAfterConfirm(t *testing.T) {
 	}
 	m, cmd := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
 	if cmd != nil {
-		t.Error("m produced a command")
+		if _, isStart := cmd().(StartMsg); isStart {
+			t.Error("m must not confirm the plan")
+		}
 	}
 	if !m.confirming {
 		t.Fatal("m did not open the confirm dialog for a non-production target")
 	}
-	// Simulate the operator landing on "yes": confirmValue is the variable
-	// huh.Confirm.Value bound at buildConfirm, so setting it here is the same thing a
-	// left/right keypress inside the dialog would do to it.
-	m.confirmValue = true
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "Switch to direct mode") || !strings.Contains(v, "app-staging  →  app-production") {
+		t.Fatalf("the dialog must sit over the screen:\n%s", v)
+	}
+	// Answered through the widget's own key, never by assigning the bound bool: an earlier
+	// version of this test set m.confirmValue directly and so never noticed that
+	// huh.NewConfirm ships a zero keymap and ignored every keypress — the m gesture could not
+	// be completed by a real operator at all (#85's named trap, the plan screen's instance).
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.confirming {
 		t.Error("confirm dialog still open after enter")
 	}
 	if m.mode != ModeDirect {
-		t.Errorf("mode = %q, want direct", m.mode)
+		t.Errorf("mode = %q, want direct: the confirmation never saw the keypress", m.mode)
+	}
+	// And no: the asymmetry that makes the above mean something.
+	n := readyModel(t, config.EnvsConfig{})
+	n, _ = n.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	n, _ = n.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if n.mode != ModePR {
+		t.Errorf("declining must leave the mode alone, got %q", n.mode)
+	}
+	// esc leaves the dialog without leaving the screen.
+	e := readyModel(t, config.EnvsConfig{})
+	e, _ = e.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	e, cmd = e.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd != nil || e.confirming {
+		t.Errorf("esc in the dialog: cmd=%v confirming=%v", cmd, e.confirming)
 	}
 }
 
@@ -440,7 +456,7 @@ func TestEnvSelectResyncsTargetFromField(t *testing.T) {
 // though this fixture's TargetsFor("app-staging") only ever offers one.
 func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, nil)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, nil, history.Funcs{})
 	if m.state != stateSelectEnv {
 		t.Fatalf("state = %v, want stateSelectEnv", m.state)
 	}
@@ -475,46 +491,41 @@ func TestSkipStagingWarning(t *testing.T) {
 // mise exec -- go test ./internal/app/plan -update
 func TestViewGolden(t *testing.T) {
 	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
-	m := readyModel(t, envs)
-	got := ansi.Strip(m.View())
-
-	for _, want := range []string{
-		"hoist plan: app-staging -> app-production",
-		"mode: PR",
-		"ghcr.io/example/counta",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("view lacks %q:\n%s", want, got)
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := readyModel(t, envs).SetSize(size[0], size[1])
+		got := ansi.Strip(m.View())
+		for _, want := range []string{
+			"hoist · confirm promotion", "app-staging  →  app-production", "images under ghcr.io/example/", "mode: PR",
+			"counta", "v202602201200", "3 repos ticked", "no commit history",
+			"d  see the yaml",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("view lacks %q:\n%s", want, got)
+			}
 		}
+		if strings.Contains(got, string(filepath.Separator)+"testdata") {
+			t.Error("view shows a path, not a base name")
+		}
+		uitest.Golden(t, "plan", m.View(), size[0], size[1])
 	}
-	// The right pane is a scrolling viewport at this terminal size, so its tail (Untouched,
-	// Warnings, Resolution) is below the fold in View() itself; check the full body text
-	// that feeds the viewport instead of what happens to be visible.
+	// The yaml view: the diff, and below the fold the untouched images, warnings and the
+	// resolution report — check the body that feeds the viewport for the tail.
+	m := readyModel(t, envs).SetSize(120, 40)
+	m = uitest.Keys(m, updateFn, "d")
+	got := ansi.Strip(m.View())
+	if !strings.Contains(got, "· yaml") || !strings.Contains(got, "image:") || !strings.Contains(got, "d  back to impact") {
+		t.Errorf("yaml view:\n%s", got)
+	}
 	body := m.rightBody()
 	for _, want := range []string{"Untouched (", "Warnings (", "Resolution:", "cluster not consulted"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("right pane body lacks %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(got, string(filepath.Separator)+"testdata") {
-		t.Error("view shows a path, not a base name")
-	}
-
-	p := filepath.Join(goldenDir, "plan.txt")
-	if *update {
-		if err := os.WriteFile(p, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("%v (regenerate with: go test ./internal/app/plan -update)", err)
-	}
-	if diff := cmp.Diff(string(want), got); diff != "" {
-		t.Errorf("plan.txt differs from golden (-want +got):\n%s", diff)
-	}
+	uitest.Golden(t, "plan-yaml", m.View(), 120, 40)
 }
+
+func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
 // Codex P2 (draft #29 pass): viewReady renders m.err.Error() directly with no per-call
 // redact.Strings — the one render point TestViewRedactsRegisteredSecrets's per-field
@@ -529,7 +540,7 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
 		return ResolveOutcome{}, sentinelErr("cluster unreachable: token " + secret + " rejected")
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {
 		t.Fatal("want the resolve error to have failed the screen")

@@ -1,0 +1,40 @@
+╭─ hoist · confirm promotion · yaml ───────────────────────────────────────────────────────────────────────────────────╮
+│app-staging  →  app-production   images under ghcr.io/example/                                                mode: PR│
+│3 repos ticked · no history for 3                                                                    d  back to impact│
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│┃ > ✓ counta  v202601151010 → v202602201200    │--- a/cluster/apps/app-production/counta/app.yaml                     │
+│┃   ✓ marketing  → sha-1a2b3c4d5e6f708192a3b4c…│+++ b/cluster/apps/app-production/counta/app.yaml                     │
+│┃   ✓ ! web  v202601010101 → v202602150930     │@@ -19,7 +19,7 @@                                                     │
+│┃                                              │           command: ["dbwait", "--timeout=60s"]                       │
+│┃                                              │       containers:                                                    │
+│┃                                              │         - name: counta                                               │
+│┃                                              │-          image: 'ghcr.io/example/counta:v202601151010@sha256:abad1de│
+│┃                                              │+          image: 'ghcr.io/example/counta:v202602201200@sha256:c0c0a12│
+│┃                                              │           envFrom:                                                   │
+│┃                                              │             - configMapRef:                                          │
+│┃                                              │                 name: counta-config                                  │
+│┃                                              │@@ -65,5 +65,5 @@                                                     │
+│┃                                              │     spec:                                                            │
+│┃                                              │       containers:                                                    │
+│┃                                              │         - name: worker                                               │
+│┃                                              │-          image: ghcr.io/example/counta:v202601151010@sha256:abad1dea│
+│┃                                              │+          image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123│
+│┃                                              │           args: ["worker"]                                           │
+│┃                                              │                                                                      │
+│┃                                              │--- a/cluster/apps/app-production/counta/purge-cronjob.yaml           │
+│┃                                              │+++ b/cluster/apps/app-production/counta/purge-cronjob.yaml           │
+│┃                                              │@@ -13,5 +13,5 @@                                                     │
+│┃                                              │           restartPolicy: OnFailure                                   │
+│┃                                              │           containers:                                                │
+│┃                                              │             - name: purge                                            │
+│┃                                              │-              image: ghcr.io/example/counta:v202601151010@sha256:abad│
+│┃                                              │+              image: ghcr.io/example/counta:v202602201200@sha256:c0c0│
+│┃                                              │               command: ["bin/rails", "counta:purge"]                 │
+│┃                                              │                                                                      │
+│┃                                              │--- a/cluster/apps/app-production/marketing/app.yaml                  │
+│┃                                              │+++ b/cluster/apps/app-production/marketing/app.yaml                  │
+│┃                                              │@@ -15,6 +15,6 @@                                                     │
+│┃                                              │     spec:                                                            │
+│┃                                              │       containers:                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                        tab pane · x toggle · d yaml · m mode · enter confirm · esc back
