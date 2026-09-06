@@ -147,6 +147,34 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + digestNew}},
 		Complete:  true,
 	})
+	// The Application exists from the start, as it does in reality: the gitops repo's own
+	// wrapper creates it, and it is there whether or not anything has synced yet. argo.Fake's
+	// not-found is for an Application that genuinely is not on the cluster, which is a
+	// different failure and has its own test.
+	fakeArgo.SetStatus(app, argo.Status{
+		SyncStatus:   "OutOfSync",
+		SyncRevision: "before-any-hoist-run",
+		HealthStatus: argo.HealthStatusHealthy,
+	})
+
+	// Argo reconciles against whatever is on the branch it tracks, however that commit got
+	// there. onMerge below covers the PR path; direct mode (M6) never merges, it pushes
+	// straight to main, so without this a --direct promotion would drive to argo-refreshed and
+	// block on an Application the fake had never heard of. Converging on Refresh models the
+	// real thing for both paths rather than special-casing one.
+	fakeArgo.OnRefresh = func(a argo.Application) {
+		tip, err := exec.Command("git", "-C", origin, "rev-parse", "refs/heads/main").Output()
+		if err != nil {
+			return // nothing to converge to; the step's own wait/block reports it
+		}
+		fakeArgo.SetStatus(a, argo.Status{
+			SyncStatus:   argo.SyncStatusSynced,
+			SyncRevision: strings.TrimSpace(string(tip)),
+			HealthStatus: argo.HealthStatusHealthy,
+			ReconciledAt: time.Now().Add(time.Hour),
+		})
+	}
+
 	wrappedForge := &mergeSimulatingForge{
 		Fake: fakeForge,
 		onMerge: func(mergeSHA string) {

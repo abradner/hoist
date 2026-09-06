@@ -133,7 +133,10 @@ func retryableStep(step engine.StepName) bool {
 // candidate is treated conservatively — reported rather than silently skipped — since a
 // promotion this call can't verify is done must not be treated as safely finished.
 //
-// Deliberately observes only engine.CoreSteps (through Merged), not the full engine.AllSteps —
+// Deliberately observes only the git/forge core (through Merged for the PR path, through the
+// push for a direct one — engine.ObserveSteps picks by the state's own mode, since a direct
+// state can never satisfy the PR path's steps and would otherwise be in flight forever), not
+// the full engine.AllSteps —
 // this is a considered call, not an oversight. Invariant 5 exists to prevent exactly one thing:
 // two promotions racing to create separate branches/PRs/merges for the same target env (a real
 // git/forge conflict). That risk is fully retired the moment a merge lands — a second promotion
@@ -156,7 +159,7 @@ func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, t
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.CoreSteps(g, f, nil), prev)
+		done, last, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(prev, g, f, nil, nil, nil), prev)
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}

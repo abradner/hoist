@@ -12,11 +12,9 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // runDeploy is `hoist deploy`: write one named image reference into one env, then drive the
@@ -28,7 +26,8 @@ import (
 // reference comes from. A promotion reads a source env and resolves what it runs (pods, then
 // the manifest, then the registry); a deploy is handed the reference outright, so none of that
 // resolution machinery applies and neither do --from, --digest or the digest-source flags.
-// Everything after "which ref" is shared: the same freshness check, the same claim-then-rescan,
+// Everything after "which ref" is shared: the same freshness checks (including direct
+// mode's own fresh-base cross-check), the same claim-then-rescan,
 // the same steps, the same drive loop, and artifacts rendered from the same templates (which
 // know to describe a deploy rather than a promotion — see gitops.Plan.Variant).
 //
@@ -113,6 +112,20 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
 	}
+	if *direct {
+		// Direct mode's own additional gap, identical to runPromote's: checkCloneCurrentForBase
+		// only validates files this plan already names, so it cannot see an occurrence
+		// origin/<base> has gained that the local checkout never had — gitops.Discover never
+		// read that file. Only direct mode can put origin ahead of the local clone that way
+		// (its own prior pushes), and only direct mode writes with no PR to catch it.
+		buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
+			return gitops.BuildDeployPlan(fresh, *env, ref, eff.promotable)
+		}
+		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, plan, buildFresh); err != nil {
+			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
+			return exitFailure
+		}
+	}
 	if !anyRealEdit(plan.Edits) {
 		fmt.Fprintf(stdout, "hoist deploy: %s already runs %s; nothing to deploy.\n", *env, ref)
 		return 0
@@ -127,27 +140,24 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	if kctx == "" && eff.cfg != nil {
 		kctx = eff.cfg.Kube.Context
 	}
-	// Only the PR path reaches an Argo step; direct mode stops at the push (issue #66), so it
-	// must not require a reachable cluster for work it never does — the same split runPromote
-	// makes.
-	var (
-		argoApps []string
-		a        argo.Argo
-		ro       rollout.Rollout
-	)
-	if !*direct {
-		if argoApps, err = engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits); err != nil {
-			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-			return exitFailure
-		}
-		if a, _, err = newArgo(kctx); err != nil {
-			fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
-			return exitFailure
-		}
-		if ro, _, err = newRollout(kctx); err != nil {
-			fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
-			return exitFailure
-		}
+	// Both modes reach the Argo/rollout steps now that DirectSteps converges too (issue #66),
+	// so these are unconditional. An earlier revision built them only for the PR path, because
+	// direct mode stopped at the push and would otherwise have demanded a cluster for work it
+	// never did; converging is the real fix, and it retires that gate.
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
+		return exitFailure
+	}
+	a, _, err := newArgo(kctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	ro, _, err := newRollout(kctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
+		return exitFailure
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -189,7 +199,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	}
 	var steps []engine.Step
 	if *direct {
-		steps = engine.DirectSteps(newGit, eff.cfg.Envs.Production, true, onWaiting)
+		steps = engine.AllDirectSteps(newGit, a, ro, eff.cfg.Envs.Production, true, onWaiting)
 	} else {
 		steps = engine.AllSteps(newGit, f, a, ro, onWaiting)
 	}

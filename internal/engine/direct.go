@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // StepDirectGate and StepDirectPushed are direct mode's own two steps (AGENTS.md M6 brief,
@@ -142,7 +144,13 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 		return Observation{Satisfied: false}, nil
 	}
 	if remoteSHA == s.CommitSHA {
+		// Direct is recorded by the step that does the landing, not left to whichever caller built
+		// this state: LandedSHA reads it to decide whether PushedSHA or MergeSHA is the commit
+		// Argo should be looking for, and a state that reached this push is direct by definition
+		// regardless of what any CLI flag said. The CLI sets it too, earlier, so resume knows the
+		// mode before any step runs; both write the same value.
 		s.PushedSHA = remoteSHA
+		s.Direct = true
 		return Observation{Satisfied: true, Detail: "origin/" + s.Base + " is already at " + remoteSHA}, nil
 	}
 	// remoteSHA differs from this promotion's own commit. Fetch first: the per-path content
@@ -171,11 +179,17 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 			return Observation{Satisfied: false}, nil
 		}
 	}
-	// PushedSHA names THIS promotion's own commit, not whatever else the tip now is — mirroring
-	// the exact-match branch above and PushedStep's own field semantics: "PushedSHA" confirms
-	// this promotion's own commit is effectively present, not "here is the tip's current SHA"
-	// (which s.Base's own remote ref already tells a caller, if that's what they want).
-	s.PushedSHA = s.CommitSHA
+	// PushedSHA is the base-branch revision that CARRIES this promotion's content, which here
+	// is remoteSHA, not s.CommitSHA. Recording the original commit instead reads better as a
+	// field name and is unobservable in the world: Argo tracks the branch and reports the tip,
+	// so ArgoSyncedStep — which compares status.sync.revision against LandedSHA() exactly —
+	// would wait out its whole deadline for a SHA the branch has already moved past and will
+	// never report again. Re-derived on every observation rather than pinned once, so a base
+	// that keeps moving keeps converging (§4.1: re-observe, never remember). The exact-match
+	// branch above records the same thing; the two only look different because there the tip
+	// and this promotion's commit happen to be equal.
+	s.PushedSHA = remoteSHA
+	s.Direct = true
 	return Observation{Satisfied: true, Detail: fmt.Sprintf(
 		"origin/%s has moved to %s (not this promotion's own commit %s), but every planned path still matches the planned content there — already effectively promoted, not reverted",
 		s.Base, remoteSHA, s.CommitSHA,
@@ -195,6 +209,7 @@ func (d DirectPushedStep) Act(ctx context.Context, s *PromotionState) error {
 		return fmt.Errorf("git push (retryable — check network and try again): %w", err)
 	}
 	s.PushedSHA = s.CommitSHA
+	s.Direct = true
 	// Belt and suspenders, not the sole mechanism: a plain `git push` to a ref covered by
 	// origin's default fetch refspec already updates cloneDir's own refs/remotes/origin/<Base>
 	// as a side effect (verified against real git; this is standard behavior, not something
@@ -230,4 +245,14 @@ func DirectSteps(g git.Git, productionEnvs []string, confirmed bool, onWaiting f
 		CommittedStep{Git: g, OnWaiting: onWaiting},
 		DirectPushedStep{Git: g},
 	}
+}
+
+// AllDirectSteps is DirectSteps plus the Argo/rollout convergence both modes share — the direct
+// mirror of CoreSteps/AllSteps, and what `hoist promote --direct` and `hoist deploy --direct`
+// actually drive. The split exists for the same reason the PR path's does: DirectSteps is the
+// git-only core, useful on its own in tests that exercise the gate and the push without a
+// cluster, while the exported pairing keeps a caller from silently driving a promotion that
+// lands a commit and then never tells Argo about it (issue #66).
+func AllDirectSteps(g git.Git, a argo.Argo, ro rollout.Rollout, productionEnvs []string, confirmed bool, onWaiting func()) []Step {
+	return append(DirectSteps(g, productionEnvs, confirmed, onWaiting), ConvergeSteps(a, ro)...)
 }
