@@ -114,8 +114,9 @@ func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.Promo
 }
 
 // heartbeatEvery is how long an unchanged wait goes before the CLI says it is still alive. It
-// is deliberately far slower than any poll.* interval: the line exists to tell a healthy
-// hour-long approval wait apart from a hung process, not to narrate every tick. A variable
+// is deliberately far slower than the default poll.* intervals (a configured one may be
+// longer, which is why the sleep below is taken in heartbeat-sized pieces): the line exists to
+// tell a healthy hour-long approval wait apart from a hung process, not to narrate every tick. A variable
 // only so a test can shrink it; nothing else assigns it.
 var heartbeatEvery = 10 * time.Minute
 

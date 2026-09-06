@@ -89,12 +89,17 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		return fmt.Errorf("fetching origin/%s to confirm the clone is current: %w", base, err)
 	}
 
-	localSHA, localOK, err := g.RevParse(ctx, cloneDir, base)
+	// Fully qualified refs, not the short names: rev-parse takes any revision, so a tag
+	// named like the branch would otherwise pass as the local branch, and a tag named
+	// origin/<base> would pass as a remote-tracking ref no prune could ever remove (Copilot on
+	// PR #99). The short names are kept for the messages and for the tree reads below, which
+	// git resolves the same way for both.
+	localSHA, localOK, err := g.RevParse(ctx, cloneDir, "refs/heads/"+base)
 	if err != nil {
 		return err
 	}
 	originRef := "origin/" + base
-	originSHA, originOK, err := g.RevParse(ctx, cloneDir, originRef)
+	originSHA, originOK, err := g.RevParse(ctx, cloneDir, "refs/remotes/"+originRef)
 	if err != nil {
 		return err
 	}

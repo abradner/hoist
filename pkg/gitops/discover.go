@@ -204,6 +204,12 @@ func readApps(root, appsRoot string) ([]ArgoApp, error) {
 			case a.Namespace == "":
 				return nil, fmt.Errorf("%s: Application %q has no spec.destination.namespace", rel, a.Name)
 			}
+			// The raw value is what checkRelative must see for its backslash refusal to
+			// mean the same thing on every host: ToSlash would rewrite a backslash on
+			// Windows before the check ever ran (Copilot on PR #99).
+			if err := checkRelative(a.SourcePath); err != nil {
+				return nil, fmt.Errorf("%s: Application %q: spec.source.path %w", rel, a.Name, err)
+			}
 			a.SourcePath = path.Clean(filepath.ToSlash(a.SourcePath))
 			if err := checkRelative(a.SourcePath); err != nil {
 				return nil, fmt.Errorf("%s: Application %q: spec.source.path %w", rel, a.Name, err)

@@ -1172,3 +1172,21 @@ func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
 		t.Fatalf("no PR should have been created: %+v", f.PRs())
 	}
 }
+
+// The base classification resolves branch refs, not any revision: a tag named like the base
+// is not a local branch, so it is reported as unresolved rather than as a local-only branch
+// (Copilot, PR #99).
+func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	runGitHost(t, clone, "tag", "release", "main")
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--base", "release"}, &out, &errOut); got == 0 {
+		t.Fatalf("expected a refusal; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), `"release" does not resolve`) || strings.Contains(errOut.String(), "push it") {
+		t.Fatalf("a tag was taken for a local branch: %s", errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
