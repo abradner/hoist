@@ -446,3 +446,35 @@ func TestBuildRestartPlanRefusesANilRepo(t *testing.T) {
 		t.Errorf("wording should match BuildPlan's own, got %v", err)
 	}
 }
+
+// RFC3339 has second resolution, so a Deployment already carrying this exact stamp would be
+// planned a byte-identical replacement — nothing changes, nothing rolls, and the command
+// reports a restart anyway (Copilot, PR #78). Planning at the same instant twice must produce
+// a stamp that actually differs from what is already there.
+func TestRestartNeverPlansAByteIdenticalWrite(t *testing.T) {
+	r, pl, _ := planOne(t, deploymentWithLabels)
+	if _, err := ApplyRestarts(r.Root, pl.Restarts); err != nil {
+		t.Fatal(err)
+	}
+	// The same instant as the write that just landed.
+	again, err := BuildRestartPlan(r, "app-staging", nil, restartAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := again.Restarts[0]
+	if re.Old != restartStamp {
+		t.Fatalf("fixture precondition: the manifest should already carry %q, got %q", restartStamp, re.Old)
+	}
+	if re.New == re.Old {
+		t.Fatal("planned a write that changes nothing: the pod template would not move and nothing would roll")
+	}
+	// And it is still an honest timestamp, one second on, not a sub-second format kubectl
+	// would never write.
+	if _, perr := time.Parse(time.RFC3339, re.New); perr != nil {
+		t.Errorf("the bumped stamp should still be plain RFC3339, got %q", re.New)
+	}
+	got := restartApplied(t, r, again)
+	if strings.Contains(got, restartStamp) {
+		t.Errorf("the superseded stamp should be gone:\n%s", got)
+	}
+}

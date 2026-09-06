@@ -145,6 +145,19 @@ func BuildRestartPlan(r *Repo, env string, families []string, at time.Time) (Pla
 		return Plan{}, fmt.Errorf("%s has no Deployment to restart%s", env, onlyLabel(families))
 	}
 	sortRestarts(plan.Restarts)
+	// RFC3339 has second resolution, so a Deployment already carrying this exact stamp would be
+	// planned a byte-identical replacement: nothing changes, the pod template does not move, and
+	// nothing rolls — while the command reports a restart (Copilot, PR #78). It happens for real
+	// when two invocations land in the same second, or a restart is re-run immediately.
+	//
+	// Advancing by a second and replanning is the fix rather than switching to sub-second
+	// precision, which would write a stamp unlike the one kubectl writes for no gain: the
+	// operation being timestamped is "now", and one second later is still an honest answer.
+	for _, re := range plan.Restarts {
+		if re.Old == re.New {
+			return BuildRestartPlan(r, env, families, at.Add(time.Second))
+		}
+	}
 	return plan, nil
 }
 
