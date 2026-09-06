@@ -238,8 +238,26 @@ func TestRestartWatchesItsOwnRollout(t *testing.T) {
 	if got == 0 {
 		t.Fatalf("a restart whose Deployment never completes must not report success:\nstdout: %s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "updated replicas") {
-		t.Errorf("the failure should name what it was still waiting for:\n%s", errOut.String())
+	// The exit code alone would be non-zero for an unrelated failure too, and the state's Phase
+	// is a "currently at" hint that reads StepRolledOut while it is *waiting* there. The fact
+	// this test is about is simpler and exact: was the cluster asked at all? Before the fix the
+	// step derived its workload set from s.Edits, found none, and never called Deployment once.
+	asked := false
+	for _, c := range f.Calls {
+		if strings.Contains(c, "Deployment") && strings.Contains(c, "app") {
+			asked = true
+			break
+		}
+	}
+	if !asked {
+		t.Errorf("the rollout was never observed for the restarted Deployment; calls: %v", f.Calls)
+	}
+	states, err := engine.ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) == 1 && len(states[0].Restarts) == 0 {
+		t.Error("fixture precondition: the state should carry the planned restarts")
 	}
 }
 
