@@ -67,7 +67,7 @@ func TestSummaryWordsARollbackAndAFloor(t *testing.T) {
 		t.Fatalf("untracked: %q", got)
 	}
 	floor := delta(2, migrate.DirectionForward)
-	floor.Migrations, floor.MigrationCommits, floor.FilesTruncated = []string{"db/migrate/a.rb"}, 1, true
+	floor.Migrations, floor.MigrationCommits, floor.MigrationsIncomplete = []string{"db/migrate/a.rb"}, 1, true
 	if got := Summary(floor, "v3", "v1", "prod"); !strings.HasSuffix(got, "1 migration (at least)") {
 		t.Fatalf("floor: %q", got)
 	}
@@ -77,12 +77,12 @@ func TestSummaryWordsARollbackAndAFloor(t *testing.T) {
 // unknown rather than nothing (Copilot, #124).
 func TestSummaryNamesAnUnknownMigrationCountUnderACap(t *testing.T) {
 	d := delta(4, migrate.DirectionForward)
-	d.FilesTruncated = true
+	d.MigrationsIncomplete = true
 	if got := Summary(d, "v3", "v1", "prod"); !strings.Contains(got, "migrations unknown") {
 		t.Fatalf("capped, none found: %q", got)
 	}
 	// Positive control: a complete list with none found says nothing about migrations.
-	d.FilesTruncated = false
+	d.MigrationsIncomplete = false
 	if got := Summary(d, "v3", "v1", "prod"); strings.Contains(got, "migration") {
 		t.Fatalf("complete, none found: %q", got)
 	}

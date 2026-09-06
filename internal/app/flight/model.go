@@ -499,7 +499,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	if m.showLog {
 		// The log is a viewport: unmatched keys (↑/↓, PageUp/PageDown, g/G) scroll it. Without
-		// this, l showed the first page of a long history and nothing moved it.
+		// this, l showed the first page of a long history and nothing moved it. Laid out on
+		// this copy first — View lays out its own copy, so the retained viewport would
+		// otherwise be the zero-sized one New built (Copilot, #124).
+		m = m.layout()
 		var cmd tea.Cmd
 		m.log, cmd = m.log.Update(msg)
 		return m, cmd
@@ -512,7 +515,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 // scrolling and degrades to the one-line strip on a short terminal (stepsSection).
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
-	return m
+	return m.layout()
 }
 
 // layout sizes the log viewport to what the frame leaves after the fixed sections.

@@ -822,7 +822,7 @@ func (m Model) totalsSection() string {
 		default:
 			commits += len(st.Delta.Commits)
 			migrations += len(st.Delta.Migrations)
-			if st.Delta.Truncated || st.Delta.FilesTruncated {
+			if st.Delta.MigrationsIncomplete {
 				capped++
 			}
 		}

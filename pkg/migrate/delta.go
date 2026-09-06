@@ -52,12 +52,16 @@ type Delta struct {
 	Commits   []Commit
 	Total     int
 	Truncated bool
-	// FilesTruncated is set when a commit that touches the migrations path had its file
-	// list capped by the forge, so Migrations may be missing entries: a floor, like
-	// Truncated, and worded as one.
-	FilesTruncated   bool
-	Migrations       []string
-	MigrationCommits int
+	// MigrationsIncomplete is set when the migration attribution could not see everything:
+	// the compare was truncated and the attribution had to run (so it is bounded by the
+	// oldest returned commit), or a commit that touches the migrations path had its file
+	// list capped by the forge. Migrations is then a floor and the screens word it as one —
+	// "unknown" when the floor is zero. Truncated alone does not set it: a complete file
+	// list with nothing under the prefix proves zero migrations however many commits the
+	// compare left out.
+	MigrationsIncomplete bool
+	Migrations           []string
+	MigrationCommits     int
 	// Prefix and PrefixSource record which migrations path applied and where it came from
 	// (MigrationsPath), so the screen can say "migrations under db/migrate/ · from
 	// me/app's .hoist.yaml". Prefix is "" when migrations are disabled for this app.
@@ -132,6 +136,11 @@ func (c Comparer) Delta(ctx context.Context, in DeltaIn) (Delta, error) {
 	}
 	// GitHub applies `since` as an exclusive lower bound, so the oldest compared commit's own
 	// timestamp would drop that very commit. One second back; inRange filters any extra.
+	if cmp.Truncated {
+		// The attribution below sees only the returned commits; the ones the bound dropped
+		// may carry migrations too.
+		out.MigrationsIncomplete = true
+	}
 	oldest := cmp.Commits[0].Date.Add(-time.Second)
 	touching, err := c.Forge.CommitsTouching(ctx, head, strings.TrimSuffix(in.Migrations, "/"), oldest)
 	if err != nil {
@@ -155,7 +164,7 @@ func (c Comparer) Delta(ctx context.Context, in DeltaIn) (Delta, error) {
 			// CommitsTouching already proved this commit changed the migrations path; if
 			// the file list is capped the migration may be past the cap, and a silent "no
 			// migrations" here would be the false negative the whole delta exists to prevent.
-			out.FilesTruncated = true
+			out.MigrationsIncomplete = true
 		}
 		for _, f := range files {
 			if strings.HasPrefix(f, in.Migrations) {

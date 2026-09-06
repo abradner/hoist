@@ -13,33 +13,25 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
-// runAll executes a command tree — a BatchMsg's members recursively — feeding nothing back;
-// it exists to prove a command does not panic.
-func runAll(t *testing.T, cmd tea.Cmd) {
-	t.Helper()
-	if cmd == nil {
-		return
-	}
-	if batch, ok := cmd().(tea.BatchMsg); ok {
-		for _, c := range batch {
-			runAll(t, c)
-		}
-	}
-}
-
 // The in-flight adaptor is optional: a root built without WithInFlight must boot. The
-// generation-stamped listing helper once dereferenced a nil List (Copilot, #124).
+// generation-stamped listing helper once dereferenced a nil List (Copilot, #124). Asserted
+// on the helper and the pop path directly rather than by draining Init, whose batch holds a
+// real 30-second tick.
 func TestInitWithoutInFlightDoesNotPanic(t *testing.T) {
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{})
-	runAll(t, root.Init())
-	m, cmd := root.Update(inFlightTickMsg{})
-	runAll(t, cmd)
-	_, cmd = m.(Model).popAndRelist()
-	runAll(t, cmd)
+	if cmd := root.listInFlightAt(root.listGen); cmd != nil {
+		t.Fatal("no List wired: the listing command must be nil, not a call on nil")
+	}
+	if _, cmd := root.popAndRelist(); cmd != nil {
+		t.Fatal("no List wired: popAndRelist must issue nothing")
+	}
+	if _, cmd := root.listInFlight(); cmd != nil {
+		t.Fatal("no List wired: listInFlight must issue nothing")
+	}
 }
 
 // Two listings in flight at once: the older answer, landing last, must not paint an older

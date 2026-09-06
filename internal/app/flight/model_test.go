@@ -14,6 +14,7 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
@@ -1019,3 +1020,26 @@ func TestHintOffersOpenPROnlyWithAPR(t *testing.T) {
 		t.Fatalf("a PR exists, but the hint does not offer o:\n%s", v)
 	}
 }
+
+// The log is a viewport that the arrow keys scroll: the retained viewport must be the sized
+// one, not the zero-sized one New built (layout used to run only on View's copy).
+func TestLogScrollsByKeypress(t *testing.T) {
+	st := fixtureState()
+	for i := 0; i < 60; i++ {
+		st.History = append(st.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
+	}
+	m := New(st, PollDurations{}, nil).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m, _ = m.Update(uitest.Key("l"))
+	if !m.showLog || m.log.YOffset() != 0 {
+		t.Fatalf("after l: showLog=%v offset=%d", m.showLog, m.log.YOffset())
+	}
+	m = uitest.Keys(m, updateFn, "down", "down", "down")
+	if m.log.YOffset() != 3 {
+		t.Fatalf("three downs scrolled to %d; want 3", m.log.YOffset())
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "entry 3") {
+		t.Fatalf("view does not show the scrolled log:\n%s", v)
+	}
+}
+
+func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }

@@ -76,7 +76,7 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	switch {
 	case d.Prefix == "":
 		migrations = " · migrations not tracked for this app"
-	case len(d.Migrations) == 0 && d.FilesTruncated:
+	case len(d.Migrations) == 0 && d.MigrationsIncomplete:
 		// A commit touched the migrations path and the forge capped its file list before any
 		// migration showed: zero is not the answer, and saying nothing would read as zero.
 		migrations = " · migrations unknown (a commit's file list was capped)"
@@ -86,7 +86,7 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 			word = "migration"
 		}
 		migrations = fmt.Sprintf(" · %d %s", len(d.Migrations), word)
-		if d.Truncated || d.FilesTruncated {
+		if d.MigrationsIncomplete {
 			migrations += " (at least)"
 		}
 	}

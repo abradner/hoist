@@ -239,13 +239,41 @@ func TestDeltaMarksACappedFileListAsAFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.FilesTruncated {
-		t.Fatalf("FilesTruncated must be set when a touching commit's file list was capped: %+v", d)
+	if !d.MigrationsIncomplete {
+		t.Fatalf("MigrationsIncomplete must be set when a touching commit's file list was capped: %+v", d)
 	}
 	// Positive control: the same shape with the list complete is not a floor.
 	f.FilesCapped = nil
 	d, err = Comparer{Forge: f}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
-	if err != nil || d.FilesTruncated {
-		t.Fatalf("complete list: FilesTruncated=%v err=%v", d.FilesTruncated, err)
+	if err != nil || d.MigrationsIncomplete {
+		t.Fatalf("complete list: MigrationsIncomplete=%v err=%v", d.MigrationsIncomplete, err)
+	}
+}
+
+// Truncated alone does not make the migration count unknown: a complete compare file list
+// with nothing under the prefix proves zero, however many commits the bound dropped. Only
+// an attribution that had to run over a truncated range is incomplete.
+func TestTruncationAloneDoesNotMakeMigrationsIncomplete(t *testing.T) {
+	proven := &forge.Fake{Comparisons: map[string]forge.Comparison{
+		shaA + "..." + shaB: {Status: "ahead", Total: 500, Truncated: true,
+			Commits: []forge.Commit{fc("c1", "a", 1), fc("c2", "b", 2)},
+			Files:   []string{"app/x.rb"}},
+	}}
+	d, err := Comparer{Forge: proven}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
+	if err != nil || !d.Truncated || d.MigrationsIncomplete {
+		t.Fatalf("complete files, no migrations: truncated=%v incomplete=%v err=%v; want incomplete false", d.Truncated, d.MigrationsIncomplete, err)
+	}
+	attributed := &forge.Fake{
+		Comparisons: map[string]forge.Comparison{
+			shaA + "..." + shaB: {Status: "ahead", Total: 500, Truncated: true,
+				Commits: []forge.Commit{fc("c1", "a", 1), fc("c2", "b", 2)},
+				Files:   []string{"db/migrate/1.rb"}},
+		},
+		Touching:   map[string][]string{shaB + " db/migrate": {"c2"}},
+		FilesBySHA: map[string][]string{"c2": {"db/migrate/1.rb"}},
+	}
+	d, err = Comparer{Forge: attributed}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
+	if err != nil || !d.MigrationsIncomplete || len(d.Migrations) != 1 {
+		t.Fatalf("attribution over a truncated range: incomplete=%v migrations=%v err=%v; want a floor of one", d.MigrationsIncomplete, d.Migrations, err)
 	}
 }

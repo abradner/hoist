@@ -58,9 +58,9 @@ func toCommit(r commitResponse) forge.Commit {
 	body = strings.TrimSpace(body)
 	return forge.Commit{
 		SHA:     r.SHA,
-		Subject: clean(strings.TrimSpace(subject)),
+		Subject: cleanLine(strings.TrimSpace(subject)),
 		Body:    clean(body),
-		Author:  clean(r.Commit.Author.Name),
+		Author:  cleanLine(r.Commit.Author.Name),
 		Date:    r.Commit.Author.Date,
 	}
 }
@@ -131,7 +131,7 @@ func (c *Client) Compare(ctx context.Context, base, head string) (forge.Comparis
 	}
 	out.Status, out.AheadBy, out.BehindBy, out.Total = first.Status, first.AheadBy, first.BehindBy, first.TotalCommits
 	for _, f := range first.Files {
-		out.Files = append(out.Files, clean(f.Filename))
+		out.Files = append(out.Files, cleanLine(f.Filename))
 	}
 	out.FilesTruncated = len(first.Files) >= githubFilesCap
 
@@ -212,10 +212,20 @@ func (c *Client) repoVisible(ctx context.Context) error {
 	// repository. A cancelled context, a 5xx or an exhausted rate limit is the moment's
 	// answer, and caching it would replay a stale failure for the rest of the session.
 	var herr *ghapi.HTTPError
-	if errors.As(err, &herr) && (herr.StatusCode == http.StatusNotFound || herr.StatusCode == http.StatusForbidden) {
+	if errors.As(err, &herr) && (herr.StatusCode == http.StatusNotFound || herr.StatusCode == http.StatusForbidden) && !rateLimited(herr) {
 		c.visKnown, c.visErr = true, verr
 	}
 	return verr
+}
+
+// rateLimited recognises GitHub's two rate-limit shapes — a primary limit (403 with
+// X-Ratelimit-Remaining: 0) and a secondary one (403/429 whose message says so) — which are
+// the moment's answer, never the repository's visibility.
+func rateLimited(herr *ghapi.HTTPError) bool {
+	if herr.StatusCode == http.StatusTooManyRequests || herr.Headers.Get("X-Ratelimit-Remaining") == "0" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(herr.Message), "rate limit")
 }
 
 // clean strips terminal control sequences from upstream text before it is ever styled or
@@ -223,6 +233,8 @@ func (c *Client) repoVisible(ctx context.Context) error {
 // one would otherwise reach the operator's terminal verbatim the moment the picker opens.
 // ANSI escapes go through ansi.Strip; the remaining C0 controls are dropped except newline
 // and tab, which commit bodies legitimately carry. redact.Strings runs after, as before.
+// Anything that is one line on a screen — a subject, an author, a file name (git allows
+// both bytes in a path) — goes through cleanLine, which drops those two as well.
 func clean(s string) string {
 	s = ansi.Strip(s)
 	s = strings.Map(func(r rune) rune {
@@ -235,6 +247,17 @@ func clean(s string) string {
 		return r
 	}, s)
 	return redact.Strings(s)
+}
+
+// cleanLine is clean for single-line text: newline and tab go too, so a file name cannot
+// add rows to a confirm screen.
+func cleanLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return -1
+		}
+		return r
+	}, clean(s))
 }
 
 // CommitFiles implements forge.Forge: GET .../commits/{sha}, whose files[] pages at 100 like
@@ -250,7 +273,7 @@ func (c *Client) CommitFiles(ctx context.Context, sha string) ([]string, bool, e
 			return nil, false, translateErr("listing files of commit "+sha, err)
 		}
 		for _, f := range resp.Files {
-			files = append(files, clean(f.Filename))
+			files = append(files, cleanLine(f.Filename))
 		}
 		lastFull = len(resp.Files) >= 100
 		if !lastFull {

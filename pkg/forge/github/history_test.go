@@ -381,3 +381,37 @@ func TestRepoVisibilityCachesOnlyDefinitiveAnswers(t *testing.T) {
 		t.Fatalf("a visible repo is remembered: probes=%d err=%v", probes, err)
 	}
 }
+
+// A file name is one line on a confirm screen; git allows a newline in a path, and a
+// migration file named with one would add rows to the deploy screen's migration list.
+func TestFileNamesAndSubjectsAreOneLine(t *testing.T) {
+	if got := cleanLine("db/migrate/1.rb\nextra row\tcell"); got != "db/migrate/1.rbextra rowcell" {
+		t.Fatalf("cleanLine = %q", got)
+	}
+	if got := clean("body line\n\tindented"); got != "body line\n\tindented" {
+		t.Fatalf("clean must keep a body's newline and tab: %q", got)
+	}
+}
+
+// A 403 that is a rate limit is the moment's answer, not the repository's visibility, and
+// must not pin "not visible" on the client for the session.
+func TestRateLimitedProbeIsNotCached(t *testing.T) {
+	probes := 0
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/v9": static(404, `{"message":"Not Found"}`),
+		"GET /repos/example/gitops": func(*http.Request) (int, string) {
+			probes++
+			if probes == 1 {
+				return 403, `{"message":"API rate limit exceeded for user"}`
+			}
+			return 200, `{"full_name":"example/gitops"}`
+		},
+	})
+	if _, _, err := c.ResolveRef(context.Background(), "v9"); err == nil {
+		t.Fatal("the rate-limited probe must surface as an error")
+	}
+	_, ok, err := c.ResolveRef(context.Background(), "v9")
+	if err != nil || ok || probes != 2 {
+		t.Fatalf("after the limit lifted: ok=%v err=%v probes=%d; want a plain not-found from a second probe", ok, err, probes)
+	}
+}
