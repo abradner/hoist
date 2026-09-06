@@ -1,0 +1,742 @@
+<title>hoist TUI Redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+  :root {
+    --ground:      #f6f7f9;
+    --surface:     #ffffff;
+    --term-bg:     #171b23;
+    --term-ink:    #d9dee8;
+    --ink:         #171c24;
+    --ink-soft:    #4c5766;
+    --ink-faint:   #7c8797;
+    --rule:        #dfe3ea;
+    --rule-strong: #c3cad5;
+    --accent:      #2f6fd0;
+    --accent-soft: #e8f0fc;
+    --good:        #2e8f63;
+    --warn:        #a86c14;
+    --bad:         #c0453d;
+    --good-term:   #6ec49a;
+    --warn-term:   #e0a854;
+    --bad-term:    #e0706a;
+    --accent-term: #7fb2ff;
+    --dim-term:    #79839a;
+
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0e1218;
+      --surface:     #161b23;
+      --term-bg:     #0a0d12;
+      --term-ink:    #d9dee8;
+      --ink:         #e6eaf1;
+      --ink-soft:    #a4aebd;
+      --ink-faint:   #737e8f;
+      --rule:        #262d38;
+      --rule-strong: #3a4352;
+      --accent:      #7fb2ff;
+      --accent-soft: #16233a;
+      --good:        #6ec49a;
+      --warn:        #e0a854;
+      --bad:         #e0706a;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0e1218;
+    --surface:     #161b23;
+    --term-bg:     #0a0d12;
+    --term-ink:    #d9dee8;
+    --ink:         #e6eaf1;
+    --ink-soft:    #a4aebd;
+    --ink-faint:   #737e8f;
+    --rule:        #262d38;
+    --rule-strong: #3a4352;
+    --accent:      #7fb2ff;
+    --accent-soft: #16233a;
+    --good:        #6ec49a;
+    --warn:        #e0a854;
+    --bad:         #e0706a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+  }
+
+  .wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  header.masthead {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 22px;
+    margin-bottom: 14px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.1;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 18px;
+    color: var(--ink-soft);
+    max-width: 64ch;
+    margin: 0;
+  }
+  .meta {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    margin: 18px 0 0;
+  }
+
+  section.screen { margin-top: 64px; }
+
+  .screen-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 10px;
+    margin-bottom: 6px;
+  }
+  .screen-num {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  h2 {
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0;
+    flex: 1 1 auto;
+  }
+  .verdict {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .verdict.new    { background: var(--accent-soft); color: var(--accent); }
+  .verdict.broken { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+  .verdict.weak   { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+
+  .intro { color: var(--ink-soft); max-width: 68ch; margin: 14px 0 26px; }
+
+  .frame-label {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 26px 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .frame-label::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  .term {
+    background: var(--term-bg);
+    border: 1px solid var(--rule-strong);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 13px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: block; }
+  .term-title {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--dim-term);
+    margin-left: 7px;
+  }
+  .term-body { overflow-x: auto; }
+  pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.62;
+    color: var(--term-ink);
+    margin: 0;
+    padding: 15px 17px 17px;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  .c-dim    { color: var(--dim-term); }
+  .c-accent { color: var(--accent-term); }
+  .c-good   { color: var(--good-term); }
+  .c-warn   { color: var(--warn-term); }
+  .c-bad    { color: var(--bad-term); }
+  .c-bold   { color: #ffffff; font-weight: 600; }
+  .sel      { background: #24304a; color: #ffffff; }
+  .add      { color: var(--good-term); }
+  .del      { color: var(--bad-term); }
+
+  ul.notes {
+    list-style: none;
+    margin: 20px 0 0;
+    padding: 0;
+    display: grid;
+    gap: 13px;
+  }
+  ul.notes li {
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    gap: 12px;
+    align-items: start;
+    font-size: 15.2px;
+    color: var(--ink-soft);
+    line-height: 1.55;
+  }
+  ul.notes li b { color: var(--ink); font-weight: 600; }
+  .marker {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.5;
+    text-align: right;
+  }
+  .m-bad  { color: var(--bad); }
+  .m-good { color: var(--good); }
+  .m-warn { color: var(--warn); }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .thesis {
+    margin: 30px 0 0;
+    padding: 18px 22px;
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 5px 5px 0;
+  }
+  .thesis p { margin: 0; color: var(--ink-soft); font-size: 15.4px; }
+  .thesis p + p { margin-top: 11px; }
+  .thesis strong { color: var(--ink); }
+
+  footer {
+    margin-top: 76px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-size: 14.5px;
+    color: var(--ink-faint);
+  }
+  footer p { margin: 0 0 9px; max-width: 68ch; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">hoist · terminal interface</p>
+    <h1>Five screens, and the thing they all hide</h1>
+    <p class="standfirst">
+      hoist's thesis is that the world is the state — it re-observes git, the forge, Argo and the
+      cluster rather than trusting its own memory. Every screen below knows more about the world
+      than it shows, and the ones that do show something mostly show the mechanism rather than the
+      change. That's the redesign.
+    </p>
+    <p class="meta">“Today” frames are real output from <span style="font-family:var(--mono)">testdata/golden/</span> · proposals are Lip Gloss borders and joins, not hand-drawn</p>
+  </header>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">01</span>
+      <h2>Matrix</h2>
+      <span class="verdict weak">shows manifests, not reality</span>
+    </div>
+    <p class="intro">
+      The entry point: families down, environments across. It renders what the manifests say —
+      which is exactly the number hoist exists to distrust.
+    </p>
+
+    <p class="frame-label">Today</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — matrix</span>
+      </div>
+      <div class="term-body"><pre> family     app-production                    app-staging
+ orders     @  2 images                       @≠ v202602201200
+ marketing  @  sha-000011112222333344445555…  @≠ sha-1a2b3c4d5e6f708192a3b4c5d…
+ temporal   !  2 images                       !  2 images
+ web           v202601010101                   ≠ v202601010101,v202602150930</pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-bad">✗</span><span><b>Three glyphs, no legend.</b> <code>@</code> pinned, <code>≠</code> differs, <code>!</code> third-party — none of it is on screen. You either know or you guess.</span></li>
+      <li><span class="marker m-bad">✗</span><span><b>“2 images” is the answer to a question nobody asked.</b> Two images at which versions? Agreeing or not? The cell that most needs detail has the least.</span></li>
+      <li><span class="marker m-bad">✗</span><span><b>A truncated <code>sha-</code> tag eats the column and says nothing.</b> Forty characters of hex, elided to twenty-eight, none of them scannable.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>Nothing indicates what is actually running.</b> hoist reads pod <code>imageID</code>s to resolve digests — it already knows production is running something the manifest doesn't claim. It just never says so.</span></li>
+    </ul>
+
+    <p class="frame-label">Proposed</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — matrix</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · matrix ────────────────────────────────────────────────────╮
+│ my-gitops     · cluster/apps                                        │
+├─────────────┬──────────────────────────┬────────────────────────────┤
+│ FAMILY      │ APP-PRODUCTION           │ APP-STAGING                │
+├─────────────┼──────────────────────────┼────────────────────────────┤
+│ <span class="sel">▸ orders</span>    │ v202601151010   pinned   │ v202602201200      pinned  │
+│   marketing │ sha-0000111    <span class="c-warn">drifted</span>   │ sha-1a2b3c4        pinned  │
+│   temporal  │ 2 images      <span class="c-dim">external</span>   │ 2 images         <span class="c-dim">external</span>  │
+│   web       │ v202601010101   pinned   │ 2 versions          <span class="c-warn">split</span>  │
+├─────────────┴──────────────────────────┴────────────────────────────┤
+│ <span class="c-warn">! marketing runs sha-77c0ffe here; manifest says sha-0000111</span>        │
+├─────────────────────────────────────────────────────────────────────┤
+│ <span class="c-accent">⟳ 5pr6sd333t → app-production</span>   <span class="c-warn">waiting on approval</span>   <span class="c-dim">12m</span>           │
+╰─────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  p promote pair · d deploy image · r resume · enter details · ? help · q quit</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>State is a word, not a glyph.</b> <i>pinned</i>, <i>drifted</i>, <i>split</i>, <i>external</i> — four states the operator can read without a key, and colour is reinforcement rather than the only channel.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Drift gets a sentence, not a symbol.</b> When the cluster disagrees with the manifest, that is the single most important fact on the screen, so it gets a line of prose under the table.</span></li>
+      <li><span class="marker m-good">→</span><span><b>In-flight promotions are on the entry screen.</b> The design always said they should be; today you find out by running <code>hoist promotions</code>. This is the compact form — screen 05 is what it expands into when the terminal has room.</span></li>
+      <li><span class="marker m-good">→</span><span><b>“split” replaces the worst cell.</b> Two versions of one repo inside one env is the exact condition the runbook blocks a promotion on. It should look like a problem.</span></li>
+    </ul>
+  </section>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">02</span>
+      <h2>Tag picker</h2>
+      <span class="verdict weak">no idea what you're shipping</span>
+    </div>
+    <p class="intro">
+      Reached with <code>d</code>. Lists what the registry holds so you can pick a build to deploy.
+      It omits the one comparison that makes the choice: what is running now.
+    </p>
+
+    <p class="frame-label">Today</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — tags</span>
+      </div>
+      <div class="term-body"><pre>hoist tags: ghcr.io/example/app -> app-staging          revision: — (pkg/migrate, later)
+  TAG                            CREATED                   DIGEST         REV
+&gt; v3                             2026-03-01 00:00          333333333333   —
+  v2                             2026-02-01 00:00          222222222222   —
+  v1                             2026-01-01 00:00          111111111111   —
+                                    ↑/↓ move · / filter · enter select · D direct commit</pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-bad">✗</span><span><b>An entire column of em-dashes.</b> <code>REV</code> has no data until <code>pkg/migrate</code> lands in M7, and it is advertising its own absence in the header too.</span></li>
+      <li><span class="marker m-bad">✗</span><span><b>Nothing marks what is deployed.</b> Choosing a build without seeing the current one is the central task of this screen, performed blind.</span></li>
+      <li><span class="marker m-warn">!</span><span><b><code>StagingMismatch</code> already computes the staging comparison</b> and the screen holds the result in <code>m.stagingTags</code> — it is never compared against the row under the cursor.</span></li>
+    </ul>
+
+    <p class="frame-label">Proposed</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — tags</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · deploy ─────────────────────────────────────────────────────────╮
+│ ghcr.io/example/app  →  app-production                                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│ now running   v1 · 1111111111 · deployed 34 days ago                     │
+├────────────────┬─────────────────┬────────────────┬──────────────────────┤
+│ TAG            │ BUILT           │ DIGEST         │                      │
+├────────────────┼─────────────────┼────────────────┼──────────────────────┤
+│ <span class="sel">▸ v3</span>           │ 3 days ago      │ 3333333333     │ <span class="c-good">in app-staging</span>       │
+│   v2           │ 32 days ago     │ 2222222222     │                      │
+│   v1           │ 62 days ago     │ 1111111111     │ <span class="c-accent">◂ live here</span>          │
+├────────────────┴─────────────────┴────────────────┴──────────────────────┤
+│ <span class="c-bold">v3 is 14 commits ahead of v1</span>              <span class="c-warn">2 migrations</span>                   │
+│                                                                          │
+│   4a1c2ef  Add rate limiting to the public API                           │
+│   e9b0d31  Fix N+1 query when resolving digests                          │
+│ <span class="sel">▸ 77c0ffe  db: add index on events.created_at            migration</span>       │
+│   1b2d3e4  Bump temporal SDK to 1.31                                     │
+│ <span class="c-dim">  …10 more</span>                                                               │
+╰──────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  ↑/↓ tag · tab commits · enter read commit · space review the change · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>The current deployment is a header, not a guess.</b> “now running v1, deployed 34 days ago” frames every row beneath it as a comparison.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Staging provenance sits on the row.</b> <i>in app-staging</i> against v3 answers “has this been tested anywhere?” at the moment of choosing — using data the screen already fetched.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Relative dates.</b> “3 days ago” is the judgement you actually make; <code>2026-03-01 00:00</code> is arithmetic homework.</span></li>
+      <li><span class="marker m-good">→</span><span><b><code>REV</code> is gone until it has data.</b> A column earns its width. It comes back in M7 with real revisions in it.</span></li>
+      <li><span class="marker m-good">→</span><span><b>What is actually <i>in</i> the build.</b> “14 commits ahead of v1”, the subject lines, and which of them carry migrations. Choosing a container image is choosing a body of work; the tag is just its label.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Keys shift to make room for reading.</b> <code>enter</code> opens the commit under the cursor, <code>space</code> goes on to review the change — so inspecting is the cheap default and committing takes a deliberate, different key.</span></li>
+    </ul>
+
+    <p class="frame-label">Reading one commit</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — deploy · commit</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · deploy · commit ──────────────────────────────────────────────────╮
+│ <span class="c-bold">77c0ffe   db: add index on events.created_at</span>                               │
+│ <span class="c-dim">in v3 · not in v1 · 11 days ago</span>                                            │
+├────────────────────────────────────────────────────────────────────────────┤
+│ db: add index on events.created_at                                         │
+│                                                                            │
+│ The purge cronjob scans events by created_at every hour and was doing a    │
+│ sequential scan over roughly 40M rows. Adds a btree index, created         │
+│ concurrently so the migration does not lock writes.                        │
+│                                                                            │
+│ <span class="c-warn">Expect around 4 minutes on production-sized data.</span>                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-warn">db/migrate/20260225T101500_add_events_created_at_index.rb</span>                  │
+╰────────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  ↑/↓ next commit · esc back to the list</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>The long-form message, not just the subject.</b> The body is where an author writes “expect around 4 minutes on production-sized data” — precisely the sentence that should reach whoever is about to deploy it, and precisely the one a subject line drops.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Migration files are named on the commit that adds them.</b> <code>pkg/migrate</code> already plans to fetch this exact comparison and filter it to <code>db/migrate/</code>; the commit each file arrived in costs nothing extra to show.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>This is the same API call M7 already needs.</b> <code>GET /repos/{app}/compare/{from}...{to}</code> returns <code>commits[]</code> with full messages, and the migration-delta design throws all of it away except the file paths. The commit history is a by-product of work already scoped.</span></li>
+    </ul>
+
+    <p class="frame-label">When the history can’t be resolved</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — deploy</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · deploy ─────────────────────────────────────────────────────────╮
+│ ghcr.io/example/app  →  app-production                                   │
+├────────────────┬─────────────────┬────────────────┬──────────────────────┤
+│ TAG            │ BUILT           │ DIGEST         │                      │
+├────────────────┼─────────────────┼────────────────┼──────────────────────┤
+│ <span class="sel">▸ v3</span>           │ 3 days ago      │ 3333333333     │ <span class="c-good">in app-staging</span>       │
+│   v1           │ 62 days ago     │ 1111111111     │ <span class="c-accent">◂ live here</span>          │
+├────────────────┴─────────────────┴────────────────┴──────────────────────┤
+│ <span class="c-dim">no commit history — ghcr.io/example/app has no app repo in repos[].apps</span>  │
+╰──────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  ↑/↓ tag · space review the change · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-warn">!</span><span><b>Two real prerequisites, and the pane says which is missing.</b> It needs <code>repos[].apps</code> mapping the image repo to its git repo, and a resolvable revision for both ends — the label, then a git tag, then a <code>sha-</code> tag, then “unknown”. The operator's own config has no <code>apps:</code> block today, so this is the state they would actually see first.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Degrade to a named gap, never a blank.</b> An empty pane reads as “no commits”; this reads as “hoist cannot answer that yet, and here is the reason”. The rest of the screen keeps working.</span></li>
+    </ul>
+  </section>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">03</span>
+      <h2>Deploy confirm</h2>
+      <span class="verdict new">leads with the work</span>
+    </div>
+    <p class="intro">
+      Today <code>enter</code> in the picker fires straight into a write with no confirmation at
+      all — it would be the only write in hoist that skips one. This screen is what Phase C builds,
+      and it leads with what is being shipped rather than which bytes move.
+    </p>
+
+    <p class="frame-label">Proposed</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — deploy confirm</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · confirm deploy ───────────────────────────────────────────────────╮
+│ <span class="c-bold">ghcr.io/example/app:v3   →   app-production</span>                  <span class="c-accent">mode: PR</span>      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-bold">rolling out 14 commits</span> · <span class="c-warn">2 <span class="c-warn"><span class="c-warn">migration</span></span>s · replacing v1, live 34 days</span>         │
+├────────────────────────────────────────────────────────────────────────────┤
+│   4a1c2ef  Add rate limiting to the public API                             │
+│   e9b0d31  Fix N+1 query when resolving digests                            │
+│   77c0ffe  db: add index on events.created_at                 migration    │
+│   1b2d3e4  Bump temporal SDK to 1.31                                       │
+│   6f8a90c  Drop the legacy /v1/export endpoint                             │
+│   a3e91b2  db: backfill events.tenant_id                      migration    │
+│                                                       <span class="c-dim">↓ 8 more commits</span>     │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-warn">2 migrations run on this deploy:</span>                                           │
+│ <span class="c-dim">  20260225T101500_add_events_created_at_index.rb</span>                           │
+│ <span class="c-dim">  20260301T090200_backfill_events_tenant_id.rb</span>                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-dim">writes 3 occurrences in 1 file</span>                        <span class="c-dim">d  see the yaml</span>      │
+╰────────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  enter deploy · ↑/↓ read a commit · d yaml diff · m mode · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>“Rolling out 14 commits” is the sentence, not “one image line changes”.</b> A deploy is a body of work reaching production; the tag is its label and the YAML is its mechanism. The screen now leads with the work.</span></li>
+      <li><span class="marker m-good">→</span><span><b>The YAML diff was confirming something already guaranteed.</b> Principle 4 is byte-minimal edits, structurally verified before <code>git add</code> — so that diff is always one image line per occurrence, and reading it tells the operator nothing the tool did not already promise. It moves behind <code>d</code>, with the guarantee stated in its footer.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>It moves; it does not go away.</b> When the commits cannot be resolved — no <code>repos[].apps</code>, or an unresolvable revision — the YAML is the only evidence left, so it stays one key away rather than being deleted. That is also why the footer still counts occurrences and files.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Migrations are called out twice, deliberately.</b> Inline against the commit that adds them, and again as a list of files that will run. It is the one class of change that is not trivially reversible.</span></li>
+      <li><span class="marker m-good">→</span><span><b>The list scrolls rather than truncating.</b> <code>↓ 8 more commits</code> is a count, so a long list reads as long instead of looking complete.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>A production target changes this screen's temperature.</b> The mode chip turns amber and reads <span style="color:var(--warn)"><b>mode: PR · production</b></span>; <code>m</code> refuses with a reason rather than silently doing nothing, and <code>D</code> is not offered at all.</span></li>
+    </ul>
+
+    <p class="frame-label">The yaml, one key away</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — confirm deploy · yaml</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · confirm deploy · yaml ────────────────────────────────────────────╮
+│ <span class="c-bold">ghcr.io/example/app:v3   →   app-production</span>                  <span class="c-accent">mode: PR</span>      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-dim">--- a/cluster/apps/app-production/app/deployment.yaml</span>                      │
+│ <span class="c-dim">+++ b/cluster/apps/app-production/app/deployment.yaml</span>                      │
+│ <span class="c-dim">@@ -21,7 +21,7 @@</span>                                                          │
+│            containers:                                                     │
+│              - name: app                                                   │
+│ <span class="del"><span class="del">-              image: ghcr.io/example/app:v1@sha256:1111111111…</span></span>            │
+│ <span class="add"><span class="add">+              image: ghcr.io/example/app:v3@sha256:3333333333…</span></span>            │
+│ <span class="c-dim">@@ -95,7 +95,7 @@</span>                                                          │
+│              - name: worker                                                │
+│ -              image: ghcr.io/example/app:v1@sha256:1111111111…            │
+│ +              image: ghcr.io/example/app:v3@sha256:3333333333…            │
+├────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-dim">3 occurrences · 1 file · verified before commit</span>       <span class="c-dim">d  back to commits</span>   │
+╰────────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  enter deploy · d back to commits · m mode · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>Same screen, same header, one pane swapped.</b> <code>d</code> toggles rather than pushing a new screen, so the decision context never leaves and <code>enter</code> still means the same thing from either view.</span></li>
+    </ul>
+  </section>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">04</span>
+      <h2>Plan confirm</h2>
+      <span class="verdict broken">mechanism, not impact</span>
+    </div>
+    <p class="intro">
+      The promotion path's confirm screen — and the only one here with a rendering bug rather
+      than a design shortfall.
+    </p>
+
+    <p class="frame-label">Today</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — plan</span>
+      </div>
+      <div class="term-body"><pre>hoist plan: app-staging -> app-production                            mode: PR
+┃ &gt; ✓ ghcr.io/example/orders       │ --- a/cluster/apps/app-production/orders/app.y
+┃ v20260115101                     │ +++ b/cluster/apps/app-production/orders/app.y
+┃   ✓ ghcr.io/example/marketing  s │ @@ -19,7 +19,7 @@
+┃ 00001                            │        containers:
+┃   ✓ ! ghcr.io/example/web        │          - name: orders
+┃ v202601010101                    │ -          image: 'ghcr.io/example/orders:v2026
+┃                                  │ +          image: 'ghcr.io/example/orders:v2026
+                                     tab pane · x toggle · m mode · enter confirm</pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-bad">✗</span><span><b>Every repo row wraps mid-token.</b> <code>ghcr.io/example/orders</code> then <code>v20260115101</code> on the next line; <code>sha-</code> orphaned from <code>00001</code>. The version you are approving is split across lines at an arbitrary column.</span></li>
+      <li><span class="marker m-bad">✗</span><span><b>The diff truncates inside the digest.</b> <code>…orders:v2026</code> — both sides cut at the same place, so the two lines are indistinguishable. This is the screen whose entire job is letting you verify the change.</span></li>
+      <li><span class="marker m-warn">!</span><span><b><code>mode: PR</code> is quiet for what it controls.</b> The difference between opening a PR and committing straight to the default branch is one word in the corner, in the same weight as everything else.</span></li>
+    </ul>
+
+    <p class="frame-label">Proposed</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — plan</span>
+      </div>
+      <div class="term-body"><pre>╭─ hoist · confirm promotion ──────────────────────────────────────────────────╮
+│ <span class="c-bold">app-staging  →  app-production</span>                              <span class="c-accent">mode: PR</span>         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-bold">3 repos · 41 commits</span> · <span class="c-warn">3 <span class="c-warn">migration</span>s · replacing images live 12-38 days</span>       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ <span class="sel">▸ ✓ orders      v2026011510 → v2026022012    18 commits · 2 migrations</span>       │
+│      4a1c2ef  Add rate limiting to the public API                            │
+│      77c0ffe  db: add index on events.created_at            migration        │
+│ <span class="c-dim"><span class="c-dim">     …16 more</span></span>                                                                │
+│                                                                              │
+│   ✓ marketing   sha-0000111 → sha-1a2b3c4     6 commits                      │
+│      2f1e0a9  Update the pricing page copy                                   │
+│ <span class="c-dim">     …5 more</span>                                                                 │
+│                                                                              │
+│   ✓ web  !      v2026010101 → v2026021509    17 commits · 1 migration        │
+│      9c3b7d1  Switch the queue driver to temporal                            │
+│      …16 more                                                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-warn">! web runs 2 versions in app-staging — promoting v202602150930</span>               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-dim">writes 6 occurrences in 3 files</span>                      <span class="c-dim">d  see the yaml</span>         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  enter confirm · x toggle repo · tab expand commits · d yaml · m mode · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>“41 commits · 3 migrations” is the promotion.</b> Six occurrences across three files is the mechanism. A promotion moves several repos at once, so it is the screen where the gap between <i>what changed on disk</i> and <i>what reaches production</i> is widest.</span></li>
+      <li><span class="marker m-good">→</span><span><b>One commit list per repo, each collapsed to its head.</b> <code>tab</code> expands the repo under the cursor; the rest stay at two lines. Three full histories at once is not a screen, it is a wall.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Repo names shorten; versions never wrap.</b> The <code>ghcr.io/example/</code> prefix is identical on every row and moves to the header, which buys the width the delta needs — the fix for the mid-token wrapping above.</span></li>
+      <li><span class="marker m-good">→</span><span><b>The ticking survives.</b> <code>x</code> still toggles a repo in or out, and an unticked repo takes its commits and migrations out of the header totals with it — so the counts always describe what is actually about to happen.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Warnings expand in place.</b> <code>!</code> against <i>web</i> gets a sentence naming which version wins, rather than a bare glyph.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>“Live 12–38 days” is the age of what is being replaced.</b> A promotion that has been queued for a month is a different risk from one that has been queued since this morning, and nothing on the current screen says which this is.</span></li>
+    </ul>
+  </section>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">05</span>
+      <h2>In flight</h2>
+      <span class="verdict new">sized to the terminal</span>
+    </div>
+    <p class="intro">
+      A promotion waits on a human for minutes or hours, and “1 in flight” tells you nothing you
+      can act on. When there is room, spend it: the panel should answer <i>what is it doing</i>,
+      <i>what is it waiting for</i>, and <i>what do I type</i>.
+    </p>
+
+    <p class="frame-label">Wide terminal</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — matrix · in-flight panel</span>
+      </div>
+      <div class="term-body"><pre>╭─ in flight ──────────────────────────────────────────────────────────────╮
+│ <span class="c-bold">5pr6sd333t</span>    <span class="c-bold">app-staging → app-production</span>           <span class="c-dim">started 12m ago</span>     │
+│ <span class="c-good">● branch  ● commit  ● push  ● PR #103  ● CI 4/4</span>  <span class="c-warn">◍ approval</span>  <span class="c-dim">○ merge</span>     │
+├──────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-warn">blocked on you — comment on PR #103 to release it:</span>                       │
+│                                                                          │
+│ <span class="c-accent">    hoist approve 5pr6sd333t</span>                                             │
+│                                                                          │
+│ <span class="c-dim">approvers  me                waiting 11m          deadline in 3h 48m</span>     │
+├──────────────────────────────────────────────────────────────────────────┤
+│ <span class="c-dim">○ argo refresh   ○ argo sync   ○ rollout          2 deployments</span>          │
+╰──────────────────────────────────────────────────────────────────────────╯
+<span class="c-dim">  enter open flight screen · o open PR · r resume · esc back</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>The step row is the whole pipeline at a glance.</b> Ten steps, three states — done, active, not reached. It is the same <code>StepOrder</code> the flight screen renders, compressed to one line.</span></li>
+      <li><span class="marker m-good">→</span><span><b>The blocked reason is a sentence, and the fix is a command.</b> This is drawn straight from a real run: the operator had a healthy promotion parked on <code>approved</code> and no way to tell it from a hang, because the id needed to release it was only ever printed in the PR body.</span></li>
+      <li><span class="marker m-good">→</span><span><b>The deadline is visible before it bites.</b> <code>poll.deadline</code> defaults to four hours; a promotion silently dies at the end of it. “deadline in 3h 48m” makes that a fact rather than a surprise.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Post-merge steps are listed, not hidden.</b> Argo refresh, sync and rollout are dimmed rather than absent, so the operator knows the merge is not the end.</span></li>
+    </ul>
+
+    <p class="frame-label">Narrow terminal</p>
+    <div class="term">
+      <div class="term-bar">
+        <span class="dot" style="background:#e0706a"></span><span class="dot" style="background:#e0a854"></span><span class="dot" style="background:#6ec49a"></span>
+        <span class="term-title">hoist — matrix · in-flight panel</span>
+      </div>
+      <div class="term-body"><pre>╭─ in flight ──────────────────────────────────╮
+│ <span class="c-accent">⟳ 5pr6sd333t → app-production</span>                │
+│   <span class="c-warn">blocked on approval</span> <span class="c-dim">· 12m</span>                  │
+╰──────────────────────────────────────────────╯
+<span class="c-dim">  enter details</span></pre></div>
+    </div>
+
+    <ul class="notes">
+      <li><span class="marker m-good">→</span><span><b>Degrade by dropping evidence, never the verdict.</b> The state (<i>blocked on approval</i>) and the id survive at every width; the step row, the command and the deadline are what fold away first.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>The threshold is height, not just width.</b> The matrix owns the screen and the panel is a guest on it — the expanded form appears when there are rows to spare, so a promotion panel never pushes the table it belongs to off the screen.</span></li>
+    </ul>
+  </section>
+
+  <section class="screen">
+    <div class="screen-head">
+      <span class="screen-num">06</span>
+      <h2>How these are built</h2>
+      <span class="verdict new">already a dependency</span>
+    </div>
+    <p class="intro">
+      None of the chrome above is hand-drawn, and none of it should be. Every frame here is
+      output from primitives the repo already depends on — recorded so nobody implements a box
+      by counting characters.
+    </p>
+
+    <ul class="notes">
+      <li><span class="marker m-warn">!</span><span><b>Bubble Tea itself has no windows.</b> It is the runtime — <code>Model</code>/<code>Update</code>/<code>View</code>, key and resize events. Layout is Lip Gloss's job, and that separation is deliberate.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Lip Gloss v2.0.6 draws every box on this page.</b> <code>Style.Border(lipgloss.RoundedBorder())</code> plus <code>BorderTop/Right/Bottom/Left</code> for partial edges. Its <code>Border</code> struct carries <code>MiddleLeft</code>, <code>MiddleRight</code>, <code>Middle</code>, <code>MiddleTop</code> and <code>MiddleBottom</code> — the <code>├ ┤ ┼ ┬ ┴</code> junctions — so the column joins I fixed by hand earlier are a thing the library already knows how to get right.</span></li>
+      <li><span class="marker m-good">→</span><span><b>Panes compose with <code>JoinHorizontal</code> / <code>JoinVertical</code>.</b> That is the two-column plan screen and the picker's table-over-commits stack — no manual padding, no width arithmetic.</span></li>
+      <li><span class="marker m-good">→</span><span><b><code>bubbles/table</code> is the matrix and the tag list.</b> It owns columns, widths, selection and scrolling; it is already used by both screens today.</span></li>
+      <li><span class="marker m-good">→</span><span><b><code>bubbles/viewport</code> is the scroll in “↓ 8 more commits”.</b> The commit list and the commit body are both viewports, which is also how the existing plan screen scrolls its diff.</span></li>
+      <li><span class="marker m-good">→</span><span><b>v2 adds <code>Canvas</code> and <code>Layer</code> — a real compositor.</b> That is the piece worth knowing about: the expanded in-flight panel and the confirm dialog can be overlays drawn <i>above</i> the matrix rather than screens swapped in for it. Screen 05's “sized to the terminal” behaviour becomes a layer with a size check, not a separate model.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>Migration detection is a path convention, and today it is Rails's.</b> The design filters the compare response to <code>db/migrate/</code> — which finds nothing for Flyway (<code>src/main/resources/db/migration</code>), Liquibase changelogs, goose, or anything else. Nothing reads commit messages, and nothing should: a keyword scan would be a guess. The honest fix is a per-repo configured path or glob, defaulting to the Rails convention because that is what these repos use — with “no pattern configured” reported as unknown rather than as zero migrations.</span></li>
+      <li><span class="marker m-warn">!</span><span><b>“No layout lib” in the design meant no framework, not no borders.</b> The hand-rolled-panes decision rules out a flexbox-for-terminals dependency; Lip Gloss borders and joins are the primitives that decision assumes, not a violation of it.</span></li>
+    </ul>
+
+    <p class="intro" style="margin-top:24px">
+      The practical consequence for Phase C: the frames on this page are a specification of
+      <i>output</i>, not of implementation. Anything that hand-assembles <code>─</code> and
+      <code>│</code> is reimplementing <code>borders.go</code>, and will get the width and
+      truncation maths wrong the way my own first pass did.
+    </p>
+  </section>
+
+  <div class="thesis">
+    <p><strong>On chrome.</strong> The first pass of these proposals was flat indented text — the
+    same shape as the current screens, just reworded. That is a CLI transcript, not an interface.
+    Panes, rules and a status bar are what let the eye find the table, the warning and the keys
+    without reading any of them; lipgloss draws all of it, and the design always called for
+    hand-rolled panes. Rebuilt accordingly.</p>
+    <p><strong>The through-line.</strong> Every one of these screens is a step short of what hoist already knows. The matrix has pod digests and doesn't mention drift. The picker has staging's tags and never compares them. The plan screen has the warning text and shows a bare <code>!</code>. None of this needs new adaptors — it needs the data routed to the screen that makes it actionable.</p>
+    <p><strong>One genuinely new thing.</strong> The commit history on the picker is the only
+    proposal here that needs data hoist does not already hold — and even that is a by-product:
+    <code>pkg/migrate</code>'s planned compare call returns the commits and discards them. Everything
+    else is routing.</p>
+    <p><strong>One deliberate subtraction.</strong> The <code>REV</code> column goes. A column of em-dashes is worse than no column, and it returns in M7 with revisions in it.</p>
+  </div>
+
+  <footer>
+    <p><b>Not covered here:</b> the flight screen, which is the one you stare at for hours and deserves its own pass — particularly now that direct mode renders four steps that never run and hides the two that do.</p>
+    <p>Frames use the fixture data from <span style="font-family:var(--mono);font-size:0.92em">testdata/golden/</span>, so the “today” panes are what hoist actually prints, not a recollection of it.</p>
+  </footer>
+
+</div>
