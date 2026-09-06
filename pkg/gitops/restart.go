@@ -549,3 +549,68 @@ func undoRestartWrite(doc any, r RestartEdit) {
 	}
 	delete(m, "annotations")
 }
+
+// restartDiffContext is how many unchanged lines frame each hunk, matching diff.go's own.
+const restartDiffContext = 3
+
+// UnifiedRestartDiff renders the planned restart writes as a unified diff.
+//
+// It builds the hunks from the plan rather than by diffing before against after, because the
+// plan already says exactly what moves and where — and because diff.go's UnifiedDiff, written
+// when every edit was a same-line scalar replacement, falls back to printing the whole file as
+// removed-then-added the moment the line counts differ. That fallback is harmless for an edit
+// (it never happens) and useless for a restart (it always would): an operator confirming a
+// two-line insertion would be shown their entire manifest twice.
+func UnifiedRestartDiff(path string, before []byte, restarts []RestartEdit) string {
+	if len(restarts) == 0 {
+		return ""
+	}
+	lines := bytes.Split(before, []byte{'\n'})
+	sorted := append([]RestartEdit(nil), restarts...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Line < sorted[j].Line })
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "--- a/%s\n+++ b/%s\n", path, path)
+	// Offset tracks how far the after-file's numbering has drifted from the before-file's as
+	// earlier insertions accumulate, so each hunk header names the line an operator would
+	// actually find it at in the result.
+	offset := 0
+	for _, r := range sorted {
+		if r.Line < 1 || r.Line > len(lines) {
+			continue
+		}
+		anchor := r.Line - 1 // 0-based
+		start := max(0, anchor-restartDiffContext)
+		// A replacement consumes its anchor line; an insertion keeps it as trailing context.
+		// Both kinds keep the anchor line in the hunk: a replacement shows it as the removed
+		// line, an insertion as the context the new lines follow.
+		end := min(len(lines), anchor+1+restartDiffContext)
+
+		oldCount := end - start
+		// A replacement swaps one line for one line, so the counts match; an insertion grows
+		// the after side by exactly the lines it adds.
+		newCount := oldCount
+		if !r.Replace {
+			newCount += len(r.Lines)
+		}
+		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", start+1, oldCount, start+1+offset, newCount)
+		for k := start; k < end; k++ {
+			switch {
+			case r.Replace && k == anchor:
+				fmt.Fprintf(&sb, "-%s\n", lines[k])
+				fmt.Fprintf(&sb, "+%s\n", r.Lines[0])
+			case !r.Replace && k == anchor:
+				fmt.Fprintf(&sb, " %s\n", lines[k])
+				for _, l := range r.Lines {
+					fmt.Fprintf(&sb, "+%s\n", l)
+				}
+			default:
+				fmt.Fprintf(&sb, " %s\n", lines[k])
+			}
+		}
+		if !r.Replace {
+			offset += len(r.Lines)
+		}
+	}
+	return sb.String()
+}

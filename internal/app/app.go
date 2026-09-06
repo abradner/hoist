@@ -437,6 +437,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
 		return m, nil
+	case matrix.OpenRestartMsg:
+		return m.openRestart(msg.Family, msg.Target)
 	case matrix.OpenTagsMsg:
 		var mapped bool
 		var listFn tags.ListFunc
@@ -520,6 +522,23 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
+}
+
+// openRestart builds the restart plan for one family in one env and pushes the same confirm
+// screen a deploy uses. The timestamp is taken here, once, because it is the whole content of
+// the change and therefore this promotion's identity (engine.DeriveID) — taking it again later
+// would build a different promotion from the one the operator looked at.
+//
+// Unlike openDeploy the matrix is NOT popped: a restart is a small, repeatable action, and
+// backing out of the confirm should return to the cell the operator was on.
+func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
+	pl, err := gitops.BuildRestartPlan(m.repo, target, []string{family}, time.Now().UTC())
+	if err != nil {
+		return m.withMatrixNotice(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
+	}
+	ds := deployScreen{deploy.New(pl, m.repo.Root, "", m.envs, m.styles)}
+	m = m.push(ds)
+	return m, ds.Init()
 }
 
 // openDeploy builds the plan for one image into one env and pushes the confirm screen for it.

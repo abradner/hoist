@@ -1450,3 +1450,37 @@ func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 		t.Fatalf("esc left %d screens on the stack, want 1 (back to the matrix)", n)
 	}
 }
+
+// TestRestartKeyOpensTheConfirmScreen is the wiring half: R on the matrix builds a real restart
+// plan and opens the same confirm screen a deploy uses, showing the bytes it would write.
+// Nothing is written until enter, exactly as for every other write in hoist.
+func TestRestartKeyOpensTheConfirmScreen(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd == nil {
+		t.Fatal("R produced no command")
+	}
+	m, _ = m.Update(cmd())
+
+	stack := m.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("stack has %d screens, want 2 (matrix + confirm)", n)
+	}
+	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
+		t.Fatalf("top screen is %T, want the confirm screen", stack[len(stack)-1])
+	}
+	v := plain(m)
+	if !strings.Contains(v, "hoist restart") {
+		t.Errorf("the confirm should say it is a restart, not a deploy:\n%s", v)
+	}
+	if !strings.Contains(v, gitops.RestartAnnotation) {
+		t.Errorf("the confirm should show the annotation it would write:\n%s", v)
+	}
+	if !strings.Contains(v, "no image change") {
+		t.Errorf("the confirm should say no image changes:\n%s", v)
+	}
+	if !strings.Contains(v, "enter restart") {
+		t.Errorf("the hint should name the operation:\n%s", v)
+	}
+}

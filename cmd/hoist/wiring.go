@@ -72,7 +72,15 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		if err := checkCloneCurrentForBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
 			return engine.PromotionState{}, nil, err
 		}
-		if !anyRealEdit(p.Edits) {
+		if p.IsRestart() {
+			// A restart's freshness question is about the files it writes, not the images it
+			// changes — it changes none — so it asks the same question through the restart
+			// path. And it can never be "already current": writing a new timestamp is the
+			// whole operation, so the no-op fast path below would refuse every restart.
+			if err := checkCloneCurrentForRestart(ctx, eff.repo, tuiBase, p.Restarts); err != nil {
+				return engine.PromotionState{}, nil, err
+			}
+		} else if !anyRealEdit(p.Edits) {
 			if p.SourceEnv == "" {
 				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)
 			}
@@ -122,6 +130,13 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// Recomputed per confirm rather than once in runTUI: it is derived from p.TargetEnv,
 		// which is whatever plan the operator just confirmed.
 		argoApps, err := engine.ArgoAppNames(r, p.TargetEnv, p.Edits)
+		if p.IsRestart() {
+			// From the restart's own files, for the same reason: with no Edits the promotion
+			// would carry no Applications at all, and the Argo/rollout steps would each
+			// short-circuit as "no Application in this promotion's plan" — reporting success
+			// for a restart nothing ever watched.
+			argoApps, err = engine.ArgoAppNamesForRestart(r, p.TargetEnv, p.Restarts)
+		}
 		if err != nil {
 			return engine.PromotionState{}, nil, err
 		}

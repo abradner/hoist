@@ -208,6 +208,45 @@ func RenderDiff(root string, edits []gitops.Edit, ticked map[string]bool) (strin
 	return b.String(), nil
 }
 
+// RenderRestartDiff is RenderDiff for a restart plan: the same unified diff over the same
+// verified apply, reading the same "before" bytes off disk — only the write kind differs,
+// because a restart adds lines and gitops.Apply cannot. There is no ticked map: a restart has
+// no per-repo selection to make, since it changes no repo.
+func RenderRestartDiff(root string, restarts []gitops.RestartEdit) (string, error) {
+	byFile := map[string][]gitops.RestartEdit{}
+	var files []string
+	for _, r := range restarts {
+		if _, ok := byFile[r.File]; !ok {
+			files = append(files, r.File)
+		}
+		byFile[r.File] = append(byFile[r.File], r)
+	}
+	sort.Strings(files)
+	var b strings.Builder
+	for _, f := range files {
+		p, err := gitops.ResolvePath(root, f)
+		if err != nil {
+			return "", err
+		}
+		before, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		after, err := gitops.ApplyRestartsToBytes(before, byFile[f])
+		if err != nil {
+			return "", err
+		}
+		// Verified before it is shown, exactly as RenderDiff does: a diff the operator is about
+		// to approve must be one the writer would actually accept.
+		if err := gitops.VerifyRestarts(map[string][]byte{f: before}, map[string][]byte{f: after}, byFile[f]); err != nil {
+			return "", err
+		}
+		b.WriteString(gitops.UnifiedRestartDiff(f, before, byFile[f]))
+		b.WriteString("\n")
+	}
+	return b.String(), nil
+}
+
 // Summary is the resolution section: which cluster context and registry credential source
 // were consulted (by name only, AGENTS.md §4.4), then each resolved repo's source and
 // detail, in repo order. It renders the same facts cmd/hoist's resolutionReport.print does.

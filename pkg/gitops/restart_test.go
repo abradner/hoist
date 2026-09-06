@@ -478,3 +478,74 @@ func TestRestartNeverPlansAByteIdenticalWrite(t *testing.T) {
 		t.Errorf("the superseded stamp should be gone:\n%s", got)
 	}
 }
+
+// The diff an operator confirms must be a hunk, not the whole file. diff.go's UnifiedDiff was
+// written when every edit was a same-line scalar replacement and falls back to printing the
+// entire file as removed-then-added the moment the line counts differ — harmless for an edit,
+// which never does, and useless for a restart, which always would.
+func TestRestartDiffIsAHunkNotTheWholeFile(t *testing.T) {
+	r, pl, _ := planOne(t, deploymentWithLabels)
+	rel := pl.Restarts[0].File
+	before, err := os.ReadFile(filepath.Join(r.Root, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := UnifiedRestartDiff(rel, before, pl.Restarts)
+
+	added, removed, context := 0, 0, 0
+	for _, l := range strings.Split(got, "\n") {
+		switch {
+		case strings.HasPrefix(l, "+++") || strings.HasPrefix(l, "---") || strings.HasPrefix(l, "@@"):
+		case strings.HasPrefix(l, "+"):
+			added++
+		case strings.HasPrefix(l, "-"):
+			removed++
+		case strings.HasPrefix(l, " "):
+			context++
+		}
+	}
+	if added != 2 {
+		t.Errorf("added lines = %d, want the annotations header and the key:\n%s", added, got)
+	}
+	if removed != 0 {
+		t.Errorf("an insertion removes nothing, got %d removed lines:\n%s", removed, got)
+	}
+	total := len(strings.Split(strings.TrimRight(string(before), "\n"), "\n"))
+	if context >= total {
+		t.Errorf("the diff shows %d context lines of a %d-line file — that is the whole file, not a hunk:\n%s", context, total, got)
+	}
+	if !strings.Contains(got, "+      annotations:") {
+		t.Errorf("the diff should show the inserted block at its real indentation:\n%s", got)
+	}
+}
+
+// A second restart replaces in place, so its diff is an ordinary one-line -/+ pair.
+func TestRestartDiffForAReplacementIsAOneLineChange(t *testing.T) {
+	r, pl, _ := planOne(t, deploymentWithLabels)
+	if _, err := ApplyRestarts(r.Root, pl.Restarts); err != nil {
+		t.Fatal(err)
+	}
+	pl2, err := BuildRestartPlan(r, "app-staging", nil, restartAt.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := pl2.Restarts[0].File
+	before, err := os.ReadFile(filepath.Join(r.Root, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := UnifiedRestartDiff(rel, before, pl2.Restarts)
+	added, removed := 0, 0
+	for _, l := range strings.Split(got, "\n") {
+		switch {
+		case strings.HasPrefix(l, "+++") || strings.HasPrefix(l, "---"):
+		case strings.HasPrefix(l, "+"):
+			added++
+		case strings.HasPrefix(l, "-"):
+			removed++
+		}
+	}
+	if added != 1 || removed != 1 {
+		t.Errorf("a replacement is one line out and one in, got +%d -%d:\n%s", added, removed, got)
+	}
+}

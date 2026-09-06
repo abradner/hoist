@@ -87,7 +87,18 @@ func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.S
 		ticked:     ticked,
 		diff:       viewport.New(),
 	}
-	body, err := plan.RenderDiff(root, pl.Edits, ticked)
+	// One screen, two write kinds. A restart's bytes are rendered by the restart-aware sibling
+	// for the same reason it needed one at all: it adds lines, and RenderDiff's apply cannot.
+	// Everything else about this screen — the diff, the confirmation, the mode toggle, the
+	// production refusal — is identical, and duplicating it for a second write kind would be
+	// two screens that have to be kept saying the same thing.
+	var body string
+	var err error
+	if pl.IsRestart() {
+		body, err = plan.RenderRestartDiff(root, pl.Restarts)
+	} else {
+		body, err = plan.RenderDiff(root, pl.Edits, ticked)
+	}
 	if err != nil {
 		m.diffErr = err
 	} else {
@@ -232,7 +243,11 @@ func (m Model) View() string {
 	if m.production {
 		mode += " · production"
 	}
-	fmt.Fprintf(&b, "hoist deploy: %s -> %s   mode: %s\n", m.image, m.target, mode)
+	if m.pl.IsRestart() {
+		fmt.Fprintf(&b, "hoist restart: %s   mode: %s\n", m.target, mode)
+	} else {
+		fmt.Fprintf(&b, "hoist deploy: %s -> %s   mode: %s\n", m.image, m.target, mode)
+	}
 	fmt.Fprintf(&b, "%s\n\n", scale(m.pl))
 	if m.confirm != nil {
 		b.WriteString(m.confirm.View())
@@ -254,7 +269,11 @@ func (m Model) View() string {
 	if m.notice != "" {
 		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render(m.notice))
 	}
-	b.WriteString("\n" + m.styles.Hint.Render("enter deploy · m mode · esc back"))
+	verb := "deploy"
+	if m.pl.IsRestart() {
+		verb = "restart"
+	}
+	b.WriteString("\n" + m.styles.Hint.Render("enter "+verb+" · m mode · esc back"))
 	// The same final-boundary scrub every other screen applies (internal/app/plan's own View,
 	// and tags'): the diff carries three lines of context from files this screen never chose,
 	// and the warnings and render errors are rendered verbatim — so a credential registered
@@ -267,6 +286,14 @@ func (m Model) View() string {
 // scale is the one-line summary of what will be written — the sentence an operator would say
 // out loud before pressing enter.
 func scale(pl gitops.Plan) string {
+	if pl.IsRestart() {
+		files := map[string]bool{}
+		for _, r := range pl.Restarts {
+			files[r.File] = true
+		}
+		return fmt.Sprintf("%s · %s · no image change",
+			plural(len(pl.Restarts), "Deployment"), plural(len(files), "file"))
+	}
 	files := map[string]bool{}
 	n := 0
 	for _, e := range pl.Edits {

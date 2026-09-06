@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	appplan "github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -92,6 +93,12 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	if *dryRun {
 		printRestartPlan(stdout, plan)
+		diff, derr := restartDiff(eff.repo, plan.Restarts)
+		if derr != nil {
+			fmt.Fprintf(stderr, "hoist restart: %v\n", derr)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "\n%s", diff)
 		return 0
 	}
 
@@ -286,6 +293,12 @@ func restartStampOf(plan gitops.Plan) time.Time {
 		return time.Now().UTC()
 	}
 	return t
+}
+
+// restartDiff renders what printRestartPlan's summary describes, byte for byte — the same
+// function the TUI's confirm screen shows, so the two surfaces cannot drift.
+func restartDiff(root string, restarts []gitops.RestartEdit) (string, error) {
+	return appplan.RenderRestartDiff(root, restarts)
 }
 
 // checkCloneCurrentForRestart is checkCloneCurrentForBase for a restart plan: the same
