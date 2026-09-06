@@ -32,11 +32,6 @@ type Row struct {
 	MetaErr     error
 }
 
-// Revision is always "—": AGENTS.md's M6 brief scopes pkg/migrate's resolution out of this
-// milestone entirely ("leave it blank/'—' for now, don't build pkg/migrate here"). A column
-// exists so the screen's shape doesn't change again the milestone pkg/migrate lands.
-const Revision = "—"
-
 // DeriveRows orders regTags per AGENTS.md invariant 3. mapped is whether RepoConfig.Apps has
 // an entry for this image repo at all — a repo-level, config-known fact, never inferred from
 // the tag list itself. When mapped, gitTags supplies the app repo's own tag→commit-date pairs

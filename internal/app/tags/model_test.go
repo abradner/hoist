@@ -3,63 +3,33 @@ package tags
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/registry"
 )
 
-var update = flag.Bool("update", false, "rewrite the golden files under testdata/golden")
+var fixedNow = time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
 
-const goldenDir = "../../../testdata/golden"
+// drain settles m through every command Init/Update produce, batches nested to any depth,
+// spinner ticks dropped — uitest.Drain, kept under the name the older tests use.
+func drain(m Model, cmd tea.Cmd) Model { return uitest.Drain(m, cmd, updateFn) }
 
-// drain runs m through every tea.Cmd Init/Update produces, one message at a time (batches
-// unpacked recursively), exactly as internal/app's root would deliver them — no tea.Program
-// involved. Mirrors plan/model_test.go's runInit, generalized to keep draining after Update
-// (this screen's onListLoaded/onMetaLoaded return further batched fetch cmds of their own).
-func drain(m Model, cmd tea.Cmd) Model {
-	for cmd != nil {
-		msg := cmd()
-		batch, ok := msg.(tea.BatchMsg)
-		if !ok {
-			if _, isTick := msg.(spinner.TickMsg); isTick {
-				// spinner.Update's own returned cmd re-fires forever, to keep the animation
-				// going for as long as the real program runs — draining it here would loop
-				// forever. Tests don't need the animation itself, only what a tick's sibling
-				// cmds in the same batch produce (handled below).
-				return m
-			}
-			m, cmd = m.Update(msg)
-			continue
-		}
-		var next tea.Cmd
-		for _, c := range batch {
-			if c == nil {
-				continue
-			}
-			sub := c()
-			if _, isTick := sub.(spinner.TickMsg); isTick {
-				continue
-			}
-			var mc tea.Cmd
-			m, mc = m.Update(sub)
-			next = tea.Batch(next, mc)
-		}
-		cmd = next
-	}
-	return m
+// prose reads a framed view as running text: ANSI stripped, box edges dropped, wrapped
+// lines rejoined — for assertions about sentences the frame may have wrapped.
+func prose(v string) string {
+	v = ansi.Strip(v)
+	v = strings.NewReplacer("│", " ", "╭", "", "╮", "", "╰", "", "╯", "", "├", "", "┤", "", "─", "", "\n", " ").Replace(v)
+	return strings.Join(strings.Fields(v), " ")
 }
 
 // fixedMetas builds a MetaFunc over a fixed table — deterministic, synchronous, no real
@@ -93,7 +63,7 @@ func readyModel(t *testing.T, target string, mapped, production bool) Model {
 		}
 		return regTags, gitTags, true, nil
 	}
-	m := New("ghcr.io/example/app", target, mapped, production, "app-staging", []string{"v1"}, target == "app-production", listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", target, Options{Mapped: mapped, Production: production, StagingEnv: "app-staging", StagingTags: []string{"v1"}, HasStagingMismatch: target == "app-production", List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -157,7 +127,7 @@ func TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime(t *testing.T)
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", true /* config says mapped */, false, "", nil, false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true /* config says mapped */, List: listFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -222,7 +192,7 @@ func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
 		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: date}
 	}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
-	m := New("ghcr.io/example/app", "app-staging", true, false, "", nil, false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -288,7 +258,7 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 	// outside the window that ever gets fetched, so Reorder never learns its date at all.
 	metas["v29"] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("9", 64), Created: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, nil, false, nil }
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, fixedMetas(metas))
+	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -307,8 +277,12 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 			t.Fatal("v29 sits far outside the visible window and must not have been fetched — otherwise this test isn't exercising the lazy-fetch gap at all")
 		}
 	}
-	if loaded != 6 {
-		t.Fatalf("expected exactly the 6-row initial window to have been fetched, got %d loaded rows — this test's own fixture no longer keeps the fetch window bounded", loaded)
+	page := m.pageSize()
+	if page >= n {
+		t.Fatalf("fixture precondition: the window (%d rows) must be smaller than the list (%d)", page, n)
+	}
+	if loaded != page {
+		t.Fatalf("expected exactly the %d-row initial window to have been fetched, got %d loaded rows — this test's own fixture no longer keeps the fetch window bounded", page, loaded)
 	}
 
 	got := ansi.Strip(m.View())
@@ -318,14 +292,14 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 	if !strings.Contains(got, "haven't been evaluated yet") {
 		t.Fatalf("view should honestly mark that rows outside the window remain unevaluated, rather than silently claim a complete Created-sort:\n%s", got)
 	}
-	if !strings.Contains(got, "24 tag(s)") {
-		t.Fatalf("24 of the 30 rows (everything outside the 6-row window) should be counted as unevaluated:\n%s", got)
+	if want := fmt.Sprintf("%d tag(s)", n-page); !strings.Contains(got, want) {
+		t.Fatalf("%s (everything outside the %d-row window) should be counted as unevaluated:\n%s", want, page, got)
 	}
 }
 
-func TestEnterEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
+func TestSpaceEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
-	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := m.Update(uitest.Key("space"))
 	if cmd == nil {
 		t.Fatal("expected a command")
 	}
@@ -357,7 +331,7 @@ func TestFailedMetaFetchIsNotRetriedForever(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, metaFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: metaFn})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -410,7 +384,7 @@ func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, metaFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: metaFn})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -424,9 +398,9 @@ func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
 		t.Fatal("fixture precondition: v1's Config call must have failed")
 	}
 
-	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m2, cmd := m.Update(uitest.Key("space"))
 	if cmd != nil {
-		t.Fatalf("Enter on a permanently-failed row must not emit a message (no digest to promote), got a command: %v", cmd())
+		t.Fatalf("space on a permanently-failed row must not emit a message (no digest to promote), got a command: %v", cmd())
 	}
 	if strings.Contains(m2.notice, "still loading") {
 		t.Fatalf("notice = %q: must not claim this row is still loading — it already failed and fetchVisible will never retry it", m2.notice)
@@ -476,7 +450,7 @@ func TestStagingMismatchNoteDoesNotClaimLiveState(t *testing.T) {
 	if !m.hasStagingMismatch {
 		t.Fatal("fixture precondition: readyModel's own target==app-production shape must set hasStagingMismatch")
 	}
-	v := m.View()
+	v := prose(m.View())
 	if strings.Contains(v, "currently running") {
 		t.Fatalf("the staging note must never claim live state (\"currently running\"):\n%s", v)
 	}
@@ -501,13 +475,13 @@ func TestStagingNoteRendersDisagreementAcrossMultipleTags(t *testing.T) {
 	metaFn := fixedMetas(map[string]registry.ImageMeta{
 		"v1": {Digest: "sha256:" + strings.Repeat("1", 64)},
 	})
-	m := New("ghcr.io/example/app", "app-production", false, true, "app-staging", []string{"v1", "v2"}, true, listFn, metaFn)
+	m := New("ghcr.io/example/app", "app-production", Options{Production: true, StagingEnv: "app-staging", StagingTags: []string{"v1", "v2"}, HasStagingMismatch: true, List: listFn, Meta: metaFn})
 	m = m.SetSize(300, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady (err=%v)", m.state, m.err)
 	}
-	v := m.View()
+	v := prose(m.View())
 	if !strings.Contains(v, "disagrees") {
 		t.Fatalf("expected the staging note to say the tags disagree:\n%s", v)
 	}
@@ -531,7 +505,7 @@ func TestStagingNoteComparesCursorTagAgainstStaging(t *testing.T) {
 	if m.cursorTag() != "v3" {
 		t.Fatalf("fixture precondition: cursor should start on the newest tag, got %q", m.cursorTag())
 	}
-	v := m.View()
+	v := prose(m.View())
 	if !strings.Contains(v, "warning: v3 (under the cursor) is not committed there") {
 		t.Fatalf("a tag staging has never carried must be called out as such:\n%s", v)
 	}
@@ -548,7 +522,7 @@ func TestStagingNoteComparesCursorTagAgainstStaging(t *testing.T) {
 	if m2.cursorTag() != "v1" {
 		t.Fatalf("expected the cursor on v1 after two j presses, got %q", m2.cursorTag())
 	}
-	v2 := m2.View()
+	v2 := prose(m2.View())
 	if !strings.Contains(v2, "v1 is the tag committed there") {
 		t.Fatalf("a tag staging does carry must read as such:\n%s", v2)
 	}
@@ -658,11 +632,11 @@ func TestEscEmitsBackMsg(t *testing.T) {
 // Model instance's command produced it, so without imageRepo-scoping a stale listLoadedMsg
 // would silently overwrite the new picker's own rows.
 func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
-	left := New("ghcr.io/example/other", "app-staging", false, false, "", nil, false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+	left := New("ghcr.io/example/other", "app-staging", Options{
+		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return []string{"stale"}, nil, false, nil
 		},
-		fixedMetas(nil))
+		Meta: fixedMetas(nil)})
 	staleMsg := left.loadCmd()()
 
 	current := readyModel(t, "app-staging", true, false)
@@ -711,11 +685,11 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 // second, even though msg.imageRepo == current.imageRepo trivially holds for both.
 func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
-	first := New(repo, "app-staging", true, false, "", nil, false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+	first := New(repo, "app-staging", Options{Mapped: true,
+		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return []string{"stale-from-first"}, nil, false, nil
 		},
-		fixedMetas(nil))
+		Meta: fixedMetas(nil)})
 	staleMsg := first.loadCmd()() // captured, never delivered — the operator backs out first.
 
 	// Reopen: a brand new Model for the identical repo, exactly as internal/app's root would
@@ -747,9 +721,9 @@ func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 // must not overwrite the reopened picker's already-loaded (or loading) row metadata.
 func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
-	first := New(repo, "app-staging", true, false, "", nil, false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"v1"}, nil, false, nil },
-		fixedMetas(nil))
+	first := New(repo, "app-staging", Options{Mapped: true,
+		List: func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"v1"}, nil, false, nil },
+		Meta: fixedMetas(nil)})
 	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
 
 	second := readyModel(t, "app-staging", true, false)
@@ -768,11 +742,10 @@ func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 }
 
 func TestListErrorRendersInsteadOfHanging(t *testing.T) {
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false,
-		func(context.Context) ([]string, []forge.GitTag, bool, error) {
+	m := New("ghcr.io/example/app", "app-staging", Options{
+		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
 			return nil, nil, false, errors.New("registry unreachable")
-		},
-		nil)
+		}})
 	m = drain(m, m.Init())
 	if m.err == nil {
 		t.Fatal("expected the list error to be recorded")
@@ -787,7 +760,7 @@ func TestListErrorRendersInsteadOfHanging(t *testing.T) {
 // placeholder naming neither the actual image repo nor how to fix it. The error must name the
 // real image repo and point at the registries[] config knob that supplies listFn.
 func TestNilListFuncErrorNamesRepoAndConfigKnob(t *testing.T) {
-	m := New("ghcr.io/example/nilcase", "app-staging", false, false, "", nil, false, nil, nil)
+	m := New("ghcr.io/example/nilcase", "app-staging", Options{})
 	m = drain(m, m.Init())
 	if m.err == nil {
 		t.Fatal("expected an error state for a nil listFn")
@@ -809,7 +782,7 @@ func TestNilMetaFuncErrorNamesRepoTagAndConfigKnob(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return []string{"v1"}, nil, false, nil
 	}
-	m := New("ghcr.io/example/nilmeta", "app-staging", false, false, "", nil, false, listFn, nil)
+	m := New("ghcr.io/example/nilmeta", "app-staging", Options{List: listFn})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -841,7 +814,7 @@ func TestLoadCmdUsesModelsCancellableContext(t *testing.T) {
 		gotCtx = ctx
 		return nil, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, nil)
+	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn})
 	m.cancel()
 	m.loadCmd()()
 	if gotCtx == nil {
@@ -858,7 +831,7 @@ func TestFetchCmdUsesModelsCancellableContext(t *testing.T) {
 		gotCtx = ctx
 		return registry.ImageMeta{}, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, nil, metaFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{Meta: metaFn})
 	m.cancel()
 	m.fetchCmd("v1")()
 	if gotCtx == nil {
@@ -912,7 +885,7 @@ func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 	if m.ctx.Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
-	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := m.Update(uitest.Key("space"))
 	if cmd == nil {
 		t.Fatal("expected a command")
 	}
@@ -943,37 +916,25 @@ func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
 	}
 }
 
-// TestViewGolden snapshots the ready screen at 100x30 with a mapped, non-production target
-// and a staging mismatch banner — deterministic fixed data, no real registry/forge call.
-// Regenerate with: mise exec -- go test ./internal/app/tags -update
+// TestViewGolden snapshots the ready screen at both harness sizes with a mapped,
+// non-production target — deterministic fixed data, no real registry/forge call.
 func TestViewGolden(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	got := ansi.Strip(m.View())
-
-	for _, want := range []string{
-		"hoist tags: ghcr.io/example/app -> app-staging",
-		"v1", "v2", "v3",
-		"D direct commit",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("view lacks %q:\n%s", want, got)
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := readyModel(t, "app-staging", true, false).SetSize(size[0], size[1])
+		got := ansi.Strip(m.View())
+		for _, want := range []string{"ghcr.io/example/app  →  app-staging", "v1", "v2", "v3", "D direct", "no commit history"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("view lacks %q:\n%s", want, got)
+			}
 		}
+		uitest.Golden(t, "tags", m.View(), size[0], size[1])
 	}
-
-	p := filepath.Join(goldenDir, "tags.txt")
-	if *update {
-		if err := os.WriteFile(p, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
+	// The production form: the chip, the staging note, no D.
+	m := readyModel(t, "app-production", true, true).SetSize(80, 24)
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "production") || strings.Contains(got, "D direct") {
+		t.Errorf("production view:\n%s", got)
 	}
-	want, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != string(want) {
-		t.Errorf("View() drifted from testdata/golden/tags.txt; if intentional, regenerate with -update.\n--- got ---\n%s\n--- want ---\n%s", got, want)
-	}
+	uitest.Golden(t, "tags-production", m.View(), 80, 24)
 }
 
 // TestDirectGestureCompletesThroughRealInput is the regression test for a gesture that had
@@ -1025,7 +986,7 @@ func TestStagingNoteDoesNotClaimTheSameBuild(t *testing.T) {
 	if m.cursorTag() != "v1" {
 		t.Fatalf("fixture precondition: cursor should be on v1, got %q", m.cursorTag())
 	}
-	v := m.View()
+	v := prose(m.View())
 	if !strings.Contains(v, "tags move") {
 		t.Errorf("the verdict must say what a tag match does and does not prove:\n%s", v)
 	}
@@ -1043,7 +1004,7 @@ func TestCredentialErrorIsWrappedSoEveryClauseIsVisible(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return nil, nil, false, errors.New(chain)
 	}
-	m := New("ghcr.io/example/app", "app-staging", false, false, "", nil, false, listFn, fixedMetas(nil))
+	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: fixedMetas(nil)})
 	m = m.SetSize(100, 20)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -1051,14 +1012,14 @@ func TestCredentialErrorIsWrappedSoEveryClauseIsVisible(t *testing.T) {
 		t.Fatal("the picker should be in its error state")
 	}
 
-	v := m.View()
+	v := prose(m.View())
 	for _, want := range []string{"cluster: not configured", "op: not configured", "keychain: status 403"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("the view must show the %q clause, not just the first:\n%s", want, v)
 		}
 	}
 	// Every line fits the terminal, so nothing is clipped away.
-	for _, line := range strings.Split(v, "\n") {
+	for _, line := range strings.Split(ansi.Strip(m.View()), "\n") {
 		if w := len([]rune(line)); w > 100 {
 			t.Errorf("line is %d wide, wider than the terminal:\n%q", w, line)
 		}

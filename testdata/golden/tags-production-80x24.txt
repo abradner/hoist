@@ -1,0 +1,24 @@
+╭─ hoist · deploy ─────────────────────────────────────────────────────────────╮
+│ghcr.io/example/app  →  app-production   production                           │
+│note: app-staging (paired staging)'s committed manifest tag is v1; warning: v3│
+│(under the cursor) is not committed there — it has not been through app-      │
+│staging                                                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│   TAG  BUILT          DIGEST                                                 │
+│▸ v3   4 days ago     333333333333                                            │
+│  v2   4 weeks ago    222222222222                                            │
+│  v1   2 months ago   111111111111  in app-staging                            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│no commit history — app-production does not declare ghcr.io/example/app yet, …│
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+                        ↑/↓ move · / filter · space review the change · esc back
