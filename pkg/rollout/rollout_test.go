@@ -264,7 +264,7 @@ func TestRestartStampsThePodTemplateAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := at.Format(time.RFC3339)
+	want := at.Format(RestartStampLayout)
 	if got.Spec.Template.Annotations[RestartAnnotation] != want {
 		t.Errorf("annotation = %q, want %q", got.Spec.Template.Annotations[RestartAnnotation], want)
 	}

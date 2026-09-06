@@ -16,6 +16,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -108,6 +110,27 @@ func (d DeploymentStatus) GracefulRestartConcerns() []string {
 	if d.ReadinessProbes == 0 {
 		out = append(out, "no readiness probe: a new pod counts as available the moment it starts, before it can serve")
 	}
+	// The one that undercuts "a restart changes nothing about what runs". It is true of the
+	// DECLARED reference and only that: a container on a mutable tag can pull a different digest
+	// when its replacement lands on a node without the image cached, or on every pull under
+	// imagePullPolicy: Always. This repo's own fixtures carry bare-tag Deployments, and so does
+	// the target repo, so this is not a hypothetical.
+	if un := d.unpinnedImages(); len(un) > 0 {
+		out = append(out, fmt.Sprintf("unpinned image(s) %s: a replacement pod can pull a different build than the one running now, so this restart may not be a no-op",
+			strings.Join(un, ", ")))
+	}
+	return out
+}
+
+// unpinnedImages lists this Deployment's live container references that name no digest, sorted.
+func (d DeploymentStatus) unpinnedImages() []string {
+	var out []string
+	for _, img := range d.Images {
+		if !strings.Contains(img.Image, "@sha256:") {
+			out = append(out, img.Image)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -248,15 +271,24 @@ func (c *client) Deployment(ctx context.Context, namespace, name string) (Deploy
 // rollout; this one is chosen because it changes nothing else.
 const RestartAnnotation = "kubectl.kubernetes.io/restartedAt"
 
+// RestartStampLayout is how Restart renders its timestamp: RFC3339 with a fixed nine fractional
+// digits. See Restart for why the sub-second part is load-bearing.
+const RestartStampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 // Restart implements Rollout.
 //
-// The caller must pass an `at` whose RFC3339 rendering differs from the Deployment's current
-// RestartedAt. RFC3339 has second resolution, so two calls in the same second patch the pod
-// template to the value it already holds — which is not a change, so no rollout starts, and a
-// caller watching for one would see the PREVIOUS rollout's completion and report success for a
-// restart that never happened. This is not enforced here because enforcing it means a read, and
-// a read here would both cost a round trip and race the write; cmd/hoist has already read the
-// Deployment before it calls this, so it is the honest place to hold the constraint.
+// The stamp carries nanoseconds, and that is a correctness decision rather than a cosmetic one.
+// kubectl writes plain RFC3339, at second resolution — but two restarts within one second then
+// patch the pod template to the value it already holds, which is not a change: no rollout
+// starts, and a caller watching for one sees the PREVIOUS rollout finish and reports success for
+// a restart that never happened. Comparing against the value already on the object does not fix
+// it either, because two processes reading in the same second both see the same "before" and
+// both compute the same "after". Nanoseconds remove the collision instead of detecting it, and
+// nothing reads this value back as a duration — it only has to differ, and be a string.
+//
+// A fixed `at` for a whole invocation is also what makes a retry safe: patching the same
+// Deployment with the same stamp twice is idempotent, so a caller that cannot tell whether its
+// patch landed can simply repeat it.
 //
 // A strategic-merge patch of one annotation, which is what kubectl issues for the same command.
 // Argo does not treat this as drift even with selfHeal on: its diff is a three-way merge, so a
@@ -270,9 +302,11 @@ func (c *client) Restart(ctx context.Context, namespace, name string, at time.Ti
 	if namespace == "" || name == "" {
 		return errors.New("rollout: restart needs a namespace and a name")
 	}
-	// RFC3339, quoted by the JSON encoding itself — the value must reach the API server as a
-	// string, since an annotation value is one.
-	stamp := at.UTC().Format(time.RFC3339)
+	// An explicit nine-digit layout, not time.RFC3339Nano, which strips trailing zeros and
+	// would occasionally render a second-resolution string — the exact case this avoids.
+	// Quoted by the JSON encoding itself: an annotation value must reach the API server as a
+	// string.
+	stamp := at.UTC().Format(RestartStampLayout)
 	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, RestartAnnotation, stamp))
 	_, err := c.cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {

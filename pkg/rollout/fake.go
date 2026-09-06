@@ -55,7 +55,7 @@ func (f *Fake) Restart(_ context.Context, namespace, name string, at time.Time) 
 	err, hook := f.RestartErr, f.OnRestart
 	st, known := f.Deployments[depKey{namespace, name}]
 	if err == nil && known {
-		st.RestartedAt = at.UTC().Format(time.RFC3339)
+		st.RestartedAt = at.UTC().Format(RestartStampLayout)
 		f.Deployments[depKey{namespace, name}] = st
 	}
 	f.mu.Unlock()

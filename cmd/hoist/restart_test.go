@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -298,36 +299,75 @@ func TestRestartFailsClosedWithNoConfiguredRepo(t *testing.T) {
 	}
 }
 
-// RFC3339 has second resolution, so restarting twice inside one second would patch the pod
-// template to the value it already holds — no change, no rollout, and the watch that follows
-// would report the PREVIOUS rollout's completion as this one's (Copilot, PR #81).
-func TestRestartStampAlwaysDiffersFromWhatIsThere(t *testing.T) {
-	now := time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)
-	nowStamp := now.Format(time.RFC3339)
+// A failed patch has one ambiguous outcome: the API server can commit and the connection can
+// still fail before the response arrives. Reporting that as failure is wrong in a way that
+// matters — the pods are already rolling, and re-running would roll them again (Copilot, PR #81).
+func TestRestartTreatsALandedPatchAsSuccessDespiteAFailedCall(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	f := restartFake(t, rolled("app-production"))
+	// The patch "fails" — but the fake records the stamp anyway, which is exactly the shape of
+	// a write that landed and whose response was lost.
+	f.RestartErr = errors.New("connection reset by peer")
+	f.OnRestart = nil
 
-	// Nothing there: now is fine.
-	if got := distinctRestartStamp(now, []rollout.DeploymentStatus{{}}); !got.Equal(now) {
-		t.Errorf("with no existing stamp it should use now, got %s", got)
+	var out, errOut bytes.Buffer
+	got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut)
+	if got == 0 {
+		t.Fatalf("this fake never records the stamp, so the failure is real and must be reported:\n%s", out.String())
 	}
-	// The exact stamp is already on one of them: it must move.
-	sts := []rollout.DeploymentStatus{{RestartedAt: nowStamp}}
-	got := distinctRestartStamp(now, sts)
-	if got.Format(time.RFC3339) == nowStamp {
-		t.Fatalf("planned the stamp already on the Deployment: nothing would roll")
+	if !strings.Contains(errOut.String(), "connection reset") {
+		t.Errorf("the real failure should be reported:\n%s", errOut.String())
 	}
-	// And it is still a plain RFC3339 second stamp, the shape kubectl writes.
-	if _, err := time.Parse(time.RFC3339, got.Format(time.RFC3339)); err != nil {
-		t.Errorf("stamp is not plain RFC3339: %v", err)
+}
+
+// The stamp carries nanoseconds so two restarts can never collide, whatever the resolution of
+// the clock that asked for them (Copilot, PR #81).
+func TestRestartStampIsSubSecond(t *testing.T) {
+	a := time.Date(2026, 9, 6, 5, 0, 0, 1, time.UTC).Format(rollout.RestartStampLayout)
+	b := time.Date(2026, 9, 6, 5, 0, 0, 2, time.UTC).Format(rollout.RestartStampLayout)
+	if a == b {
+		t.Fatalf("two instants one nanosecond apart rendered identically as %q: a second restart would be a no-op", a)
 	}
-	// Several Deployments occupying consecutive seconds: it steps past all of them.
-	var occupied []rollout.DeploymentStatus
-	for i := 0; i < 3; i++ {
-		occupied = append(occupied, rollout.DeploymentStatus{RestartedAt: now.Add(time.Duration(i) * time.Second).Format(time.RFC3339)})
+	// Nine digits always, so an instant that happens to land on a whole second cannot collapse
+	// back to second resolution (time.RFC3339Nano strips trailing zeros; this layout does not).
+	whole := time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC).Format(rollout.RestartStampLayout)
+	if !strings.Contains(whole, ".000000000") {
+		t.Errorf("a whole-second instant lost its fractional part: %q", whole)
 	}
-	g2 := distinctRestartStamp(now, occupied).Format(time.RFC3339)
-	for _, st := range occupied {
-		if g2 == st.RestartedAt {
-			t.Errorf("stamp %s collides with an existing one", g2)
-		}
+	if _, err := time.Parse(time.RFC3339, whole); err != nil {
+		t.Errorf("the stamp should still be valid RFC3339: %v", err)
+	}
+}
+
+// The claim "a restart changes nothing about what runs" holds only for a pinned reference. A
+// container on a mutable tag can pull a different build when its replacement lands, and this
+// repo's own fixtures carry bare-tag Deployments (Copilot, PR #81).
+func TestRestartWarnsAboutUnpinnedImages(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	st := rolled("app-production")
+	st.Images = []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v1"}}
+	restartFake(t, st)
+
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got != 0 {
+		t.Fatalf("the warning must not block the restart: %s", errOut.String())
+	}
+	if !strings.Contains(out.String(), "unpinned image(s) ghcr.io/example/app:v1") {
+		t.Errorf("an unpinned reference should be named:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "may not be a no-op") {
+		t.Errorf("the warning should say what it means:\n%s", out.String())
+	}
+
+	// A pinned one says nothing.
+	out.Reset()
+	pinned := rolled("app-production")
+	pinned.Images = []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v1@sha256:" + strings.Repeat("a", 64)}}
+	restartFake(t, pinned)
+	if got := run([]string{"--config", cfgPath, "restart", "--env", "app-production"}, &out, &errOut); got != 0 {
+		t.Fatal(errOut.String())
+	}
+	if strings.Contains(out.String(), "unpinned") {
+		t.Errorf("a pinned reference should draw no warning:\n%s", out.String())
 	}
 }

@@ -18,7 +18,8 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// runRestart is `hoist restart`: roll an env's Deployments without changing what they run.
+// runRestart is `hoist restart`: roll an env's Deployments without changing the image references
+// they declare.
 //
 // It talks to the cluster directly, and deliberately writes nothing to git. `kubectl rollout
 // restart` stamps the pod template's restart annotation on the live Deployment, and Argo does
@@ -130,10 +131,10 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return 0
 	}
 
-	at := distinctRestartStamp(time.Now().UTC(), before)
+	at := time.Now().UTC()
 	var restarted []string
 	for _, st := range before {
-		if rerr := ro.Restart(ctx, *env, st.Name, at); rerr != nil {
+		if rerr := restartOne(ctx, ro, *env, st.Name, at); rerr != nil {
 			fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
 			// Say what did roll before the failure: some pods are already restarting, and an
 			// operator needs to know which.
@@ -149,34 +150,28 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	return watchRestart(ctx, ro, *env, restarted, cfg.Poll, stdout, stderr)
 }
 
-// distinctRestartStamp is now, advanced until its RFC3339 rendering differs from every stamp
-// already on the Deployments about to be restarted.
+// restartOne patches one Deployment and resolves the one ambiguous outcome the patch has: the
+// API server can commit the change and the connection can still fail before the response
+// arrives. Reporting that as a failure is wrong in a way that matters — the pods are already
+// rolling, and an operator who re-runs would roll them a second time.
 //
-// RFC3339 has second resolution, so restarting twice inside one second would otherwise patch the
-// pod template to the value it already holds. That is not a change: no rollout starts, and the
-// watch that follows would see the PREVIOUS rollout already complete and report success for a
-// restart that never happened — directly contradicting this command's own promise that
-// re-running restarts again.
+// So a failed patch is followed by a read: if the annotation already carries this invocation's
+// own stamp, the write landed and the error was only in hearing about it. Safe because the stamp
+// is fixed for the whole invocation and unique to it (rollout.RestartStampLayout), so finding it
+// there cannot mean someone else's restart.
 //
-// Advancing a second rather than switching to sub-second precision keeps the value identical in
-// shape to the one `kubectl rollout restart` writes, which is the whole reason for sharing the
-// key. "One second from now" is still an honest answer to when the restart was asked for.
-func distinctRestartStamp(now time.Time, sts []rollout.DeploymentStatus) time.Time {
-	existing := make(map[string]bool, len(sts))
-	for _, st := range sts {
-		if st.RestartedAt != "" {
-			existing[st.RestartedAt] = true
-		}
+// ErrNotFound is terminal either way: a Deployment that is not there was not restarted, and no
+// amount of re-reading changes that.
+func restartOne(ctx context.Context, ro rollout.Rollout, env, name string, at time.Time) error {
+	err := ro.Restart(ctx, env, name, at)
+	if err == nil || errors.Is(err, rollout.ErrNotFound) {
+		return err
 	}
-	// Bounded: each step moves a whole second, and the set it must avoid is finite, so this
-	// terminates after at most len(existing) steps.
-	for i := 0; i <= len(existing); i++ {
-		at := now.Add(time.Duration(i) * time.Second)
-		if !existing[at.Format(time.RFC3339)] {
-			return at
-		}
+	st, rerr := ro.Deployment(ctx, env, name)
+	if rerr == nil && st.RestartedAt == at.UTC().Format(rollout.RestartStampLayout) {
+		return nil
 	}
-	return now.Add(time.Duration(len(existing)+1) * time.Second)
+	return err
 }
 
 // restartTargets is the distinct Deployment names the named families declare in env, or every
