@@ -80,14 +80,12 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			if err := checkCloneCurrentForRestart(ctx, eff.repo, tuiBase, p.Restarts); err != nil {
 				return engine.PromotionState{}, nil, err
 			}
-			if opts.Direct {
-				// The same fresh-base cross-check the CLI's own --direct runs: a Deployment
-				// origin/<base> has gained is invisible to a plan built from this checkout,
-				// and a direct push has no PR to catch it. The family selection is recovered
-				// from the plan, which is what actually crossed this boundary.
-				if err := checkNoMissingWorkloadAtFreshBase(ctx, eff.repo, tuiBase, eff.appsRoot, p.TargetEnv, familiesOfRestart(r, p), p); err != nil {
-					return engine.PromotionState{}, nil, err
-				}
+			// Both modes, as the CLI does: a restart's omission is invisible in a PR (the
+			// file that should have been touched simply has no diff line), so a PR is not the
+			// second look here that it is for an image change. The family selection is
+			// recovered from the plan, which is what actually crossed this boundary.
+			if err := checkNoMissingWorkloadAtFreshBase(ctx, eff.repo, tuiBase, eff.appsRoot, p.TargetEnv, familiesOfRestart(r, p), p); err != nil {
+				return engine.PromotionState{}, nil, err
 			}
 		} else if !anyRealEdit(p.Edits) {
 			if p.SourceEnv == "" {
@@ -114,7 +112,11 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// push would silently update a subset of the family and leave the rest behind. The CLI
 		// runs this for --direct on both promote and deploy; the TUI's D gesture is the same
 		// write with the same blind spot, so it runs the same check (Copilot, PR #72).
-		if opts.Direct {
+		// Restart plans are excluded: they have no SourceEnv and no Edits, so this would call
+		// BuildPlan with an empty source env and fail before the engine ever started — every
+		// direct restart from the TUI refused outright (Copilot, PR #80). Their own equivalent
+		// check ran above, in both modes.
+		if opts.Direct && !p.IsRestart() {
 			buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
 				if p.IsDeploy() {
 					return gitops.BuildDeployPlan(fresh, p.TargetEnv, deployRefOf(p), eff.promotable)

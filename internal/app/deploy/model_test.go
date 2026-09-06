@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -190,5 +191,51 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 	m.notice = "could not reach the registry with " + secret
 	if v := m.View(); strings.Contains(v, secret) {
 		t.Errorf("a registered secret reached the rendered view:\n%s", v)
+	}
+}
+
+// One screen serves two write kinds, so every operator-facing word has to move with the
+// variant. Before this, `m` offered "Commit  straight to <env> with no PR?" for a restart —
+// the image is empty — and the diff-failure and production refusals both still said "deploy"
+// (Copilot, PR #80).
+func TestConfirmScreenWordsFollowTheVariant(t *testing.T) {
+	restartFixture := func(t *testing.T, envs config.EnvsConfig) Model {
+		t.Helper()
+		r, err := gitops.Discover("../../../testdata/repo", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pl, err := gitops.BuildRestartPlan(r, "app-production", nil, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(pl, r.Root, "", envs, ui.NewStyles(true))
+		return m.SetSize(120, 40)
+	}
+
+	// The mode dialog names the workloads, never an empty image.
+	m := restartFixture(t, config.EnvsConfig{})
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	v := m2.View()
+	if strings.Contains(v, "Commit  straight") {
+		t.Errorf("the dialog has a hole where the subject belongs:\n%s", v)
+	}
+	if !strings.Contains(v, "Deployments") {
+		t.Errorf("a restart's dialog should name what it commits:\n%s", v)
+	}
+
+	// The production refusal is a restart refusal.
+	p := restartFixture(t, config.EnvsConfig{Production: []string{"app-production"}})
+	p2, _ := p.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	if pv := p2.View(); !strings.Contains(pv, "restarts there always open a PR") {
+		t.Errorf("the production refusal should name the operation:\n%s", pv)
+	}
+
+	// And so is the diff-failure refusal.
+	d := restartFixture(t, config.EnvsConfig{})
+	d.diffErr = errors.New("boom")
+	d2, _ := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if dv := d2.View(); !strings.Contains(dv, "cannot confirm a restart") {
+		t.Errorf("the diff-failure refusal should name the operation:\n%s", dv)
 	}
 }

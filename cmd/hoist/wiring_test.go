@@ -488,3 +488,39 @@ func mustStatePath(t *testing.T, id string) string {
 	}
 	return p
 }
+
+// TestTUIDirectRestartStarts is Copilot's PR #80 finding: every direct restart from the TUI
+// failed before the engine ever started. The restart branch ran its own checks, then fell
+// through to the deploy path's direct-mode fresh-base block, which called BuildPlan with a
+// restart plan's empty SourceEnv and errored with `source env "" not found`.
+func TestTUIDirectRestartStarts(t *testing.T) {
+	cfgPath, _, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, err := gitops.BuildRestartPlan(r, "app-production", nil, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+
+	s, driveFn, err := start(context.Background(), pl, app.StartOpts{Direct: true, Confirmed: true})
+	if err != nil {
+		t.Fatalf("a direct restart must reach the engine: %v", err)
+	}
+	if driveFn == nil {
+		t.Fatal("no DriveFunc for a plan that built cleanly")
+	}
+	if !s.Direct {
+		t.Error("the state should carry Direct")
+	}
+	if len(s.Restarts) == 0 {
+		t.Error("the state should carry the planned restarts")
+	}
+	if len(s.ArgoApps) == 0 {
+		t.Error("a restart must carry its Applications, or the Argo and rollout steps watch nothing")
+	}
+}

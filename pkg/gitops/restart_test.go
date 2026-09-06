@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -547,5 +548,65 @@ func TestRestartDiffForAReplacementIsAOneLineChange(t *testing.T) {
 	}
 	if added != 1 || removed != 1 {
 		t.Errorf("a replacement is one line out and one in, got +%d -%d:\n%s", added, removed, got)
+	}
+}
+
+// UnifiedRestartDiff must never emit two hunks whose old-file ranges overlap: overlapping
+// hunks repeat context lines and describe a file that does not exist (Copilot, PR #80).
+//
+// Driven at the function rather than through a plan, deliberately. A plan cannot currently
+// reach this: one pod template per document puts consecutive anchors at least a dozen lines
+// apart, wider than two three-line context windows, so BuildRestartPlan has no input that
+// makes them overlap. The renderer is still written to be total over its input — it takes a
+// []RestartEdit, not a plan — and this pins that property rather than pretending to exercise a
+// scenario the planner can produce.
+func TestRestartDiffMergesOverlappingHunks(t *testing.T) {
+	r, pl, _ := planOne(t, deploymentWithLabels)
+	rel := pl.Restarts[0].File
+	before, err := os.ReadFile(filepath.Join(r.Root, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two writes two lines apart: their context windows overlap heavily.
+	first := pl.Restarts[0]
+	second := first
+	second.Line = first.Line + 2
+	got := UnifiedRestartDiff(rel, before, []RestartEdit{first, second})
+
+	var starts, ends []int
+	for _, l := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(l, "@@") {
+			continue
+		}
+		var os1, oc, ns, nc int
+		if _, err := fmt.Sscanf(l, "@@ -%d,%d +%d,%d @@", &os1, &oc, &ns, &nc); err != nil {
+			t.Fatalf("unparseable hunk header %q: %v", l, err)
+		}
+		starts = append(starts, os1)
+		ends = append(ends, os1+oc)
+	}
+	if len(starts) == 0 {
+		t.Fatalf("no hunks rendered:\n%s", got)
+	}
+	for i := 1; i < len(starts); i++ {
+		if starts[i] < ends[i-1] {
+			t.Errorf("hunk %d starts at line %d, inside the previous hunk which ends at %d:\n%s",
+				i+1, starts[i], ends[i-1], got)
+		}
+	}
+	// Both writes survive the merge.
+	if n := strings.Count(got, "+"+first.Lines[1]); n != 2 {
+		t.Errorf("expected both writes in the diff, got %d:\n%s", n, got)
+	}
+	// And no line of the file appears twice as context.
+	seen := map[string]bool{}
+	for _, l := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(l, " ") || strings.TrimSpace(l) == "" {
+			continue
+		}
+		if seen[l] {
+			t.Errorf("context line %q appears twice — the hunks overlap:\n%s", l, got)
+		}
+		seen[l] = true
 	}
 }

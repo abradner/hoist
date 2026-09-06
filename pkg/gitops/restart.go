@@ -569,37 +569,54 @@ func UnifiedRestartDiff(path string, before []byte, restarts []RestartEdit) stri
 	sorted := append([]RestartEdit(nil), restarts...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Line < sorted[j].Line })
 
+	// Group writes whose context windows touch or overlap into one hunk. Emitting a hunk per
+	// write is only correct while they are far apart; two Deployments near each other in one
+	// manifest would otherwise produce hunks with overlapping old-file ranges, repeating the
+	// same context lines and describing a file that does not exist (Copilot, PR #80).
+	type group struct {
+		start, end int // 0-based, [start,end)
+		writes     []RestartEdit
+	}
+	var groups []group
+	for _, r := range sorted {
+		if r.Line < 1 || r.Line > len(lines) {
+			continue
+		}
+		anchor := r.Line - 1
+		gs := max(0, anchor-restartDiffContext)
+		ge := min(len(lines), anchor+1+restartDiffContext)
+		if n := len(groups); n > 0 && gs <= groups[n-1].end {
+			groups[n-1].end = max(groups[n-1].end, ge)
+			groups[n-1].writes = append(groups[n-1].writes, r)
+			continue
+		}
+		groups = append(groups, group{start: gs, end: ge, writes: []RestartEdit{r}})
+	}
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- a/%s\n+++ b/%s\n", path, path)
 	// Offset tracks how far the after-file's numbering has drifted from the before-file's as
 	// earlier insertions accumulate, so each hunk header names the line an operator would
 	// actually find it at in the result.
 	offset := 0
-	for _, r := range sorted {
-		if r.Line < 1 || r.Line > len(lines) {
-			continue
+	for _, g := range groups {
+		byAnchor := make(map[int]RestartEdit, len(g.writes))
+		added := 0
+		for _, r := range g.writes {
+			byAnchor[r.Line-1] = r
+			if !r.Replace {
+				added += len(r.Lines)
+			}
 		}
-		anchor := r.Line - 1 // 0-based
-		start := max(0, anchor-restartDiffContext)
-		// A replacement consumes its anchor line; an insertion keeps it as trailing context.
-		// Both kinds keep the anchor line in the hunk: a replacement shows it as the removed
-		// line, an insertion as the context the new lines follow.
-		end := min(len(lines), anchor+1+restartDiffContext)
-
-		oldCount := end - start
-		// A replacement swaps one line for one line, so the counts match; an insertion grows
-		// the after side by exactly the lines it adds.
-		newCount := oldCount
-		if !r.Replace {
-			newCount += len(r.Lines)
-		}
-		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", start+1, oldCount, start+1+offset, newCount)
-		for k := start; k < end; k++ {
+		oldCount := g.end - g.start
+		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", g.start+1, oldCount, g.start+1+offset, oldCount+added)
+		for k := g.start; k < g.end; k++ {
+			r, isAnchor := byAnchor[k]
 			switch {
-			case r.Replace && k == anchor:
+			case isAnchor && r.Replace:
 				fmt.Fprintf(&sb, "-%s\n", lines[k])
 				fmt.Fprintf(&sb, "+%s\n", r.Lines[0])
-			case !r.Replace && k == anchor:
+			case isAnchor:
 				fmt.Fprintf(&sb, " %s\n", lines[k])
 				for _, l := range r.Lines {
 					fmt.Fprintf(&sb, "+%s\n", l)
@@ -608,9 +625,7 @@ func UnifiedRestartDiff(path string, before []byte, restarts []RestartEdit) stri
 				fmt.Fprintf(&sb, " %s\n", lines[k])
 			}
 		}
-		if !r.Replace {
-			offset += len(r.Lines)
-		}
+		offset += added
 	}
 	return sb.String()
 }

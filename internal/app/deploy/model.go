@@ -107,13 +107,34 @@ func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.S
 	return m
 }
 
+// noun is what this screen calls the operation it is about to confirm. Every operator-facing
+// string goes through it: the mode dialog, the production refusal, the diff-failure notice and
+// the hint. Reusing one screen for two write kinds is only honest if all of its words move
+// together, and four independent conditionals is how three of them end up saying "deploy" for
+// a restart (Copilot, PR #80).
+func (m Model) noun() string {
+	if m.pl.IsRestart() {
+		return "restart"
+	}
+	return "deploy"
+}
+
+// subject is what the confirmation names as the thing being written: the image for a deploy,
+// the env's workloads for a restart, which names no image at all.
+func (m Model) subject() string {
+	if m.pl.IsRestart() {
+		return fmt.Sprintf("%s's Deployments", m.target)
+	}
+	return m.image
+}
+
 // WithDirectMode opens the screen already in direct mode, for the picker's own D path: that
 // gesture (keypress + huh.Confirm, internal/app/tags) has already been completed, and asking
 // for it twice would be ceremony rather than safety. Production is the exception — §4.5 gives
 // it no direct path at all, so the request is dropped and the screen says why.
 func (m Model) WithDirectMode() Model {
 	if m.production {
-		m.notice = fmt.Sprintf("%s is a production env — deploys there always open a PR", m.target)
+		m.notice = fmt.Sprintf("%s is a production env — %ss there always open a PR", m.target, m.noun())
 		return m
 	}
 	m.mode = ModeDirect
@@ -148,7 +169,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			// confirm a write on the operator's behalf against something they were never
 			// shown — the one thing this screen exists to prevent (Copilot, PR #72). Esc back
 			// and fix the cause; there is no way to force past it, deliberately.
-			m.notice = "cannot confirm a deploy whose diff could not be rendered — esc back and retry"
+			m.notice = fmt.Sprintf("cannot confirm a %s whose diff could not be rendered — esc back and retry", m.noun())
 			return m, nil
 		}
 		return m, m.start(m.mode, false)
@@ -156,7 +177,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.production {
 			// §4.5: production always goes through a PR. Refusing with the reason beats a
 			// key that silently does nothing.
-			m.notice = fmt.Sprintf("%s is a production env — deploys there always open a PR", m.target)
+			m.notice = fmt.Sprintf("%s is a production env — %ss there always open a PR", m.target, m.noun())
 			return m, nil
 		}
 		if m.mode == ModeDirect {
@@ -165,7 +186,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		m.confirmV = false
 		m.confirm = huh.NewConfirm().
-			Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target)).
+			Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.subject(), m.target)).
 			Value(&m.confirmV)
 		// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing: a
 		// Confirm used standalone rather than inside a huh.Form ignores every keypress, so
@@ -269,11 +290,7 @@ func (m Model) View() string {
 	if m.notice != "" {
 		fmt.Fprintf(&b, "\n%s", m.styles.Notice.Render(m.notice))
 	}
-	verb := "deploy"
-	if m.pl.IsRestart() {
-		verb = "restart"
-	}
-	b.WriteString("\n" + m.styles.Hint.Render("enter "+verb+" · m mode · esc back"))
+	b.WriteString("\n" + m.styles.Hint.Render("enter "+m.noun()+" · m mode · esc back"))
 	// The same final-boundary scrub every other screen applies (internal/app/plan's own View,
 	// and tags'): the diff carries three lines of context from files this screen never chose,
 	// and the warnings and render errors are rendered verbatim — so a credential registered
