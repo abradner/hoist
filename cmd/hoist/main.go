@@ -76,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
 	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party (the selected repo's promotable when configured)")
 	base := fs.String("base", defaultBase, "the GitOps repo's default branch: what a promotion or deploy branch is created from and the PR targets; the matrix's confirm path uses it too, and names it in the title when it is not main")
-	kubeContext := fs.String("kube-context", "", "kubeconfig context for everything the matrix asks the cluster — drift, restarts, the promotions it drives (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is shown in the title, never its address)")
+	kubeContext := fs.String("kube-context", "", "kubeconfig context for everything the matrix asks the cluster — drift, restarts, the promotions it drives (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the title names the flag's or the config's context, never an address)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
@@ -123,9 +123,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "restart":
 		return runRestart(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "promotions":
-		return runPromotions(fs.Args()[1:], cfg, stdout, stderr)
+		return runPromotions(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "resume":
-		return runResume(fs.Args()[1:], cfg, stdout, stderr)
+		return runResume(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "watch":
 		return runWatch(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
@@ -206,6 +206,15 @@ type selection struct {
 	// at all.
 	base, kubeContext string
 	given             map[string]bool
+}
+
+// kubeOverride is the root --kube-context when it was given, else "" — the operator's
+// explicit choice as distinct from a repo's configured default (see effective.kubeOverride).
+func (s selection) kubeOverride() string {
+	if s.given["kube-context"] {
+		return s.kubeContext
+	}
+	return ""
 }
 
 // defaultBase is what --base means when nobody gives it, on every face.

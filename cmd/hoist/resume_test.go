@@ -20,7 +20,7 @@ func TestPromotionsEmptyStateDir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
 	cfg := &config.Config{}
 	var out, errOut bytes.Buffer
-	if got := runPromotions(nil, cfg, &out, &errOut); got != 0 {
+	if got := runPromotions(nil, cfg, selection{given: map[string]bool{}}, &out, &errOut); got != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
 	}
 	if !strings.Contains(out.String(), "no promotions found") {
@@ -32,11 +32,11 @@ func TestResumeRequiresExactlyOneOfIDOrEnv(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
 	cfg := &config.Config{}
 	var errOut bytes.Buffer
-	if got := runResume(nil, cfg, &bytes.Buffer{}, &errOut); got != exitUsage {
+	if got := runResume(nil, cfg, selection{given: map[string]bool{}}, &bytes.Buffer{}, &errOut); got != exitUsage {
 		t.Fatalf("neither id nor --env: exit %d, want %d; stderr: %s", got, exitUsage, errOut.String())
 	}
 	errOut.Reset()
-	if got := runResume([]string{"--env", "app-production", "some-id"}, cfg, &bytes.Buffer{}, &errOut); got != exitUsage {
+	if got := runResume([]string{"--env", "app-production", "some-id"}, cfg, selection{given: map[string]bool{}}, &bytes.Buffer{}, &errOut); got != exitUsage {
 		t.Fatalf("both id and --env: exit %d, want %d; stderr: %s", got, exitUsage, errOut.String())
 	}
 }
@@ -45,7 +45,7 @@ func TestResumeUnknownIDFails(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
 	cfg := &config.Config{}
 	var errOut bytes.Buffer
-	if got := runResume([]string{"no-such-id"}, cfg, &bytes.Buffer{}, &errOut); got != exitFailure {
+	if got := runResume([]string{"no-such-id"}, cfg, selection{given: map[string]bool{}}, &bytes.Buffer{}, &errOut); got != exitFailure {
 		t.Fatalf("exit %d, want %d; stderr: %s", got, exitFailure, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "no-such-id") {
@@ -57,7 +57,7 @@ func TestResumeUnknownEnvFails(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
 	cfg := &config.Config{}
 	var errOut bytes.Buffer
-	if got := runResume([]string{"--env", "app-production"}, cfg, &bytes.Buffer{}, &errOut); got != exitFailure {
+	if got := runResume([]string{"--env", "app-production"}, cfg, selection{given: map[string]bool{}}, &bytes.Buffer{}, &errOut); got != exitFailure {
 		t.Fatalf("exit %d, want %d; stderr: %s", got, exitFailure, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "app-production") {

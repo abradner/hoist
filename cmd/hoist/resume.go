@@ -20,11 +20,18 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// buildArgoRollout constructs this run's Argo/Rollout adaptors from rc's kube context —
+// buildArgoRolloutIn constructs this run's Argo/Rollout adaptors from rc's kube context —
 // exactly the pair `hoist promote` builds alongside its forge client (promote.go), needed here
 // too since runPromotions/runResume also drive/observe AllSteps, which always wires all ten
-// steps regardless of which one a given promotion currently sits at.
-func buildArgoRollout(rc config.RepoConfig) (argo.Argo, rollout.Rollout, error) {
+// steps regardless of which one a given promotion currently sits at. The operator's explicit
+// --kube-context (#105) takes the place of rc's own kube.context when non-empty — the one
+// rule every face that lists or resumes promotions applies, so a state file from another repo
+// is observed and driven against the cluster the operator named, not that repo's default.
+// Empty keeps rc's.
+func buildArgoRolloutIn(rc config.RepoConfig, kubeOverride string) (argo.Argo, rollout.Rollout, error) {
+	if kubeOverride != "" {
+		rc.Kube.Context = kubeOverride
+	}
 	a, _, err := newArgo(rc.Kube.Context)
 	if err != nil {
 		return nil, nil, err
@@ -98,9 +105,10 @@ func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 // worktree, never the state file's own possibly-stale Phase field — AGENTS.md §4.1). A
 // promotion whose repo is no longer in the config file is listed with its last-recorded phase
 // and a note, since there is nothing to re-observe it against.
-func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
+func runPromotions(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist promotions", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to re-observe every promotion in, instead of each repo's own kube.context (may also be given before the command)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -138,7 +146,7 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build a forge client: %v)\n", s.ID, s.TargetEnv, err)
 			continue
 		}
-		a, ro, err := buildArgoRollout(rc)
+		a, ro, err := buildArgoRolloutIn(rc, *kubeContext)
 		if err != nil {
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build an Argo/rollout client: %s)\n", s.ID, s.TargetEnv, redact.Strings(err.Error()))
 			continue
@@ -168,10 +176,11 @@ func runPromotions(args []string, cfg *config.Config, stdout, stderr io.Writer) 
 // env — ambiguous, and AGENTS.md invariant 5 says there should never legitimately be two).
 // Re-drives through AllSteps exactly like `hoist promote`, from wherever Observe actually finds
 // it — never from the recorded Phase.
-func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
+func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	env := fs.String("env", "", "resume the (single, non-terminal) promotion targeting this env, instead of naming an id")
+	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to observe and drive the promotion in, instead of its repo's own kube.context (may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -241,7 +250,7 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
 				continue
 			}
-			a, ro, ferr := buildArgoRollout(rc)
+			a, ro, ferr := buildArgoRolloutIn(rc, *kubeContext)
 			if ferr != nil {
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building Argo/rollout clients: %v", st.ID, ferr))
 				continue
@@ -292,7 +301,7 @@ func runResume(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
 		return exitFailure
 	}
-	a, ro, err := buildArgoRollout(rc)
+	a, ro, err := buildArgoRolloutIn(rc, *kubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
 		return exitFailure

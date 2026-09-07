@@ -230,10 +230,11 @@ func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error) 
 // in the config file, or whose clients cannot be built, is listed with that as its Err rather
 // than dropped: a promotion that cannot be confirmed is not one that is not there.
 // kubeOverride, when non-empty, is the operator's explicit --kube-context (#105) and is what
-// Resume's Argo/rollout adaptors open instead of the promotion's own repo's kube.context, so
-// one TUI session runs against one cluster throughout. Empty keeps runResume's rule — the
-// *resumed* promotion's repo's kube.context, which is not necessarily the selected repo's:
-// the list is every state file, whichever repo it belongs to (review of #105).
+// both List's re-observation and Resume's drive open their Argo/rollout adaptors against,
+// instead of each promotion's own repo's kube.context, so one TUI session runs against one
+// cluster throughout and the pane and the flight screen agree. Empty keeps runResume's rule
+// — the promotion's repo's kube.context, which is not necessarily the selected repo's: the
+// list is every state file, whichever repo it belongs to (review of #105).
 func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 	if cfg == nil {
 		return app.InFlight{}
@@ -246,7 +247,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			}
 			out := make([]flight.Summary, 0, len(states))
 			for _, s := range states {
-				out = append(out, observeForList(ctx, cfg, s))
+				out = append(out, observeForList(ctx, cfg, s, kubeOverride))
 			}
 			return out, nil
 		},
@@ -273,10 +274,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			if err != nil {
 				return engine.PromotionState{}, nil, err
 			}
-			if kubeOverride != "" {
-				rc.Kube.Context = kubeOverride
-			}
-			a, ro, err := buildArgoRollout(rc)
+			a, ro, err := buildArgoRolloutIn(rc, kubeOverride)
 			if err != nil {
 				return engine.PromotionState{}, nil, err
 			}
@@ -305,7 +303,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 
 // observeForList re-observes one state for the in-flight pane: engine.Status over the list
 // the state implies, so the pane can draw every step, not only where it stopped.
-func observeForList(ctx context.Context, cfg *config.Config, s *engine.PromotionState) flight.Summary {
+func observeForList(ctx context.Context, cfg *config.Config, s *engine.PromotionState, kubeOverride string) flight.Summary {
 	rc, ok := repoConfigFor(cfg, s.RepoFullName)
 	if !ok {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("repo %s is not in the config file", s.RepoFullName))
@@ -314,7 +312,7 @@ func observeForList(ctx context.Context, cfg *config.Config, s *engine.Promotion
 	if err != nil {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build a forge client: %w", err))
 	}
-	a, ro, err := buildArgoRollout(rc)
+	a, ro, err := buildArgoRolloutIn(rc, kubeOverride)
 	if err != nil {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build an Argo/rollout client: %s", redact.Strings(err.Error())))
 	}

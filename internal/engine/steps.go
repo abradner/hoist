@@ -391,8 +391,8 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 		// re-run": that never worked, because the id, branch and PR lookup are all derived
 		// from the same inputs (§4.1), so a re-run finds this same closed PR again.
 		return Observation{Blocked: fmt.Sprintf(
-			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or open a new PR from the same branch with the same body (gh pr view %d --json body -q .body | gh pr create --head %s --base %s --body-file -) and re-run: hoist adopts the open one. Deleting the state file does not help — a re-run derives the same id, branch and PR",
-			pr.Number, s.Branch, pr.Number, s.Branch, s.Base,
+			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or open a new PR from the same branch with the same body (gh pr create --head %s --base %s --title \"$(gh pr view %d --json title -q .title)\" --body \"$(gh pr view %d --json body -q .body)\") and re-run: hoist adopts the open one. Deleting the state file does not help — a re-run derives the same id, branch and PR",
+			pr.Number, s.Branch, s.Branch, s.Base, pr.Number, pr.Number,
 		)}, nil
 	}
 	s.PR = &pr
