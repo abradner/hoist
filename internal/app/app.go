@@ -286,6 +286,12 @@ func (m Model) WithDrift(resolveFn plan.ResolveFunc) Model {
 	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithDrift(driftFunc(m.repo, resolveFn)) })
 }
 
+// WithRun tells the matrix which base branch and kube context this session runs against
+// (the launch's --base/--kube-context, #105), so its title can say so.
+func (m Model) WithRun(base, kubeContext string) Model {
+	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithRun(base, kubeContext) })
+}
+
 // inFlightTick schedules the next listing at Poll.Approval — the cadence the engine itself
 // re-observes an approval at — with a floor so a zero config never spins.
 func (m Model) inFlightTick() tea.Cmd {

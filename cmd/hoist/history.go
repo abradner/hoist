@@ -27,10 +27,10 @@ import (
 // manifest there; with forgeErr set it returns that error and the screen says the age is
 // unavailable. blameRef is the checkout's HEAD sha (line numbers were read from that tree);
 // the default branch is the fallback when HEAD was never pushed; "" when unknown.
-func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef string) history.Funcs {
-	// The TUI has no --base flag (promote/deploy default theirs to "main" too), so the
-	// blame fallback is the same literal until one exists.
-	const base = "main"
+// base is the root --base (#105): the blame fallback for a HEAD that was never pushed.
+// kubeContext is the root --kube-context, else the repo's kube.context, for the cluster
+// credential source when a registry entry names one.
+func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base, kubeContext string) history.Funcs {
 	if rc == nil {
 		return history.Funcs{}
 	}
@@ -65,7 +65,11 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 	if cfg != nil {
 		registries = cfg.Registries
 	}
-	h := &historyAdaptor{rc: rc, registries: registries, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
+	kctx := kubeContext
+	if kctx == "" {
+		kctx = rc.Kube.Context
+	}
+	h := &historyAdaptor{rc: rc, kubeContext: kctx, registries: registries, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -90,8 +94,9 @@ type registryOrErr struct {
 
 // historyAdaptor holds the memoised clients and the cache behind buildHistoryFuncs.
 type historyAdaptor struct {
-	rc         *config.RepoConfig
-	registries []config.RegistryConfig
+	rc          *config.RepoConfig
+	kubeContext string // the root --kube-context, else rc.Kube.Context
+	registries  []config.RegistryConfig
 
 	mu       sync.Mutex
 	forges   map[string]forgeOrErr    // app repo -> forge
@@ -156,7 +161,7 @@ func (h *historyAdaptor) registry(imageRepo string) (registry.Registry, error) {
 	auth, clusterSecret, opRef := entryAuthConfig(entry, resolveOptions{})
 	regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
 	if clusterSecret != "" && has(auth, registry.AuthCluster) {
-		if cluster, _, err := newCluster(h.rc.Kube.Context); err == nil {
+		if cluster, _, err := newCluster(h.kubeContext); err == nil {
 			regCfg.ClusterSecret, regCfg.Cluster = clusterSecret, cluster
 		}
 	}

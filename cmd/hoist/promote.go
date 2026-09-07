@@ -330,13 +330,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
 	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
-	base := fs.String("base", "main", "the GitOps repo's default branch: what the promotion branch is created from and the PR targets")
+	base := fs.String("base", sel.base, "the GitOps repo's default branch: what the promotion branch is created from and the PR targets (may also be given before the command)")
 	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag: this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
 	confirmDirect := fs.String("confirm-direct", "", "the operator's explicit second acknowledgement required alongside --direct: must repeat --to's exact value (refused otherwise) — the CLI's stronger keypress-then-confirm shape (the TUI's equivalent is internal/app/tags' own keypress + huh.Confirm dialog, which names the same env in its prompt)")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
 	var rf resolveFlags
-	fs.StringVar(&rf.kubeContext, "kube-context", "", "kubeconfig context whose pods supply digests (see hoist plan -h)")
+	fs.StringVar(&rf.kubeContext, "kube-context", sel.kubeContext, "kubeconfig context whose pods supply digests (see hoist plan -h)")
 	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins (see hoist plan -h)")
 	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order (see hoist plan -h)")
 	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a pull secret for the cluster credential source (see hoist plan -h)")
@@ -348,7 +348,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
+	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext = *repo, *appsRoot, *promotable, *base, rf.kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {

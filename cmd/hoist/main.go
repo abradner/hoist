@@ -75,6 +75,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	repo := fs.String("repo", "", "path to the GitOps repo checkout, or the name or path of a repos[] entry in the config file; with no command, opens the env/family matrix. Optional when the config file lists exactly one repo")
 	appsRoot := fs.String("apps-root", gitops.DefaultAppsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
 	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party (the selected repo's promotable when configured)")
+	base := fs.String("base", defaultBase, "the GitOps repo's default branch: what a promotion or deploy branch is created from and the PR targets; the matrix's confirm path uses it too, and names it in the title when it is not main")
+	kubeContext := fs.String("kube-context", "", "kubeconfig context for everything the matrix asks the cluster — drift, restarts, the promotions it drives (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is shown in the title, never its address)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
@@ -97,7 +99,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
-	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, given: map[string]bool{}}
+	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, base: *base, kubeContext: *kubeContext, given: map[string]bool{}}
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	if fs.NArg() == 0 {
 		eff, err := selectRepo(cfg, sel)
@@ -198,15 +200,32 @@ func loadConfig(path string) (*config.Config, error) {
 // falls back to the config file.
 type selection struct {
 	repo, appsRoot, promotable string
-	given                      map[string]bool
+	// base and kubeContext are the root --base/--kube-context (#105): a subcommand's own
+	// flag of the same name defaults to them, so `hoist --base dev promote` and
+	// `hoist promote --base dev` mean the same thing, and the no-command TUI launch has them
+	// at all.
+	base, kubeContext string
+	given             map[string]bool
 }
 
+// defaultBase is what --base means when nobody gives it, on every face.
+const defaultBase = "main"
+
 // effective is what the config file and the flags agree the run is about. cfg is the
-// selected repos[] entry, nil when the run is on flags alone.
+// selected repos[] entry, nil when the run is on flags alone. base is never empty;
+// kubeContext is the flag when given, else the selected repo's kube.context, else "" (the
+// kubeconfig's current context, resolved by whoever opens the cluster); kubeOverride is the
+// flag alone — "" unless --kube-context was given — for the one consumer that must tell an
+// operator's override from the selected repo's own default (buildInFlightFuncs, whose
+// promotions may belong to another repo with another context). A subcommand copies its own
+// --base/--kube-context into selection before selectRepo, so both fields hold that
+// subcommand's answer, not only the root's.
 type effective struct {
-	repo, appsRoot string
-	promotable     []string
-	cfg            *config.RepoConfig
+	repo, appsRoot    string
+	promotable        []string
+	base, kubeContext string
+	kubeOverride      string
+	cfg               *config.RepoConfig
 }
 
 // selectRepo applies the precedence: a flag given on the command line wins; otherwise the
@@ -215,7 +234,13 @@ type effective struct {
 // --repo that matches no entry is a plain checkout path and takes the flag defaults, so
 // the config file never changes what an explicit command line means.
 func selectRepo(cfg *config.Config, sel selection) (effective, error) {
-	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable)}
+	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable), base: sel.base, kubeContext: sel.kubeContext}
+	if eff.base == "" {
+		eff.base = defaultBase
+	}
+	if sel.given["kube-context"] {
+		eff.kubeOverride = sel.kubeContext
+	}
 	if len(cfg.Repos) == 0 {
 		return eff, nil
 	}
@@ -237,6 +262,9 @@ func selectRepo(cfg *config.Config, sel selection) (effective, error) {
 	if !sel.given["promotable"] && rc.Promotable != nil {
 		eff.promotable = rc.Promotable
 	}
+	if !sel.given["kube-context"] {
+		eff.kubeContext = rc.Kube.Context
+	}
 	return eff, nil
 }
 
@@ -252,7 +280,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
 	var rf resolveFlags
-	fs.StringVar(&rf.kubeContext, "kube-context", "", "kubeconfig context whose pods supply digests (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is printed)")
+	fs.StringVar(&rf.kubeContext, "kube-context", sel.kubeContext, "kubeconfig context whose pods supply digests (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is printed; may also be given before the command)")
 	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins: pods (what --from is running), manifest (its own pin), registry (HEAD of its tag); none plans from the manifests alone, exactly as M1 did (default: the selected repo's digest_sources when configured, else pods,manifest,registry)")
 	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order: env, keychain, cluster, op; the one that worked is reported by name (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op)")
 	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; unset skips the source)")
@@ -263,7 +291,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
+	sel.repo, sel.appsRoot, sel.promotable, sel.kubeContext = *repo, *appsRoot, *promotable, rf.kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
@@ -559,7 +587,10 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if eff.cfg != nil {
 		envs = eff.cfg.Envs
 	}
-	resolveFn := buildResolveFunc(cfg, eff.cfg, eff.promotable)
+	// The root --kube-context (#105), already reconciled with the repo's kube.context by
+	// selectRepo, reaches every cluster-touching adaptor the TUI builds — the same value a
+	// subcommand's own flag would carry.
+	resolveFn := buildResolveFuncWith(cfg, eff.cfg, eff.promotable, resolveFlags{kubeContext: eff.kubeContext})
 
 	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
 	// reused for every promotion the operator confirms in this TUI session, mirroring
@@ -577,19 +608,15 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	// promotion the flight screen drives now reaches the Argo/rollout steps — both modes
 	// (issues #64, #66) — so these are needed for any confirm, but a session that only browses
 	// the matrix should not fail to open because the cluster is unreachable.
-	kubeContext := ""
-	if eff.cfg != nil {
-		kubeContext = eff.cfg.Kube.Context
-	}
-	a, _, argoErr := newArgo(kubeContext)
-	ro, _, rolloutErr := newRollout(kubeContext)
+	a, _, argoErr := newArgo(eff.kubeContext)
+	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
 		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
-	tagsFn := buildTagsFunc(cfg, eff.cfg)
+	tagsFn := buildTagsFunc(cfg, eff.cfg, eff.kubeContext)
 	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
 	// The checkout's HEAD is what the plan's line numbers were read from, so it is what the
 	// live-age blame asks the forge about; the default branch is the fallback for a HEAD that
@@ -598,8 +625,12 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if sha, ok, err := newGit.RevParse(context.Background(), r.Root, "HEAD"); err == nil && ok {
 		blameRef = sha
 	}
-	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef)
-	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).WithHistory(historyFn).WithInFlight(buildInFlightFuncs(cfg)).WithDrift(buildDriftResolveFunc(cfg, eff.cfg, eff.promotable))
+	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef, eff.base, eff.kubeContext)
+	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).
+		WithHistory(historyFn).
+		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
+		WithDrift(buildDriftResolveFunc(cfg, eff.cfg, eff.promotable, eff.kubeContext)).
+		WithRun(eff.base, eff.kubeContext)
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
@@ -624,8 +655,8 @@ func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []stri
 // digest_sources the config orders for planning. A manifest or registry answer is not
 // "what the cluster runs", and a config that lists no pods source would otherwise make
 // the drift column say "asking the cluster" and then never ask it.
-func buildDriftResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
-	return buildResolveFuncWith(cfg, rc, prefixes, resolveFlags{digestSources: "pods"})
+func buildDriftResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string, kubeContext string) plan.ResolveFunc {
+	return buildResolveFuncWith(cfg, rc, prefixes, resolveFlags{digestSources: "pods", kubeContext: kubeContext})
 }
 
 func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []string, rf resolveFlags) plan.ResolveFunc {
@@ -669,7 +700,7 @@ func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []
 // multiRegistry doc comment) — registryEntryFor/entryAuthConfig still pick the one
 // registries[] entry (if any) covering imageRepo, so a repo a different entry covers, or none
 // does, never borrows another entry's credentials (F4's rule, unchanged here).
-func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig) tags.BuildFunc {
+func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string) tags.BuildFunc {
 	var registries []config.RegistryConfig
 	if cfg != nil {
 		registries = cfg.Registries
@@ -679,8 +710,8 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig) tags.BuildFunc {
 		auth, clusterSecret, opRef := entryAuthConfig(entry, resolveOptions{})
 		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
 		if clusterSecret != "" && has(auth, registry.AuthCluster) {
-			kctx := ""
-			if rc != nil {
+			kctx := kubeContext
+			if kctx == "" && rc != nil {
 				kctx = rc.Kube.Context
 			}
 			if cluster, _, err := newCluster(kctx); err == nil {

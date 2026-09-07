@@ -275,6 +275,25 @@ func TestViewGolden(t *testing.T) {
 	uitest.Golden(t, "matrix-help", m.View(), 80, 24)
 }
 
+// The title names the base only when it is not main, and the kube context whenever one is
+// in use (#105): a plain run keeps the plain title, a session against another branch or a
+// named cluster says so. The context is its kubeconfig name, never an address. The golden
+// proves the longer title still fits 80 columns.
+func TestTitleNamesBaseWhenNotMainAndTheContextInUse(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(80, 24)
+	if got := m.title(); strings.Contains(got, "base") || got != m.WithRun("main", "").title() {
+		t.Fatalf("plain title should not name a base or context: %q", got)
+	}
+	got := m.WithRun("develop", "my-cluster").title()
+	if !strings.Contains(got, "· base develop") || !strings.Contains(got, "· my-cluster") {
+		t.Fatalf("title should name both overrides: %q", got)
+	}
+	if got := m.WithRun("main", "my-cluster").title(); strings.Contains(got, "base") || !strings.Contains(got, "my-cluster") {
+		t.Fatalf("main is the default and should not be named, the context should: %q", got)
+	}
+	uitest.Golden(t, "matrix-run", m.WithRun("develop", "my-cluster").SetStyles(ui.NewStyles(true)).View(), 80, 24)
+}
+
 // Below a minimum size the matrix says so in one line instead of drawing a partial table (#16).
 func TestTooSmallAWindowSaysSo(t *testing.T) {
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(10, 3)

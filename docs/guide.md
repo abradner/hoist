@@ -14,7 +14,11 @@ stops](#when-it-stops) · [resuming](#resuming) · [registry credentials](#regis
 
 `hoist --repo <path>` (or just `hoist`, when the config file lists one repo) opens the matrix: one
 row per family, one column per environment, and in each cell the reference that environment's
-manifests declare plus its state as a word.
+manifests declare plus its state as a word. `--base <branch>` and `--kube-context <name>` given
+before the command apply to everything the matrix does — the branch a confirmed plan is created
+from and its PR targets, and the cluster drift, restarts and resumed promotions talk to — exactly
+as the same flags do on `promote` or `restart`. The title names the base when it is not `main`,
+and the kube context in use — the flag's, else the repo's `kube.context` — by name.
 
 ```
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮

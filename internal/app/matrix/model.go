@@ -61,18 +61,21 @@ var nextGen atomic.Uint64
 // Model is the matrix screen. It is a value: Update, SetSize and SetStyles return the
 // updated model.
 type Model struct {
-	repo          *gitops.Repo
-	promotable    []string
-	envs          config.EnvsConfig
-	drift         DriftFunc
-	matrix        Table
-	tbl           table.Model
-	styles        ui.Styles
-	keys          keyMap
-	help          help.Model
-	width, height int
-	showHelp      bool
-	notice        string
+	repo       *gitops.Repo
+	promotable []string
+	envs       config.EnvsConfig
+	drift      DriftFunc
+	// base and kubeContext are the launch's --base/--kube-context (#105), named in the title
+	// when they are not the defaults so a session against another branch or cluster says so.
+	base, kubeContext string
+	matrix            Table
+	tbl               table.Model
+	styles            ui.Styles
+	keys              keyMap
+	help              help.Model
+	width, height     int
+	showHelp          bool
+	notice            string
 	// col is the focused env column: CurrentEnv's index into matrix.Envs. Left/Right move
 	// it; it is what p, P, d and R all act on, so the header marks it and the footer names it.
 	col int
@@ -529,8 +532,25 @@ func (m Model) WithDrift(drift DriftFunc) Model {
 	return m
 }
 
+// WithRun names the base branch and kube context this session runs against (#105). The
+// title names the base only when it is not "main", and the context whenever one is in use —
+// from the flag or the repo's kube.context alike, since which cluster a session talks to is
+// worth a glance either way; the context is its kubeconfig name, never an address (AGENTS.md
+// §4.4).
+func (m Model) WithRun(base, kubeContext string) Model {
+	m.base, m.kubeContext = base, kubeContext
+	return m
+}
+
 func (m Model) title() string {
-	return "hoist · matrix · " + displayRoot(m.repo.Root)
+	t := "hoist · matrix · " + displayRoot(m.repo.Root)
+	if m.base != "" && m.base != "main" {
+		t += " · base " + m.base
+	}
+	if m.kubeContext != "" {
+		t += " · " + m.kubeContext
+	}
+	return t
 }
 
 // notes is the section under the table: the transient notice first (word-wrapped, never

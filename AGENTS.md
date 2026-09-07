@@ -393,7 +393,9 @@ progress of every Deployment/Job/CronJob its family declares, resolved from `--r
 the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
 `poll.argo`/`poll.rollout` is tighter; it never calls `Refresh` — only `Get`/`Deployment`/`JobLike`
 — since watching is not promoting. `mise exec -- go
-run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (`q` quits,
+run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (root
+`--base` and `--kube-context` apply to it as to the subcommands, whose own flags of those names
+default to the root's — #105; `q` quits,
 `?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs; every cell carries its state as a
 word — pinned, unpinned, split, external, drifted — and a production column is marked `⚠` in the
 header and named in the footer (#86, M10); what is promoting right now is listed under the table —

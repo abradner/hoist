@@ -44,7 +44,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	env := fs.String("env", "", "target env: the namespace whose Deployments to restart (required)")
 	family := fs.String("family", "", "comma-separated family names to restart; default every family in --env")
 	confirmProduction := fs.String("confirm-production", "", "required when --env is listed in the selected repo's envs.production: repeat --env's exact value to acknowledge restarting production (refused otherwise)")
-	kubeContext := fs.String("kube-context", "", "kubeconfig context to restart in (the selected repo's kube.context when configured)")
+	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context to restart in (the selected repo's kube.context when configured; may also be given before the command)")
 	dryRun := fs.Bool("dry-run", false, "print what would be restarted, and any reason a restart would not be graceful, without touching the cluster")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -52,7 +52,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot = *repo, *appsRoot
+	sel.repo, sel.appsRoot, sel.kubeContext = *repo, *appsRoot, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
