@@ -458,6 +458,26 @@ Seeded at init from the design session rather than left empty (deviation recorde
    ordering when the image repo is mapped.
 4. **`mise` shim for `go` fails outside a pinned directory** — see §6. `go version` in a random
    shell prints `No version is set for shim: go`; it is not a broken install.
+5. **go-gh's REST client rewrites C0 control bytes in response bodies to caret notation.**
+   Symptom: a test that feeds a raw `\x1b` (or `%q`-escaped `\x1b`, which JSON rejects
+   outright) through a fake `POST`/`GET` handler never sees ESC in the decoded string — it sees
+   `^[`, and a "strips terminal control sequences" assertion passes or fails for the wrong
+   reason. Cause: `go-gh`'s `api` client sanitises the body before decoding. Rule: a test for
+   control-byte stripping drives the sanitiser (`clean`/`cleanLine` in
+   `pkg/forge/github/history.go`) directly with the bytes it cares about, and dumps `%x` when a
+   string's bytes matter — tool output renders raw controls as `^[`/`^G` too, so eyes cannot
+   tell the two apart.
+6. **zsh arrays are 1-indexed.** A scripted `gh pr edit` loop of the form
+   `${bodies[$((i-1))]}` over a stack's PR numbers installed every body one PR off, silently —
+   `gh pr edit` succeeded on each. Rule: scripted per-PR edits carry explicit `<number>:<file>`
+   pairs, never a parallel array indexed by loop counter; and read one edited PR back before
+   trusting the loop.
+7. **`gh pr merge --delete-branch` (and `git checkout main`) fail in a worktree when `main` is
+   checked out in another one.** Symptom: `'main' is already used by worktree …` *after* the
+   merge; the merge itself succeeded. A following `git reset --hard origin/main` then runs on
+   whatever branch *is* checked out. Rule: check `gh pr view <n> --json state` before retrying a
+   merge that printed this, and never chain a `checkout main` with a `reset --hard` in a
+   worktree — start the next branch with `git checkout -B <name> origin/main` instead.
 
 ## 7. CI & Deployment
 
