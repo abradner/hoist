@@ -1011,7 +1011,11 @@ func (m Model) impactBody() string {
 			}
 		}
 		if st.Loaded && st.Err == nil && len(st.Delta.Migrations) > 0 {
-			lines = append(lines, "", m.styles.Warn.Render(plural(len(st.Delta.Migrations), "migration")+" run on this promotion:"))
+			qualifier := ""
+			if st.Delta.MigrationsIncomplete {
+				qualifier = " (at least)" // the forge capped the history; this list is a floor
+			}
+			lines = append(lines, "", m.styles.Warn.Render(plural(len(st.Delta.Migrations), "migration")+qualifier+" run on this promotion:"))
 			for _, f := range st.Delta.Migrations {
 				lines = append(lines, m.styles.Dim.Render("  "+ansi.Truncate(f, width-2, "…")))
 			}

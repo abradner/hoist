@@ -80,13 +80,13 @@ var registry = []op{
 	},
 	{
 		Name: "list what is in flight, re-observed",
-		CLI:  "promotions",
-		TUI:  "the in-flight pane under the matrix, re-observed at boot and every poll.approval",
+		CLI:  "promotions --kube-context",
+		TUI:  "the in-flight pane under the matrix, re-observed at boot and every poll.approval, in the launch's --kube-context when given",
 	},
 	{
 		Name: "resume a promotion from wherever Observe finds it",
-		CLI:  "resume --env",
-		TUI:  "matrix.ResumeMsg r (or enter on the pane)",
+		CLI:  "resume --env --kube-context",
+		TUI:  "matrix.ResumeMsg r (or enter on the pane), driven in the launch's --kube-context when given",
 	},
 	{
 		Name: "open the promotion's PR",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -87,9 +88,32 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	for _, tc := range []struct{ override, want string }{{effFlag.kubeOverride, "flag-ctx"}, {effA.kubeOverride, "ctx-b"}} {
 		var argoCtx string
 		newArgo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
-		_, _, err := buildInFlightFuncs(cfg, tc.override).Resume(context.Background(), "resume01")
+		funcs := buildInFlightFuncs(cfg, tc.override)
+		_, _, err := funcs.Resume(context.Background(), "resume01")
 		if err == nil || argoCtx != tc.want {
-			t.Fatalf("override %q: newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+			t.Fatalf("override %q: Resume's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+		}
+		// List re-observes against the same cluster Resume drives, or the pane and the
+		// flight screen disagree about one state file (aggregate review of stack #137).
+		argoCtx = ""
+		if _, err := funcs.List(context.Background()); err != nil || argoCtx != tc.want {
+			t.Fatalf("override %q: List's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+		}
+		// And the CLI faces of the same two operations honour the root flag the same way.
+		argoCtx = ""
+		sel := selection{given: map[string]bool{}}
+		if tc.override != "" {
+			sel.kubeContext, sel.given["kube-context"] = tc.override, true
+		}
+		var out, errOut bytes.Buffer
+		runPromotions(nil, cfg, sel, &out, &errOut)
+		if argoCtx != tc.want {
+			t.Fatalf("override %q: promotions' newArgo got %q, want %q (out=%s err=%s)", tc.override, argoCtx, tc.want, out.String(), errOut.String())
+		}
+		argoCtx = ""
+		runResume([]string{"resume01"}, cfg, sel, &out, &errOut)
+		if argoCtx != tc.want {
+			t.Fatalf("override %q: resume's newArgo got %q, want %q", tc.override, argoCtx, tc.want)
 		}
 	}
 }

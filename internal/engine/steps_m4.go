@@ -379,6 +379,19 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 			pr.Number, s.Branch, pr.Base, s.Base,
 		)}, nil
 	}
+	// findOwnPR prefers an open PR over the recorded one when the recorded one was closed
+	// without merging (#130). If that swap happens between ApprovedStep's observation and
+	// this one — the operator closes and replaces the PR mid-pass — the approval that
+	// satisfied ApprovedStep was posted on the dead PR, and merging the replacement here
+	// would land a production change on an approval its reviewer never saw (§4.5; Codex on
+	// #138). Block this pass instead: the next one re-observes from the top, PROpenedStep
+	// adopts the replacement and ApprovedStep reads *its* comments.
+	if s.PR != nil && s.PR.Number > 0 && s.PR.Number != pr.Number {
+		return Observation{Blocked: fmt.Sprintf(
+			"PR #%d replaced the recorded PR #%d for branch %s since this pass began — not merging until approval has been re-observed on #%d (R, or the next poll)",
+			pr.Number, s.PR.Number, s.Branch, pr.Number,
+		)}, nil
+	}
 	s.PR = &pr
 	if !pr.Merged {
 		expected := s.PushedSHA

@@ -403,7 +403,9 @@ func TestPROpenedStepRefusesClosedUnmergedPR(t *testing.T) {
 	if strings.Contains(obs.Blocked, "state file and re-run") {
 		t.Fatalf("Blocked reason offers a recovery that does not exist: %s", obs.Blocked)
 	}
-	if !strings.Contains(obs.Blocked, "gh pr create --head "+s.Branch+" --base "+s.Base+" --body-file -") {
+	// The command must run non-interactively: gh refuses a piped create without --title
+	// (found by the aggregate review of stack #137).
+	if !strings.Contains(obs.Blocked, "gh pr create --head "+s.Branch+" --base "+s.Base+" --title ") || !strings.Contains(obs.Blocked, "--body ") {
 		t.Fatalf("Blocked reason should name the new-PR recovery, got: %s", obs.Blocked)
 	}
 	if s.PR != nil {

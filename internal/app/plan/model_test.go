@@ -17,6 +17,7 @@ import (
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -67,6 +68,35 @@ func readyModel(t *testing.T, envs config.EnvsConfig) Model {
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	return m
+}
+
+// The hovered repo's migrations list qualifies its count when the forge capped the history,
+// exactly as the totals line does — a floor is never presented as the whole list (Codex, #138).
+func TestImpactBodySaysAtLeastWhenMigrationsIncomplete(t *testing.T) {
+	for _, incomplete := range []bool{false, true} {
+		r := discoverFixture(t)
+		hist := history.Funcs{
+			Mapped: func(string) bool { return true },
+			Delta: func(context.Context, image.Ref, image.Ref) (migrate.Delta, error) {
+				return migrate.Delta{
+					Direction: migrate.DirectionForward, Total: 1,
+					Commits:              []migrate.Commit{{SHA: "77c0ffe0000", Subject: "db: add index", Migrations: []string{"db/migrate/1_add_index.rb"}}},
+					Migrations:           []string{"db/migrate/1_add_index.rb"},
+					MigrationCommits:     1,
+					MigrationsIncomplete: incomplete,
+				}, nil
+			},
+		}
+		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, nil, hist)
+		m = uitest.Drain(m, m.Init(), updateFn).SetSize(120, 40).SetStyles(ui.NewStyles(true))
+		v := ansi.Strip(m.View())
+		if !strings.Contains(v, "1 migration") || !strings.Contains(v, "run on this promotion:") {
+			t.Fatalf("incomplete=%v: the migrations list should render:\n%s", incomplete, v)
+		}
+		if got := strings.Contains(v, "1 migration (at least) run on this promotion:"); got != incomplete {
+			t.Fatalf("incomplete=%v: qualifier present=%v:\n%s", incomplete, got, v)
+		}
+	}
 }
 
 // TestAsyncLoad drives Init()'s two batched cmds one at a time: the spinner tick lands

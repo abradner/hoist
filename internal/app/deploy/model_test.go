@@ -226,6 +226,19 @@ func withHistory(t *testing.T, envs config.EnvsConfig) Model {
 
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
+// The detailed migrations list qualifies its count the same way the summary does when the
+// forge capped the history: a floor is never presented as the whole list (Codex, #138).
+func TestMigrationsSectionSaysAtLeastWhenIncomplete(t *testing.T) {
+	m := withHistory(t, config.EnvsConfig{})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "2 migrations run on this deploy:") || strings.Contains(v, "at least") {
+		t.Fatalf("complete history should not be qualified:\n%s", v)
+	}
+	m.history.Delta.MigrationsIncomplete = true
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "2 migrations (at least) run on this deploy:") {
+		t.Fatalf("capped history should qualify the list header:\n%s", v)
+	}
+}
+
 // With history the screen leads with the work: the commits, the migrations twice (inline and
 // as the list that runs), the age of what is replaced; the yaml is one key away and enter
 // means the same thing from either view.
