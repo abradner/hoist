@@ -303,7 +303,11 @@ know the base branch:
   origin to the base branch, or delete it there — then `R`, and hoist commits again.
 - `found PR #N … but it targets base "x", not "main"` / `… was closed without merging` — a PR on
   the promotion's branch that hoist did not open, or one that was closed. Retarget or reopen it
-  and `R`; hoist adopts it.
+  and `R`; hoist adopts it. If the closed PR should stay closed, open a new one from the same
+  branch, carrying the closed PR's body so the reviewer still sees hoist's diff summary and
+  warnings (`gh pr view <n> --json body -q .body | gh pr create --head hoist/<env>/<id>
+  --base main --body-file -`), then `R` — hoist prefers an open PR over a closed one on the
+  same branch.
 
 One thing that does *not* help in any of these: deleting the state file. A promotion's id is a
 hash of its inputs, so the same digests into the same env is the same id, the same branch and the

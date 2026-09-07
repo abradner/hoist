@@ -160,7 +160,7 @@ func (c *Client) FindPR(ctx context.Context, headBranch, bodyMarker string) (for
 		return forge.PR{}, false, translateErr("listing PRs by head branch", err)
 	}
 	if len(byHead) > 0 {
-		return toPR(byHead[0]), true, nil
+		return toPR(preferLive(byHead)), true, nil
 	}
 	if bodyMarker == "" {
 		return forge.PR{}, false, nil
@@ -177,6 +177,28 @@ func (c *Client) FindPR(ctx context.Context, headBranch, bodyMarker string) (for
 		}
 	}
 	return forge.PR{}, false, nil
+}
+
+// preferLive picks, from the PRs GitHub returned for one head branch, the one a promotion
+// should adopt: an open PR first, then a merged one, then whatever is newest (GitHub lists
+// newest first). state=all can return several for the same branch — a PR someone closed
+// without merging beside the fresh one the operator opened to recover (#130); adopting the
+// dead one by list order would block the promotion on the very PR that replaced it. An open
+// PR hiding a merged one for the same head needs an older closed PR reopened after a newer
+// one merged with the branch still present — and a recorded PR number is asked for by number
+// first (findOwnPR), so that edge never decides a promotion's outcome.
+func preferLive(prs []prResponse) prResponse {
+	for _, p := range prs {
+		if p.State == "open" {
+			return p
+		}
+	}
+	for _, p := range prs {
+		if p.Merged || p.MergedAt != nil {
+			return p
+		}
+	}
+	return prs[0]
 }
 
 func (c *Client) listPRs(ctx context.Context, state string, maxPages int) ([]prResponse, error) {

@@ -523,7 +523,11 @@ func findOwnPR(ctx context.Context, f forge.Forge, s *PromotionState) (forge.PR,
 		if err != nil {
 			return forge.PR{}, false, err
 		}
-		if ok && pr.HeadBranch == s.Branch {
+		// A recorded PR that was closed without merging is not the answer if the operator
+		// has since opened another from the same branch (#130): fall through to FindPR,
+		// which prefers an open PR for the head and returns this same closed one when
+		// nothing replaced it.
+		if ok && pr.HeadBranch == s.Branch && !pr.Closed {
 			return pr, true, nil
 		}
 	}

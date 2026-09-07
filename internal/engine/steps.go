@@ -386,10 +386,13 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 		// "in flight" indefinitely (it never resolves to done, and findInFlight then refuses
 		// every later promotion to the same env). Block clearly instead — the same shape as the
 		// wrong-base case above — naming the closed PR so the operator can decide what to do
-		// (reopen it, or delete the branch/state and let a fresh promotion open a new one).
+		// (reopen it, or open a new PR from the same branch — which findOwnPR then prefers
+		// over the dead one, #130). The earlier wording offered "delete the state file and
+		// re-run": that never worked, because the id, branch and PR lookup are all derived
+		// from the same inputs (§4.1), so a re-run finds this same closed PR again.
 		return Observation{Blocked: fmt.Sprintf(
-			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or delete this promotion's state file and re-run to open a fresh one",
-			pr.Number, s.Branch,
+			"found PR #%d for branch %s, but it was closed without merging — refusing to adopt a dead PR; reopen it on GitHub, or open a new PR from the same branch with the same body (gh pr view %d --json body -q .body | gh pr create --head %s --base %s --body-file -) and re-run: hoist adopts the open one. Deleting the state file does not help — a re-run derives the same id, branch and PR",
+			pr.Number, s.Branch, pr.Number, s.Branch, s.Base,
 		)}, nil
 	}
 	s.PR = &pr

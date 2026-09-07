@@ -724,3 +724,47 @@ func TestCommentsOmitsSinceForZeroTime(t *testing.T) {
 		t.Fatalf("since parameters sent = %q, want [<absent> 2026-09-06T00:30:00Z]", sinces)
 	}
 }
+
+// TestFindPRPrefersOpenOverClosedOnSameHead is #130's regression: GitHub's state=all list
+// for one head can hold a PR someone closed without merging beside the fresh open one the
+// operator opened to recover, and list order (newest first, but not guaranteed) must not
+// decide which one a promotion adopts.
+func TestFindPRPrefersOpenOverClosedOnSameHead(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/pulls": func(r *http.Request) (int, string) {
+			if r.URL.Query().Get("head") != "example:hoist/app-production/abc" {
+				return 200, "[]"
+			}
+			return 200, `[{"number": 7, "state": "closed", "merged_at": null, "head": {"ref": "hoist/app-production/abc"}},
+				{"number": 9, "state": "open", "head": {"ref": "hoist/app-production/abc"}}]`
+		},
+	})
+	pr, ok, err := c.FindPR(context.Background(), "hoist/app-production/abc", "")
+	if err != nil || !ok {
+		t.Fatalf("FindPR: ok=%v err=%v", ok, err)
+	}
+	if pr.Number != 9 || pr.Closed {
+		t.Fatalf("adopted %+v, want the open #9", pr)
+	}
+}
+
+// TestFindPRStillReportsALoneClosedPR is the positive control for the test above: with no
+// open PR for the head, the closed one is what FindPR returns, flagged Closed, so the engine
+// can block on it rather than open a duplicate behind the operator's back.
+func TestFindPRStillReportsALoneClosedPR(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/pulls": func(r *http.Request) (int, string) {
+			if r.URL.Query().Get("head") != "example:hoist/app-production/abc" {
+				return 200, "[]"
+			}
+			return 200, `[{"number": 7, "state": "closed", "merged_at": null, "head": {"ref": "hoist/app-production/abc"}}]`
+		},
+	})
+	pr, ok, err := c.FindPR(context.Background(), "hoist/app-production/abc", "")
+	if err != nil || !ok {
+		t.Fatalf("FindPR: ok=%v err=%v", ok, err)
+	}
+	if pr.Number != 7 || !pr.Closed {
+		t.Fatalf("got %+v, want closed #7", pr)
+	}
+}
