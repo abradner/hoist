@@ -109,7 +109,7 @@ func (f *Fake) CreatePR(_ context.Context, spec PRSpec) (PR, error) {
 		return PR{}, f.CreateErr
 	}
 	for _, p := range f.prs {
-		if p.HeadBranch == spec.Head && !p.Merged {
+		if p.HeadBranch == spec.Head && !p.Merged && !p.Closed {
 			return PR{}, fmt.Errorf("forge: an open PR #%d already exists for head %s", p.Number, spec.Head)
 		}
 	}
@@ -139,10 +139,27 @@ func (f *Fake) FindPR(_ context.Context, headBranch, bodyMarker string) (PR, boo
 	if f.FindErr != nil {
 		return PR{}, false, f.FindErr
 	}
+	// The same preference the GitHub adaptor applies (preferLive): an open PR for the head
+	// first, then a merged one, then any — a closed-unmerged PR beside a fresh open one must
+	// resolve to the open one (#130).
+	var byHead []PR
 	for _, p := range f.prs {
 		if p.HeadBranch == headBranch {
+			byHead = append(byHead, p)
+		}
+	}
+	for _, p := range byHead {
+		if !p.Closed && !p.Merged {
 			return p, true, nil
 		}
+	}
+	for _, p := range byHead {
+		if p.Merged {
+			return p, true, nil
+		}
+	}
+	if len(byHead) > 0 {
+		return byHead[len(byHead)-1], true, nil // newest, as GitHub lists them
 	}
 	if bodyMarker != "" {
 		// Search newest-first, as the real adaptor does, so a duplicate created in error

@@ -398,8 +398,57 @@ func TestPROpenedStepRefusesClosedUnmergedPR(t *testing.T) {
 	if !strings.Contains(obs.Blocked, "closed") {
 		t.Fatalf("Blocked reason should name the closed state, got: %s", obs.Blocked)
 	}
+	// #130: the recovery the message names must exist. A re-run derives the same id, branch
+	// and PR, so "delete the state file" is not one; opening a new PR from the branch is.
+	if strings.Contains(obs.Blocked, "state file and re-run") {
+		t.Fatalf("Blocked reason offers a recovery that does not exist: %s", obs.Blocked)
+	}
+	if !strings.Contains(obs.Blocked, "gh pr create --head "+s.Branch+" --base "+s.Base+" --body-file -") {
+		t.Fatalf("Blocked reason should name the new-PR recovery, got: %s", obs.Blocked)
+	}
 	if s.PR != nil {
 		t.Fatalf("a closed-unmerged PR must never be adopted onto s.PR, got %+v", s.PR)
+	}
+}
+
+// TestPROpenedStepAdoptsOpenPROverClosedOnSameHead is the other half of #130: once the
+// operator has opened a fresh PR from the same branch, the dead one must not keep blocking —
+// the step adopts the open PR, whichever the forge happens to list first.
+func TestPROpenedStepAdoptsOpenPROverClosedOnSameHead(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	f := &forge.Fake{}
+	step := PROpenedStep{Forge: f}
+
+	dead, err := f.CreatePR(ctx(), forge.PRSpec{Title: "x", Body: "x", Head: s.Branch, Base: s.Base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.SetClosed(dead.Number, true)
+	live, err := f.CreatePR(ctx(), forge.PRSpec{Title: "y", Body: "y", Head: s.Branch, Base: s.Base})
+	if err != nil {
+		t.Fatalf("a closed PR must not stop a new one opening from the same head: %v", err)
+	}
+
+	// The common case: hoist opened the dead PR itself, so the state file records its
+	// number and findOwnPR asks for it by number first — that path must fall through to the
+	// preference too, or the recorded dead PR blocks forever (found by review of #130).
+	s.PR = &dead
+	obs, err := step.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied || obs.Blocked != "" {
+		t.Fatalf("expected the open PR to be adopted over the recorded dead one, got %+v", obs)
+	}
+	if s.PR == nil || s.PR.Number != live.Number {
+		t.Fatalf("adopted %+v, want the open #%d", s.PR, live.Number)
+	}
+	// And with no recorded PR at all (killed between Act and save).
+	s.PR = nil
+	if obs, err := step.Observe(ctx(), s); err != nil || !obs.Satisfied || s.PR == nil || s.PR.Number != live.Number {
+		t.Fatalf("unrecorded: obs=%+v err=%v s.PR=%+v", obs, err, s.PR)
 	}
 }
 
