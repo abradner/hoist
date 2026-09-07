@@ -44,10 +44,10 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	env := fs.String("env", "", "target env: the Argo destination namespace to write into (required)")
 	img := fs.String("image", "", "the image to deploy, fully pinned: repo:tag@sha256:<64 hex> (required). Every occurrence of that repo in --env is rewritten to it")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may write (see hoist plan -h)")
-	base := fs.String("base", "main", "the GitOps repo's default branch: what the deploy branch is created from and the PR targets")
+	base := fs.String("base", sel.base, "the GitOps repo's default branch: what the deploy branch is created from and the PR targets (may also be given before the command)")
 	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag: this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
 	confirmDirect := fs.String("confirm-direct", "", "the operator's explicit second acknowledgement required alongside --direct: must repeat --env's exact value (refused otherwise)")
-	kubeContext := fs.String("kube-context", "", "kubeconfig context for the Argo/rollout steps (the selected repo's kube.context when configured)")
+	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context for the Argo/rollout steps (the selected repo's kube.context when configured; may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block)")
 	dryRun := fs.Bool("dry-run", false, "print the diff this deploy would make and exit without touching git, the forge or the cluster")
 	if err := fs.Parse(args); err != nil {
@@ -56,7 +56,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot, sel.promotable = *repo, *appsRoot, *promotable
+	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext = *repo, *appsRoot, *promotable, *base, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {

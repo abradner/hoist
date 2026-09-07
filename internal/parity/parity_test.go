@@ -45,8 +45,8 @@ type op struct {
 var registry = []op{
 	{
 		Name: "launch: choose the config file and the repo, or print the version",
-		CLI:  "(launch) --version --config --repo --apps-root --promotable",
-		TUI:  "(launch) the same flags: the matrix is hoist with no subcommand, and --version exits before either face starts",
+		CLI:  "(launch) --version --config --repo --apps-root --promotable --base --kube-context",
+		TUI:  "(launch) the same flags: the matrix is hoist with no subcommand, and --version exits before either face starts; --base and --kube-context (#105) reach the confirm path and every cluster adaptor, and the title names them when they are not the defaults",
 	},
 	{
 		Name: "plan a promotion, read-only",
@@ -119,9 +119,14 @@ var registry = []op{
 		Gap:  "#104 — no config screen; the TUI reads the same file but never shows it",
 	},
 	{
-		Name: "per-run overrides of what the config file says: base branch, kube context, digest sources, registry credential chain",
-		CLI:  "promote --base --kube-context --digest-sources --registry-auth --cluster-secret --op-ref plan --kube-context --digest-sources --registry-auth --cluster-secret --op-ref deploy --base --kube-context restart --kube-context watch --kube-context",
-		Gap:  "#105 — the TUI hard-codes main and reads kube.context, digest_sources and registries[] from config only",
+		Name: "per-run overrides of what the config file says: base branch and kube context",
+		CLI:  "promote --base --kube-context plan --kube-context deploy --base --kube-context restart --kube-context watch --kube-context",
+		TUI:  "(launch) --base --kube-context — the root flags every subcommand's own flag defaults to (#105)",
+	},
+	{
+		Name: "per-run overrides of what the config file says: digest sources and the registry credential chain",
+		CLI:  "promote --digest-sources --registry-auth --cluster-secret --op-ref plan --digest-sources --registry-auth --cluster-secret --op-ref",
+		Gap:  "#132 — the TUI reads digest_sources and registries[] from config only",
 	},
 }
 

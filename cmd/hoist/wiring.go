@@ -23,15 +23,13 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// tuiBase and tuiOverrideCINone are the defaults the TUI's own confirm path uses for
-// buildPromotionForConfirm's base/overrideCINone parameters. `hoist promote` takes these as
-// --base (default "main") and --override-ci-none (default false) flags; the TUI has no
-// equivalent flags yet (no milestone has designed that UI), so it uses the exact same
-// defaults runPromote's own flags fall back to rather than inventing a different one.
-const (
-	tuiBase           = "main"
-	tuiOverrideCINone = false
-)
+// tuiOverrideCINone is the default the TUI's own confirm path uses for
+// buildPromotionForConfirm's overrideCINone parameter. `hoist promote` takes it as
+// --override-ci-none (default false); the TUI has no equivalent yet (#103), so it uses the
+// exact same default runPromote's own flag falls back to rather than inventing a different
+// one. The base branch used to be a sibling constant ("main") and is now the root --base,
+// carried in effective.base (#105).
+const tuiOverrideCINone = false
 
 // buildStartPromotion adapts buildPromotionForConfirm (promote.go) and the engine's own drive
 // primitives (engine.AllSteps, engine.Drive, engine.Status) into an app.StartPromotionFunc the
@@ -69,7 +67,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// from it, not only one that happens to come out all-no-op. runPromote does exactly
 		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
 		// disagree about when a plan is trustworthy.
-		if err := checkCloneCurrentForBase(ctx, g, eff.repo, tuiBase, p.Edits); err != nil {
+		if err := checkCloneCurrentForBase(ctx, g, eff.repo, eff.base, p.Edits); err != nil {
 			return engine.PromotionState{}, nil, err
 		}
 		if !anyRealEdit(p.Edits) {
@@ -124,7 +122,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 				}
 				return gitops.BuildPlanWith(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests, reasons)
 			}
-			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, tuiBase, eff.appsRoot, p, buildFresh); err != nil {
+			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, eff.base, eff.appsRoot, p, buildFresh); err != nil {
 				return engine.PromotionState{}, nil, err
 			}
 		}
@@ -136,7 +134,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			return engine.PromotionState{}, nil, err
 		}
 
-		s, release, err := buildPromotionForConfirm(ctx, eff, p, tuiBase, tuiOverrideCINone, g, f, argoApps)
+		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, tuiOverrideCINone, g, f, argoApps)
 		if err != nil {
 			return engine.PromotionState{}, nil, err
 		}
@@ -231,7 +229,12 @@ func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error) 
 // and Resume builds the same state and DriveFunc runResume would. A state whose repo is not
 // in the config file, or whose clients cannot be built, is listed with that as its Err rather
 // than dropped: a promotion that cannot be confirmed is not one that is not there.
-func buildInFlightFuncs(cfg *config.Config) app.InFlight {
+// kubeOverride, when non-empty, is the operator's explicit --kube-context (#105) and is what
+// Resume's Argo/rollout adaptors open instead of the promotion's own repo's kube.context, so
+// one TUI session runs against one cluster throughout. Empty keeps runResume's rule — the
+// *resumed* promotion's repo's kube.context, which is not necessarily the selected repo's:
+// the list is every state file, whichever repo it belongs to (review of #105).
+func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 	if cfg == nil {
 		return app.InFlight{}
 	}
@@ -269,6 +272,9 @@ func buildInFlightFuncs(cfg *config.Config) app.InFlight {
 			f, err := newForge(rc.GitHub)
 			if err != nil {
 				return engine.PromotionState{}, nil, err
+			}
+			if kubeOverride != "" {
+				rc.Kube.Context = kubeOverride
 			}
 			a, ro, err := buildArgoRollout(rc)
 			if err != nil {

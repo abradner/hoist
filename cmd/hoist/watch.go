@@ -35,7 +35,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
 	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
 	app := fs.String("app", "", "the Argo Application's own metadata.name to watch (required)")
-	kubeContext := fs.String("kube-context", "", "kubeconfig context (default: the selected repo's kube.context, else the kubeconfig's current context)")
+	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context (default: the selected repo's kube.context, else the kubeconfig's current context; may also be given before the command)")
 	once := fs.Bool("once", false, "print one snapshot and exit, instead of polling until interrupted")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -43,7 +43,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot = *repo, *appsRoot
+	sel.repo, sel.appsRoot, sel.kubeContext = *repo, *appsRoot, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {

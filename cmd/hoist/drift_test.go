@@ -30,7 +30,7 @@ func TestDriftResolverAsksPodsOnlyWhateverTheConfigSays(t *testing.T) {
 	}
 
 	contexts, authCfgs = installFakes(t, &k8s.Fake{}, &registry.Fake{})
-	if _, err := buildDriftResolveFunc(cfg, &rc, rc.Promotable)(context.Background(), r, "app-staging"); err != nil {
+	if _, err := buildDriftResolveFunc(cfg, &rc, rc.Promotable, "")(context.Background(), r, "app-staging"); err != nil {
 		t.Fatal(err)
 	}
 	if len(*contexts) != 1 || len(*authCfgs) != 0 {
