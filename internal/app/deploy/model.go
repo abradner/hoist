@@ -496,7 +496,11 @@ func (m Model) migrationsSection() string {
 	if len(d.Migrations) == 1 {
 		word = "migration"
 	}
-	lines := []string{m.styles.Warn.Render(fmt.Sprintf("%d %s %s:", len(d.Migrations), word, verb))}
+	qualifier := ""
+	if d.MigrationsIncomplete {
+		qualifier = " (at least)" // the forge capped the history; this list is a floor
+	}
+	lines := []string{m.styles.Warn.Render(fmt.Sprintf("%d %s%s %s:", len(d.Migrations), word, qualifier, verb))}
 	for _, f := range d.Migrations {
 		lines = append(lines, m.styles.Dim.Render("  "+ansi.Truncate(f, max(m.width-4, 20), "…")))
 	}

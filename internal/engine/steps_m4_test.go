@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -521,6 +522,50 @@ func TestApprovedIsAllowedAuthorErrorSurfaces(t *testing.T) {
 }
 
 // --- MergedStep ------------------------------------------------------------
+
+// TestMergedBlocksWhenRecordedPRWasReplacedMidPass: findOwnPR's #130 fall-through can hand
+// MergedStep a different PR than the one ApprovedStep just observed, if the operator closed
+// and replaced the PR between the two. Merging it would act on an approval posted on the dead
+// PR (Codex, #138). MergedStep must block, and the next pass must then re-check approval on
+// the replacement rather than inherit it.
+func TestMergedBlocksWhenRecordedPRWasReplacedMidPass(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	dead := *s.PR
+	s.Approval = "comment"
+	s.Approvers = []string{"carol"}
+	f.AddComment(dead.Number, forge.Comment{Author: "carol", AuthorType: "User", Body: "hoist approve " + s.ID, CreatedAt: dead.CreatedAt.Add(time.Second)})
+	if obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s); err != nil || !obs.Satisfied {
+		t.Fatalf("setup: approval on the original PR should satisfy: obs=%+v err=%v", obs, err)
+	}
+	// Between ApprovedStep and MergedStep: the PR is closed and replaced from the same head.
+	f.SetClosed(dead.Number, true)
+	live, err := f.CreatePR(ctx(), forge.PRSpec{Title: "again", Body: "again", Head: s.Branch, Base: s.Base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.SetHeadSHA(live.Number, dead.HeadSHA)
+
+	obs, err := (MergedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Blocked == "" || !strings.Contains(obs.Blocked, fmt.Sprintf("#%d", live.Number)) || !strings.Contains(obs.Blocked, fmt.Sprintf("#%d", dead.Number)) {
+		t.Fatalf("expected a Block naming both PRs, got %+v", obs)
+	}
+	if calls := strings.Count(strings.Join(f.Calls, "\n"), "MergePR"); calls != 0 {
+		t.Fatalf("MergePR must not have been called, got %d", calls)
+	}
+	// The next pass: PROpenedStep adopts the replacement, and ApprovedStep does not carry
+	// the dead PR's approval over to it.
+	if obs, err := (PROpenedStep{Forge: f}).Observe(ctx(), s); err != nil || !obs.Satisfied || s.PR.Number != live.Number {
+		t.Fatalf("next pass should adopt #%d: obs=%+v err=%v s.PR=%+v", live.Number, obs, err, s.PR)
+	}
+	if obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s); err != nil || obs.Satisfied {
+		t.Fatalf("approval on the dead PR must not satisfy the replacement: obs=%+v err=%v", obs, err)
+	}
+}
 
 func TestMergedRefusesStaleHead(t *testing.T) {
 	fx := newFixture(t)
