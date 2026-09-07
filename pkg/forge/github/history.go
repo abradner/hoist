@@ -284,9 +284,11 @@ func (c *Client) CommitFiles(ctx context.Context, sha string) ([]string, bool, e
 }
 
 // CommitsTouching implements forge.Forge: GET .../commits?sha={ref}&path={path}&since=…,
-// newest first as GitHub orders it, paged to the same bound.
-func (c *Client) CommitsTouching(ctx context.Context, ref, path string, since time.Time) ([]string, error) {
+// newest first as GitHub orders it, paged to the same bound. truncated is true when every
+// page up to the bound came back full — the shas past it were never seen (#125).
+func (c *Client) CommitsTouching(ctx context.Context, ref, path string, since time.Time) ([]string, bool, error) {
 	var shas []string
+	lastFull := false
 	for page := 1; page <= maxCommitFilesPages; page++ {
 		q := url.Values{
 			"sha":      {ref},
@@ -298,16 +300,17 @@ func (c *Client) CommitsTouching(ctx context.Context, ref, path string, since ti
 		apiPath := fmt.Sprintf("repos/%s/%s/commits?%s", c.owner, c.repo, q.Encode())
 		var batch []commitResponse
 		if err := c.rest.DoWithContext(ctx, http.MethodGet, apiPath, nil, &batch); err != nil {
-			return nil, translateErr("listing commits touching "+path, err)
+			return nil, false, translateErr("listing commits touching "+path, err)
 		}
 		for _, r := range batch {
 			shas = append(shas, r.SHA)
 		}
-		if len(batch) < 100 {
+		lastFull = len(batch) >= 100
+		if !lastFull {
 			break
 		}
 	}
-	return shas, nil
+	return shas, lastFull, nil
 }
 
 type contentsResponse struct {

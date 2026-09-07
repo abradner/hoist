@@ -167,6 +167,33 @@ func TestDeltaTruncatedFileListStillAttributes(t *testing.T) {
 	}
 }
 
+// TestDeltaCappedTouchingListMarksMigrationsIncomplete is #125's regression: when the forge
+// capped the list of commits touching the migrations path, an in-range commit past the cap
+// is never attributed, so the count must be reported as a floor. The uncapped run is the
+// positive control — identical data, MigrationsIncomplete false.
+func TestDeltaCappedTouchingListMarksMigrationsIncomplete(t *testing.T) {
+	for _, capped := range []bool{true, false} {
+		f := &forge.Fake{
+			Comparisons: map[string]forge.Comparison{
+				shaA + "..." + shaB: {Status: "ahead", Total: 2, Commits: []forge.Commit{fc("c1", "a", 1), fc("c2", "b", 2)}, Files: []string{"db/migrate/1.rb", "db/migrate/2.rb"}},
+			},
+			Touching:       map[string][]string{shaB + " db/migrate": {"c2"}}, // c1 is past the cap
+			TouchingCapped: map[string]bool{shaB + " db/migrate": capped},
+			FilesBySHA:     map[string][]string{"c2": {"db/migrate/2.rb"}},
+		}
+		d, err := Comparer{Forge: f}.Delta(context.Background(), DeltaIn{From: rev("v1", shaA), To: rev("v2", shaB), Migrations: "db/migrate/"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.MigrationCommits != 1 {
+			t.Fatalf("capped=%v: MigrationCommits = %d, want the one attributed commit", capped, d.MigrationCommits)
+		}
+		if d.MigrationsIncomplete != capped {
+			t.Fatalf("capped=%v: MigrationsIncomplete = %v", capped, d.MigrationsIncomplete)
+		}
+	}
+}
+
 // A rollback: To is behind From. A plain forward compare reports zero commits — the most
 // dangerous case rendered as the safest — so the delta compares the other way and lists the
 // migrations being un-applied.

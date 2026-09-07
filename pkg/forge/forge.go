@@ -204,9 +204,11 @@ type Forge interface {
 	CommitFiles(ctx context.Context, sha string) (files []string, truncated bool, err error)
 	// CommitsTouching lists, newest first, the shas of commits reachable from ref that changed
 	// anything under path (a directory prefix or a file), committed at or after since. Bounded
-	// by the adaptor's page cap. M10: how pkg/migrate attributes migration files to the commits
-	// that added them without reading every commit in a range.
-	CommitsTouching(ctx context.Context, ref, path string, since time.Time) ([]string, error)
+	// by the adaptor's page cap, and truncated=true when that cap bit — a caller counting
+	// migrations from the result must then report the count as a floor (#125). M10: how
+	// pkg/migrate attributes migration files to the commits that added them without reading
+	// every commit in a range.
+	CommitsTouching(ctx context.Context, ref, path string, since time.Time) (shas []string, truncated bool, err error)
 	// BlameLines reports, for each requested 1-based line of path at ref, the commit that last
 	// changed it. A line past the file's end is absent from the map, not an error. M10: "how
 	// long has the image this promotion replaces been live" is the age of the manifest line,

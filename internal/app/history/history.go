@@ -77,8 +77,8 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 	case d.Prefix == "":
 		migrations = " · migrations not tracked for this app"
 	case len(d.Migrations) == 0 && d.MigrationsIncomplete:
-		// The attribution could not see everything (a truncated compare, or a capped file
-		// list): zero is not the answer, and saying nothing would read as zero.
+		// The attribution could not see everything (a truncated compare, a capped file
+		// list, or a capped commit list): zero is not the answer, and saying nothing would read as zero.
 		migrations = " · migrations unknown (the history is incomplete)"
 	case d.MigrationCommits > 0 || len(d.Migrations) > 0:
 		word := "migrations"

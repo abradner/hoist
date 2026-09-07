@@ -170,12 +170,53 @@ func TestCommitsTouchingSendsRefPathAndSince(t *testing.T) {
 			return 200, `[` + commitJSON("c2", "two") + `,` + commitJSON("c1", "one") + `]`
 		},
 	})
-	shas, err := c.CommitsTouching(context.Background(), "bbb", "db/migrate", since)
-	if err != nil {
-		t.Fatal(err)
+	shas, truncated, err := c.CommitsTouching(context.Background(), "bbb", "db/migrate", since)
+	if err != nil || truncated {
+		t.Fatalf("err=%v truncated=%v", err, truncated)
 	}
 	if len(shas) != 2 || shas[0] != "c2" {
 		t.Fatalf("shas = %v", shas)
+	}
+}
+
+// TestCommitsTouchingReportsTruncationAtPageCap is #125's regression: a migrations path with
+// more commits in range than the page cap returns must say so, because pkg/migrate turns a
+// silent cap into a migration count that reads complete. Routed through paginate so the
+// per_page arithmetic is real (see paginate's doc comment).
+func TestCommitsTouchingReportsTruncationAtPageCap(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		n         int
+		truncated bool
+	}{
+		{"past the cap", maxCommitFilesPages*100 + 1, true},
+		{"exactly at the cap", maxCommitFilesPages * 100, true}, // every page full: the tail is unknowable
+		{"under the cap", maxCommitFilesPages*100 - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			all := make([]string, tc.n)
+			for i := range all {
+				all[i] = commitJSON(fmt.Sprintf("c%d", i), "m")
+			}
+			c := newTestClient(t, map[string]func(*http.Request) (int, string){
+				"GET /repos/example/gitops/commits": func(r *http.Request) (int, string) {
+					q := r.URL.Query()
+					page, _ := strconv.Atoi(q.Get("page"))
+					perPage, _ := strconv.Atoi(q.Get("per_page"))
+					return 200, "[" + strings.Join(paginate(all, page, perPage), ",") + "]"
+				},
+			})
+			shas, truncated, err := c.CommitsTouching(context.Background(), "bbb", "db/migrate", time.Time{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if truncated != tc.truncated {
+				t.Fatalf("truncated = %v with %d commits, want %v (got %d shas)", truncated, tc.n, tc.truncated, len(shas))
+			}
+			if want := min(tc.n, maxCommitFilesPages*100); len(shas) != want {
+				t.Fatalf("len(shas) = %d, want %d", len(shas), want)
+			}
+		})
 	}
 }
 
