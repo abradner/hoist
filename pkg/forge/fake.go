@@ -58,13 +58,16 @@ type Fake struct {
 	CompareErr  error
 	FilesBySHA  map[string][]string
 	FilesCapped map[string]bool
-	FilesErr    error
-	Touching    map[string][]string
-	TouchingErr error
-	Blames      map[string]map[int]LineOrigin
-	BlameErr    error
-	Files       map[string][]byte
-	ReadErr     error
+	// TouchingCapped, keyed like Touching, makes CommitsTouching report truncated=true for
+	// that ref/path — the adaptor's page cap having bitten (#125).
+	TouchingCapped map[string]bool
+	FilesErr       error
+	Touching       map[string][]string
+	TouchingErr    error
+	Blames         map[string]map[int]LineOrigin
+	BlameErr       error
+	Files          map[string][]byte
+	ReadErr        error
 
 	// Calls records every method invocation, in order, for tests asserting call counts
 	// ("CreatePR was called exactly once across both kill/resume attempts").
@@ -355,14 +358,14 @@ func (f *Fake) CommitFiles(_ context.Context, sha string) ([]string, bool, error
 
 // CommitsTouching implements Forge against Touching (keyed "ref path"); since is recorded in
 // Calls but not applied — see the field's doc comment.
-func (f *Fake) CommitsTouching(_ context.Context, ref, path string, since time.Time) ([]string, error) {
+func (f *Fake) CommitsTouching(_ context.Context, ref, path string, since time.Time) ([]string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, fmt.Sprintf("CommitsTouching %s %s since=%s", ref, path, since.UTC().Format(time.RFC3339)))
 	if f.TouchingErr != nil {
-		return nil, f.TouchingErr
+		return nil, false, f.TouchingErr
 	}
-	return append([]string(nil), f.Touching[ref+" "+path]...), nil
+	return append([]string(nil), f.Touching[ref+" "+path]...), f.TouchingCapped[ref+" "+path], nil
 }
 
 // BlameLines implements Forge against Blames (keyed "ref path"). Lines the test never seeded

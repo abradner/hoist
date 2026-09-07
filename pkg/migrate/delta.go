@@ -54,8 +54,9 @@ type Delta struct {
 	Truncated bool
 	// MigrationsIncomplete is set when the migration attribution could not see everything:
 	// the compare was truncated and the attribution had to run (so it is bounded by the
-	// oldest returned commit), or a commit that touches the migrations path had its file
-	// list capped by the forge. Migrations is then a floor and the screens word it as one —
+	// oldest returned commit), a commit that touches the migrations path had its file
+	// list capped by the forge, or the list of commits touching the migrations path itself
+	// hit the forge's page cap (#125). Migrations is then a floor and the screens word it as one —
 	// "unknown" when the floor is zero. Truncated alone does not set it: a complete file
 	// list with nothing under the prefix proves zero migrations however many commits the
 	// compare left out.
@@ -142,9 +143,14 @@ func (c Comparer) Delta(ctx context.Context, in DeltaIn) (Delta, error) {
 		out.MigrationsIncomplete = true
 	}
 	oldest := cmp.Commits[0].Date.Add(-time.Second)
-	touching, err := c.Forge.CommitsTouching(ctx, head, strings.TrimSuffix(in.Migrations, "/"), oldest)
+	touching, touchingTruncated, err := c.Forge.CommitsTouching(ctx, head, strings.TrimSuffix(in.Migrations, "/"), oldest)
 	if err != nil {
 		return out, fmt.Errorf("migrate: finding commits under %s: %w", in.Migrations, err)
+	}
+	if touchingTruncated {
+		// The forge stopped listing at its page cap: any in-range commit past it never gets
+		// attributed, so the count below is a floor, not the answer (#125).
+		out.MigrationsIncomplete = true
 	}
 	inRange := map[string]int{}
 	for i, mc := range out.Commits {
