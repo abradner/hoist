@@ -129,11 +129,11 @@ func TestComputeStates(t *testing.T) {
 func TestComputeDrift(t *testing.T) {
 	running := Running{
 		"b": {
-			"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v2", Digest: digestC}, // pinned family says digestA
-			"ghcr.io/x/web": {Repo: "ghcr.io/x/web", Tag: "v1", Digest: digestA}, // multi: web agrees, worker unreported
+			"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v2", Digest: digestC}}, // pinned family says digestA
+			"ghcr.io/x/web": {{Repo: "ghcr.io/x/web", Tag: "v1", Digest: digestA}}, // multi: web agrees, worker unreported
 		},
 		"c": {
-			"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v3", Digest: digestC}, // drift family is unpinned v2: tag differs
+			"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v3", Digest: digestC}}, // drift family is unpinned v2: tag differs
 		},
 	}
 	tb := Compute(fixture(), []string{"ghcr.io/"}, running)
@@ -143,8 +143,8 @@ func TestComputeDrift(t *testing.T) {
 			got[r.Family+"/"+tb.Envs[i]] = c
 		}
 	}
-	if c := got["pinned/b"]; c.State != StateDrifted || c.Running != "v2" {
-		t.Errorf("pinned/b = %+v; want drifted, running v2", c)
+	if c := got["pinned/b"]; c.State != StateDrifted || c.Running != "v2" || c.Compared != "by digest" {
+		t.Errorf("pinned/b = %+v; want drifted, running v2, compared by digest", c)
 	}
 	if c := got["pinned/a"]; c.State != StatePinned {
 		t.Errorf("pinned/a = %+v; env a was not asked, so nothing there is drifted", c)
@@ -152,7 +152,7 @@ func TestComputeDrift(t *testing.T) {
 	if c := got["multi/b"]; c.State != StateUnpinned {
 		t.Errorf("multi/b = %+v; web agrees and worker was not reported", c)
 	}
-	if c := got["drift/c"]; c.State != StateDrifted || c.Running != "v3" {
+	if c := got["drift/c"]; c.State != StateDrifted || c.Running != "v3" || c.Compared != "by tag" {
 		t.Errorf("drift/c = %+v; want drifted by tag", c)
 	}
 	if c := got["drift/b"]; c.State != StateDrifted {
@@ -162,11 +162,53 @@ func TestComputeDrift(t *testing.T) {
 		t.Errorf("thirdparty/b = %+v; external cells are never compared", c)
 	}
 	// Positive control the other way: a cluster that agrees leaves the word alone.
-	agree := Running{"b": {"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v1", Digest: digestA}}}
+	agree := Running{"b": {"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v1", Digest: digestA}}}}
 	tb = Compute(fixture(), []string{"ghcr.io/"}, agree)
 	for _, r := range tb.Rows {
 		if r.Family == "pinned" && r.Cells[1].State != StatePinned {
 			t.Errorf("pinned/b with an agreeing cluster = %+v", r.Cells[1])
+		}
+	}
+}
+
+// Every running build reaches the cell (#122): a partial rollout is drifted when one of
+// its builds is undeclared and the sentence counts both; a bare manifest is compared by
+// tag with the tag the pod pulled, and a pod that reported no tag cannot be compared with
+// it at all; a pinned manifest is compared by digest.
+func TestDriftKeepsEveryRunningBuildAndNamesTheComparison(t *testing.T) {
+	const app = "ghcr.io/x/app"
+	ref := func(tag, digest string) image.Ref { return image.Ref{Repo: app, Tag: tag, Digest: digest} }
+	cases := []struct {
+		name         string
+		occs         []gitops.Occurrence
+		running      []image.Ref
+		wantState    State
+		wantRunning  string
+		wantCompared string
+	}{
+		{"partial rollout: one build declared, one not", []gitops.Occurrence{occ(app, "v1", digestA)},
+			[]image.Ref{ref("v1", digestA), ref("v2", digestB)},
+			StateDrifted, "2 builds running (v1, v2)", "by digest"},
+		{"two builds, both declared (split manifest mid-rollout)", []gitops.Occurrence{occ(app, "v1", digestA), occ(app, "v2", digestB)},
+			[]image.Ref{ref("v1", digestA), ref("v2", digestB)},
+			StateSplit, "", ""},
+		{"bare manifest, pod pulled the same tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v1", digestA)},
+			StateUnpinned, "", ""},
+		{"bare manifest, pod pulled another tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v2", digestB)},
+			StateDrifted, "v2", "by tag"},
+		{"bare manifest, pod reported no tag: not comparable", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("", digestB)},
+			StateUnpinned, "", ""},
+		{"pinned manifest, pod digest differs", []gitops.Occurrence{occ(app, "v1", digestA)},
+			[]image.Ref{ref("v1", digestB)},
+			StateDrifted, "v1", "by digest"},
+	}
+	for _, tc := range cases {
+		got := cellFor(&gitops.Family{Name: "f", Occurrences: tc.occs}, []string{"ghcr.io/"}, map[string][]image.Ref{app: tc.running})
+		if got.State != tc.wantState || got.Running != tc.wantRunning || got.Compared != tc.wantCompared {
+			t.Errorf("%s: state %q running %q compared %q; want %q %q %q", tc.name, got.State, got.Running, got.Compared, tc.wantState, tc.wantRunning, tc.wantCompared)
 		}
 	}
 }

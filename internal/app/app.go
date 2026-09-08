@@ -22,7 +22,6 @@ import (
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // StartPromotionFunc builds a real engine.PromotionState and flight.DriveFunc for a plan the
@@ -228,7 +227,9 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		tagsFn:         tagsFn,
 		restartFn:      restartFn,
 	}
-	return m.push(matrixScreen{matrix.New(repo, promotable, envs, driftFunc(repo, resolveFn))})
+	// The matrix starts without a cluster question; WithDrift supplies one. Deriving it from
+	// resolveFn (as before #122) collapsed a partial rollout to the one digest a plan picks.
+	return m.push(matrixScreen{matrix.New(repo, promotable, envs, nil)})
 }
 
 // WithHistory supplies the commit-history and migration-delta functions (cmd/hoist's
@@ -279,11 +280,12 @@ func (m Model) listInFlightAt(gen uint64) tea.Cmd {
 	}
 }
 
-// WithDrift hands the matrix a resolver of its own for asking the cluster what each env
-// runs — cmd/hoist builds a pods-only one, since a registry fallback answers a question the
-// drift column never asked.
-func (m Model) WithDrift(resolveFn plan.ResolveFunc) Model {
-	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithDrift(driftFunc(m.repo, resolveFn)) })
+// WithDrift hands the matrix its cluster question — cmd/hoist's buildDriftFunc, the raw
+// pod observations per env (every running build kept, #122), never the planning resolver,
+// which picks one digest per repo and would collapse a partial rollout. nil leaves the
+// matrix claiming nothing about the cluster.
+func (m Model) WithDrift(drift matrix.DriftFunc) Model {
+	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithDrift(drift) })
 }
 
 // WithRun tells the matrix which base branch and kube context this session runs against
@@ -313,31 +315,6 @@ func (m Model) matrixOnTop() bool {
 	}
 	_, ok := m.stack[len(m.stack)-1].(matrixScreen)
 	return ok
-}
-
-// driftFunc adapts the plan screen's resolve function into the matrix's DriftFunc: the
-// pod-sourced resolutions for one env are what that env is running. The same adaptor, the
-// same credentials, one call per env at boot — nothing new is opened for the matrix. nil
-// when there is no resolve function (digest sources: none), so the matrix never claims
-// anything about the cluster. A resolution from any source other than the pods (a manifest
-// pin, a registry HEAD) is not evidence of what runs and is left out.
-func driftFunc(repo *gitops.Repo, resolveFn plan.ResolveFunc) matrix.DriftFunc {
-	if resolveFn == nil {
-		return nil
-	}
-	return func(ctx context.Context, env string) (map[string]image.Ref, error) {
-		out, err := resolveFn(ctx, repo, env)
-		if err != nil {
-			return nil, err
-		}
-		running := map[string]image.Ref{}
-		for repoName, res := range out.Resolutions {
-			if res.Source == resolve.SourcePods && res.Ref.Repo != "" {
-				running[repoName] = res.Ref
-			}
-		}
-		return running, nil
-	}
 }
 
 // Init asks the terminal for its background colour so the palette can follow it, and starts

@@ -27,13 +27,14 @@ import (
 // maxCellWidth caps an env column so one long tag list cannot push the others off screen.
 const maxCellWidth = 44
 
-// DriftFunc reports what one env's cluster is running, keyed by image repo — the pod
-// digests hoist already resolves for a plan, asked for per env at boot so the matrix can say
-// "drifted" where the manifest and the cluster disagree. nil means no cluster is configured
-// and no cell is ever claimed drifted (nor not drifted). The root builds it from the same
-// resolve function the plan screen uses (AGENTS.md §4.8: this package takes a function
-// value, never an adaptor).
-type DriftFunc func(ctx context.Context, env string) (map[string]image.Ref, error)
+// DriftFunc reports what one env's cluster is running — the raw pod observations, keyed by
+// canonical image repo, every distinct running reference kept (see Running) — asked for
+// per env at boot so the matrix can say "drifted" where the manifest and the cluster
+// disagree. It is not the planning resolver, which picks one digest per repo and would
+// collapse a partial rollout (#122). nil means no cluster is configured and no cell is
+// ever claimed drifted (nor not drifted). cmd/hoist builds it over pkg/k8s (AGENTS.md
+// §4.8: this package takes a function value, never an adaptor).
+type DriftFunc func(ctx context.Context, env string) (map[string][]image.Ref, error)
 
 // chooserKind names what the dialog under m.chooser is choosing between.
 type chooserKind int
@@ -50,7 +51,7 @@ const (
 type DriftMsg struct {
 	gen     uint64
 	env     string
-	running map[string]image.Ref
+	running map[string][]image.Ref
 	err     error
 }
 
@@ -639,7 +640,7 @@ func (m Model) driftLines(env string) []string {
 			out = append(out, m.styles.Dim.Render("…and more drift in this env"))
 			break
 		}
-		out = append(out, fmt.Sprintf("! %s runs %s in %s; manifest says %s", m.matrix.Rows[i].Family, c.Running, env, c.Text))
+		out = append(out, fmt.Sprintf("! %s runs %s in %s; manifest says %s (compared %s)", m.matrix.Rows[i].Family, c.Running, env, c.Text, c.Compared))
 	}
 	return out
 }
