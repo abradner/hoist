@@ -22,7 +22,10 @@ import (
 // Meta/MetaLoaded/MetaErr are filled in lazily as Model fetches them (model.go) — a row
 // never blocks the picker's own opening on its own Config call (AGENTS.md invariant 4).
 type Row struct {
-	Tag        string
+	Tag string
+	// Class is the group the row lists under (Classify, #91): releases, then digest tags,
+	// then moving tags. Set by DeriveRows; every sort keeps it as the first key.
+	Class      Class
 	HasGitDate bool
 	GitDate    time.Time
 
@@ -48,6 +51,10 @@ type Row struct {
 // here — sorting by Created is Reorder's job once each row's MetaFunc resolves, since an
 // unmapped repo's ordering fact doesn't exist until then (this function never blocks on a
 // network call).
+//
+// Before any of that, every row is grouped by Classify (#91): releases, then digest tags,
+// then moving tags. The group is the first sort key here and in Reorder, and the ordering
+// above applies within each group; nothing is filtered out.
 func DeriveRows(regTags []string, gitTags []forge.GitTag, mapped bool) []Row {
 	dates := make(map[string]time.Time, len(gitTags))
 	if mapped {
@@ -58,12 +65,15 @@ func DeriveRows(regTags []string, gitTags []forge.GitTag, mapped bool) []Row {
 	rows := make([]Row, 0, len(regTags))
 	for _, t := range regTags {
 		if d, ok := dates[t]; ok {
-			rows = append(rows, Row{Tag: t, HasGitDate: true, GitDate: d})
+			rows = append(rows, Row{Tag: t, Class: Classify(t), HasGitDate: true, GitDate: d})
 		} else {
-			rows = append(rows, Row{Tag: t})
+			rows = append(rows, Row{Tag: t, Class: Classify(t)})
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Class != rows[j].Class {
+			return rows[i].Class < rows[j].Class
+		}
 		if rows[i].HasGitDate != rows[j].HasGitDate {
 			return rows[i].HasGitDate
 		}
@@ -97,6 +107,9 @@ func Reorder(rows []Row, mapped bool) []Row {
 	}
 	out := append([]Row(nil), rows...)
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Class != out[j].Class {
+			return out[i].Class < out[j].Class // the group comes first, as in DeriveRows (#91)
+		}
 		if out[i].MetaLoaded != out[j].MetaLoaded {
 			return out[i].MetaLoaded
 		}
