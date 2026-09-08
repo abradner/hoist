@@ -398,8 +398,12 @@ the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (root
 `--base` and `--kube-context` apply to it as to the subcommands, whose own flags of those names
 default to the root's — #105; `q` quits,
-`?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs; every cell carries its state as a
-word — pinned, unpinned, split, external, drifted — and a production column is marked `⚠` in the
+`?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs — every running build per image
+repo straight from the pods (`k8s.Cluster.RunningImages`, never the planning resolver's one pick),
+so a partial rollout reads "2 builds running" and the drift sentence names whether it compared by
+digest or by tag (#122); every cell carries its state as a
+word — pinned, unpinned, split, external, drifted — split judged per image repo on builds, so one
+tag pinned to two digests is split and a bare tag beside the same tag pinned is not (#118) — and a production column is marked `⚠` in the
 header and named in the footer (#86, M10); what is promoting right now is listed under the table —
 re-observed against the forge and cluster at boot and every `poll.approval`, finished ones left
 out, expanded to the step strip and the `hoist approve <id>` command when the terminal has the
@@ -408,14 +412,19 @@ opens its PR, each asking which when several are in flight: the TUI's `hoist pro
 `hoist resume` (M10). `d` opens the tag picker — `internal/app/tags`, M6; a chooser first when the
 cell holds several first-party images — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
-repo's git tag dates for ordering when `repos[].apps` names one, and its own `D` key walks the
+repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91) as releases
+(`v…`/`release-…` + digits), then digest-named tags (`sha-<hex>`), then moving tags (`latest`,
+branch names), each under a divider; nothing is hidden and `/` filters across all three, since
+the operator is scanning for releases outnumbered several to one — and its own `D` key walks the
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
 deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
 written: it shows the diff the pick would make and takes Enter, so no write in hoist skips a diff
 and a confirmation); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
 age relative to now and whether the paired staging env's manifest carries it, and under the cursor
 the commits between the declared build and the one under the cursor with the migrations among them
-(`pkg/migrate` — `tab` into the list, `enter` reads a commit in full, `space` reviews the change;
+(`pkg/migrate` — `tab` into the list, `enter` opens a commit in a scrolling view (`pgdn`/`pgup`,
+`g`/`G`; ↑/↓ still switch commits — #120), `space` reviews the change; a split target env names
+every declared reference in the header and says which one the count runs from — #119;
 a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
 the confirm screens lead with the work, not the mechanism (M10): the deploy confirm says
 "rolling out N commits · M migrations · replacing v1, live 34 days" over the commit list, the plan
@@ -853,6 +862,32 @@ test lives** (if one exists).
    screen. Regression coverage: every `internal/app/<screen>` test that renders a loaded golden
    goes through `Drain`; the plan package's older `runInit` is the one exception left and is
    covered because its batch is flat.
+8. **A `git push` into a temp bare origin leaves a detached `git maintenance` child running
+   after the test returns, and `t.TempDir` cleanup then fails on a lock it never listed.** What
+   happened: `TestApprovedIgnoresBotComment` failed once on CI (#123) with `TempDir RemoveAll
+   cleanup: unlinkat …/origin.git/objects: directory not empty`; the issue was filed as a
+   clock/ordering race in the approval anchor, which the timestamps could never produce. Root
+   cause: `receive-pack` honours `receive.autogc` (default true) and spawns `git maintenance run
+   --auto` *detached*, which writes `objects/maintenance.lock` some milliseconds after the push
+   — and the test — has returned; reproduced 2/150 on git 2.55 with a probe, 0/150 with the
+   fix. Rule: every fixture that pushes into a bare repo under `t.TempDir` appends
+   `noBackgroundGitConfig` (`internal/engine/fixture_test.go`: `receive.autogc=false`,
+   `gc.auto=0`, `maintenance.auto=false`, `gc.autoDetach=false`, `maintenance.autoDetach=false`)
+   to its isolated gitconfig, so nothing git runs can outlive the command that started it — and
+   a flaky test whose failure line was lost is diagnosed from the *first* attempt's log
+   (`gh run view <id> --attempt 1`), because a rerun overwrites the job list. Regression
+   coverage: the four fixtures named in PR #140; the test's failure message now prints every
+   timestamp it compares.
+9. **A fixture that happens to exhibit the bug under test makes the golden archive the
+   defect.** What happened: the tag picker's shared fixture repo declared one image repo at two
+   references (a split), and the header golden read "declares v1" — exactly the single-build
+   claim #119 was about — so the golden passed for years as the picture of correct output. Root
+   cause: a golden asserts "same as last time", never "right"; a fixture built without a stated
+   control property carries whatever shape it was first given. Rule: a golden's fixture states
+   the property it is a control for (unsplit, pinned, one repo) in its constructor's doc comment,
+   and the case that exercises the defect gets its own fixture rather than the shared one. Regression
+   coverage: `internal/app/tags/history_test.go` keeps an unsplit control alongside the split
+   case (PR #143).
 
 ## 10. Maintaining This Document
 
