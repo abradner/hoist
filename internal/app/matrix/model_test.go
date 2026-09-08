@@ -195,15 +195,15 @@ func TestProductionColumnIsMarkedEverywhere(t *testing.T) {
 // stale generation's answer is dropped; F5 asks again; a cluster error is a sentence.
 func TestDriftAnswersRefineTheColumn(t *testing.T) {
 	asked := map[string]int{}
-	drift := func(_ context.Context, env string) (map[string]image.Ref, error) {
+	drift := func(_ context.Context, env string) (map[string][]image.Ref, error) {
 		asked[env]++
 		switch env {
 		case "b":
-			return map[string]image.Ref{"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v7", Digest: digestC}}, nil
+			return map[string][]image.Ref{"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v7", Digest: digestC}}}, nil
 		case "c":
 			return nil, errors.New("kube context \"my-cluster\" is not in the kubeconfig")
 		}
-		return map[string]image.Ref{}, nil
+		return map[string][]image.Ref{}, nil
 	}
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, drift).SetSize(120, 24)
 	before := ansi.Strip(m.View())
@@ -220,7 +220,7 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 	if !strings.Contains(v, "v1  drifted") && !strings.Contains(v, "drifted") {
 		t.Fatalf("pinned/b must be drifted after b's answer:\n%s", v)
 	}
-	if !strings.Contains(v, "! pinned runs v7 in b; manifest says v1") {
+	if !strings.Contains(v, "! pinned runs v7 in b; manifest says v1 (compared by digest)") {
 		t.Fatalf("the drift sentence is missing:\n%s", v)
 	}
 	if strings.Contains(v, "resolving…") {
@@ -233,7 +233,7 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 		t.Fatalf("cluster error not shown for c:\n%s", v)
 	}
 	// A stale answer (an earlier generation) is dropped.
-	stale := DriftMsg{gen: m.gen - 1, env: "a", running: map[string]image.Ref{"ghcr.io/x/app": {Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}
+	stale := DriftMsg{gen: m.gen - 1, env: "a", running: map[string][]image.Ref{"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}}
 	m2, _ := m.Update(stale)
 	if strings.Contains(ansi.Strip(m2.View()), "v99") {
 		t.Fatal("a stale generation's answer was applied")

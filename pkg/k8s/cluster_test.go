@@ -86,6 +86,27 @@ func TestRunningImagesCountsRunningAndPendingPodsOnly(t *testing.T) {
 	}
 }
 
+// The tag a pod was started from reaches the caller as Image (status.image, the manifest's
+// spelling), beside the digest-only Ref; an empty or unparsable status.image leaves it zero.
+func TestRunningImagesCarriesTheReportedImage(t *testing.T) {
+	tagged := status("web", "ghcr.io/example/web@"+digestA)
+	tagged.Image = "ghcr.io/example/web:v1"
+	junk := status("worker", "ghcr.io/example/web@"+digestA)
+	junk.Image = "not an image ref"
+	cs := fake.NewClientset(pod("app", "web-1", corev1.PodRunning, []corev1.ContainerStatus{tagged, junk}, nil))
+	got, err := FromClientset(cs).RunningImages(context.Background(), "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RunningImage{
+		{Pod: "web-1", Container: "web", Ref: image.Ref{Repo: "ghcr.io/example/web", Digest: digestA}, Image: image.Ref{Repo: "ghcr.io/example/web", Tag: "v1"}},
+		{Pod: "web-1", Container: "worker", Ref: image.Ref{Repo: "ghcr.io/example/web", Digest: digestA}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("RunningImages (-want +got):\n%s", diff)
+	}
+}
+
 func describeActions(actions []k8stesting.Action) []string {
 	var out []string
 	for _, a := range actions {

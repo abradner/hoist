@@ -58,10 +58,15 @@ type Cell struct {
 	Differs bool
 	// ThirdParty: the family has no first-party image at all.
 	ThirdParty bool
-	// Running is what the cluster reports for a drifted cell — the tag, or a short digest —
-	// for the sentence under the table ("marketing runs sha-77c0ffe here; manifest says …").
-	// Empty unless State is StateDrifted.
+	// Running is what the cluster reports for a drifted cell, for the sentence under the
+	// table ("marketing runs sha-77c0ffe here; manifest says …"): the one running build's
+	// tag or short digest, or "N builds running (a, b)" when the pods run several. Empty
+	// unless State is StateDrifted.
 	Running string
+	// Compared names the comparison that decided the drift — "by digest" when the manifest
+	// reference is pinned, "by tag" when it is bare — so the sentence says what the
+	// evidence was. Empty unless State is StateDrifted.
+	Compared string
 	// key is the sorted distinct ref set the Differs comparison runs on.
 	key string
 }
@@ -92,11 +97,13 @@ type Table struct {
 	Rows []Row
 }
 
-// Running is what each env's cluster is actually running, keyed env → image repo → the
-// running reference (tag and digest as the pod reports them). nil, or a missing env, means
-// the cluster has not answered for that env — no cell there can be drifted, and none is
-// claimed not to be.
-type Running map[string]map[string]image.Ref
+// Running is what each env's cluster is actually running, keyed env → image repo (in the
+// registry's canonical spelling, image.Canonical) → every distinct running reference (the
+// digest each pod reports, and the tag the pod was started from when it reported one).
+// Every build is kept: a partial rollout is two entries, never the one a resolver would
+// choose (#122). nil, or a missing env, means the cluster has not answered for that env —
+// no cell there can be drifted, and none is claimed not to be.
+type Running map[string]map[string][]image.Ref
 
 // Compute derives the matrix from a discovered repo. promotable lists the image repo
 // prefixes that count as first-party (what hoist plan --promotable takes); an occurrence
@@ -135,7 +142,7 @@ func Compute(r *gitops.Repo, promotable []string, running Running) Table {
 }
 
 // cellFor computes everything about a cell except Differs, which needs its neighbour.
-func cellFor(fam *gitops.Family, promotable []string, running map[string]image.Ref) Cell {
+func cellFor(fam *gitops.Family, promotable []string, running map[string][]image.Ref) Cell {
 	var first, third []image.Ref
 	for _, o := range fam.Occurrences {
 		if isFirstParty(o.Ref.Repo, promotable) {
@@ -180,50 +187,82 @@ func cellFor(fam *gitops.Family, promotable []string, running map[string]image.R
 			break
 		}
 	}
-	if run, ok := drifted(first, running); ok {
+	if runs, compared, ok := drifted(first, running); ok {
 		c.State = StateDrifted
-		c.Running = tagOrDigest(run)
+		c.Compared = compared
+		c.Running = runningText(runs)
 	}
 	return c
 }
 
-// drifted reports the running reference for the first repo whose cluster image matches
-// none of its manifest references. Digests decide when both sides carry one; a bare manifest
-// tag compares by tag. A repo the cluster did not report is not drifted — absence of evidence
-// is not drift.
-func drifted(first []image.Ref, running map[string]image.Ref) (image.Ref, bool) {
+// drifted reports every running reference of the first repo whose pods run a build none of
+// its manifest references declare, and which comparison found it. The rule (#122): a repo
+// is drifted when ANY running build matches no manifest reference — a partial rollout
+// where one build is declared and one is not is drifted, because the cluster runs
+// something the manifest does not say; two running builds both declared (a split
+// manifest mid-rollout) are not. Each running build is compared by digest against a
+// pinned manifest reference and by tag against a bare one (sameBuild); a running
+// reference that reports no tag cannot be compared with a bare manifest at all, and is
+// neither drifted nor confirmed. A repo the cluster did not report is not drifted —
+// absence of evidence is not drift.
+func drifted(first []image.Ref, running map[string][]image.Ref) ([]image.Ref, string, bool) {
 	if len(running) == 0 {
-		return image.Ref{}, false
+		return nil, "", false
 	}
 	for _, repo := range distinct(first, func(r image.Ref) string { return r.Repo }) {
-		run, ok := running[repo]
-		if !ok {
+		runs := running[repo]
+		if runs == nil {
+			runs = running[image.Canonical(repo)]
+		}
+		if len(runs) == 0 {
 			continue
 		}
-		matched := false
-		for _, ref := range first {
-			if ref.Repo != repo {
-				continue
+		for _, run := range runs {
+			matched, compared := false, ""
+			for _, ref := range first {
+				if ref.Repo != repo {
+					continue
+				}
+				same, how := sameBuild(ref, run)
+				if how == "" {
+					continue
+				}
+				compared = how
+				if same {
+					matched = true
+					break
+				}
 			}
-			if sameBuild(ref, run) {
-				matched = true
-				break
+			if !matched && compared != "" {
+				return runs, compared, true
 			}
-		}
-		if !matched {
-			return run, true
 		}
 	}
-	return image.Ref{}, false
+	return nil, "", false
 }
 
-// sameBuild compares a manifest reference with a running one: by digest when both have one,
-// else by tag.
-func sameBuild(manifest, running image.Ref) bool {
+// sameBuild compares a manifest reference with a running one and names how: "by digest"
+// when the manifest is pinned and the pod reported a digest, "by tag" when the manifest is
+// bare and the pod reported the tag it was started from; "" when the two cannot be
+// compared (a bare manifest against a digest-only pod).
+func sameBuild(manifest, running image.Ref) (same bool, compared string) {
 	if manifest.Digest != "" && running.Digest != "" {
-		return manifest.Digest == running.Digest
+		return manifest.Digest == running.Digest, "by digest"
 	}
-	return manifest.Tag != "" && manifest.Tag == running.Tag
+	if manifest.Digest == "" && manifest.Tag != "" && running.Tag != "" {
+		return manifest.Tag == running.Tag, "by tag"
+	}
+	return false, ""
+}
+
+// runningText is the drifted sentence's subject: one build's tag or short digest, or "N
+// builds running (a, b)" when the pods run several.
+func runningText(runs []image.Ref) string {
+	names := distinct(runs, tagOrDigest)
+	if len(names) == 1 {
+		return names[0]
+	}
+	return fmt.Sprintf("%d builds running (%s)", len(names), strings.Join(names, ", "))
 }
 
 func isFirstParty(repo string, prefixes []string) bool {

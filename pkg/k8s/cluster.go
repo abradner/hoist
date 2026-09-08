@@ -40,6 +40,13 @@ type RunningImage struct {
 	Container string
 	Init      bool // an initContainer
 	Ref       image.Ref
+	// Image is the reference the container was started from, as the runtime reports it in
+	// status.*containerStatuses[].image — the manifest's own spelling, tag included, which
+	// is the only place a pod says which tag its digest was pulled as. Zero when the field
+	// is empty or does not parse. It is observation, not resolution: a moved tag still
+	// reads here as the tag the pod pulled, so callers comparing a bare manifest tag to it
+	// learn what the pod was started from, never what the registry serves now (#122).
+	Image image.Ref
 }
 
 // Cluster is what the resolver and the registry auth chain need from a cluster. Both
@@ -117,7 +124,11 @@ func runningImages(pod *corev1.Pod) []RunningImage {
 				continue
 			}
 			ref.Tag = ""
-			out = append(out, RunningImage{Pod: pod.Name, Container: s.Name, Init: init, Ref: ref})
+			ri := RunningImage{Pod: pod.Name, Container: s.Name, Init: init, Ref: ref}
+			if img, err := image.Parse(s.Image); err == nil && img.Repo != "" {
+				ri.Image = img
+			}
+			out = append(out, ri)
 		}
 	}
 	add(pod.Status.ContainerStatuses, false)
