@@ -766,10 +766,26 @@ func TestCommitTimeoutKillsWholeProcessTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unparseable pid file: %v", err)
 	}
-	if perr := syscall.Kill(pid, 0); perr == nil {
-		t.Fatalf("grandchild pid %d is still alive shortly after Commit returned", pid)
-	} else if !errors.Is(perr, syscall.ESRCH) {
-		t.Fatalf("unexpected error probing grandchild pid %d: %v", pid, perr)
+	// The contract is that the grandchild is killed, not that it has been reaped by the instant
+	// Commit returns: the process group is signalled synchronously, but the grandchild is
+	// reparented to init once its parent dies and only disappears from the pid table when init
+	// reaps it — the kernel's schedule, not ours, and on a loaded shared CI runner that lags
+	// behind Commit's own return (issue #76: a single kill(pid, 0) probe here flaked on
+	// GitHub-hosted runners and never locally). So poll for the pid to vanish, bounded well
+	// below the grandchild's own 3s sleep so an orphaned-but-alive grandchild still fails.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		perr := syscall.Kill(pid, 0)
+		if errors.Is(perr, syscall.ESRCH) {
+			break
+		}
+		if perr != nil {
+			t.Fatalf("unexpected error probing grandchild pid %d: %v", pid, perr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild pid %d is still alive 2s after Commit returned", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	// Wait past the grandchild's own sleep and confirm it never got to write the marker —
