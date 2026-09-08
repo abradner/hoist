@@ -800,6 +800,89 @@ func TestCommitTimeoutKillsWholeProcessTree(t *testing.T) {
 	}
 }
 
+// TestWorktreeBaseIgnoresTagsNamedLikeTheBase is issue #100's regression test at the git layer:
+// a real branch AND a tag of the same name, pointing at different commits. Git resolves a short
+// name by ref precedence, under which refs/tags/<name> beats both refs/heads/<name> and
+// refs/remotes/<name>, so a resolveBase that handed `git worktree add` the short "origin/main"
+// (or bare "main") would seed a brand-new promotion branch from the tag's commit. Both fallbacks
+// are covered: the remote-tracking ref while origin is configured, the local branch once it is
+// not. Mutant-verified: returning the short names from resolveBase makes both subtests fail —
+// in practice `git worktree add` refuses the ambiguous short name outright (`fatal: ambiguous
+// object name`), so the promotion could not even start; either way the branch never wins.
+func TestWorktreeBaseIgnoresTagsNamedLikeTheBase(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	baseSHA, ok, err := g.RevParse(ctx(), cloneDir, "refs/remotes/origin/main")
+	if err != nil || !ok {
+		t.Fatalf("refs/remotes/origin/main: ok=%v err=%v", ok, err)
+	}
+	// A divergent commit on a scratch branch, never pushed, then tags named exactly like the
+	// base's short names pointing at it. `git tag main` is legal even with a branch main.
+	if err := runHost(t, cloneDir, "checkout", "-q", "-b", "scratch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "divergent.txt"), []byte("not the base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "add", "divergent.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "commit", "-q", "-m", "divergent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+	divergentSHA, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/scratch")
+	if err != nil || !ok || divergentSHA == baseSHA {
+		t.Fatalf("scratch: sha=%s ok=%v err=%v (base %s)", divergentSHA, ok, err, baseSHA)
+	}
+	for _, tag := range []string{"main", "origin/main"} {
+		if err := runHost(t, cloneDir, "tag", tag, "refs/heads/scratch"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check := func(t *testing.T, branch, want string) {
+		t.Helper()
+		wt := filepath.Join(t.TempDir(), "wt")
+		if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+			t.Fatal(err)
+		}
+		head, ok, err := g.RevParse(ctx(), wt, "HEAD")
+		if err != nil || !ok {
+			t.Fatalf("HEAD in %s: ok=%v err=%v", wt, ok, err)
+		}
+		if head == divergentSHA {
+			t.Fatalf("worktree for %s was created from the tag's commit %s, not the branch's %s", branch, shortSHA(head), shortSHA(want))
+		}
+		if head != want {
+			t.Fatalf("worktree for %s at %s, want %s", branch, shortSHA(head), shortSHA(want))
+		}
+	}
+	t.Run("remote-tracking ref wins over the tag origin/main", func(t *testing.T) {
+		check(t, "hoist/app-production/tagged-remote", baseSHA)
+	})
+	t.Run("local branch wins over the tag main once origin is gone", func(t *testing.T) {
+		// Removing the remote drops refs/remotes/origin/*, leaving resolveBase's local fallback
+		// — which now has to pick refs/heads/main over refs/tags/main.
+		if err := runHost(t, cloneDir, "remote", "remove", "origin"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := g.RevParse(ctx(), cloneDir, "refs/remotes/origin/main"); err != nil || ok {
+			t.Fatalf("refs/remotes/origin/main should be gone: ok=%v err=%v", ok, err)
+		}
+		check(t, "hoist/app-production/tagged-local", baseSHA)
+	})
+}
+
+func shortSHA(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
 // TestDeleteRemoteBranchIsIdempotent is MergedStep's own resume property at the git layer
 // (M4): deleting a branch that was already pushed succeeds, and deleting it again — a resumed
 // process re-attempting cleanup after a kill between merge and delete — must also succeed
