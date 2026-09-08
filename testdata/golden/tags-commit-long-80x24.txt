@@ -1,0 +1,24 @@
+╭─ hoist · deploy · commit ────────────────────────────────────────────────────╮
+│4a1c2ef   Add rate limiting to the public API                                 │
+│1 of 14 in v3 · not in v1 · dev · 2 days ago · body 0% (pgdn scrolls)         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│body line 01 of the rate-limiting design note                                 │
+│body line 02 of the rate-limiting design note                                 │
+│body line 03 of the rate-limiting design note                                 │
+│body line 04 of the rate-limiting design note                                 │
+│body line 05 of the rate-limiting design note                                 │
+│body line 06 of the rate-limiting design note                                 │
+│body line 07 of the rate-limiting design note                                 │
+│body line 08 of the rate-limiting design note                                 │
+│body line 09 of the rate-limiting design note                                 │
+│body line 10 of the rate-limiting design note                                 │
+│body line 11 of the rate-limiting design note                                 │
+│body line 12 of the rate-limiting design note                                 │
+│body line 13 of the rate-limiting design note                                 │
+│body line 14 of the rate-limiting design note                                 │
+│body line 15 of the rate-limiting design note                                 │
+│body line 16 of the rate-limiting design note                                 │
+│body line 17 of the rate-limiting design note                                 │
+│body line 18 of the rate-limiting design note                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+       ↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back

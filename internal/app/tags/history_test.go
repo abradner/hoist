@@ -225,6 +225,74 @@ func TestSplitTargetEnvIsNamedInHeader(t *testing.T) {
 	}
 }
 
+// longBody is fourteenAhead with the first commit's body forty numbered lines and a
+// migration list at the end — longer than a 24-row terminal, so only a scrolling body can
+// reach the migration files (#120).
+func longBody(ctx context.Context, from, to image.Ref) (migrate.Delta, error) {
+	d, err := fourteenAhead(ctx, from, to)
+	if len(d.Commits) > 0 {
+		lines := make([]string, 40)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("body line %02d of the rate-limiting design note", i+1)
+		}
+		d.Commits[0].Body = strings.Join(lines, "\n")
+		d.Commits[0].Migrations = []string{"db/migrate/20260301T090000_add_rate_limits.rb"}
+	}
+	return d, err
+}
+
+// The commit-detail view scrolls a body longer than the terminal: PageDown shows lines the
+// first page clipped, and the migration list at the end is reachable with G; ↑/↓ still
+// switch commits rather than scroll, and a switched-to commit is read from its top (#120).
+func TestReadingScrollsALongBody(t *testing.T) {
+	m := historyModelOver(t, unsplitRepo(), longBody, liveAge34Days).SetSize(80, 24)
+	m = uitest.Keys(m, updateFn, "tab", "enter")
+	if !m.reading {
+		t.Fatal("enter must open the commit")
+	}
+	first := ansi.Strip(m.View())
+	if !strings.Contains(first, "body line 01") || strings.Contains(first, "body line 30") || strings.Contains(first, "add_rate_limits") {
+		t.Fatalf("the first page must show the start of the body and not its end:\n%s", first)
+	}
+	if !strings.Contains(first, "body 0% (pgdn scrolls)") {
+		t.Fatalf("a clipped body must say so in the head:\n%s", first)
+	}
+	uitest.Golden(t, "tags-commit-long", m.View(), 80, 24)
+
+	m = uitest.Keys(m, updateFn, "pgdown")
+	paged := ansi.Strip(m.View())
+	if paged == first || strings.Contains(paged, "body line 01") || !strings.Contains(paged, "body line 30") {
+		t.Fatalf("pgdown must show a different page of the body:\n%s", paged)
+	}
+	uitest.Golden(t, "tags-commit-long-paged", m.View(), 80, 24)
+
+	m = uitest.Keys(m, updateFn, "G")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "add_rate_limits") || !strings.Contains(v, "body 100%") {
+		t.Fatalf("G must reach the migration list at the end of the body:\n%s", v)
+	}
+	m = uitest.Keys(m, updateFn, "g")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "body line 01") {
+		t.Fatalf("g must return to the top:\n%s", v)
+	}
+	m = uitest.Keys(m, updateFn, "ctrl+d")
+	if v := ansi.Strip(m.View()); strings.Contains(v, "body line 01") {
+		t.Fatalf("ctrl+d must scroll half a page:\n%s", v)
+	}
+
+	// ↓ is still the next commit, not a scroll, and that commit is read from its top.
+	m = uitest.Keys(m, updateFn, "G", "down")
+	if m.commitIdx != 1 || !m.reading {
+		t.Fatalf("down must switch commits in the detail view: idx=%d reading=%v", m.commitIdx, m.reading)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "2 of 14") || !strings.Contains(v, "(no body)") || m.body.YOffset() != 0 {
+		t.Fatalf("the next commit must be shown from its top: offset=%d\n%s", m.body.YOffset(), v)
+	}
+	m = uitest.Keys(m, updateFn, "up")
+	if m.commitIdx != 0 || m.body.YOffset() != 0 {
+		t.Fatalf("up must switch back, from the top: idx=%d offset=%d", m.commitIdx, m.body.YOffset())
+	}
+}
+
 // Every way history can be missing is a sentence naming why, never a blank pane.
 func TestHistoryPaneNamesEveryGap(t *testing.T) {
 	m := historyModel(t, func(_ context.Context, _, to image.Ref) (migrate.Delta, error) {

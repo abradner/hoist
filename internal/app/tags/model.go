@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -191,6 +192,8 @@ type ageMsg struct {
 
 type keyMap struct {
 	Up, Down, Filter, Direct, Review, Read, Pane, Back key.Binding
+	// Top and Bottom jump the commit-detail body to its ends (reading mode only).
+	Top, Bottom key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -206,6 +209,8 @@ func defaultKeyMap() keyMap {
 		Read:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "read commit")),
 		Pane:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "commits")),
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Top:    key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "top of the body")),
+		Bottom: key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "end of the body")),
 	}
 }
 
@@ -268,6 +273,10 @@ type Model struct {
 	focus     focus
 	commitIdx int
 	reading   bool
+	// body is the commit-detail view's scrolling section (the commit message and its
+	// migration files) — a viewport, since a body can be longer than the terminal (#120).
+	// Laid out by layoutReading on whichever copy needs it, the flight screen's log pattern.
+	body viewport.Model
 
 	filtering   bool
 	filterInput textinput.Model
@@ -317,6 +326,7 @@ func New(imageRepo, target string, o Options) Model {
 		keys:               defaultKeyMap(),
 		spinner:            spinner.New(spinner.WithSpinner(spinner.Line)),
 		filterInput:        textinput.New(),
+		body:               newBodyViewport(),
 		styles:             ui.NewStyles(true),
 	}
 }
@@ -534,6 +544,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.reading = true
+		m.body.GotoTop()
 		return m, nil
 	case key.Matches(msg, m.keys.Review):
 		return m.selectCurrent(false)
@@ -547,18 +558,50 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateReading handles the commit-detail view: ↑/↓ walk the commits, esc returns to the list.
+// newBodyViewport is the commit-detail viewport with only the paging keys bound: ↑/↓ (and
+// j/k) stay the picker's own "next commit", and space stays "review the change", so the
+// viewport's defaults for those (line scroll, page down) are unbound rather than fought over.
+func newBodyViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = viewport.KeyMap{
+		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
+		PageUp:       key.NewBinding(key.WithKeys("pgup")),
+		HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
+		HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
+	}
+	v.MouseWheelEnabled = false
+	return v
+}
+
+// updateReading handles the commit-detail view: ↑/↓ walk the commits (each one read from
+// its top), esc returns to the list, and every other key scrolls the body — PageUp/PageDown,
+// ctrl+u/ctrl+d for half a page, g/G for the ends (#120).
 func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Back):
 		m.reading = false
 	case key.Matches(msg, m.keys.Up):
 		m.commitIdx = max(m.commitIdx-1, 0)
+		m.body.GotoTop()
 	case key.Matches(msg, m.keys.Down):
 		m.commitIdx = min(m.commitIdx+1, max(len(m.currentCommits())-1, 0))
+		m.body.GotoTop()
 	case key.Matches(msg, m.keys.Review):
 		m.reading = false
 		return m.selectCurrent(false)
+	case key.Matches(msg, m.keys.Top):
+		m = m.layoutReading()
+		m.body.GotoTop()
+	case key.Matches(msg, m.keys.Bottom):
+		m = m.layoutReading()
+		m.body.GotoBottom()
+	default:
+		// Laid out on this copy first — View lays out its own, so the retained viewport
+		// would otherwise still be the zero-sized one New built (flight's log, Copilot #124).
+		m = m.layoutReading()
+		var cmd tea.Cmd
+		m.body, cmd = m.body.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -1305,15 +1348,10 @@ func (m Model) paneSection() string {
 	return strings.Join(out, "\n")
 }
 
-// viewReading is the commit-detail view (mockup 08): subject, position, the full body, and
-// the migration files the commit carries.
-func (m Model) viewReading() string {
-	commits := m.currentCommits()
-	if len(commits) == 0 || m.commitIdx >= len(commits) {
-		m.reading = false
-		return m.viewReady()
-	}
-	c := commits[m.commitIdx]
+// readingHead is the commit-detail view's fixed section: subject and position. The second
+// line says how much of the body is on screen when it does not all fit, so a clipped body
+// is never mistaken for the whole of it.
+func (m Model) readingHead(c migrate.Commit, n int) string {
 	st := m.deltas[m.selectedTag]
 	// Forward: the commit is in the cursor tag and not in what the env declares. A rollback
 	// lists the commits being removed, so the containment reads the other way round.
@@ -1321,19 +1359,55 @@ func (m Model) viewReading() string {
 	if st.Delta.Direction == migrate.DirectionRollback {
 		in, notIn = notIn, in
 	}
-	head := m.styles.Title.Render(history.ShortSHA(c.SHA)+"   "+c.Subject) + "\n" +
-		m.styles.Dim.Render(fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, len(commits), in, notIn, c.Author, ui.Ago(m.now(), c.Date)))
+	pos := fmt.Sprintf("%d of %d in %s · not in %s · %s · %s", m.commitIdx+1, n, in, notIn, c.Author, ui.Ago(m.now(), c.Date))
+	if m.body.TotalLineCount() > m.body.Height() {
+		pos += fmt.Sprintf(" · body %d%% (pgdn scrolls)", int(m.body.ScrollPercent()*100))
+	}
+	return m.styles.Title.Render(history.ShortSHA(c.SHA)+"   "+c.Subject) + "\n" + m.styles.Dim.Render(pos)
+}
+
+// readingBody is what the viewport scrolls: the commit message, wrapped, and the migration
+// files the commit carries.
+func (m Model) readingBody(c migrate.Commit) string {
 	body := c.Body
 	if strings.TrimSpace(body) == "" {
 		body = m.styles.Dim.Render("(no body)")
 	} else {
 		body = m.wrap(body)
 	}
-	sections := []string{head, body}
 	if len(c.Migrations) > 0 {
-		sections = append(sections, m.styles.Warn.Render("migrations in this commit:\n  "+strings.Join(c.Migrations, "\n  ")))
+		body += "\n\n" + m.styles.Warn.Render("migrations in this commit:\n  "+strings.Join(c.Migrations, "\n  "))
 	}
-	return ui.Frame{Title: "hoist · deploy · commit", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("↑/↓ next commit · space review the change · esc back to the list"))}.Render(m.styles, m.width, m.height)
+	return body
+}
+
+// layoutReading sizes the body viewport to what the frame leaves after the head, and loads
+// the cursor commit into it — the offset is kept, so a scrolled body stays scrolled across
+// a redraw. A no-op when there is no commit to read.
+func (m Model) layoutReading() Model {
+	commits := m.currentCommits()
+	if len(commits) == 0 || m.commitIdx >= len(commits) {
+		return m
+	}
+	c := commits[m.commitIdx]
+	m.body.SetWidth(m.width - 2)
+	m.body.SetHeight(max(ui.BodyHeight(m.height, 2)-2, 1)) // the head is two lines
+	m.body.SetContent(m.readingBody(c))
+	return m
+}
+
+// viewReading is the commit-detail view (mockup 08): subject and position, then the body and
+// the commit's migration files in a viewport — PageUp/PageDown, ctrl+u/ctrl+d and g/G scroll
+// it when the message is longer than the terminal (#120); ↑/↓ move to the next commit.
+func (m Model) viewReading() string {
+	commits := m.currentCommits()
+	if len(commits) == 0 || m.commitIdx >= len(commits) {
+		m.reading = false
+		return m.viewReady()
+	}
+	m = m.layoutReading()
+	sections := []string{m.readingHead(commits[m.commitIdx], len(commits)), m.body.View()}
+	return ui.Frame{Title: "hoist · deploy · commit", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back"))}.Render(m.styles, m.width, m.height)
 }
 
 func (m Model) footer() string {
