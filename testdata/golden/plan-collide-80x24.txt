@@ -1,0 +1,24 @@
+╭─ hoist · confirm promotion ──────────────────────────────────────────────────╮
+│app-staging  →  app-production   images under ghcr.io/example/        mode: PR│
+│3 repos ticked · no history for 3                              d  see the yaml│
+├──────────────────────────────────────────────────────────────────────────────┤
+│┃ > ✓ db  → v202602201200           │db                                       │
+│┃   ✓ …alpha  → v202602201200       │v202602201200 → v202602201200            │
+│┃   ✓ …beta  → v202602201200        │1 occurrence · 1 file · digest from      │
+│┃                                   │manifest                                 │
+│┃                                   │                                         │
+│┃                                   │no commit history — ghcr.io/example/db   │
+│┃                                   │has no app repo in repos[].apps          │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+│┃                                   │                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                tab pane · x toggle · d yaml · m mode · enter confirm · esc back

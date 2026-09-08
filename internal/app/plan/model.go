@@ -289,17 +289,26 @@ func (m *Model) buildMultiSelect() {
 }
 
 // rebuildMultiSelect builds the left pane's field for the current width, keeping the ticked
-// set (bound through Value) — called at load and again when the pane's width changes, since
-// the labels are truncated to it and huh would otherwise wrap them.
+// set (bound through Value) and the cursor — called at load and again when the pane's width
+// changes, since the labels are truncated to it and huh would otherwise wrap them.
+//
+// The cursor has to be put back by hand (#121): huh v2.0.3's MultiSelect exposes the cursor
+// only through Hovered(), and re-setting Options on the existing widget is no better than a
+// rebuild — Options calls selectOptions, which parks the cursor on the first ticked option.
+// So the hovered index is read before the rebuild and walked back to with Up/Down presses
+// through the widget's own Update (GotoTop is disabled in huh's default keymap, so there is
+// no shorter route) — the same keys an operator would press, never a private field.
 func (m *Model) rebuildMultiSelect() {
+	hovered := m.hoveredIndex()
 	sel := Selectable(m.rows)
+	labels := Labels(sel, m.prefix, m.labelWidth())
 	opts := make([]huh.Option[string], 0, len(sel))
 	ticked := map[string]bool{}
 	for _, t := range m.ticked {
 		ticked[t] = true
 	}
-	for _, r := range sel {
-		opts = append(opts, huh.NewOption(r.ShortLabel(m.prefix, m.labelWidth()), r.Repo).Selected(ticked[r.Repo]))
+	for i, r := range sel {
+		opts = append(opts, huh.NewOption(labels[i], r.Repo).Selected(ticked[r.Repo]))
 	}
 	ms := huh.NewMultiSelect[string]().Value(&m.ticked)
 	// Same wiring as buildEnvSelect's own WithKeyMap call — see CapturesText's doc comment.
@@ -310,6 +319,44 @@ func (m *Model) rebuildMultiSelect() {
 	}
 	ms.Focus()
 	m.multiSelect = ms
+	if hovered >= 0 {
+		m.moveCursorTo(hovered)
+	}
+}
+
+// hoveredIndex is the position of the hovered row among the selectable rows, -1 when there
+// is no field or no row under the cursor.
+func (m Model) hoveredIndex() int {
+	if m.multiSelect == nil {
+		return -1
+	}
+	repo, ok := m.multiSelect.Hovered()
+	if !ok {
+		return -1
+	}
+	for i, r := range Selectable(m.rows) {
+		if r.Repo == repo {
+			return i
+		}
+	}
+	return -1
+}
+
+// moveCursorTo walks the field's cursor to index i with Up/Down presses; bounded by the row
+// count so a stale index can never loop.
+func (m *Model) moveCursorTo(i int) {
+	n := len(Selectable(m.rows))
+	for step := 0; step < n; step++ {
+		at := m.hoveredIndex()
+		if at < 0 || at == i {
+			return
+		}
+		code := tea.KeyDown
+		if at > i {
+			code = tea.KeyUp
+		}
+		m.multiSelect.Update(tea.KeyPressMsg{Code: code})
+	}
 }
 
 // Init kicks off whatever the starting state needs: the env-select prompt's focus, or the

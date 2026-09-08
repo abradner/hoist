@@ -62,24 +62,103 @@ func (r Row) Label() string {
 // carries warnings — short enough that the version never wraps mid-token at the pane's
 // width; the occurrence count and source moved to the right pane's own head line.
 func (r Row) ShortLabel(prefix string, width int) string {
-	marker := ""
+	return r.fitLabel("", strings.TrimPrefix(r.Repo, prefix), width)
+}
+
+// fitLabel is ShortLabel's layout: "<marker><lead><name>  <old> → <new>", fitted to width
+// by first dropping the old version, then truncating the name from its right with "…" —
+// never wrapped (a sha- tag can be forty characters and huh would otherwise break it
+// mid-token), and the new version, which is what is being approved, is the last thing to
+// go. lead is "" for a plain row, or "…" / "3 …" for a row Labels has disambiguated.
+func (r Row) fitLabel(lead, name string, width int) string {
+	head := lead
 	if len(r.Warnings) > 0 {
-		marker = "! "
+		head = "! " + lead
 	}
-	label := fmt.Sprintf("%s%s  %s → %s", marker, strings.TrimPrefix(r.Repo, prefix), tagOrDigest(r.Old), tagOrDigest(r.New))
-	if width > 0 && len(label) > width {
-		// Truncated with "…", never wrapped: a sha- tag can be forty characters and huh
-		// would otherwise break it mid-token. The right pane's head line carries both
-		// versions in full.
-		label = fmt.Sprintf("%s%s  → %s", marker, strings.TrimPrefix(r.Repo, prefix), tagOrDigest(r.New))
-		if len(label) > width {
-			runes := []rune(label)
-			if width > 1 {
-				label = string(runes[:width-1]) + "…"
-			}
+	both := fmt.Sprintf("  %s → %s", tagOrDigest(r.Old), tagOrDigest(r.New))
+	newOnly := fmt.Sprintf("  → %s", tagOrDigest(r.New))
+	if width <= 0 || len(head+name+both) <= width {
+		return head + name + both
+	}
+	if len(head+name+newOnly) <= width {
+		return head + name + newOnly
+	}
+	if room := width - len(head) - len(newOnly) - 1; room >= 1 {
+		if runes := []rune(name); len(runes) > room {
+			name = string(runes[:room])
+		}
+		return head + name + "…" + newOnly
+	}
+	// Narrower than the version itself: cut the whole string, as a last resort.
+	if runes := []rune(head + name + newOnly); width > 1 && len(runes) > width-1 {
+		return string(runes[:width-1]) + "…"
+	}
+	return head + name + newOnly
+}
+
+// Labels is one ShortLabel per row, made distinct where truncation would otherwise leave
+// two rows reading the same (#121: two repos whose names differ only past the pane's width,
+// with the same versions, were indistinguishable on the left — and the left row is the tick
+// target). A colliding group drops the prefix its own members share and shows the rest
+// behind "…", so the first visible character is the one that differs; anything still
+// colliding after that (two such groups with the same remainders) is numbered by row
+// position. Rows that never collided keep their plain ShortLabel.
+func Labels(rows []Row, prefix string, width int) []string {
+	labels := make([]string, len(rows))
+	for i, r := range rows {
+		labels[i] = r.ShortLabel(prefix, width)
+	}
+	for _, group := range collisions(labels) {
+		names := make([]string, 0, len(group))
+		for _, i := range group {
+			names = append(names, rows[i].Repo)
+		}
+		common := len(commonPrefix(names))
+		for _, i := range group {
+			labels[i] = rows[i].fitLabel("…", rows[i].Repo[common:], width)
 		}
 	}
-	return label
+	for _, group := range collisions(labels) {
+		for _, i := range group {
+			labels[i] = rows[i].fitLabel(fmt.Sprintf("%d …", i+1), rows[i].Repo[len(prefix):], width)
+		}
+	}
+	return labels
+}
+
+// collisions groups the indexes of every label that appears more than once, in first-seen order.
+func collisions(labels []string) [][]int {
+	byLabel := map[string][]int{}
+	var order []string
+	for i, l := range labels {
+		if _, seen := byLabel[l]; !seen {
+			order = append(order, l)
+		}
+		byLabel[l] = append(byLabel[l], i)
+	}
+	var out [][]int
+	for _, l := range order {
+		if len(byLabel[l]) > 1 {
+			out = append(out, byLabel[l])
+		}
+	}
+	return out
+}
+
+// commonPrefix is the longest byte prefix every name shares.
+func commonPrefix(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	p := names[0]
+	for _, n := range names[1:] {
+		i := 0
+		for i < len(p) && i < len(n) && p[i] == n[i] {
+			i++
+		}
+		p = p[:i]
+	}
+	return p
 }
 
 // tagOrDigest is the tag, or a shortened digest for a tag-less reference — the same

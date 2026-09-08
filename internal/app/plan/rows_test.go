@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -124,6 +125,54 @@ func TestDeriveRowsNoResolution(t *testing.T) {
 	}
 	if rows[0].Source != "manifest" {
 		t.Errorf("Source = %q, want manifest", rows[0].Source)
+	}
+}
+
+// #121: two repos whose names differ only past the pane's width, with the same versions,
+// truncate to the same ShortLabel — and the left row is the tick target. Labels must keep
+// every row distinct at any width that fits at least one character of the name.
+func TestLabelsStayDistinctWhenTruncated(t *testing.T) {
+	old := ref("ghcr.io/example/web:v1@sha256:" + strings.Repeat("a", 64))
+	newRef := ref("ghcr.io/example/web:v2@sha256:" + strings.Repeat("b", 64))
+	row := func(repo string) Row { return Row{Repo: repo, Old: old, New: newRef, Count: 1} }
+	rows := []Row{row("ghcr.io/example/web-frontend-service-alpha"), row("ghcr.io/example/web-frontend-service-beta"), row("ghcr.io/example/db")}
+	const prefix, width = "ghcr.io/example/", 20
+
+	if a, b := rows[0].ShortLabel(prefix, width), rows[1].ShortLabel(prefix, width); a != b {
+		t.Fatalf("setup: ShortLabel should collide at width %d, got %q and %q", width, a, b)
+	}
+	got := Labels(rows, prefix, width)
+	if got[0] == got[1] {
+		t.Fatalf("Labels left two rows reading the same: %q", got[0])
+	}
+	for i, l := range got {
+		if len([]rune(l)) > width {
+			t.Errorf("label %d %q is wider than %d", i, l, width)
+		}
+	}
+	if got[2] != rows[2].ShortLabel(prefix, width) {
+		t.Errorf("a row that never collided changed: %q", got[2])
+	}
+	// The visible name starts at the character that differs, and the version being approved stays.
+	for i, want := range []string{"…alpha", "…beta"} {
+		if !strings.HasPrefix(got[i], want) || !strings.HasSuffix(got[i], "→ v2") {
+			t.Errorf("label %d = %q, want it to start %q and end with the new version", i, got[i], want)
+		}
+	}
+
+	// Two colliding groups with the same remainders collide again after the first pass
+	// (…alpha twice); those rows get numbered by position instead.
+	rows = []Row{row("ghcr.io/example/aa-service-alpha"), row("ghcr.io/example/aa-service-beta"), row("ghcr.io/example/bb-service-alpha"), row("ghcr.io/example/bb-service-beta")}
+	got = Labels(rows, prefix, width)
+	seen := map[string]int{}
+	for i, l := range got {
+		if j, dup := seen[l]; dup {
+			t.Errorf("labels %d and %d both read %q", j, i, l)
+		}
+		seen[l] = i
+		if !strings.HasPrefix(l, fmt.Sprintf("%d …", i+1)) {
+			t.Errorf("label %d = %q, want a row number", i, l)
+		}
 	}
 }
 

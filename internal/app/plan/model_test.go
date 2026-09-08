@@ -558,6 +558,62 @@ func TestViewGolden(t *testing.T) {
 
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
+// #121: a width change rebuilds the huh.MultiSelect to re-truncate its labels, and huh has
+// no cursor setter, so the cursor used to jump to the first row and the right pane followed
+// it. Driven through real keys: down twice, then a resize the layout turns into a rebuild.
+func TestResizeKeepsTheCursor(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{}).SetSize(100, 30)
+	if n := len(Selectable(m.rows)); n < 3 {
+		t.Fatalf("fixture has %d selectable rows, want at least 3", n)
+	}
+	m = uitest.Keys(m, updateFn, "down", "down")
+	if got := m.hoveredIndex(); got != 2 {
+		t.Fatalf("setup: hovered index after down, down = %d, want 2", got)
+	}
+	want, _ := m.hoveredRow()
+
+	before := m.leftWidth
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = m.SetSize(120, 40)
+	if m.leftWidth == before {
+		t.Fatalf("setup: the resize did not change the left pane's width (%d), so nothing was rebuilt", before)
+	}
+	if got := m.hoveredIndex(); got != 2 {
+		t.Fatalf("hovered index after resize = %d, want 2: the rebuilt field lost the cursor", got)
+	}
+	if r, _ := m.hoveredRow(); r.Repo != want.Repo {
+		t.Errorf("hovered repo after resize = %q, want %q", r.Repo, want.Repo)
+	}
+	if head := ansi.Strip(strings.SplitN(m.impactBody(), "\n", 2)[0]); head != strings.TrimPrefix(want.Repo, m.prefix) {
+		t.Errorf("right pane heads with %q after resize, want %q", head, strings.TrimPrefix(want.Repo, m.prefix))
+	}
+}
+
+// #121: the left pane's labels stay distinct when two long repo names truncate to the same
+// text — a synthetic plan over the fixture repo's root, with NoOp edits so no file is read.
+func TestViewGoldenCollidingLabels(t *testing.T) {
+	r := discoverFixture(t)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, nil, history.Funcs{})
+	same := func(repo string) gitops.Edit {
+		ref := ref(repo + ":v202602201200@sha256:" + strings.Repeat("a", 64))
+		return edit("cluster/apps/app-production/web/deployment.yaml", ref, ref)
+	}
+	pl := gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production", Edits: []gitops.Edit{
+		same("ghcr.io/example/web-frontend-service-alpha"),
+		same("ghcr.io/example/web-frontend-service-beta"),
+		same("ghcr.io/example/db"),
+	}}
+	m, _ = m.Update(loadedMsg{plan: pl})
+	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"…alpha", "…beta"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("view lacks %q:\n%s", want, v)
+		}
+	}
+	uitest.Golden(t, "plan-collide", m.View(), 80, 24)
+}
+
 // Codex P2 (draft #29 pass): viewReady renders m.err.Error() directly with no per-call
 // redact.Strings — the one render point TestViewRedactsRegisteredSecrets's per-field
 // cases don't reach, since they all exercise the success path. A registered secret
