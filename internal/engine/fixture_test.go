@@ -15,6 +15,17 @@ import (
 
 const repoFullName = "example/gitops"
 
+// noBackgroundGitConfig is appended to every isolated test gitconfig so no git command a test
+// runs can leave a process behind that outlives it (#123). `git push` into a bare origin has
+// receive-pack spawn `git maintenance run --auto` *detached* (receive.autogc, the default),
+// and that child takes objects/maintenance.lock after the push has already returned — so
+// t.TempDir's cleanup could fail with "unlinkat …/origin.git/objects: directory not empty"
+// (TestApprovedIgnoresBotComment on CI, git 2.55; a probe here saw the lock file present
+// after push in 2 of 150 runs). receive.autogc and maintenance.auto switch the spawn off;
+// gc.auto=0 removes the other trigger (fetch); the two autoDetach settings are the backstop
+// that keeps anything still run inline, so it finishes before the git command exits.
+const noBackgroundGitConfig = "[receive]\n\tautogc = false\n[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n\tautoDetach = false\n"
+
 // runHost runs git directly (not through pkg/git) for test setup that isn't itself part of
 // what's under test: seeding the fixture repo, and simulating "someone else" pushing a
 // conflicting branch from a second clone.
@@ -37,7 +48,7 @@ func newFixtureOrigin(t *testing.T) (originDir string) {
 	t.Helper()
 	home := t.TempDir()
 	gitconfig := filepath.Join(home, ".gitconfig")
-	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"
+	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" + noBackgroundGitConfig
 	if err := os.WriteFile(gitconfig, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

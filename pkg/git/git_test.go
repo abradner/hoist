@@ -22,7 +22,11 @@ func newTestRepo(t *testing.T) (cloneDir, originDir string) {
 	t.Helper()
 	home := t.TempDir()
 	gitconfig := filepath.Join(home, ".gitconfig")
-	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"
+	// The [receive]/[gc]/[maintenance] block keeps git from spawning a detached
+	// `maintenance run --auto` on push, which can still be writing under the bare origin's
+	// objects/ when t.TempDir cleans up (#123; see internal/engine's noBackgroundGitConfig).
+	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" +
+		"[receive]\n\tautogc = false\n[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n\tautoDetach = false\n"
 	if err := os.WriteFile(gitconfig, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

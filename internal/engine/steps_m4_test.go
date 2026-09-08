@@ -288,14 +288,26 @@ func TestApprovedIgnoresBotComment(t *testing.T) {
 	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
 	s.Approval = "comment"
 	s.Approvers = []string{"some-bot"}
-	f.AddComment(s.PR.Number, forge.Comment{Author: "some-bot", AuthorType: "Bot", Body: "hoist approve " + s.ID, CreatedAt: s.PR.CreatedAt.Add(time.Second)})
+	// #123: this test failed once on CI, and the assertion below was never the reason — the
+	// failure was t.TempDir's cleanup racing git's detached post-push maintenance in the bare
+	// origin (fixed in newFixtureOrigin's gitconfig, noBackgroundGitConfig). The message still
+	// names every timestamp the step compares, so a genuine anchor flip would be readable from
+	// the log instead of needing a re-run: the comment sits 1s after PR.CreatedAt, which is
+	// itself after the commit's second-truncated committer date, so it is always at-or-after
+	// the anchor and only the Bot check keeps it from satisfying.
+	comment := forge.Comment{Author: "some-bot", AuthorType: "Bot", Body: "hoist approve " + s.ID, CreatedAt: s.PR.CreatedAt.Add(time.Second)}
+	f.AddComment(s.PR.Number, comment)
+	commitTime, err := (git.Exec{}).CommitTime(ctx(), s.CloneDir, s.CommitSHA)
+	if err != nil {
+		t.Fatalf("CommitTime for %s in %s: %v", s.CommitSHA, s.CloneDir, err)
+	}
 
 	obs, err := (ApprovedStep{Forge: f, Git: git.Exec{}}).Observe(ctx(), s)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Observe: %v (commit %s at %s, PR.CreatedAt %s, comment %s)", err, s.CommitSHA, commitTime.Format(time.RFC3339Nano), s.PR.CreatedAt.Format(time.RFC3339Nano), comment.CreatedAt.Format(time.RFC3339Nano))
 	}
 	if obs.Satisfied {
-		t.Fatalf("a Bot-typed account must never satisfy even if listed in Approvers: %+v", obs)
+		t.Fatalf("a Bot-typed account must never satisfy even if listed in Approvers: %+v (commit %s at %s, PR.CreatedAt %s, comment %s)", obs, s.CommitSHA, commitTime.Format(time.RFC3339Nano), s.PR.CreatedAt.Format(time.RFC3339Nano), comment.CreatedAt.Format(time.RFC3339Nano))
 	}
 }
 
