@@ -435,9 +435,13 @@ func (e Exec) refExists(ctx context.Context, cloneDir, ref string) (bool, error)
 // Whichever wins is returned fully qualified (refs/remotes/origin/<base>, refs/heads/<base>),
 // never as the short name: `git worktree add` resolves a short name by ref precedence, under
 // which a tag wins over a branch, so a tag named "main" or "origin/main" pointing at a divergent
-// commit would otherwise seed the promotion worktree from the tag (issue #100). Only a base that
-// is neither a remote-tracking nor a local branch is passed through as written, so a caller
-// naming a bare sha still works — and a caller naming a tag gets the tag it asked for.
+// commit would otherwise seed the promotion worktree from the tag (issue #100). A base that is
+// neither a remote-tracking nor a local branch is passed through only when it cannot be a short
+// name at all: an explicit object id (hex) or an already-qualified refs/… name. Anything else is
+// an error naming the base and both refs looked for — never handed to git unqualified, where ref
+// precedence would let a surviving refs/tags/<base> answer for a branch that is gone (`hoist
+// resume` before BranchedStep ever made its worktree: the TUI saves state first, and if both
+// branch refs have since vanished the tag would silently seed the promotion).
 func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, error) {
 	for _, prefix := range []string{"refs/remotes/origin/", "refs/heads/"} {
 		ok, err := e.refExists(ctx, cloneDir, prefix+base)
@@ -448,7 +452,24 @@ func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, e
 			return prefix + base, nil
 		}
 	}
-	return base, nil
+	if isObjectID(base) || strings.HasPrefix(base, "refs/") {
+		return base, nil
+	}
+	return "", fmt.Errorf("base %q is neither a branch (refs/remotes/origin/%s, refs/heads/%s) nor an object id", base, base, base)
+}
+
+// isObjectID reports whether s is an abbreviated or full hex object id (7–64 characters), the
+// one unqualified form resolveBase passes to git as written.
+func isObjectID(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // LsRemoteBranch implements Git.

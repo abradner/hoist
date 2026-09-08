@@ -842,6 +842,14 @@ func TestWorktreeBaseIgnoresTagsNamedLikeTheBase(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Positive control: the collision has to exist for the subtests to prove anything —
+	// without it they pass against a resolveBase that hands git the short name.
+	for _, tag := range []string{"refs/tags/main", "refs/tags/origin/main"} {
+		got, ok, err := g.RevParse(ctx(), cloneDir, tag)
+		if err != nil || !ok || got != divergentSHA {
+			t.Fatalf("positive control: %s = %s ok=%v err=%v, want the divergent %s", tag, shortSHA(got), ok, err, shortSHA(divergentSHA))
+		}
+	}
 
 	check := func(t *testing.T, branch, want string) {
 		t.Helper()
@@ -874,6 +882,42 @@ func TestWorktreeBaseIgnoresTagsNamedLikeTheBase(t *testing.T) {
 		}
 		check(t, "hoist/app-production/tagged-local", baseSHA)
 	})
+}
+
+// TestWorktreeBaseRefusesATagOnlyBase is the other half of #100's tag precedence: when
+// neither branch ref exists, a base name that is not an object id or a refs/… name is refused,
+// naming both refs looked for — never passed to git short, where a surviving refs/tags/<base>
+// would answer (`hoist resume` after both branch refs vanished). A full sha still works.
+func TestWorktreeBaseRefusesATagOnlyBase(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	if err := runHost(t, cloneDir, "tag", "v9", "refs/heads/main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := g.RevParse(ctx(), cloneDir, "refs/tags/v9"); err != nil || !ok {
+		t.Fatalf("positive control: refs/tags/v9 ok=%v err=%v", ok, err)
+	}
+	err := g.Worktree(ctx(), cloneDir, filepath.Join(t.TempDir(), "wt"), "hoist/app-production/tagbase", "v9")
+	if err == nil {
+		t.Fatal("Worktree with base v9 (a tag, no branch) succeeded; want a refusal")
+	}
+	for _, want := range []string{`base "v9"`, "refs/remotes/origin/v9", "refs/heads/v9"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	sha, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok {
+		t.Fatalf("refs/heads/main: ok=%v err=%v", ok, err)
+	}
+	wt := filepath.Join(t.TempDir(), "wt-sha")
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/shabase", sha); err != nil {
+		t.Fatalf("Worktree with a full sha as base: %v", err)
+	}
+	if head, ok, err := g.RevParse(ctx(), wt, "HEAD"); err != nil || !ok || head != sha {
+		t.Fatalf("HEAD in %s = %s ok=%v err=%v, want %s", wt, shortSHA(head), ok, err, shortSHA(sha))
+	}
 }
 
 func shortSHA(s string) string {
