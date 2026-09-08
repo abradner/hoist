@@ -12,7 +12,9 @@ hoist is a Go terminal UI that promotes container images between environments in
 GitOps repository, and drives the whole path from edit to rollout: commit, PR, CI, human approval,
 merge, Argo refresh, Deployment watch — with resume after interruption. It is a single-operator
 tool for the author's own GitOps repo first, written so other repos with the same shape can use it.
-Status: greenfield, pre-alpha; milestones M0–M7 are tracked in issues.
+Status: pre-alpha, first tag `v0.1.0`; milestones M0–M10 have landed on `main` and the remaining
+work (TUI/CLI parity gaps, the design questions the tracker flags, M13's first-run wizard) is
+tracked in issues.
 
 Domain nouns, as this repo uses them:
 
