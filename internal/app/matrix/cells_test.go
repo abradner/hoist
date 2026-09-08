@@ -171,6 +171,33 @@ func TestComputeDrift(t *testing.T) {
 	}
 }
 
+// Split is per image repo, on builds (#118): one tag pinned to two digests is split; a
+// multi-repo cell whose sidecar alone runs under two tags is split; and the mixed case —
+// one tag pinned and bare — stays unpinned, since that is one build.
+func TestSplitIsJudgedPerRepoOnBuilds(t *testing.T) {
+	cases := []struct {
+		name string
+		occs []gitops.Occurrence
+		want Cell
+	}{
+		{"one tag, two digests", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", digestA), occ("ghcr.io/x/app", "v1", digestB)},
+			Cell{Present: true, Text: "2 versions", State: StateSplit, Pinned: true}},
+		{"intra-repo split inside a multi-repo cell", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", ""), occ("ghcr.io/x/sidecar", "v1", ""), occ("ghcr.io/x/sidecar", "v2", "")},
+			Cell{Present: true, Text: "2 images", State: StateSplit}},
+		{"same tag pinned and bare is one build", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", digestA), occ("ghcr.io/x/app", "v1", "")},
+			Cell{Present: true, Text: "v1", State: StateUnpinned}},
+		{"two repos each on one build", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", digestA), occ("ghcr.io/x/sidecar", "v2", digestA)},
+			Cell{Present: true, Text: "2 images", State: StatePinned, Pinned: true}},
+	}
+	for _, tc := range cases {
+		got := cellFor(&gitops.Family{Name: "f", Occurrences: tc.occs}, []string{"ghcr.io/"}, nil)
+		got.key = ""
+		if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(Cell{})); diff != "" {
+			t.Errorf("%s (-want +got):\n%s", tc.name, diff)
+		}
+	}
+}
+
 func TestCellStringBlankWhenAbsent(t *testing.T) {
 	if got := (Cell{Pinned: true, State: StatePinned, Text: "v1"}).String(); got != "" {
 		t.Fatalf("absent cell renders %q", got)
