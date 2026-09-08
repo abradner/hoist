@@ -287,7 +287,7 @@ func newTwoFamilyOrigin(t *testing.T) (cloneDir string) {
 	t.Helper()
 	home := t.TempDir()
 	gitconfig := filepath.Join(home, ".gitconfig")
-	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"
+	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" + noBackgroundGitConfig
 	if err := os.WriteFile(gitconfig, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
