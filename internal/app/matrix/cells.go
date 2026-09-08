@@ -40,10 +40,11 @@ type Cell struct {
 	// Present is false when the family has no Application in this env; the other fields
 	// are then zero and String renders blank.
 	Present bool
-	// Text is the tag shown: the single first-party tag, "N images" when the family's
-	// first-party occurrences span N image repos, or "N versions" when the one image repo
-	// runs under N builds inside the env (see builds). A third-party-only family shows the
-	// same for its third-party images.
+	// Text is the tag shown: the single first-party tag, "v1/v2" when one build is pinned
+	// under several tags (sorted, so the text does not depend on file order), "N images"
+	// when the family's first-party occurrences span N image repos, or "N versions" when the
+	// one image repo runs under N builds inside the env (see builds). A third-party-only
+	// family shows the same for its third-party images.
 	Text string
 	// State is the word beside Text; "" for a present cell with no images at all. The split
 	// word is judged per image repo, so a "N images" cell is split whenever any one of its
@@ -60,12 +61,16 @@ type Cell struct {
 	ThirdParty bool
 	// Running is what the cluster reports for a drifted cell, for the sentence under the
 	// table ("marketing runs sha-77c0ffe here; manifest says …"): the one running build's
-	// tag or short digest, or "N builds running (a, b)" when the pods run several. Empty
-	// unless State is StateDrifted.
+	// tag or short digest, or "N builds running (a, b)" when the pods run several. Builds
+	// are counted by digest where the pod reported one (else by tag), and two builds under
+	// the same tag are each named "tag · <short digest>" so they can be told apart — the
+	// case a mutable tag makes most likely. Empty unless State is StateDrifted.
 	Running string
-	// Compared names the comparison that decided the drift — "by digest" when the manifest
-	// reference is pinned, "by tag" when it is bare — so the sentence says what the
-	// evidence was. Empty unless State is StateDrifted.
+	// Compared names the comparison that decided the drift — "by digest" when any manifest
+	// reference for the repo is pinned and was compared with the undeclared build's digest,
+	// "by tag" only when every comparison made for that build was against a bare manifest
+	// reference — so the sentence says the strongest evidence it has. Empty unless State is
+	// StateDrifted.
 	Compared string
 	// key is the sorted distinct ref set the Differs comparison runs on.
 	key string
@@ -227,7 +232,11 @@ func drifted(first []image.Ref, running map[string][]image.Ref) ([]image.Ref, st
 				if how == "" {
 					continue
 				}
-				compared = how
+				// A mixed manifest (one pinned reference, one bare) makes both comparisons;
+				// the digest is the stronger evidence, whichever reference came last.
+				if compared == "" || how == "by digest" {
+					compared = how
+				}
 				if same {
 					matched = true
 					break
@@ -256,13 +265,50 @@ func sameBuild(manifest, running image.Ref) (same bool, compared string) {
 }
 
 // runningText is the drifted sentence's subject: one build's tag or short digest, or "N
-// builds running (a, b)" when the pods run several.
+// builds running (a, b)" when the pods run several. A build is a digest where the pod
+// reported one, else a tag — never the tag alone, which would fold v1@A and v1@B into one
+// "v1" and hide exactly the rollout a moved tag produces. Two builds under one tag are told
+// apart as "v1 · aaaaaaaaaaaa"; names are sorted so the sentence is stable.
 func runningText(runs []image.Ref) string {
-	names := distinct(runs, tagOrDigest)
+	seen := map[string]bool{}
+	var found []image.Ref
+	tagCount := map[string]int{}
+	for _, r := range runs {
+		key := r.Digest
+		if key == "" {
+			key = "tag:" + r.Tag
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		found = append(found, r)
+		if r.Tag != "" {
+			tagCount[r.Tag]++
+		}
+	}
+	names := make([]string, 0, len(found))
+	for _, r := range found {
+		name := tagOrDigest(r)
+		if r.Tag != "" && r.Digest != "" && tagCount[r.Tag] > 1 {
+			name = r.Tag + " · " + shortHex(r.Digest)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	if len(names) == 1 {
 		return names[0]
 	}
 	return fmt.Sprintf("%d builds running (%s)", len(names), strings.Join(names, ", "))
+}
+
+// shortHex is the first 12 hex characters of a digest, without its algorithm prefix.
+func shortHex(digest string) string {
+	d := strings.TrimPrefix(digest, "sha256:")
+	if len(d) > 12 {
+		d = d[:12]
+	}
+	return d
 }
 
 func isFirstParty(repo string, prefixes []string) bool {
@@ -288,6 +334,17 @@ func cellText(refs []image.Ref) string {
 	case 1:
 		if b := builds(refs, repos[0]); len(b) > 1 {
 			return fmt.Sprintf("%d versions", len(b))
+		}
+		// One build — but it may be pinned under several tags (v1@A and v2@A): name every
+		// tag, sorted, rather than whichever occurrence came first in the file.
+		var tagged []image.Ref
+		for _, r := range refs {
+			if r.Tag != "" {
+				tagged = append(tagged, r)
+			}
+		}
+		if tags := distinct(tagged, func(r image.Ref) string { return r.Tag }); len(tags) > 0 {
+			return strings.Join(tags, "/")
 		}
 		return tagOrDigest(refs[0])
 	default:
