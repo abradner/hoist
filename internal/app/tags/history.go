@@ -11,18 +11,28 @@ import (
 // — how many commits ahead of what the env declares, their subjects, and which of them carry
 // a migration. Derived here with no terminal dependency; model.go lays it out.
 
-// Declared is what the target env's manifests declare for this image repo today: the
-// reference every row is compared against ("v3 is 14 commits ahead of v1"), and the
-// occurrence whose line the live-age blame dates.
+// Declared is what the target env's manifests declare for this image repo today. Refs is
+// every distinct reference the env carries, in file-then-line order — one entry in the
+// common case, several when the env is split (the matrix's own word for one image repo at
+// two references). Ref is Refs[0]: the reference every row's commit delta is measured
+// against ("v3 is 14 commits ahead of v1"), and Occurrence its first occurrence, whose line
+// the live-age blame dates. A screen that renders Ref alone for a split env is claiming one
+// declared build where there are several (#119): it must render Refs, or say which one the
+// delta is from.
 type Declared struct {
 	Ref        image.Ref
 	Occurrence gitops.Occurrence
+	Refs       []image.Ref
 }
 
-// DeclaredIn finds the target env's declared reference for imageRepo: the first occurrence,
-// by family then file then line, so the answer is stable when the env carries several. ok is
-// false when the env has no occurrence of the repo at all (a first deploy — there is nothing
-// to compare with, and gitops.BuildDeployPlan would refuse the write anyway).
+// Split reports whether the env declares this image repo at more than one reference.
+func (d Declared) Split() bool { return len(d.Refs) > 1 }
+
+// DeclaredIn finds the target env's declared references for imageRepo: every distinct
+// reference across its families, ordered by file then line, so the answer is stable when the
+// env carries several and Ref is always the same one of them. ok is false when the env has
+// no occurrence of the repo at all (a first deploy — there is nothing to compare with, and
+// gitops.BuildDeployPlan would refuse the write anyway).
 func DeclaredIn(repo *gitops.Repo, imageRepo, target string) (Declared, bool) {
 	if repo == nil {
 		return Declared{}, false
@@ -53,5 +63,13 @@ func DeclaredIn(repo *gitops.Repo, imageRepo, target string) (Declared, bool) {
 		}
 		return found[i].Line < found[j].Line
 	})
-	return Declared{Ref: found[0].Ref, Occurrence: found[0]}, true
+	seen := map[string]bool{}
+	var refs []image.Ref
+	for _, o := range found {
+		if k := o.Ref.String(); !seen[k] {
+			seen[k] = true
+			refs = append(refs, o.Ref)
+		}
+	}
+	return Declared{Ref: found[0].Ref, Occurrence: found[0], Refs: refs}, true
 }

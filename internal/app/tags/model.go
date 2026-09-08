@@ -805,7 +805,7 @@ func (m Model) paneRows() int {
 func (m Model) metaLines() int {
 	n := 1
 	if m.declared != nil {
-		n++
+		n += lipgloss.Height(m.declaredLine()) // a split env's line may wrap
 	}
 	if m.hasStagingMismatch {
 		n += lipgloss.Height(m.wrap(m.stagingNote()))
@@ -973,12 +973,24 @@ func (m Model) productionChip() string {
 }
 
 // declaredLine words what the env declares: "app-production declares  v1 · 111111111111 ·
-// since 34 days ago". "Declares", never "runs": this is the manifest, not the cluster.
+// since 34 days ago". "Declares", never "runs": this is the manifest, not the cluster. A
+// split env (one image repo at several references, #119) names every reference and says
+// which one the commit pane measures from — the first by file then line (Declared.Ref) —
+// rather than claiming a single declared build; BuildDeployPlan rewrites every one of them.
 func (m Model) declaredLine() string {
 	ref := m.declared.Ref
 	parts := []string{m.styles.Dim.Render(m.target + " declares"), "  " + m.styles.Accent.Render(tagOrDigest(ref))}
 	if ref.Digest != "" {
 		parts = append(parts, " · "+ShortDigest(ref.Digest))
+	}
+	if m.declared.Split() {
+		for _, r := range m.declared.Refs[1:] {
+			parts = append(parts, m.styles.Dim.Render(" and ")+m.styles.Accent.Render(tagOrDigest(r)))
+			if r.Digest != "" {
+				parts = append(parts, " · "+ShortDigest(r.Digest))
+			}
+		}
+		parts = append(parts, m.styles.Warn.Render(" — split"), m.styles.Dim.Render("; commits are counted from "+tagOrDigest(ref)))
 	}
 	switch {
 	case m.ageKnown && m.ageErr == nil:
@@ -992,7 +1004,7 @@ func (m Model) declaredLine() string {
 	case m.histFn.LiveAge != nil:
 		parts = append(parts, m.styles.Dim.Render(" · since …"))
 	}
-	return strings.Join(parts, "")
+	return m.wrap(strings.Join(parts, ""))
 }
 
 func tagOrDigest(r image.Ref) string {
@@ -1182,16 +1194,33 @@ func (m Model) rowLine(w [4]int, r Row) string {
 
 // provenance is the fourth column: where else this tag is — "in app-staging" when the
 // paired staging env's committed manifest carries it, "◂ declared here" for what the target
-// env declares now. Both are tag comparisons, and the staging note says what that proves.
+// env declares now (any of its references, when split). Both are tag comparisons, and the
+// staging note says what that proves.
 func (m Model) provenance(r Row) string {
 	var parts []string
-	if m.declared != nil && m.declared.Ref.Tag == r.Tag {
+	if m.declared != nil && m.declaresTag(r.Tag) {
 		parts = append(parts, m.styles.Accent.Render("◂ declared here"))
 	}
 	if m.hasStagingMismatch && m.stagingRuns(r.Tag) {
 		parts = append(parts, m.styles.Good.Render("in "+m.stagingEnv))
 	}
 	return strings.Join(parts, "  ")
+}
+
+// declaresTag reports whether any of the target env's declared references carries tag.
+func (m Model) declaresTag(tag string) bool {
+	if m.declared == nil {
+		return false
+	}
+	if len(m.declared.Refs) == 0 {
+		return m.declared.Ref.Tag == tag // a Declared built by hand, without Refs
+	}
+	for _, r := range m.declared.Refs {
+		if r.Tag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // builtCell is when the build was made, relative to now: the app repo's git tag date when
