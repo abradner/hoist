@@ -428,16 +428,25 @@ func (e Exec) refExists(ctx context.Context, cloneDir, ref string) (bool, error)
 // push (PushHeadTo) already leaves it pointing at what was just pushed without any extra step;
 // FetchBranch exists as a belt-and-suspenders refresh for the rest (someone else's push through
 // a different clone entirely, or a remote whose fetch refspec doesn't cover this side effect).
-// Falling back to the bare name keeps every existing caller working in a repo with no "origin"
+// Falling back to the local branch keeps every existing caller working in a repo with no "origin"
 // remote configured at all, or one nothing has ever pushed to or fetched from (some tests
 // construct exactly that).
+//
+// Whichever wins is returned fully qualified (refs/remotes/origin/<base>, refs/heads/<base>),
+// never as the short name: `git worktree add` resolves a short name by ref precedence, under
+// which a tag wins over a branch, so a tag named "main" or "origin/main" pointing at a divergent
+// commit would otherwise seed the promotion worktree from the tag (issue #100). Only a base that
+// is neither a remote-tracking nor a local branch is passed through as written, so a caller
+// naming a bare sha still works — and a caller naming a tag gets the tag it asked for.
 func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, error) {
-	ok, err := e.refExists(ctx, cloneDir, "refs/remotes/origin/"+base)
-	if err != nil {
-		return "", err
-	}
-	if ok {
-		return "origin/" + base, nil
+	for _, prefix := range []string{"refs/remotes/origin/", "refs/heads/"} {
+		ok, err := e.refExists(ctx, cloneDir, prefix+base)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return prefix + base, nil
+		}
 	}
 	return base, nil
 }

@@ -92,14 +92,18 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	// Fully qualified refs, not the short names: rev-parse takes any revision, so a tag
 	// named like the branch would otherwise pass as the local branch, and a tag named
 	// origin/<base> would pass as a remote-tracking ref no prune could ever remove (Copilot on
-	// PR #99). The short names are kept for the messages and for the tree reads below, which
-	// git resolves the same way for both.
-	localSHA, localOK, err := g.RevParse(ctx, cloneDir, "refs/heads/"+base)
+	// PR #99). The tree reads below use the same qualified refs: `git ls-tree` resolves a short
+	// name by ref precedence too, under which a tag named like the branch wins, so a divergent
+	// tag "main" would otherwise have its tree compared instead of the branch's (issue #100).
+	// Only the messages keep the short names.
+	localRef := "refs/heads/" + base
+	localSHA, localOK, err := g.RevParse(ctx, cloneDir, localRef)
 	if err != nil {
 		return err
 	}
 	originRef := "origin/" + base
-	originSHA, originOK, err := g.RevParse(ctx, cloneDir, "refs/remotes/"+originRef)
+	originFullRef := "refs/remotes/" + originRef
+	originSHA, originOK, err := g.RevParse(ctx, cloneDir, originFullRef)
 	if err != nil {
 		return err
 	}
@@ -125,9 +129,10 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	// promotion branch from: origin/<base> whenever that ref exists at all — the bare local
 	// branch name only when there is none to prefer (no "origin" remote configured, or nothing
 	// ever fetched from it — some tests construct exactly that; resolveBase's own fallback).
-	targetRef, targetSHA := base, localSHA
+	// targetFullRef is the same choice fully qualified, for the object reads.
+	targetRef, targetFullRef, targetSHA := base, localRef, localSHA
 	if originOK {
-		targetRef, targetSHA = originRef, originSHA
+		targetRef, targetFullRef, targetSHA = originRef, originFullRef, originSHA
 	}
 
 	byFile := map[string][]gitops.Edit{}
@@ -154,7 +159,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		if err != nil {
 			return err
 		}
-		localBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, base, f)
+		localBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, localRef, f)
 		if err != nil {
 			return err
 		}
@@ -165,7 +170,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		if targetRef == base {
 			continue // no origin/<base> ref exists at all: the local branch IS the target.
 		}
-		targetBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, targetRef, f)
+		targetBlob, ok, err := g.LsTreeBlob(ctx, cloneDir, targetFullRef, f)
 		if err != nil {
 			return err
 		}
@@ -232,11 +237,14 @@ func discoverAtFreshBase(ctx context.Context, g git.Git, cloneDir, base string) 
 	// exists, falling back to the bare branch name only for a repo with no "origin" configured
 	// at all, or one nothing has ever fetched from — resolveBase's own doc comment explains why
 	// (some tests construct exactly that; a real clone always has one after the fetch above).
-	ref := base
-	if _, ok, rerr := g.RevParse(ctx, cloneDir, "origin/"+base); rerr != nil {
+	// Fully qualified either way, for the same reason as checkCloneCurrentForBase's reads: a tag
+	// named "origin/<base>" or "<base>" would otherwise win the short-name lookup and the
+	// snapshot would be checked out from the tag (issue #100).
+	ref := "refs/heads/" + base
+	if _, ok, rerr := g.RevParse(ctx, cloneDir, "refs/remotes/origin/"+base); rerr != nil {
 		return "", nil, rerr
 	} else if ok {
-		ref = "origin/" + base
+		ref = "refs/remotes/origin/" + base
 	}
 	tmp, err := os.MkdirTemp("", "hoist-direct-discover-*")
 	if err != nil {

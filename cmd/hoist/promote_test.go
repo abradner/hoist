@@ -1180,6 +1180,65 @@ func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
 // The base classification resolves branch refs, not any revision: a tag named like the base
 // is not a local branch, so it is reported as unresolved rather than as a local-only branch
 // (Copilot, PR #99).
+// TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase is issue #100's regression test for the reads
+// AFTER the classification: a real branch main AND tags named "main" and "origin/main", pointing
+// at a divergent commit that changes the very file the promotion edits. Git resolves a short
+// name by ref precedence, under which refs/tags/<name> wins, so an LsTreeBlob against the short
+// "main" compared the tag's tree with the clone's checkout and refused with "uncommitted local
+// changes" for a clone that had none; the short "origin/main" had the same problem for the
+// target-side read and for direct mode's throwaway snapshot. With every read fully qualified the
+// branch wins and the promotion goes through — both the PR flow and direct mode, whose
+// checkNoMissingOccurrenceAtFreshBase is the one caller of discoverAtFreshBase.
+//
+// Mutant-verified: passing the short "main" to LsTreeBlob again fails both subtests with
+// `has uncommitted local changes not yet in "main"`; passing the short origin/main to
+// WorktreeAtRef again fails the direct subtest with `origin/main has occurrence(s) ... doesn't
+// know about at all` — `git worktree add --detach` takes the tag silently, warning only.
+func TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase(t *testing.T) {
+	prodPath := "cluster/apps/app-production/app/deployment.yaml"
+	tagBase := func(t *testing.T, clone string) {
+		t.Helper()
+		runGitHost(t, clone, "checkout", "-q", "-b", "scratch")
+		// The divergent commit changes the planned occurrence's value AND adds a second
+		// occurrence the fixture's real main never had: the first is what the freshness check's
+		// blob comparison sees, the second is what direct mode's fresh-snapshot discovery sees
+		// (it compares occurrences by position, never by value, so a changed value alone would
+		// not tell the tag's tree from the branch's there).
+		content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v7@sha256:" + strings.Repeat("7", 64) + "\n" +
+			"        - name: sidecar\n          image: ghcr.io/example/app:v7@sha256:" + strings.Repeat("7", 64) + "\n"
+		if err := os.WriteFile(filepath.Join(clone, prodPath), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGitHost(t, clone, "add", ".")
+		runGitHost(t, clone, "commit", "-q", "-m", "divergent, never pushed")
+		runGitHost(t, clone, "checkout", "-q", "main")
+		runGitHost(t, clone, "tag", "main", "refs/heads/scratch")
+		runGitHost(t, clone, "tag", "origin/main", "refs/heads/scratch")
+	}
+	t.Run("pr", func(t *testing.T) {
+		cfgPath, clone, f := newPromoteFixture(t)
+		tagBase(t, clone)
+		var out, errOut bytes.Buffer
+		if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}, &out, &errOut); got != 0 {
+			t.Fatalf("exit %d, want 0 — a tag named like the base was read instead of the branch; stderr: %s", got, errOut.String())
+		}
+		if len(f.PRs()) != 1 {
+			t.Fatalf("expected exactly one PR, got %d", len(f.PRs()))
+		}
+	})
+	t.Run("direct", func(t *testing.T) {
+		cfgPath, clone, f := newPromoteFixture(t)
+		tagBase(t, clone)
+		var out, errOut bytes.Buffer
+		if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--direct", "--confirm-direct=app-production"}, &out, &errOut); got != 0 {
+			t.Fatalf("exit %d, want 0 — a tag named like the base was read instead of the branch; stderr: %s", got, errOut.String())
+		}
+		if len(f.PRs()) != 0 {
+			t.Fatalf("direct mode must never open a PR, got %+v", f.PRs())
+		}
+	})
+}
+
 func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	runGitHost(t, clone, "tag", "release", "main")
