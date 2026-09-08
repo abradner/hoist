@@ -5,26 +5,26 @@
 │The purge cronjob scans events by created_at every hour.                                          │
 │                                                                                                  │
 │Expect around 4 minutes on production-sized data.                                                 │
-├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                  │
 │migrations in this commit:                                                                        │
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                                    ↑/↓ next commit · space review the change · esc back to the list
+                           ↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back
