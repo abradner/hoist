@@ -1,0 +1,24 @@
+╭─ hoist · deploy ─────────────────────────────────────────────────────────────╮
+│ghcr.io/example/app  →  app-staging                                           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│   TAG                         BUILT          DIGEST                          │
+│▸ v202603040428               1 day ago      555555555555                     │
+│  v202602280900               5 days ago     666666666666                     │
+│  v1                          2 months ago   777777777777                     │
+│── digest tags (sha-…): builds named by hash ──                               │
+│  sha-055c877f                4 days ago     444444444444                     │
+│── moving tags (latest, branches): not releases ──                            │
+│  fix-docker-workflow-secre…  1 day ago      111111111111                     │
+│  latest                      2 days ago     222222222222                     │
+│  main                        3 days ago     333333333333                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│no commit history — app-staging does not declare ghcr.io/example/app yet, so …│
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+             ↑/↓ move · / filter · space review the change · D direct · esc back

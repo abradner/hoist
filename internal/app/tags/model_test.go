@@ -937,6 +937,47 @@ func TestViewGolden(t *testing.T) {
 	uitest.Golden(t, "tags-production", m.View(), 80, 24)
 }
 
+// The live registry listed branch tags, latest and sha- entries interleaved with the
+// releases (#91): the table groups them under dividers, releases first, drops nothing, and
+// `/` still searches every group.
+func TestViewGroupsTagsByClass(t *testing.T) {
+	regTags := []string{"fix-docker-workflow-secrets-context", "latest", "main", "sha-055c877f", "v202603040428", "v202602280900", "v1"}
+	gitTags := []forge.GitTag{
+		{Name: "v1", Date: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{Name: "v202602280900", Date: time.Date(2026, 2, 28, 9, 0, 0, 0, time.UTC)},
+		{Name: "v202603040428", Date: time.Date(2026, 3, 4, 4, 28, 0, 0, time.UTC)},
+	}
+	metas := map[string]registry.ImageMeta{}
+	for i, tag := range regTags {
+		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat(string(rune('1'+i)), 64), Created: fixedNow.AddDate(0, 0, -1-i)}
+	}
+	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
+		m = drain(m.SetSize(size[0], size[1]).SetStyles(ui.NewStyles(true)), m.Init())
+		v := ansi.Strip(m.View())
+		for _, want := range []string{"digest tags (sha-…)", "moving tags (latest, branches)", "sha-055c877f", "latest", "main", "fix-docker-workflow-secre"} {
+			if !strings.Contains(v, want) {
+				t.Errorf("%dx%d view lacks %q — nothing may be filtered out:\n%s", size[0], size[1], want, v)
+			}
+		}
+		if got := tagsOf(m.rows); got[0] != "v202603040428" || got[3] != "sha-055c877f" || got[4] != "fix-docker-workflow-secrets-context" {
+			t.Errorf("rows must be grouped releases, digest, moving: %v", got)
+		}
+		uitest.Golden(t, "tags-grouped", m.View(), size[0], size[1])
+	}
+	// `/` searches every group: "a" matches no release, one digest tag and two moving ones.
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
+	m = drain(m.SetSize(80, 24).SetStyles(ui.NewStyles(true)), m.Init())
+	m = uitest.Keys(m, updateFn, "/", "a")
+	if got := tagsOf(m.filtered()); len(got) != 3 || got[0] != "sha-055c877f" || got[2] != "main" {
+		t.Fatalf("filter must span every group: %v", got)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "digest tags") || !strings.Contains(v, "moving tags") {
+		t.Fatalf("a filtered window opening mid-group still names its groups:\n%s", v)
+	}
+}
+
 // TestDirectGestureCompletesThroughRealInput is the regression test for a gesture that had
 // never worked: huh.NewConfirm leaves its keymap zero-valued, and a zero key.Binding matches
 // nothing, so a Confirm used standalone (rather than inside a huh.Form, which installs the

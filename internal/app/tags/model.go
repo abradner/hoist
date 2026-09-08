@@ -870,7 +870,33 @@ func (m Model) pageSize() int {
 	if m.notice != "" {
 		body--
 	}
-	return max(body, minPageSize)
+	return max(body-m.dividerRows(), minPageSize)
+}
+
+// dividerRows is how many table rows the dividers can take from the page: one per group
+// present beyond the release group (#91), and one for the "unordered" rule when a mapped
+// repo has a release tag with no git date. Counted over the whole filtered list rather than
+// the window — the window depends on the page size — so a divider outside the window
+// over-reserves a row rather than pushing the cursor's row off the bottom of the frame.
+func (m Model) dividerRows() int {
+	classes := map[Class]bool{}
+	unordered := false
+	for _, r := range m.filtered() {
+		classes[r.Class] = true
+		if m.mapped && r.Class == ClassRelease && !r.HasGitDate {
+			unordered = true
+		}
+	}
+	n := 0
+	for c := range classes {
+		if c != ClassRelease {
+			n++
+		}
+	}
+	if unordered {
+		n++
+	}
+	return n
 }
 
 // visibleWindow computes the half-open [start,end) slice of rows this screen keeps warm and
@@ -1169,9 +1195,19 @@ func (m Model) tableSection() string {
 	// is always among what's drawn — moving the cursor past one screen's worth of rows must
 	// scroll the window with it, never leave the selected row off-screen (finding 5).
 	start, end := m.visibleWindow(rows)
+	// Groups (#91): a divider above the first drawn row of the digest and moving groups —
+	// also when the window opens mid-group, so a scrolled page still says what it is
+	// looking at. The release group is the default view and gets none; the "unordered"
+	// divider (a mapped repo's releases with no matching git tag) lives inside it only,
+	// since a digest or moving tag never matches a git tag and would always be "unordered".
 	dividerShown := false
-	for _, r := range rows[start:end] {
-		if m.mapped && !r.HasGitDate && !dividerShown {
+	prev := ClassRelease
+	for i, r := range rows[start:end] {
+		if r.Class != prev || (i == 0 && r.Class != ClassRelease) {
+			b.WriteString("\n" + m.styles.Dim.Render(ansi.Truncate(r.Class.Divider(), max(m.width-2, 10), "…")))
+		}
+		prev = r.Class
+		if m.mapped && r.Class == ClassRelease && !r.HasGitDate && !dividerShown {
 			b.WriteString("\n" + m.styles.Dim.Render("── unordered (no matching git tag) ──"))
 			dividerShown = true
 		}
