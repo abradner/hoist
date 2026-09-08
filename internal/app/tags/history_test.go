@@ -35,10 +35,28 @@ func fixtureRepo() *gitops.Repo {
 	}}
 }
 
+// unsplitRepo is fixtureRepo with every occurrence at the same reference: the common case,
+// and the positive control for the split tests below.
+func unsplitRepo() *gitops.Repo {
+	r := fixtureRepo()
+	occ := &r.Envs["app-production"].Families["zed"].Occurrences[0]
+	occ.Ref = r.Envs["app-production"].Families["app"].Occurrences[0].Ref
+	return r
+}
+
 func TestDeclaredInIsStableAndFirstByFamilyFileLine(t *testing.T) {
 	d, ok := DeclaredIn(fixtureRepo(), "ghcr.io/example/app", "app-production")
 	if !ok || d.Ref.Tag != "v1" || d.Occurrence.Line != 21 {
 		t.Fatalf("declared = %+v ok=%v", d, ok)
+	}
+	// fixtureRepo's app-production carries the repo at v1 (twice, app/) and v0 (zed/): a split
+	// env declares two builds, and Refs names both, distinct, in file-then-line order (#119).
+	if len(d.Refs) != 2 || d.Refs[0].Tag != "v1" || d.Refs[1].Tag != "v0" || !d.Split() {
+		t.Fatalf("a split env must expose every distinct declared ref, got %+v", d.Refs)
+	}
+	u, _ := DeclaredIn(unsplitRepo(), "ghcr.io/example/app", "app-production")
+	if len(u.Refs) != 1 || u.Split() {
+		t.Fatalf("an env agreeing with itself is not split, got %+v", u.Refs)
 	}
 	if _, ok := DeclaredIn(fixtureRepo(), "ghcr.io/example/other", "app-production"); ok {
 		t.Fatal("an image the env does not declare must not be found")
@@ -53,6 +71,12 @@ func TestDeclaredInIsStableAndFirstByFamilyFileLine(t *testing.T) {
 // carried on the message.
 func historyModel(t *testing.T, delta history.DeltaFunc, age history.LiveAgeFunc) Model {
 	t.Helper()
+	return historyModelOver(t, unsplitRepo(), delta, age)
+}
+
+// historyModelOver is historyModel with the gitops repo the declared reference is read from.
+func historyModelOver(t *testing.T, repo *gitops.Repo, delta history.DeltaFunc, age history.LiveAgeFunc) Model {
+	t.Helper()
 	regTags := []string{"v3", "v2", "v1"}
 	gitTags := []forge.GitTag{
 		{Name: "v1", Date: fixedNow.Add(-62 * 24 * time.Hour)},
@@ -64,7 +88,7 @@ func historyModel(t *testing.T, delta history.DeltaFunc, age history.LiveAgeFunc
 		"v2": {Digest: "sha256:" + strings.Repeat("2", 64)},
 		"v3": {Digest: "sha256:" + strings.Repeat("3", 64)},
 	}
-	d, _ := DeclaredIn(fixtureRepo(), "ghcr.io/example/app", "app-production")
+	d, _ := DeclaredIn(repo, "ghcr.io/example/app", "app-production")
 	m := New("ghcr.io/example/app", "app-production", Options{
 		Mapped: true, Production: true,
 		StagingEnv: "app-staging", StagingTags: []string{"v3"}, HasStagingMismatch: true,
@@ -170,6 +194,34 @@ func TestHistoryPaneShowsTheDeltaUnderTheCursor(t *testing.T) {
 	msg, ok := cmd().(SelectedMsg)
 	if !ok || msg.Tag != "v3" || msg.Delta == nil || len(msg.Delta.Commits) != 14 || msg.Declared == nil || msg.Declared.Ref.Tag != "v1" {
 		t.Fatalf("SelectedMsg = %+v", msg)
+	}
+}
+
+// A split target env (one image repo at two references — fixtureRepo's v1 in app/ and v0 in
+// zed/) never reads as declaring one build (#119): the header names both, says it is split
+// and which reference the commit count is measured from, and both rows carry the declared
+// marker. The commit pane keeps counting from the first-by-file reference (v1).
+func TestSplitTargetEnvIsNamedInHeader(t *testing.T) {
+	m := historyModelOver(t, fixtureRepo(), fourteenAhead, liveAge34Days)
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m = m.SetSize(size[0], size[1])
+		v := prose(m.View())
+		for _, want := range []string{
+			"app-production declares v1 · 111111111111 and v0 — split; commits are counted from v1 · since 4 weeks ago",
+			"v3 is 14 commits ahead of v1",
+		} {
+			if !strings.Contains(v, want) {
+				t.Errorf("%dx%d view lacks %q:\n%s", size[0], size[1], want, v)
+			}
+		}
+		if strings.Contains(v, "declares v1 · 111111111111 · since") {
+			t.Errorf("%dx%d header claims a single declared build for a split env:\n%s", size[0], size[1], v)
+		}
+		uitest.Golden(t, "tags-split", m.View(), size[0], size[1])
+	}
+	// Positive control: the unsplit env's header carries neither the word nor the rule.
+	if v := prose(historyModel(t, fourteenAhead, liveAge34Days).View()); strings.Contains(v, "split") {
+		t.Errorf("an env agreeing with itself must not be called split:\n%s", v)
 	}
 }
 
