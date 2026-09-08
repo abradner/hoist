@@ -24,8 +24,9 @@ const (
 	// StateUnpinned means at least one first-party occurrence is a bare tag — a moved tag is
 	// invisible to imagePullPolicy: IfNotPresent (AGENTS.md principle 3).
 	StateUnpinned State = "unpinned"
-	// StateSplit means one image repo runs under more than one reference inside the env — the
-	// condition the runbook blocks a promotion on, so it should look like a problem.
+	// StateSplit means one image repo runs under more than one build inside the env (two
+	// digests, or two tags — see builds) — the condition the runbook blocks a promotion on,
+	// so it should look like a problem. Judged per repo, so a multi-repo cell can be split too.
 	StateSplit State = "split"
 	// StateExternal means the family has no first-party image at all.
 	StateExternal State = "external"
@@ -40,11 +41,14 @@ type Cell struct {
 	// are then zero and String renders blank.
 	Present bool
 	// Text is the tag shown: the single first-party tag, "N images" when the family's
-	// first-party occurrences span N image repos, or "N versions" when one image repo runs
-	// under N references inside the env. A third-party-only family shows the same for its
-	// third-party images.
+	// first-party occurrences span N image repos, or "N versions" when the one image repo
+	// runs under N builds inside the env (see builds). A third-party-only family shows the
+	// same for its third-party images.
 	Text string
-	// State is the word beside Text; "" for a present cell with no images at all.
+	// State is the word beside Text; "" for a present cell with no images at all. The split
+	// word is judged per image repo, so a "N images" cell is split whenever any one of its
+	// repos runs under two builds, and a "N versions" cell is always split: Text counts repos
+	// or builds, State says whether any repo's builds disagree, and both come from builds.
 	State State
 	// Pinned: every first-party occurrence carries a digest.
 	Pinned bool
@@ -167,11 +171,14 @@ func cellFor(fam *gitops.Family, promotable []string, running map[string]image.R
 	if c.Pinned {
 		c.State = StatePinned
 	}
-	// Split is judged on what the cell shows — distinct tags (or digests for tag-less refs),
-	// the same basis as cellText's "N versions" — so the word and the text never disagree.
-	// Two occurrences of one tag, one pinned and one not, are unpinned, not split.
-	if repos := distinct(first, func(r image.Ref) string { return r.Repo }); len(repos) == 1 && len(distinct(first, tagOrDigest)) > 1 {
-		c.State = StateSplit
+	// Split is judged per image repo on builds (see builds): a repo that runs under two
+	// different builds is split whether or not the cell holds other repos too (#118).
+	// cellText counts the same builds, so "N versions" and the word never disagree.
+	for _, repo := range distinct(first, func(r image.Ref) string { return r.Repo }) {
+		if len(builds(first, repo)) > 1 {
+			c.State = StateSplit
+			break
+		}
 	}
 	if run, ok := drifted(first, running); ok {
 		c.State = StateDrifted
@@ -240,14 +247,53 @@ func cellText(refs []image.Ref) string {
 	case 0:
 		return "no images"
 	case 1:
-		tags := distinct(refs, tagOrDigest)
-		if len(tags) > 1 {
-			return fmt.Sprintf("%d versions", len(tags))
+		if b := builds(refs, repos[0]); len(b) > 1 {
+			return fmt.Sprintf("%d versions", len(b))
 		}
-		return tags[0]
+		return tagOrDigest(refs[0])
 	default:
 		return fmt.Sprintf("%d images", len(repos))
 	}
+}
+
+// builds is the distinct set of builds one image repo runs under among refs — the basis of
+// the split word and of cellText's "N versions". Two references are the same build when
+// both carry a digest and the digests agree, or when one carries no digest and the tags
+// agree; so v1@A and a bare v1 are one build (unpinned, not split), v1@A and v1@B are two
+// (one tag pinned to two builds — split), and v1 and v2 are two. Each entry is the digest
+// where one is known, else the tag.
+func builds(refs []image.Ref, repo string) []string {
+	var pinnedTags []string
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range refs {
+		if r.Repo != repo || !r.Pinned() {
+			continue
+		}
+		pinnedTags = append(pinnedTags, r.Tag)
+		if !seen[r.Digest] {
+			seen[r.Digest] = true
+			out = append(out, r.Digest)
+		}
+	}
+	for _, r := range refs {
+		if r.Repo != repo || r.Pinned() || seen["tag:"+r.Tag] {
+			continue
+		}
+		covered := false
+		for _, t := range pinnedTags {
+			if t != "" && t == r.Tag {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			seen["tag:"+r.Tag] = true
+			out = append(out, r.Tag)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // tagOrDigest is the tag, or a shortened digest for a tag-less reference.
