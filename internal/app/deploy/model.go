@@ -62,12 +62,37 @@ const (
 // History is what the picker already learned about the build being deployed, carried in so
 // this screen leads with it without a second fetch (tags.SelectedMsg). Delta is nil when
 // there is none, and Note then says why in a sentence. Declared is what the env declares
-// today and Since when its manifest line last changed (zero when unknown).
+// today — the reference the delta is measured against — and Since when its manifest line
+// last changed (zero when unknown). DeclaredRefs is every distinct reference the env
+// declares for the image repo, Declared first: several when the env is split, and the
+// summary then names each one, since "replacing v1" over an env that also runs v0 claims one
+// declared build where there are two (#151).
 type History struct {
-	Delta    *migrate.Delta
-	Note     string
-	Declared image.Ref
-	Since    time.Time
+	Delta        *migrate.Delta
+	Note         string
+	Declared     image.Ref
+	DeclaredRefs []image.Ref
+	Since        time.Time
+}
+
+// replacing is the summary's "replacing v1" clause, or "replacing v1 and v0 (split)" when
+// the env declares several references — with no terminal dependency, for tests.
+func (h History) replacing() string {
+	if h.Declared.Repo == "" {
+		return ""
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, r := range append([]image.Ref{h.Declared}, h.DeclaredRefs...) {
+		if n := tagOrDigest(r); !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	if len(names) == 1 {
+		return "replacing " + names[0]
+	}
+	return "replacing " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " (split)"
 }
 
 // Model is the deploy confirm screen.
@@ -417,8 +442,7 @@ func (m Model) summarySection() string {
 	} else if d.MigrationsIncomplete {
 		parts = append(parts, m.styles.Warn.Render("migrations unknown — the history is incomplete"))
 	}
-	if m.history.Declared.Repo != "" {
-		replacing := "replacing " + tagOrDigest(m.history.Declared)
+	if replacing := m.history.replacing(); replacing != "" {
 		if !m.history.Since.IsZero() {
 			replacing += ", live " + ui.Span(m.now().Sub(m.history.Since))
 		}

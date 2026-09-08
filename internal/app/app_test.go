@@ -1627,3 +1627,17 @@ func TestFlightOpenPRLaunchesOutsideUpdate(t *testing.T) {
 		t.Fatalf("running the command: calls=%d", calls)
 	}
 }
+
+// deployHistory carries every declared reference across to the confirm screen, Declared
+// first, so a split env's summary can name them all (#151).
+func TestDeployHistoryCarriesEveryDeclaredRef(t *testing.T) {
+	one := image.Ref{Repo: "ghcr.io/example/web", Tag: "v1"}
+	old := image.Ref{Repo: "ghcr.io/example/web", Tag: "v0"}
+	h := deployHistory(nil, &tags.Declared{Ref: one, Refs: []image.Ref{one, old}}, time.Time{}, "")
+	if h.Declared != one || len(h.DeclaredRefs) != 2 || h.DeclaredRefs[0] != one || h.DeclaredRefs[1] != old {
+		t.Fatalf("deployHistory = %+v; want Declared v1 and DeclaredRefs [v1 v0]", h)
+	}
+	if h := deployHistory(nil, nil, time.Time{}, "none"); h.Declared.Repo != "" || h.DeclaredRefs != nil {
+		t.Fatalf("no declared: %+v", h)
+	}
+}

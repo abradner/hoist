@@ -1177,9 +1177,6 @@ func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
 	}
 }
 
-// The base classification resolves branch refs, not any revision: a tag named like the base
-// is not a local branch, so it is reported as unresolved rather than as a local-only branch
-// (Copilot, PR #99).
 // TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase is issue #100's regression test for the reads
 // AFTER the classification: a real branch main AND tags named "main" and "origin/main", pointing
 // at a divergent commit that changes the very file the promotion edits. Git resolves a short
@@ -1239,6 +1236,9 @@ func TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase(t *testing.T) {
 	})
 }
 
+// The base classification resolves branch refs, not any revision: a tag named like the base
+// is not a local branch, so it is reported as unresolved rather than as a local-only branch
+// (Copilot, PR #99).
 func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	runGitHost(t, clone, "tag", "release", "main")
