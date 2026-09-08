@@ -1627,3 +1627,36 @@ func TestFlightOpenPRLaunchesOutsideUpdate(t *testing.T) {
 		t.Fatalf("running the command: calls=%d", calls)
 	}
 }
+
+// deployHistory carries every declared reference across to the confirm screen, Declared
+// first, so a split env's summary can name them all (#151).
+func TestDeployHistoryCarriesEveryDeclaredRef(t *testing.T) {
+	one := image.Ref{Repo: "ghcr.io/example/web", Tag: "v1"}
+	old := image.Ref{Repo: "ghcr.io/example/web", Tag: "v0"}
+	h := deployHistory(nil, &tags.Declared{Ref: one, Refs: []image.Ref{one, old}}, time.Time{}, "")
+	if h.Declared != one || len(h.DeclaredRefs) != 2 || h.DeclaredRefs[0] != one || h.DeclaredRefs[1] != old {
+		t.Fatalf("deployHistory = %+v; want Declared v1 and DeclaredRefs [v1 v0]", h)
+	}
+	if h := deployHistory(nil, nil, time.Time{}, "none"); h.Declared.Repo != "" || h.DeclaredRefs != nil {
+		t.Fatalf("no declared: %+v", h)
+	}
+}
+
+// The root builds the matrix with no cluster question and installs one through WithDrift
+// afterwards, exactly as cmd/hoist does; until each env's answer lands the notes must say
+// the cluster is being asked, or a hung request reads as a finished comparison.
+func TestWithDriftMarksEveryEnvPendingUntilItAnswers(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift := func(_ context.Context, _ string) (map[string][]image.Ref, error) {
+		return map[string][]image.Ref{}, nil
+	}
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{}).WithDrift(drift)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	if v := plain(tm); !strings.Contains(v, "… asking the cluster what") {
+		t.Fatalf("before any answer the notes must say the cluster is being asked:\n%s", v)
+	}
+}

@@ -776,6 +776,7 @@ func deployHistory(delta *migrate.Delta, declared *tags.Declared, since time.Tim
 	h := deploy.History{Delta: delta, Note: note, Since: since}
 	if declared != nil {
 		h.Declared = declared.Ref
+		h.DeclaredRefs = declared.Refs
 	}
 	return h
 }

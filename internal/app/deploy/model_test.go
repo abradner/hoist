@@ -226,6 +226,39 @@ func withHistory(t *testing.T, envs config.EnvsConfig) Model {
 
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
+// A split env declares the image repo at several references; the summary names every one
+// of them, Declared first, rather than claiming one build where there are two (#151).
+func TestReplacingNamesEveryDeclaredRefWhenSplit(t *testing.T) {
+	one := image.Ref{Repo: "ghcr.io/example/web", Tag: "v1"}
+	old := image.Ref{Repo: "ghcr.io/example/web", Tag: "v0"}
+	cases := []struct {
+		name string
+		h    History
+		want string
+	}{
+		{"nothing declared", History{}, ""},
+		{"one reference", History{Declared: one, DeclaredRefs: []image.Ref{one}}, "replacing v1"},
+		{"DeclaredRefs absent", History{Declared: one}, "replacing v1"},
+		{"split", History{Declared: one, DeclaredRefs: []image.Ref{one, old}}, "replacing v1 and v0 (split)"},
+		{"three-way split", History{Declared: one, DeclaredRefs: []image.Ref{one, old, {Repo: one.Repo, Tag: "v2"}}}, "replacing v1, v0 and v2 (split)"},
+	}
+	for _, tc := range cases {
+		if got := tc.h.replacing(); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSplitEnvSummaryNamesBothReferences(t *testing.T) {
+	m := withHistory(t, config.EnvsConfig{Production: []string{"app-production"}})
+	m.history.DeclaredRefs = []image.Ref{m.history.Declared, {Repo: "ghcr.io/example/web", Tag: "v202512120000"}}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "replacing v202601010101 and v202512120000 (split), live 4 weeks") {
+		t.Fatalf("a split env must name every declared reference:\n%s", v)
+	}
+	uitest.Golden(t, "deploy-split", m.SetSize(80, 24).View(), 80, 24)
+}
+
 // The detailed migrations list qualifies its count the same way the summary does when the
 // forge capped the history: a floor is never presented as the whole list (Codex, #138).
 func TestMigrationsSectionSaysAtLeastWhenIncomplete(t *testing.T) {

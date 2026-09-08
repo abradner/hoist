@@ -204,6 +204,29 @@ func TestDriftKeepsEveryRunningBuildAndNamesTheComparison(t *testing.T) {
 		{"pinned manifest, pod digest differs", []gitops.Occurrence{occ(app, "v1", digestA)},
 			[]image.Ref{ref("v1", digestB)},
 			StateDrifted, "v1", "by digest"},
+		// A moved tag: the pods run two builds under one tag, and the manifest pins one of
+		// them. Builds are counted by digest, and each is named with its short digest so the
+		// two can be told apart — "runs v1; manifest says v1" would say nothing (P2, Arc 1).
+		{"two builds under one tag", []gitops.Occurrence{occ(app, "v1", digestA)},
+			[]image.Ref{ref("v1", digestA), ref("v1", digestB)},
+			StateDrifted, "2 builds running (v1 · aaaaaaaaaaaa, v1 · bbbbbbbbbbbb)", "by digest"},
+		// A bare manifest matched by tag while the pods run two digests under that tag: at
+		// most one of them is what the tag names now, so the repo is drifted and both builds
+		// are named; two pods on the same digest are one build (P1, Arc 1 followup).
+		{"bare manifest, pods run two digests under its tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v1", digestA), ref("v1", digestB)},
+			StateDrifted, "2 builds running (v1 · aaaaaaaaaaaa, v1 · bbbbbbbbbbbb)", "by tag"},
+		{"bare manifest, two pods on one digest under its tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v1", digestA), ref("v1", digestA)},
+			StateUnpinned, "", ""},
+		// A mixed manifest makes both comparisons; the digest is the stronger evidence
+		// whichever reference came last in the file (P3, Arc 1).
+		{"mixed manifest, pinned first: the digest comparison names the drift", []gitops.Occurrence{occ(app, "v1", digestA), occ(app, "v2", "")},
+			[]image.Ref{ref("v3", digestC)},
+			StateDrifted, "v3", "by digest"},
+		{"mixed manifest, bare first: same answer", []gitops.Occurrence{occ(app, "v2", ""), occ(app, "v1", digestA)},
+			[]image.Ref{ref("v3", digestC)},
+			StateDrifted, "v3", "by digest"},
 	}
 	for _, tc := range cases {
 		got := cellFor(&gitops.Family{Name: "f", Occurrences: tc.occs}, []string{"ghcr.io/"}, map[string][]image.Ref{app: tc.running})
@@ -230,6 +253,12 @@ func TestSplitIsJudgedPerRepoOnBuilds(t *testing.T) {
 			Cell{Present: true, Text: "v1", State: StateUnpinned}},
 		{"two repos each on one build", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", digestA), occ("ghcr.io/x/sidecar", "v2", digestA)},
 			Cell{Present: true, Text: "2 images", State: StatePinned, Pinned: true}},
+		// One build pinned under two tags is not split (one digest), but the text names both
+		// tags, sorted — never whichever occurrence the file listed first (P3, Arc 1).
+		{"two tags pinned to one digest", []gitops.Occurrence{occ("ghcr.io/x/app", "v1", digestA), occ("ghcr.io/x/app", "v2", digestA)},
+			Cell{Present: true, Text: "v1/v2", State: StatePinned, Pinned: true}},
+		{"two tags pinned to one digest, listed the other way round", []gitops.Occurrence{occ("ghcr.io/x/app", "v2", digestA), occ("ghcr.io/x/app", "v1", digestA)},
+			Cell{Present: true, Text: "v1/v2", State: StatePinned, Pinned: true}},
 	}
 	for _, tc := range cases {
 		got := cellFor(&gitops.Family{Name: "f", Occurrences: tc.occs}, []string{"ghcr.io/"}, nil)

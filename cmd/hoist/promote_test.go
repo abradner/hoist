@@ -38,6 +38,16 @@ func runGitHost(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// outGitHost is runGitHost returning stdout, for setup that reads a sha back.
+func outGitHost(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := gitHostCmd(dir, args...).Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
+}
+
 // mergeSimulatingForge wraps *forge.Fake so a successful MergePR also does what a real GitHub
 // squash-merge actually does to the world beyond the fake's own in-memory bookkeeping — forge.
 // Fake deliberately has no access to git (its own doc comment), so this bridge lives here, at
@@ -1177,9 +1187,6 @@ func TestPromoteNamesLocalOnlyAndOriginOnlyBases(t *testing.T) {
 	}
 }
 
-// The base classification resolves branch refs, not any revision: a tag named like the base
-// is not a local branch, so it is reported as unresolved rather than as a local-only branch
-// (Copilot, PR #99).
 // TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase is issue #100's regression test for the reads
 // AFTER the classification: a real branch main AND tags named "main" and "origin/main", pointing
 // at a divergent commit that changes the very file the promotion edits. Git resolves a short
@@ -1214,6 +1221,14 @@ func TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase(t *testing.T) {
 		runGitHost(t, clone, "checkout", "-q", "main")
 		runGitHost(t, clone, "tag", "main", "refs/heads/scratch")
 		runGitHost(t, clone, "tag", "origin/main", "refs/heads/scratch")
+		// Positive control: both tags must point at the divergent commit, or the subtests
+		// below pass without ever exercising a collision.
+		want := strings.TrimSpace(outGitHost(t, clone, "rev-parse", "--verify", "refs/heads/scratch"))
+		for _, tag := range []string{"refs/tags/main", "refs/tags/origin/main"} {
+			if got := strings.TrimSpace(outGitHost(t, clone, "rev-parse", "--verify", tag)); got != want {
+				t.Fatalf("positive control: %s = %q, want the divergent %q", tag, got, want)
+			}
+		}
 	}
 	t.Run("pr", func(t *testing.T) {
 		cfgPath, clone, f := newPromoteFixture(t)
@@ -1239,6 +1254,9 @@ func TestPromoteTreeReadsIgnoreTagsNamedLikeTheBase(t *testing.T) {
 	})
 }
 
+// The base classification resolves branch refs, not any revision: a tag named like the base
+// is not a local branch, so it is reported as unresolved rather than as a local-only branch
+// (Copilot, PR #99).
 func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	runGitHost(t, clone, "tag", "release", "main")

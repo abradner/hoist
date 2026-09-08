@@ -250,6 +250,34 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 	uitest.Golden(t, "matrix-drift", m.View(), 120, 24)
 }
 
+// WithDrift installed a second time (the root re-handing its resolver) must not re-mark an env
+// whose answer already landed: it starts no request, so that env would show "asking the
+// cluster" forever. An unanswered env stays pending; a nil function clears pending.
+func TestWithDriftLeavesAnsweredEnvsAlone(t *testing.T) {
+	drift := func(_ context.Context, _ string) (map[string][]image.Ref, error) {
+		return map[string][]image.Ref{}, nil
+	}
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).WithDrift(drift)
+	if !m.pending["a"] || !m.pending["b"] {
+		t.Fatalf("pending = %v; want every env pending after the first WithDrift", m.pending)
+	}
+	m, _ = m.Update(DriftMsg{gen: m.gen, env: "a", running: map[string][]image.Ref{}})
+	m, _ = m.Update(DriftMsg{gen: m.gen, env: "c", err: errors.New("cluster unreachable")})
+	m = m.WithDrift(drift)
+	if m.pending["a"] {
+		t.Error("env a answered before the second WithDrift, yet it is pending again")
+	}
+	if m.pending["c"] {
+		t.Error("env c failed before the second WithDrift, yet it is pending again")
+	}
+	if !m.pending["b"] {
+		t.Error("env b never answered, yet it is not pending")
+	}
+	if p := m.WithDrift(nil).pending; len(p) != 0 {
+		t.Errorf("a nil function must clear pending; got %v", p)
+	}
+}
+
 // A long notice wraps inside the frame instead of being clipped at the first clause (#85).
 func TestLongNoticeWrapsInsideTheFrame(t *testing.T) {
 	notice := "cannot deploy ghcr.io/x/app:v3 to a: env: GHCR_TOKEN not set; keychain: no credential for ghcr.io; cluster: not configured (registries[].cluster); op: not configured (registries[].op)"
