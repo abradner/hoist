@@ -190,11 +190,9 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, drift D
 		// the root keeps, and every answer would be dropped as stale.
 		gen: nextGen.Add(1),
 	}
-	if drift != nil {
-		for _, env := range m.matrix.Envs {
-			m.pending[env] = true
-		}
-	}
+	// WithDrift is the one place a supplied function seeds every env as pending, whether it
+	// arrives here or later from the root.
+	m = m.WithDrift(drift)
 	// The table's own up/down bindings are replaced so the screen owns the key vocabulary.
 	km := table.DefaultKeyMap()
 	km.LineUp, km.LineDown = m.keys.Up, m.keys.Down
@@ -527,9 +525,18 @@ func (m Model) View() string {
 }
 
 // WithDrift replaces the cluster-asking function New was given — the root uses it to hand
-// the matrix a pods-only resolver built after New.
+// the matrix a pods-only resolver built after New. A non-nil function marks every env
+// pending, so the notes say "asking the cluster" until its answer lands rather than showing
+// a hung request as a finished comparison (the root builds the matrix with nil and installs
+// the function afterwards, so New's own seeding alone would leave nothing pending).
 func (m Model) WithDrift(drift DriftFunc) Model {
 	m.drift = drift
+	if drift != nil {
+		m.pending = map[string]bool{}
+		for _, env := range m.matrix.Envs {
+			m.pending[env] = true
+		}
+	}
 	return m
 }
 

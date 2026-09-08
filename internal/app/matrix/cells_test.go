@@ -210,6 +210,15 @@ func TestDriftKeepsEveryRunningBuildAndNamesTheComparison(t *testing.T) {
 		{"two builds under one tag", []gitops.Occurrence{occ(app, "v1", digestA)},
 			[]image.Ref{ref("v1", digestA), ref("v1", digestB)},
 			StateDrifted, "2 builds running (v1 · aaaaaaaaaaaa, v1 · bbbbbbbbbbbb)", "by digest"},
+		// A bare manifest matched by tag while the pods run two digests under that tag: at
+		// most one of them is what the tag names now, so the repo is drifted and both builds
+		// are named; two pods on the same digest are one build (P1, Arc 1 followup).
+		{"bare manifest, pods run two digests under its tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v1", digestA), ref("v1", digestB)},
+			StateDrifted, "2 builds running (v1 · aaaaaaaaaaaa, v1 · bbbbbbbbbbbb)", "by tag"},
+		{"bare manifest, two pods on one digest under its tag", []gitops.Occurrence{occ(app, "v1", "")},
+			[]image.Ref{ref("v1", digestA), ref("v1", digestA)},
+			StateUnpinned, "", ""},
 		// A mixed manifest makes both comparisons; the digest is the stronger evidence
 		// whichever reference came last in the file (P3, Arc 1).
 		{"mixed manifest, pinned first: the digest comparison names the drift", []gitops.Occurrence{occ(app, "v1", digestA), occ(app, "v2", "")},

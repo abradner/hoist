@@ -210,6 +210,13 @@ func cellFor(fam *gitops.Family, promotable []string, running map[string][]image
 // reference that reports no tag cannot be compared with a bare manifest at all, and is
 // neither drifted nor confirmed. A repo the cluster did not report is not drifted —
 // absence of evidence is not drift.
+//
+// A tag comparison has one more rule: when a bare manifest reference is matched by tag and
+// the pods run more than one distinct digest under that tag, the repo is drifted — at most
+// one of those digests can be what the tag names now, so the other is a build the manifest
+// does not say (a moved tag mid-rollout, invisible to a match that stops at the tag). Two
+// pods on the same digest are one build and not drifted. Running is every build, named by
+// digest (runningText), and Compared is "by tag".
 func drifted(first []image.Ref, running map[string][]image.Ref) ([]image.Ref, string, bool) {
 	if len(running) == 0 {
 		return nil, "", false
@@ -222,6 +229,9 @@ func drifted(first []image.Ref, running map[string][]image.Ref) ([]image.Ref, st
 		if len(runs) == 0 {
 			continue
 		}
+		// digestsByTag collects, per tag matched against a bare manifest reference, the
+		// distinct digests the pods run under it.
+		digestsByTag := map[string]map[string]bool{}
 		for _, run := range runs {
 			matched, compared := false, ""
 			for _, ref := range first {
@@ -239,11 +249,22 @@ func drifted(first []image.Ref, running map[string][]image.Ref) ([]image.Ref, st
 				}
 				if same {
 					matched = true
+					if how == "by tag" && run.Digest != "" {
+						if digestsByTag[run.Tag] == nil {
+							digestsByTag[run.Tag] = map[string]bool{}
+						}
+						digestsByTag[run.Tag][run.Digest] = true
+					}
 					break
 				}
 			}
 			if !matched && compared != "" {
 				return runs, compared, true
+			}
+		}
+		for _, digests := range digestsByTag {
+			if len(digests) > 1 {
+				return runs, "by tag", true
 			}
 		}
 	}
