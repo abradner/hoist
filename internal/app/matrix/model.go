@@ -528,14 +528,24 @@ func (m Model) View() string {
 // the matrix a pods-only resolver built after New. A non-nil function marks every env
 // pending, so the notes say "asking the cluster" until its answer lands rather than showing
 // a hung request as a finished comparison (the root builds the matrix with nil and installs
-// the function afterwards, so New's own seeding alone would leave nothing pending).
+// the function afterwards, so New's own seeding alone would leave nothing pending). Only envs
+// with no recorded answer (neither running nor driftErr) are marked: WithDrift starts no
+// request, so re-marking an answered env after its DriftMsg landed would say "asking the
+// cluster" forever. A nil function clears pending — nothing will be asked.
 func (m Model) WithDrift(drift DriftFunc) Model {
 	m.drift = drift
-	if drift != nil {
-		m.pending = map[string]bool{}
-		for _, env := range m.matrix.Envs {
-			m.pending[env] = true
+	m.pending = map[string]bool{}
+	if drift == nil {
+		return m
+	}
+	for _, env := range m.matrix.Envs {
+		if _, answered := m.running[env]; answered {
+			continue
 		}
+		if _, failed := m.driftErr[env]; failed {
+			continue
+		}
+		m.pending[env] = true
 	}
 	return m
 }

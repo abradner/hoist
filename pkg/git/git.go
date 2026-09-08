@@ -437,11 +437,17 @@ func (e Exec) refExists(ctx context.Context, cloneDir, ref string) (bool, error)
 // which a tag wins over a branch, so a tag named "main" or "origin/main" pointing at a divergent
 // commit would otherwise seed the promotion worktree from the tag (issue #100). A base that is
 // neither a remote-tracking nor a local branch is passed through only when it cannot be a short
-// name at all: an explicit object id (hex) or an already-qualified refs/… name. Anything else is
-// an error naming the base and both refs looked for — never handed to git unqualified, where ref
-// precedence would let a surviving refs/tags/<base> answer for a branch that is gone (`hoist
-// resume` before BranchedStep ever made its worktree: the TUI saves state first, and if both
-// branch refs have since vanished the tag would silently seed the promotion).
+// name at all: an already-qualified refs/… name. Anything else is an error naming the base and
+// both refs looked for — never handed to git unqualified, where ref precedence would let a
+// surviving refs/tags/<base> answer for a branch that is gone (`hoist resume` before
+// BranchedStep ever made its worktree: the TUI saves state first, and if both branch refs have
+// since vanished the tag would silently seed the promotion). A hex string is not accepted
+// either: an earlier revision let a 7–64 character hex base through as an object id, but a tag
+// (or branch on another remote) can be *named* with hex, and `git worktree add` resolves that
+// spelling by ref precedence too — the tag wins over the object, so an exact hex-named tag
+// could still seed the promotion from a divergent commit. The only production caller
+// (engine.BranchedStep) passes the configured base branch; a caller that really holds a sha
+// uses WorktreeAtRef, the detached-HEAD path.
 func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, error) {
 	for _, prefix := range []string{"refs/remotes/origin/", "refs/heads/"} {
 		ok, err := e.refExists(ctx, cloneDir, prefix+base)
@@ -452,24 +458,10 @@ func (e Exec) resolveBase(ctx context.Context, cloneDir, base string) (string, e
 			return prefix + base, nil
 		}
 	}
-	if isObjectID(base) || strings.HasPrefix(base, "refs/") {
+	if strings.HasPrefix(base, "refs/") {
 		return base, nil
 	}
-	return "", fmt.Errorf("base %q is neither a branch (refs/remotes/origin/%s, refs/heads/%s) nor an object id", base, base, base)
-}
-
-// isObjectID reports whether s is an abbreviated or full hex object id (7–64 characters), the
-// one unqualified form resolveBase passes to git as written.
-func isObjectID(s string) bool {
-	if len(s) < 7 || len(s) > 64 {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
-			return false
-		}
-	}
-	return true
+	return "", fmt.Errorf("base %q is neither a branch (refs/remotes/origin/%s, refs/heads/%s) nor a refs/-qualified name; a sha is not accepted here (WorktreeAtRef is the sha path)", base, base, base)
 }
 
 // LsRemoteBranch implements Git.

@@ -885,9 +885,10 @@ func TestWorktreeBaseIgnoresTagsNamedLikeTheBase(t *testing.T) {
 }
 
 // TestWorktreeBaseRefusesATagOnlyBase is the other half of #100's tag precedence: when
-// neither branch ref exists, a base name that is not an object id or a refs/… name is refused,
-// naming both refs looked for — never passed to git short, where a surviving refs/tags/<base>
-// would answer (`hoist resume` after both branch refs vanished). A full sha still works.
+// neither branch ref exists, a base name that is not a refs/… name is refused, naming both
+// refs looked for — never passed to git short, where a surviving refs/tags/<base> would answer
+// (`hoist resume` after both branch refs vanished). A sha is refused too, naming WorktreeAtRef:
+// a hex-spelled tag name resolves by the same precedence, so hex cannot be a passthrough.
 func TestWorktreeBaseRefusesATagOnlyBase(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	var g Exec
@@ -911,12 +912,29 @@ func TestWorktreeBaseRefusesATagOnlyBase(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("refs/heads/main: ok=%v err=%v", ok, err)
 	}
-	wt := filepath.Join(t.TempDir(), "wt-sha")
-	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/shabase", sha); err != nil {
-		t.Fatalf("Worktree with a full sha as base: %v", err)
+	err = g.Worktree(ctx(), cloneDir, filepath.Join(t.TempDir(), "wt-sha"), "hoist/app-production/shabase", sha)
+	if err == nil {
+		t.Error("Worktree with a full sha as base succeeded; want a refusal naming WorktreeAtRef")
+	} else if !strings.Contains(err.Error(), "WorktreeAtRef") {
+		t.Errorf("sha refusal %q does not name WorktreeAtRef", err)
 	}
-	if head, ok, err := g.RevParse(ctx(), wt, "HEAD"); err != nil || !ok || head != sha {
-		t.Fatalf("HEAD in %s = %s ok=%v err=%v, want %s", wt, shortSHA(head), ok, err, shortSHA(sha))
+
+	// A hex-spelled tag name (no branch of that name): the old object-id passthrough would
+	// have handed it to git short, where refs/tags/deadbeef1 wins by ref precedence.
+	if err := runHost(t, cloneDir, "tag", "deadbeef1", "refs/heads/main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := g.RevParse(ctx(), cloneDir, "refs/tags/deadbeef1"); err != nil || !ok {
+		t.Fatalf("positive control: refs/tags/deadbeef1 ok=%v err=%v", ok, err)
+	}
+	err = g.Worktree(ctx(), cloneDir, filepath.Join(t.TempDir(), "wt-hextag"), "hoist/app-production/hextag", "deadbeef1")
+	if err == nil {
+		t.Fatal("Worktree with base deadbeef1 (a hex-named tag, no branch) succeeded; want a refusal")
+	}
+	for _, want := range []string{`base "deadbeef1"`, "refs/remotes/origin/deadbeef1", "refs/heads/deadbeef1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
