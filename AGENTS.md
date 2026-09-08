@@ -412,9 +412,10 @@ opens its PR, each asking which when several are in flight: the TUI's `hoist pro
 `hoist resume` (M10). `d` opens the tag picker — `internal/app/tags`, M6; a chooser first when the
 cell holds several first-party images — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
-repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91) as releases
-(`v…`/`release-…` + digits), then digest-named tags (`sha-<hex>`), then moving tags (`latest`,
-branch names), each under a divider; nothing is hidden and `/` filters across all three, since
+repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91): releases
+(`v…`/`release-…` + digits) lead the list with no divider above them, then digest-named tags
+(`sha-<hex>`) and moving tags (`latest`, branch names) each sit under their own divider; nothing
+is hidden and `/` filters across all three, since
 the operator is scanning for releases outnumbered several to one — and its own `D` key walks the
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
 deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
