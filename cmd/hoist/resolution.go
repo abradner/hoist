@@ -33,6 +33,22 @@ type resolveFlags struct {
 	kubeContext, digestSources, registryAuth, clusterSecret, opRef string
 }
 
+// emptyResolveFlag is the one refusal every face gives an explicit empty --digest-sources
+// or --registry-auth: "" means "the config decides" only when the flag was not given at
+// all. The root flag set (#132) and `hoist plan` both call it, so the message is the same
+// by construction; the caller prefixes its own name.
+func emptyResolveFlag(given map[string]bool, rf resolveFlags) (msg string, bad bool) {
+	for _, f := range []struct{ name, val, hint string }{
+		{"digest-sources", rf.digestSources, "use none to plan without resolution"},
+		{"registry-auth", rf.registryAuth, "list at least one of env, keychain, cluster, op"},
+	} {
+		if given[f.name] && strings.TrimSpace(f.val) == "" {
+			return fmt.Sprintf("--%s: empty; %s", f.name, f.hint), true
+		}
+	}
+	return "", false
+}
+
 // resolveOptions is what the flags and the config agree resolution does. auth,
 // clusterSecret and opRef are only ever the *explicit* --registry-auth/--cluster-secret/
 // --op-ref override, applied identically to every repo when given — the operator naming

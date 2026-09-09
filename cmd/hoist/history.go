@@ -29,8 +29,11 @@ import (
 // the default branch is the fallback when HEAD was never pushed; "" when unknown.
 // base is the root --base (#105): the blame fallback for a HEAD that was never pushed.
 // kubeContext is the root --kube-context, else the repo's kube.context, for the cluster
-// credential source when a registry entry names one.
-func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base, kubeContext string) history.Funcs {
+// credential source when a registry entry names one. reg carries the root
+// --registry-auth/--cluster-secret/--op-ref (#132), applied to every image repo's registry
+// client exactly as buildTagsFunc and runResolution apply them; only its auth,
+// clusterSecret and opRef are read.
+func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base, kubeContext string, reg resolveOptions) history.Funcs {
 	if rc == nil {
 		return history.Funcs{}
 	}
@@ -69,7 +72,7 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 	if kctx == "" {
 		kctx = rc.Kube.Context
 	}
-	h := &historyAdaptor{rc: rc, kubeContext: kctx, registries: registries, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
+	h := &historyAdaptor{rc: rc, kubeContext: kctx, registries: registries, reg: reg, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -97,6 +100,7 @@ type historyAdaptor struct {
 	rc          *config.RepoConfig
 	kubeContext string // the root --kube-context, else rc.Kube.Context
 	registries  []config.RegistryConfig
+	reg         resolveOptions // the root credential-chain overrides (#132); auth/clusterSecret/opRef only
 
 	mu       sync.Mutex
 	forges   map[string]forgeOrErr    // app repo -> forge
@@ -158,7 +162,7 @@ func (h *historyAdaptor) registry(imageRepo string) (registry.Registry, error) {
 		return re.r, re.err
 	}
 	entry := registryEntryFor(h.registries, imageRepo)
-	auth, clusterSecret, opRef := entryAuthConfig(entry, resolveOptions{})
+	auth, clusterSecret, opRef := entryAuthConfig(entry, h.reg)
 	regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
 	if clusterSecret != "" && has(auth, registry.AuthCluster) {
 		if cluster, _, err := newCluster(h.kubeContext); err == nil {
