@@ -80,7 +80,8 @@ type PromotionState struct {
 	// zero checks.
 	CINone  string
 	CIGrace time.Duration
-	// CINoneOverride, once set (via `hoist resume --override-ci-none`), lets CIGreenStep treat
+	// CINoneOverride, once set (via `hoist resume --override-ci-none`, or `c` on the TUI's
+	// flight screen behind a confirm — #103), lets CIGreenStep treat
 	// a still-empty check-run set as satisfied under ci.none: prompt after the grace period —
 	// the explicit override invariant 1 requires. ci.none: block never consults this field: it
 	// has no override path through this flag at all (see CIGreenStep's doc comment for why).

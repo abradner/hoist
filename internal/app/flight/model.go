@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -56,7 +57,7 @@ type DriveFunc func(ctx context.Context, s engine.PromotionState) (next engine.P
 
 // keyMap is this screen's own key vocabulary, on top of the root's global quit keys.
 type keyMap struct {
-	Open, Reobserve, Abort, Log, Back key.Binding
+	Open, Reobserve, Abort, Log, Back, Override key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -66,6 +67,7 @@ func defaultKeyMap() keyMap {
 		Abort:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "abort")),
 		Log:       key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
 		Back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Override:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "treat no checks as green")),
 	}
 }
 
@@ -82,6 +84,17 @@ type AbortMsg struct{ ID string }
 
 // BackMsg pops this screen back to whatever was underneath it (mirrors plan.BackMsg).
 type BackMsg struct{}
+
+// OverrideCINoneMsg is the operator's confirmed answer to the one Blocked reason that has an
+// in-band override: CIGreenStep's "no checks reported after the grace period; ci.none=prompt"
+// (engine.IsCINonePromptBlock). It asks whatever composes screens to re-drive promotion ID
+// with engine.PromotionState.CINoneOverride set — the TUI's `hoist resume <id>
+// --override-ci-none` (#103). Emitted only after `c` and a huh.Confirm answered yes, never on
+// the keypress alone, and only for the promotion this screen is showing: the override is a
+// per-promotion, one-shot operator instruction, never a launch default and never config
+// (AGENTS.md §4.5 — a default may not weaken a gate). The root answers it by calling
+// ApplyCINoneOverride on the flight screen whose state carries ID.
+type OverrideCINoneMsg struct{ ID string }
 
 // tickMsg fires the next poll iteration.
 type tickMsg struct{}
@@ -159,6 +172,15 @@ type Model struct {
 	now func() time.Time
 	// log is the History scrollback when l toggles it on.
 	log viewport.Model
+
+	// confirming is true while the `c` gesture's dialog is up; confirmOverride is the widget.
+	// confirmValue is huh's write target only and is never read to decide anything — Value
+	// binds a pointer into the copy of this value-typed model that built the widget, so the
+	// answer is read back through the widget's GetValue (confirmAgreed), the shape the tag
+	// picker's D gesture settled on after shipping broken twice (AGENTS.md §9 entry 6).
+	confirming      bool
+	confirmOverride *huh.Confirm
+	confirmValue    bool
 }
 
 // WithNow fixes the clock (tests).
@@ -208,6 +230,9 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 	}
 	return m
 }
+
+// ID is the promotion this screen shows — what the root matches an OverrideCINoneMsg against.
+func (m Model) ID() string { return m.state.ID }
 
 // Cancel interrupts this screen's shared drive context immediately, rather than waiting for
 // m.deadlineAt or for driveFn to notice at its own next Observe/Act that nobody is watching
@@ -507,7 +532,26 @@ func (m Model) tickDelay(failed engine.StepName) time.Duration {
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.notice = ""
+	if m.confirming {
+		// Esc leaves the dialog without answering it (the tag picker's round-3 finding:
+		// huh's own Update swallows Esc, trapping the operator); everything else is the
+		// widget's, until enter reads its answer.
+		if key.Matches(msg, m.keys.Back) {
+			m.confirming = false
+			return m, nil
+		}
+		return m.updateConfirm(msg)
+	}
 	switch {
+	case key.Matches(msg, m.keys.Override):
+		if !m.offersCINoneOverride() {
+			// Any other block (a failed check, ci.none=block, a branch conflict) has no
+			// in-band override; the key does nothing rather than open a dialog whose yes
+			// would change nothing (AGENTS.md §2 principle 1: an offer that cannot deliver
+			// is a bug).
+			return m, nil
+		}
+		return m.openConfirm()
 	case key.Matches(msg, m.keys.Open):
 		if url, ok := PRURL(m.state); ok {
 			return m, func() tea.Msg { return OpenPRMsg{URL: url} }
@@ -563,11 +607,98 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// offersCINoneOverride is true exactly when `c` has something to do: the drive stopped on a
+// Blocked CI step whose reason is the ci.none=prompt one (engine.IsCINonePromptBlock) — the
+// single Blocked reason with an override. A failed or skipped check, ci.none=block, or any
+// other step's block never qualifies, so the offer, the hint and the key all agree.
+func (m Model) offersCINoneOverride() bool {
+	if m.done || !m.stopped {
+		return false
+	}
+	for _, r := range m.rows {
+		if r.Glyph == GlyphBlocked {
+			return r.Step == engine.StepCIGreen && engine.IsCINonePromptBlock(r.Detail)
+		}
+	}
+	return false
+}
+
+// openConfirm raises the `c` gesture's dialog — the tag picker's D shape: keypress, then a
+// huh.Confirm, and only a yes emits anything.
+func (m Model) openConfirm() (Model, tea.Cmd) {
+	m.confirming = true
+	m.confirmValue = false
+	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.state.ID)
+	m.confirmOverride = huh.NewConfirm().Title(title).Value(&m.confirmValue)
+	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
+	// (AGENTS.md §9 entry 6).
+	m.confirmOverride.WithKeyMap(huh.NewDefaultKeyMap())
+	m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.confirmOverride.WithWidth(m.dialogWidth())
+	return m, tea.Batch(m.confirmOverride.Init(), m.confirmOverride.Focus())
+}
+
+func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
+	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
+		m.confirming = false
+		if !m.confirmAgreed() {
+			return m, nil
+		}
+		id := m.state.ID
+		return m, func() tea.Msg { return OverrideCINoneMsg{ID: id} }
+	}
+	f, cmd := m.confirmOverride.Update(msg)
+	if c, ok := f.(*huh.Confirm); ok {
+		m.confirmOverride = c
+	}
+	return m, cmd
+}
+
+// confirmAgreed reads the operator's answer from the widget, never from confirmValue — see
+// the field's own comment.
+func (m Model) confirmAgreed() bool {
+	if m.confirmOverride == nil {
+		return false
+	}
+	v, _ := m.confirmOverride.GetValue().(bool)
+	return v
+}
+
+func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
+
+// ApplyCINoneOverride is what the root calls in answer to OverrideCINoneMsg: it sets
+// CINoneOverride on this screen's own copy of the state — the state every driveCmd hands to
+// DriveFunc, so the next engine.Drive's CIGreenStep.Observe reads it (and the drive's own
+// save persists it, exactly as `hoist resume --override-ci-none` does) — and re-drives at
+// once, the way R does. Only this screen's promotion is touched: no other state, file or
+// screen sees the flag. A read-only screen (driveFn nil) can record the wish but not act on
+// it, and says so.
+func (m Model) ApplyCINoneOverride() (Model, tea.Cmd) {
+	m.state.CINoneOverride = true
+	if m.driveFn == nil {
+		m.notice = "override recorded, but nothing is driving this promotion here (read-only) — run `hoist resume " + m.state.ID + " --override-ci-none`"
+		return m, nil
+	}
+	if m.busy || m.done {
+		return m, nil
+	}
+	m.stopped = false
+	if m.ctx != nil && m.ctx.Err() != nil {
+		m = m.renewDeadline()
+	}
+	m.notice = "treating no checks as green for this promotion — re-observing"
+	m.busy = true
+	return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
+}
+
 // SetSize records the terminal size. The log is a viewport sized to what the frame leaves
 // (layout) and scrolls with the unmatched keys handleKey forwards; the step list has no
 // scrolling and degrades to the one-line strip on a short terminal (stepsSection).
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
+	if m.confirmOverride != nil {
+		m.confirmOverride.WithWidth(m.dialogWidth())
+	}
 	return m.layout()
 }
 
@@ -596,10 +727,18 @@ func (m Model) layout() Model {
 	return m
 }
 
-// SetStyles applies the palette; this screen has no huh fields or other themed components
-// beyond the shared status bar and notice styles.
+// CapturesText reports whether the c gesture's dialog is up: while it is, the root must
+// hand every key to this screen rather than treat q as quit, or an operator deciding
+// whether to treat no checks as green can quit the program mid-decision (Arc 2 review,
+// the same gap the tag picker's D dialog closes through tags.Model.CapturesText).
+func (m Model) CapturesText() bool { return m.confirming }
+
+// SetStyles applies the palette (and re-themes the `c` dialog when one is up).
 func (m Model) SetStyles(s ui.Styles) Model {
 	m.styles = s
+	if m.confirmOverride != nil {
+		m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	}
 	return m
 }
 
@@ -622,7 +761,11 @@ func (m Model) View() string {
 	if n := m.notes(); n != "" {
 		sections = append(sections, n)
 	}
-	return redact.Strings(ui.Frame{Title: m.title(), Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Status.Render(m.statusLeft()), m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height))
+	out := ui.Frame{Title: m.title(), Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Status.Render(m.statusLeft()), m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height)
+	if m.confirming && m.confirmOverride != nil {
+		out = ui.Dialog(m.styles, out, "treat no checks as green", m.confirmOverride.View(), m.width, m.height)
+	}
+	return redact.Strings(out)
 }
 
 func (m Model) title() string {
@@ -742,7 +885,13 @@ func (m Model) actionSection() string {
 			// The step's own reason first — a CI policy block, a failed check, a missing
 			// Application — and the generic advice only where there is none.
 			if text != "" {
-				return m.styles.Bad.Render(ansi.Wrap("blocked — "+text, max(m.width-2, 20), "")) + "\n" + m.styles.Dim.Render("R to re-observe once resolved")
+				out := m.styles.Bad.Render(ansi.Wrap("blocked — "+text, max(m.width-2, 20), ""))
+				if m.offersCINoneOverride() {
+					// The one block with an in-band answer: the CLI's own re-run command is
+					// already in the reason text; this is the TUI's equivalent (#103).
+					return out + "\n" + m.styles.Accent.Render("press c to treat no checks as green for this promotion") + "\n" + m.styles.Dim.Render("R to re-observe once resolved")
+				}
+				return out + "\n" + m.styles.Dim.Render("R to re-observe once resolved")
 			}
 			return m.styles.Bad.Render("blocked — resolve the conflict, then R to re-observe")
 		}
@@ -783,6 +932,9 @@ func (m Model) statusLeft() string {
 		// never sets m.errNotice — its own reason is already shown as the blocked row's
 		// Detail, in the step list above, not as a separate notice below.
 		if _, blocked := BlockedStep(m.rows); blocked {
+			if m.offersCINoneOverride() {
+				return "blocked: no checks reported; c treats them as green"
+			}
 			return "blocked: resolve the conflict, then press R to re-observe"
 		}
 		return "stopped: see error below"
@@ -791,10 +943,14 @@ func (m Model) statusLeft() string {
 }
 
 func (m Model) hint() string {
-	if _, ok := PRURL(m.state); ok {
-		return "o open PR · R re-observe · x abort · l log · esc back"
+	h := "R re-observe · x abort · l log · esc back"
+	if m.offersCINoneOverride() {
+		h = "c treat as green · " + h
 	}
-	return "R re-observe · x abort · l log · esc back"
+	if _, ok := PRURL(m.state); ok {
+		h = "o open PR · " + h
+	}
+	return h
 }
 
 // pollInterval mirrors cmd/hoist/drive.go's own pollInterval exactly. It is duplicated

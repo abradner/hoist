@@ -210,10 +210,25 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green"}, nil
 	default: // "prompt", and any empty value a caller forgot to fill from Normalize's default
 		if s.CINoneOverride {
-			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden via --override-ci-none"}, nil
+			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)"}, nil
 		}
-		return Observation{Blocked: "no checks reported after the grace period; ci.none=prompt requires an explicit override — re-run `hoist resume " + s.ID + " --override-ci-none`"}, nil
+		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`"}, nil
 	}
+}
+
+// ciNonePromptBlockedPrefix is the one reason text CIGreenStep produces for "ci.none=prompt
+// and nothing reported"; IsCINonePromptBlock is how the flight screen recognises it. One
+// constant, used by both, so the TUI's `c` offer (#103) can never be shown for a different
+// block or withheld from this one because the wording drifted.
+const ciNonePromptBlockedPrefix = "no checks reported after the grace period; ci.none=prompt requires an explicit override"
+
+// IsCINonePromptBlock reports whether blocked is CIGreenStep's ci.none=prompt reason — the one
+// Blocked observation an operator can lift in-band, by setting PromotionState.CINoneOverride
+// (`hoist resume --override-ci-none`, or `c` on the flight screen) and re-observing. Every
+// other Blocked reason CIGreenStep produces (a failed or skipped check, ci.none=block) has no
+// override and must not match.
+func IsCINonePromptBlock(blocked string) bool {
+	return strings.HasPrefix(blocked, ciNonePromptBlockedPrefix)
 }
 
 // Act implements Step: nothing to do. CI runs itself; hoist only observes it.

@@ -550,9 +550,9 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 // (see its own body above), and cmd/hoist's TUI wiring (wiring.go's startPromotion) calls it too,
 // so the CLI and TUI paths can never silently drift apart.
 //
-// base and overrideCINone are the CLI's own --base/--override-ci-none flag values; the TUI has
-// no equivalent flags yet, so its own caller passes the same defaults ("main", false) runPromote
-// itself defaults to.
+// base and overrideCINone are the CLI's own --base/--override-ci-none flag values; the TUI's
+// caller passes the root --base and false — its override is applied per promotion on the
+// flight screen instead (wiring.go, #103), never at confirm time.
 //
 // argoApps is M5's addition: the Argo Application names this promotion's own state records
 // (engine.ArgoAppNames), computed by the caller from the same discovered repo BuildPlan already

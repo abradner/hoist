@@ -1,0 +1,24 @@
+╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+│abcd1234   app-staging → app-production                     started 4 days ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                      │
+│✓ commit                                                                      │
+│✓ push                                                                        │
+│✓ PR                                                                          │
+│✗ CI                                                                          │
+│    no checks reported after the grace period; ci.none=prompt requires an     │
+│explicit override — re-run `hoist resume abcd1234 --override-ci-none`         │
+│· approval                                                                    │
+│· merge                                                                       │
+│· argo refresh                                                                │
+│· argo sync                                                                   │
+│· rollout                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│blocked — no checks reported after the grace period; ci.none=prompt requires  │
+│an explicit override — re-run `hoist resume abcd1234 --override-ci-none`      │
+│press c to treat no checks as green for this promotion                        │
+│R to re-observe once resolved                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+blocke… o open PR · c treat as green · R re-observe · x abort · l log · esc back
