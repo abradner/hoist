@@ -677,7 +677,13 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		blameRef = sha
 	}
 	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef, eff.base, eff.kubeContext, regOpts)
+	configText, err := configViewText(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitFailure
+	}
 	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).
+		WithConfigView(cfg.File, cfg.Found, configText).
 		WithHistory(historyFn).
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
@@ -687,6 +693,17 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	return 0
+}
+
+// configViewText is what the TUI's config screen (C, #104) shows: exactly the bytes `hoist
+// config show` prints, redacted before they leave this package — the screen takes the
+// string and never sees the loader (AGENTS.md §4.8).
+func configViewText(cfg *config.Config) (string, error) {
+	out, err := cfg.Redacted().Marshal()
+	if err != nil {
+		return "", fmt.Errorf("config view: %w", err)
+	}
+	return string(out), nil
 }
 
 // buildResolveFunc adapts the plan command's own resolution adaptors (resolution.go:

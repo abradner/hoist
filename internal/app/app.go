@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	appconfig "github.com/abradner/hoist/internal/app/config"
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/history"
@@ -202,6 +203,15 @@ type Model struct {
 	// state file behind, the same as any other process-killed-mid-flight promotion already
 	// recovers from via `hoist resume`.
 	buildCancel context.CancelFunc
+
+	// configPath, configFound and configText are what the config screen shows (C, #104):
+	// where the file was read from or looked for, whether it existed, and the effective
+	// config already marshalled and redacted by cmd/hoist (WithConfigView) — this package
+	// holds the strings and never re-marshals, so the screen can show nothing `hoist config
+	// show` would not.
+	configPath  string
+	configFound bool
+	configText  string
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -292,6 +302,14 @@ func (m Model) WithDrift(drift matrix.DriftFunc) Model {
 // (the launch's --base/--kube-context, #105), so its title can say so.
 func (m Model) WithRun(base, kubeContext string) Model {
 	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithRun(base, kubeContext) })
+}
+
+// WithConfigView supplies what C shows: the config file's path, whether it existed, and the
+// effective config as text — cmd/hoist's cfg.Redacted().Marshal(), the same bytes `hoist
+// config show` prints. Unset, C says there is nothing to show.
+func (m Model) WithConfigView(path string, found bool, text string) Model {
+	m.configPath, m.configFound, m.configText = path, found, text
+	return m
 }
 
 // inFlightTick schedules the next listing at Poll.Approval — the cadence the engine itself
@@ -627,6 +645,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
 		return m.listInFlight()
+	case matrix.OpenConfigMsg:
+		if m.configText == "" {
+			m.notice = "no config to show: the launcher supplied none"
+			return m, nil
+		}
+		cs := configScreen{appconfig.New(m.configPath, m.configFound, m.configText)}
+		m = m.push(cs)
+		return m, cs.Init()
+	case appconfig.BackMsg:
+		return m.pop(), nil
 	case matrix.OpenRestartMsg:
 		return m.openRestart(msg.Family, msg.Target)
 	case apprestart.BackMsg:

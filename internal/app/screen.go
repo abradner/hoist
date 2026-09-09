@@ -3,6 +3,7 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	appconfig "github.com/abradner/hoist/internal/app/config"
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
@@ -170,3 +171,26 @@ func (s restartScreen) SetStyles(st ui.Styles) Screen {
 
 // CapturesText implements Screen: true only while the production confirmation is open.
 func (s restartScreen) CapturesText() bool { return s.Model.CapturesText() }
+
+// configScreen adapts config.Model (internal/app/config). Pushed on top of the matrix by C
+// (matrix.OpenConfigMsg, handled in app.go); read-only, so nothing beneath it changes while
+// it is open and esc lands back where it started.
+type configScreen struct{ appconfig.Model }
+
+func (s configScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s configScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return configScreen{m}, cmd
+}
+
+func (s configScreen) SetSize(width, height int) Screen {
+	return configScreen{s.Model.SetSize(width, height)}
+}
+
+func (s configScreen) SetStyles(st ui.Styles) Screen {
+	return configScreen{s.Model.SetStyles(st)}
+}
+
+// CapturesText implements Screen: the config screen has no text-entry mode.
+func (s configScreen) CapturesText() bool { return false }

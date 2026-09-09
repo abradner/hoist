@@ -1,0 +1,24 @@
+╭─ /home/me/.config/hoist/config.yaml ─────────────────────────────────────────╮
+│repos:                                                                        │
+│    - name: my-gitops                                                         │
+│      path: ~/src/my-gitops                                                   │
+│      apps_root: cluster/apps                                                 │
+│      github: me/my-gitops                                                    │
+│      kube:                                                                   │
+│        context: my-cluster                                                   │
+│      envs:                                                                   │
+│        production:                                                           │
+│            - app-production                                                  │
+│        pairs:                                                                │
+│            app-staging: app-production                                       │
+│registries:                                                                   │
+│    - prefix: ghcr.io/me/                                                     │
+│      auth:                                                                   │
+│        - env                                                                 │
+│        - keychain                                                            │
+│      op: <redacted>                                                          │
+│poll:                                                                         │
+│    ci: 20s                                                                   │
+│    approval: 30s                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+read-only · op refs redacted        ↑/↓ pgup/pgdn ctrl+u/d g/G scroll · esc back

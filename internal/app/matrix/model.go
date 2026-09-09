@@ -104,7 +104,7 @@ type Model struct {
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Resume, OpenPR, Refresh, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Resume, OpenPR, Refresh, Config, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the footer: the writes first, since they are what an
@@ -115,7 +115,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Resume, k.OpenPR, k.Refresh, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Resume, k.OpenPR, k.Refresh, k.Config, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
@@ -137,8 +137,11 @@ func defaultKeyMap() keyMap {
 		Resume:  key.NewBinding(key.WithKeys("r", "enter"), key.WithHelp("r", "resume")),
 		OpenPR:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open PR")),
 		Refresh: key.NewBinding(key.WithKeys("f5", "ctrl+r"), key.WithHelp("F5", "re-read the cluster")),
-		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		// Capital C, like R: the lower-case letters open screens about the cell under the
+		// cursor; C is about the session itself (the effective config, #104).
+		Config: key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "config")),
+		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:   key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -157,6 +160,10 @@ type OpenPlanMsg struct {
 type OpenTagsMsg struct {
 	ImageRepo, Target string
 }
+
+// OpenConfigMsg is emitted when the operator asks to read the effective config (C, #104):
+// the TUI's `hoist config show`. It carries nothing — the root holds the text and the path.
+type OpenConfigMsg struct{}
 
 // OpenRestartMsg is emitted when the operator asks to restart the family under the cursor in
 // CurrentEnv (R). It names a family rather than an image because a restart changes no image:
@@ -270,6 +277,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Help):
 			m.showHelp = !m.showHelp
 			return m.layout(), nil
+		case key.Matches(msg, m.keys.Config):
+			return m, func() tea.Msg { return OpenConfigMsg{} }
 		case key.Matches(msg, m.keys.Refresh):
 			return m.refresh()
 		case key.Matches(msg, m.keys.Left):

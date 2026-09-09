@@ -116,7 +116,7 @@ var registry = []op{
 	{
 		Name: "show the effective config and where it came from",
 		CLI:  "config show path",
-		Gap:  "#104 — no config screen; the TUI reads the same file but never shows it",
+		TUI:  "matrix.OpenConfigMsg C — the same redacted, defaults-filled text, titled with the path (or the CLI's no-file sentence)",
 	},
 	{
 		Name: "per-run overrides of what the config file says: base branch and kube context",

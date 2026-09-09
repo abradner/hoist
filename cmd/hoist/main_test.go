@@ -692,3 +692,25 @@ func TestPlanNoOpPrintsIDWithoutABranch(t *testing.T) {
 		t.Errorf("no-op plan names a branch promote would never create:\n%s", out.String())
 	}
 }
+
+// The text runTUI hands the config screen is the redacted marshal: an op:// ref never
+// reaches the terminal, and the defaults are filled the way `config show` fills them (#104).
+func TestConfigViewTextIsRedacted(t *testing.T) {
+	cfgPath := writeConfig(t, "repos:\n  - path: ~/src/my-gitops\nregistries:\n  - prefix: ghcr.io/me/\n    op: op://vault/item/field\n")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := configViewText(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "op://") {
+		t.Errorf("config view leaks the op ref:\n%s", text)
+	}
+	for _, want := range []string{"op: <redacted>", "apps_root: cluster/apps", "ci: 20s"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("config view lacks %q:\n%s", want, text)
+		}
+	}
+}

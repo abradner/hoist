@@ -402,7 +402,9 @@ default to the root's — #105; root `--digest-sources`, `--registry-auth`, `--c
 overrides reach the tag picker's and the history's registry clients, the drift column stays
 pods-only, and an empty `--registry-auth`/`--digest-sources` is refused at the root with
 `plan`'s own message; `q` quits,
-`?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs — every running build per image
+`?` help; `C` opens a read-only view of the effective config — the same redacted,
+defaults-filled text as `hoist config show`, titled with the path `config path` prints (#104);
+`F5`/`ctrl+r` re-asks the cluster what each env runs — every running build per image
 repo straight from the pods (`k8s.Cluster.RunningImages`, never the planning resolver's one pick),
 so a partial rollout reads "2 builds running" and the drift sentence names whether it compared by
 digest or by tag (#122); every cell carries its state as a
