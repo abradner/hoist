@@ -81,7 +81,10 @@ type snapshotMsg struct {
 	at   time.Time
 }
 
-type tickMsg struct{}
+// tickMsg carries the generation of the tick that scheduled it; a stale one (r, or a later
+// snapshot, has scheduled a newer tick since) is ignored, so a manual poll never leaves a
+// second timer chain running beside the cadence — the same guard as app.go's listGen.
+type tickMsg struct{ gen uint64 }
 
 // Model is the screen.
 type Model struct {
@@ -96,6 +99,8 @@ type Model struct {
 	polls      int
 	// polling is true while a read is outstanding, so r during one does not start a second.
 	polling bool
+	// tickGen is the generation of the one live tick; see tickMsg.
+	tickGen uint64
 
 	// body scrolls the status and workload rows: a family with several Deployments, each
 	// carrying a digest-pinned image, is taller than a 24-row terminal.
@@ -126,8 +131,11 @@ func (m Model) poll() tea.Cmd {
 	}
 }
 
-func (m Model) tick() tea.Cmd {
-	return tea.Tick(m.interval(), func(time.Time) tea.Msg { return tickMsg{} })
+// tick schedules the next poll and retires every tick scheduled before it.
+func (m Model) tick() (Model, tea.Cmd) {
+	m.tickGen++
+	gen := m.tickGen
+	return m, tea.Tick(m.interval(), func(time.Time) tea.Msg { return tickMsg{gen: gen} })
 }
 
 // Update implements the screen contract.
@@ -145,10 +153,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.err = ""
 			m.snap = msg.snap
 		}
-		return m.render(), m.tick()
+		return m.render().tick()
 	case tickMsg:
+		if msg.gen != m.tickGen {
+			return m, nil // retired by r or a later snapshot; its replacement is already pending
+		}
 		if m.polling {
-			return m, m.tick()
+			return m.tick()
 		}
 		m.polling = true
 		return m, m.poll()
@@ -160,6 +171,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.polling {
 				return m, nil
 			}
+			// The pending tick is retired: the snapshot this read yields schedules the next
+			// one, so the cadence restarts from now rather than doubling.
+			m.tickGen++
 			m.polling = true
 			return m, m.poll()
 		}

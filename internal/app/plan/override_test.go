@@ -186,6 +186,61 @@ func TestOverrideWithoutAResolver(t *testing.T) {
 	}
 }
 
+// TestOverrideRebuildKeepsTheTickedSetAndCursor: untick the first row, move to the second
+// and override it — the rebuilt plan must still leave the first row unticked (before this
+// the rebuild ticked every row again, and Enter would have promoted a repo the operator had
+// excluded), keep the second ticked (the control), and keep the cursor on it (#121's shape).
+func TestOverrideRebuildKeepsTheTickedSetAndCursor(t *testing.T) {
+	m, seen := overrideFixture(t)
+	sel := Selectable(m.rows)
+	if len(sel) < 2 {
+		t.Fatalf("fixture has %d selectable rows, want at least 2", len(sel))
+	}
+	unticked, kept := sel[0].Repo, sel[1].Repo
+	m = uitest.Keys(m, updateFn, "x", "down")
+	if has(m.ticked, unticked) || !has(m.ticked, kept) {
+		t.Fatalf("setup: ticked = %v after x, want %s unticked and %s ticked", m.ticked, unticked, kept)
+	}
+	if r, _ := m.hoveredRow(); r.Repo != kept {
+		t.Fatalf("setup: hovered %q after down, want %q", r.Repo, kept)
+	}
+	m = uitest.Keys(m, updateFn, "o")
+	m = typeInto(m, kept+":v9@"+overrideDigest)
+	m = uitest.Keys(m, updateFn, "enter")
+	if m.overriding || len(*seen) != 2 {
+		t.Fatalf("override did not rebuild: overriding=%v calls=%d err=%q", m.overriding, len(*seen), m.overrideErr)
+	}
+	if has(m.ticked, unticked) {
+		t.Errorf("the rebuild ticked %s again: ticked = %v — Enter would promote a repo the operator excluded", unticked, m.ticked)
+	}
+	if !has(m.ticked, kept) {
+		t.Errorf("the rebuild lost the ticked %s: ticked = %v", kept, m.ticked)
+	}
+	if r, _ := m.hoveredRow(); r.Repo != kept {
+		t.Errorf("hovered %q after the rebuild, want %q: the cursor jumped", r.Repo, kept)
+	}
+	m, cmd := m.Update(uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter emitted nothing")
+	}
+	start, ok := cmd().(StartMsg)
+	if !ok {
+		t.Fatalf("enter emitted %T, want StartMsg", cmd())
+	}
+	if has(start.Ticked, unticked) || !has(start.Ticked, kept) {
+		t.Errorf("StartMsg.Ticked = %v, want %s absent and %s present", start.Ticked, unticked, kept)
+	}
+}
+
+func has(set []string, s string) bool {
+	for _, v := range set {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 func TestViewGoldenOverride(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
 		m, _ := overrideFixture(t)

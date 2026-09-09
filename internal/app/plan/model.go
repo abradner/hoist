@@ -199,6 +199,9 @@ type Model struct {
 
 	multiSelect *huh.MultiSelect[string]
 	ticked      []string // bound to multiSelect's accessor
+	// keepTicked is set by an override rebuild so onLoaded carries the operator's ticked
+	// set and cursor through it instead of ticking every row again as a first load does.
+	keepTicked bool
 
 	viewport viewport.Model
 	diff     string
@@ -361,6 +364,21 @@ func (m *Model) rebuildMultiSelect() {
 	}
 }
 
+// intersect keeps the ticked repos that are still selectable rows, in row order.
+func intersect(ticked []string, rows []Row) []string {
+	set := map[string]bool{}
+	for _, t := range ticked {
+		set[t] = true
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if set[r.Repo] {
+			out = append(out, r.Repo)
+		}
+	}
+	return out
+}
+
 // hoveredIndex is the position of the hovered row among the selectable rows, -1 when there
 // is no field or no row under the cursor.
 func (m Model) hoveredIndex() int {
@@ -521,6 +539,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
+	keep := m.keepTicked
+	m.keepTicked = false
 	m.state = stateReady
 	m.status = ""
 	if msg.err != nil {
@@ -531,7 +551,16 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 	m.outcome = msg.outcome
 	m.rows = DeriveRows(m.plan, m.outcome.Resolutions)
 	m.prefix = CommonPrefix(m.rows)
-	m.buildMultiSelect()
+	if keep {
+		// An override rebuild keeps what the operator unticked: rebuilding from scratch
+		// would tick every row again, and Enter would promote the repos they had excluded.
+		// The set is intersected with the rebuilt rows (a repo may have stopped being
+		// selectable), and rebuildMultiSelect puts the cursor back by repo (#121).
+		m.ticked = intersect(m.ticked, Selectable(m.rows))
+		m.rebuildMultiSelect()
+	} else {
+		m.buildMultiSelect()
+	}
 	m = m.recomputeDiff()
 	m = m.layout()
 	return m.refreshRight(), m.historyCmds()
@@ -733,6 +762,7 @@ func (m Model) updateOverride(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			m.overriding = false
 			m.overrides[ref.Repo] = ref
+			m.keepTicked = true
 			m.gen = nextGen.Add(1) // a delta still loading for the old plan must not land on the new rows
 			m.state = stateLoading
 			m.status = fmt.Sprintf("re-resolving digests from %s pods with the override…", m.source)

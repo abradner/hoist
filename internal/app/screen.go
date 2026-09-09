@@ -216,5 +216,6 @@ func (s watchScreen) SetStyles(st ui.Styles) Screen {
 	return watchScreen{s.Model.SetStyles(st)}
 }
 
-// CapturesText implements Screen: the watch screen takes no text.
+// CapturesText implements Screen, delegating to watch.Model: false today, since the watch
+// screen has no text-entry mode — but the model, not this adapter, is what says so.
 func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }

@@ -124,7 +124,7 @@ func TestTickRereadsAndMovesLastPolled(t *testing.T) {
 	if got := ansi.Strip(m.headerSection()); !strings.Contains(got, "polled 3m ago") {
 		t.Fatalf("header before the tick: %q, want 'polled 3m ago'", got)
 	}
-	m, cmd := m.Update(tickMsg{})
+	m, cmd := m.Update(tickMsg{gen: m.tickGen})
 	if cmd == nil {
 		t.Fatal("tick produced no read")
 	}
@@ -162,6 +162,49 @@ func TestRPollsNow(t *testing.T) {
 	}
 }
 
+// TestRRetiresThePendingTick: r while the cadence's tick is still pending reads exactly
+// once more, and when that stale tick fires it is ignored — before the generation guard the
+// manual snapshot scheduled a second chain and every r multiplied the polling for good.
+// The tick the manual snapshot schedules is the positive control: it still reads.
+func TestRRetiresThePendingTick(t *testing.T) {
+	r := &reader{snaps: []Snapshot{healthy()}}
+	m := ready(t, r, &clock{t0}, 80, 24)
+	pending := m.tickGen // the tick the first snapshot scheduled, not yet fired
+	if pending == 0 {
+		t.Fatal("setup: the first snapshot scheduled no tick")
+	}
+	m, cmd := m.Update(uitest.Key("r"))
+	if cmd == nil {
+		t.Fatal("r produced no read")
+	}
+	m, cmd = m.Update(cmd())
+	if cmd == nil {
+		t.Fatal("the manual snapshot scheduled no tick")
+	}
+	if r.calls != 2 {
+		t.Fatalf("r read %d times in total, want 2", r.calls)
+	}
+	live := m.tickGen
+	if live == pending {
+		t.Fatalf("the manual snapshot's tick shares generation %d with the pending one", live)
+	}
+	m, cmd = m.Update(tickMsg{gen: pending})
+	if cmd != nil || m.polling || r.calls != 2 {
+		t.Fatalf("the stale tick was not ignored: cmd=%v polling=%v calls=%d — r left a second chain", cmd != nil, m.polling, r.calls)
+	}
+	if m.tickGen != live {
+		t.Fatalf("the stale tick rescheduled: generation %d, want %d", m.tickGen, live)
+	}
+	m, cmd = m.Update(tickMsg{gen: live})
+	if cmd == nil {
+		t.Fatal("the live tick produced no read")
+	}
+	m, _ = m.Update(cmd())
+	if r.calls != 3 {
+		t.Fatalf("after the live tick the function was called %d times, want 3", r.calls)
+	}
+}
+
 func TestEscEmitsBackMsg(t *testing.T) {
 	m := ready(t, &reader{snaps: []Snapshot{healthy()}}, &clock{t0}, 80, 24)
 	_, cmd := m.Update(uitest.Key("esc"))
@@ -177,7 +220,7 @@ func TestReadErrorKeepsLastSnapshot(t *testing.T) {
 	r := &reader{snaps: []Snapshot{healthy()}}
 	m := ready(t, r, &clock{t0}, 80, 24)
 	r.err = errors.New("dial tcp my-cluster:6443: i/o timeout")
-	m, cmd := m.Update(tickMsg{})
+	m, cmd := m.Update(tickMsg{gen: m.tickGen})
 	m, _ = m.Update(cmd())
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "Deployment web") || !strings.Contains(v, "i/o timeout") {

@@ -672,16 +672,24 @@ func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 // save persists it, exactly as `hoist resume --override-ci-none` does) — and re-drives at
 // once, the way R does. Only this screen's promotion is touched: no other state, file or
 // screen sees the flag. A read-only screen (driveFn nil) can record the wish but not act on
-// it, and says so.
+// it, and says so. A busy or finished screen refuses before it records: the flag is only
+// ever acted on by the re-drive this method schedules, so recording it on a screen that
+// schedules none would carry an override no engine step ever reads — and the next R would
+// then apply it silently, without the c gesture that is meant to be the operator's decision.
 func (m Model) ApplyCINoneOverride() (Model, tea.Cmd) {
-	m.state.CINoneOverride = true
 	if m.driveFn == nil {
+		m.state.CINoneOverride = true
 		m.notice = "override recorded, but nothing is driving this promotion here (read-only) — run `hoist resume " + m.state.ID + " --override-ci-none`"
 		return m, nil
 	}
 	if m.busy || m.done {
+		m.notice = "override not applied: this promotion is still being driven"
+		if m.done {
+			m.notice = "override not applied: this promotion is finished"
+		}
 		return m, nil
 	}
+	m.state.CINoneOverride = true
 	m.stopped = false
 	if m.ctx != nil && m.ctx.Err() != nil {
 		m = m.renewDeadline()

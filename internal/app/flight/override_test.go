@@ -222,3 +222,34 @@ func TestApplyCINoneOverrideReadOnly(t *testing.T) {
 		t.Error("the state should still record the override")
 	}
 }
+
+// TestApplyCINoneOverrideRefusesOnADoneScreen: a finished promotion cannot be re-driven, so
+// the override is not recorded either — recording without a re-drive would leave a flag no
+// engine step reads until some later R applied it without the c gesture. The screen says so
+// and schedules nothing. The blocked screen from blockedOnCINone is the positive control.
+func TestApplyCINoneOverrideRefusesOnADoneScreen(t *testing.T) {
+	drv := &stubDrive{done: true, statuses: []engine.StepStatus{
+		st(engine.StepBranched, engine.Observation{Satisfied: true}),
+		st(engine.StepRolledOut, engine.Observation{Satisfied: true}),
+	}}
+	m := New(fixtureState(), PollDurations{}, drv.fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m = runInit(t, m)
+	if !m.done {
+		t.Fatal("fixture precondition: the screen should be done")
+	}
+	m, cmd := m.ApplyCINoneOverride()
+	if cmd != nil {
+		t.Error("a done screen must not schedule a drive")
+	}
+	if m.state.CINoneOverride {
+		t.Error("a done screen recorded CINoneOverride with nothing to re-drive")
+	}
+	if !strings.Contains(m.notice, "not applied") {
+		t.Errorf("notice should say the override was not applied, got %q", m.notice)
+	}
+
+	ctl, cmd := blockedOnCINone(t, &stubDrive{}).ApplyCINoneOverride()
+	if cmd == nil || !ctl.state.CINoneOverride {
+		t.Errorf("positive control: a blocked screen must record and re-drive (cmd=%v flag=%v)", cmd != nil, ctl.state.CINoneOverride)
+	}
+}

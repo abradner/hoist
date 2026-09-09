@@ -173,6 +173,11 @@ func TestRootEmptyRegistryAuthRefusedLikePlan(t *testing.T) {
 	if strings.TrimPrefix(rootErr, "hoist: ") != strings.TrimPrefix(planErr, "hoist plan: ") {
 		t.Errorf("messages differ:\n root %q\n plan %q", rootErr, planErr)
 	}
+	// promote refuses the same way — it used to fall back to the config's chain silently.
+	code, _, promoteErr := run3(t, "--repo", fixture, "promote", "--from", "app-staging", "--to", "app-production", "--registry-auth", "")
+	if code != exitUsage || promoteErr != "hoist promote: "+want {
+		t.Errorf("promote: exit %d stderr %q; want %d and %q", code, promoteErr, exitUsage, "hoist promote: "+want)
+	}
 }
 
 // A subcommand's own --digest-sources defaults to the root's and still wins when given:

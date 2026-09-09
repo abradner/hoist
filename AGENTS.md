@@ -234,6 +234,13 @@ no rule stated for any of them:
   `internal/app/plan` and knows nothing of `resolutionOptions` or `runResolution`; only `cmd/hoist`
   is allowed to know both sides, so a screen's own package still never imports `config` or
   `registry` policy, only the plain function type it calls.
+- **A screen that shows launcher-owned text takes plain values, not a function.** Codified
+  from the config screen (#104, Arc 2): when what a screen displays is a string the launcher
+  already holds (the redacted config text and its path), the root takes it through
+  `WithConfigView(path, found, text)` and the screen's `New(...)` takes the same plain values —
+  no func value, no `Init` fetch. `WithHistory`/`WithDrift`/`WithWatch` pass funcs because
+  those screens *observe* something that changes; a func for static text would be a claim of
+  liveness the screen cannot keep (principle 1).
 
 ### 4.9 Configuration
 
