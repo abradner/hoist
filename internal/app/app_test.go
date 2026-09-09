@@ -1660,3 +1660,39 @@ func TestWithDriftMarksEveryEnvPendingUntilItAnswers(t *testing.T) {
 		t.Fatalf("before any answer the notes must say the cluster is being asked:\n%s", v)
 	}
 }
+
+// C pushes the config screen with the text WithConfigView supplied, esc pops it; without
+// WithConfigView, C is a notice, not a blank screen (#104).
+func TestConfigKeyPushesConfigScreen(t *testing.T) {
+	m := sized(t)
+	m = m.(Model).WithConfigView("/home/me/.config/hoist/config.yaml", true, "poll:\n    ci: 20s\n")
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'C', Text: "C"})
+	if cmd == nil {
+		t.Fatal("C produced no command")
+	}
+	msg := cmd()
+	if _, ok := msg.(matrix.OpenConfigMsg); !ok {
+		t.Fatalf("C's command yields %T, want matrix.OpenConfigMsg", msg)
+	}
+	m, _ = m.Update(msg)
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after C, want 2", n)
+	}
+	if v := plain(m); !strings.Contains(v, "/home/me/.config/hoist/config.yaml") || !strings.Contains(v, "ci: 20s") {
+		t.Errorf("config screen lacks the path or the text:\n%s", v)
+	}
+	m, backCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd == nil {
+		t.Fatal("esc on the config screen produced no command")
+	}
+	m, _ = m.Update(backCmd())
+	if n := len(m.(Model).stack); n != 1 {
+		t.Errorf("esc did not pop back to the matrix: stack has %d screens", n)
+	}
+	// Positive control for the unwired case.
+	bare := sized(t)
+	bare, _ = bare.Update(matrix.OpenConfigMsg{})
+	if n := len(bare.(Model).stack); n != 1 || !strings.Contains(plain(bare), "no config to show") {
+		t.Errorf("unwired C: stack %d, view:\n%s", n, plain(bare))
+	}
+}

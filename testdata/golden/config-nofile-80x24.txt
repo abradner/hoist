@@ -1,0 +1,24 @@
+╭─ no file at /home/me/.config/hoist/config.yaml; showing defaults ────────────╮
+│poll:                                                                         │
+│    ci: 20s                                                                   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+read-only · op refs redacted        ↑/↓ pgup/pgdn ctrl+u/d g/G scroll · esc back

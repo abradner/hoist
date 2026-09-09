@@ -334,3 +334,21 @@ func TestTooSmallAWindowSaysSo(t *testing.T) {
 		t.Fatalf("view at 40×8 should be the table:\n%s", v)
 	}
 }
+
+// C emits OpenConfigMsg (#104), whatever the cursor is on — the config is the session's,
+// not a cell's — and shows up in ? help.
+func TestConfigKeyEmitsOpenConfigMsg(t *testing.T) {
+	m := newFixture().SetSize(80, 24)
+	if _, ok := emitted(t, m, "C").(OpenConfigMsg); !ok {
+		t.Fatalf("C emitted %+v, want OpenConfigMsg", emitted(t, m, "C"))
+	}
+	if got := emitted(t, m, "c"); got != nil {
+		t.Fatalf("lower-case c emitted %+v, want nothing", got)
+	}
+	// The full help line is longer than 120 columns and truncates from the right, so the
+	// key is checked on a terminal wide enough to show all of it.
+	m = uitest.Keys(m.SetSize(200, 24), update, "?")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "C config") {
+		t.Errorf("? help lacks the C key:\n%s", v)
+	}
+}
