@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -83,8 +84,9 @@ type UpdateFunc[M any] func(M, tea.Msg) (M, tea.Cmd)
 
 // Drain runs cmd and feeds every message it produces back through update, recursively,
 // until no command is left — the way a test settles a screen after Init or a keypress.
-// tea.BatchMsg is unpacked in order; spinner ticks are dropped, since a spinner reschedules
-// itself forever and a test never wants to wait on one.
+// tea.BatchMsg is unpacked in order; spinner ticks and cursor blinks are dropped, since a
+// spinner — and a focused text input's cursor (#102's o dialog) — reschedules itself forever
+// and a test never wants to wait on one.
 func Drain[M any](m M, cmd tea.Cmd, update UpdateFunc[M]) M {
 	if cmd == nil {
 		return m
@@ -98,7 +100,7 @@ func Drain[M any](m M, cmd tea.Cmd, update UpdateFunc[M]) M {
 			m = Drain(m, c, update)
 		}
 		return m
-	case spinner.TickMsg:
+	case spinner.TickMsg, cursor.BlinkMsg:
 		return m
 	}
 	var next tea.Cmd

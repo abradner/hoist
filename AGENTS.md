@@ -442,7 +442,13 @@ the confirm screens lead with the work, not the mechanism (M10): the deploy conf
 "rolling out N commits · M migrations · replacing v1, live 34 days" over the commit list, the plan
 confirm keeps the ticked set on the left and the hovered repo's commits and migrations on the
 right with the common image-repo prefix lifted into the header so a version never wraps, and on
-both `d` toggles the yaml diff into view and `enter` means the same from either; the flight and
+both `d` toggles the yaml diff into view and `enter` means the same from either; on the plan
+confirm `o` is the TUI's `--digest` (#102): a `huh.Input` dialog pre-filled with the hovered
+repo's `<repo>=`, validated on `enter` by `image.ParseOverride` — the one predicate
+`digestFlag.Set` applies too, so both faces refuse the same inputs with the same words — that
+rebuilds the plan through `ResolveFunc` with the override in place, so the row's provenance,
+the resolution section and the plan's warnings read `override` exactly as the CLI's do; an
+invalid entry keeps the dialog open with the refusal, `esc` changes nothing; the flight and
 restart screens are framed the same way, with the blocked reason and its command
 (`hoist approve <id>`) as their own section, which a short terminal keeps by collapsing the step
 list to a one-line strip rather than dropping the verdict; when that reason is `ci.none: prompt`'s

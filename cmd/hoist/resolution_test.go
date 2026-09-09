@@ -139,9 +139,10 @@ func TestPlanDigestOverrideBeatsPods(t *testing.T) {
 	if !strings.Contains(out, "ghcr.io/example/web:v9@"+digestB+"  [override] caller-supplied digest") {
 		t.Errorf("section does not show the override:\n%s", out)
 	}
-	// A tagless override is still BuildPlan's refusal, resolution or not.
+	// A tagless override is refused by the shared predicate at flag parsing (#102), resolution
+	// or not; BuildPlan's own refusal remains the enforcement behind it.
 	code, _, errOut = run3(t, planArgs("--dry-run", "--digest", "ghcr.io/example/web=ghcr.io/example/web@"+digestB)...)
-	if code != exitFailure || !strings.Contains(errOut, "a tag is required") {
+	if code != exitUsage || !strings.Contains(errOut, "a tag is required") {
 		t.Errorf("tagless override: exit %d, stderr %s", code, errOut)
 	}
 }
@@ -289,10 +290,10 @@ func TestBuildResolveFuncComputesOptionsOnce(t *testing.T) {
 	rc.Kube.Context = "second-context"
 
 	repo := &gitops.Repo{Root: "x", Envs: map[string]*gitops.Env{"app-staging": {Name: "app-staging"}}}
-	if _, err := fn(context.Background(), repo, "app-staging"); err != nil {
+	if _, err := fn(context.Background(), repo, "app-staging", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fn(context.Background(), repo, "app-staging"); err != nil {
+	if _, err := fn(context.Background(), repo, "app-staging", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range *contexts {
