@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │! c: cluster not asked: kube context "my-cluster" is not in the kubeconfig                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c                                                                  p promote • d deploy • r resume • ? help • q quit
+env c                                                        p promote • d deploy • w watch • r resume • ? help • q quit

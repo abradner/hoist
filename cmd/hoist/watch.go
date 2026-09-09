@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -89,13 +90,10 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	}
 	fam := r.Envs[target.Namespace].Families[path.Base(target.SourcePath)]
 
-	argoNamespace := config.DefaultArgoNamespace
+	argoNamespace := argoNamespaceOf(eff.cfg)
 	ctxName := *kubeContext
-	if eff.cfg != nil {
-		argoNamespace = eff.cfg.Kube.ArgoNamespace
-		if ctxName == "" {
-			ctxName = eff.cfg.Kube.Context
-		}
+	if eff.cfg != nil && ctxName == "" {
+		ctxName = eff.cfg.Kube.Context
 	}
 
 	a, usedCtx, err := newArgo(ctxName)
@@ -131,16 +129,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 		return 0
 	}
 
-	// Poll interval: the smaller of poll.argo and poll.rollout, since this one loop refreshes
-	// both an Argo status and a Deployment/Job status on every tick — never a constant this
-	// command invents on its own (invariant 5). There is no dedicated "watch" poll knob in
-	// internal/config; reusing the tighter of the two existing ones means neither reading ever
-	// goes stale by more than its own configured cadence already promises elsewhere.
-	interval := time.Duration(cfg.Poll.Argo)
-	if r := time.Duration(cfg.Poll.Rollout); r < interval {
-		interval = r
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(watchInterval(cfg.Poll))
 	defer ticker.Stop()
 	for {
 		select {
@@ -150,6 +139,30 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 			renderOnce()
 		}
 	}
+}
+
+// watchInterval is the poll cadence both faces of watch share: the smaller of poll.argo and
+// poll.rollout, since one loop refreshes both an Argo status and a Deployment/Job status on
+// every tick — never a constant either face invents on its own (invariant 5). There is no
+// dedicated "watch" poll knob in internal/config; reusing the tighter of the two existing
+// ones means neither reading ever goes stale by more than its own configured cadence already
+// promises elsewhere. The TUI's watch screen (buildWatchFunc, wiring.go) polls at this same
+// value, so the two faces cannot drift apart on cadence.
+func watchInterval(poll config.PollConfig) time.Duration {
+	interval := time.Duration(poll.Argo)
+	if r := time.Duration(poll.Rollout); r < interval {
+		interval = r
+	}
+	return interval
+}
+
+// argoNamespaceOf is where the Application custom resources live for a configured repo
+// (RepoConfig.Kube.ArgoNamespace), or the default when running from flags alone.
+func argoNamespaceOf(rc *config.RepoConfig) string {
+	if rc == nil {
+		return config.DefaultArgoNamespace
+	}
+	return rc.Kube.ArgoNamespace
 }
 
 // familyWorkloads lists the distinct Deployment names, and the distinct (kind, name) Job/
@@ -190,46 +203,65 @@ func familyWorkloads(fam *gitops.Family) (deployments []string, jobLikes []jobLi
 
 type jobLikeName struct{ Name, Kind string }
 
-// watchAppSnapshot renders one read-only snapshot: a.Get's current Argo status, then
-// ro.Deployment/ro.JobLike for every workload the family declares. It calls Argo.Get and
-// Rollout.Deployment/JobLike only — never Argo.Refresh — which is the whole of `hoist watch`'s
-// read-only guarantee (see runWatch's own doc comment).
+// watchAppSnapshot renders one read-only snapshot for the CLI: readWatchSnapshot's values,
+// one line for the Application and one per workload.
 func watchAppSnapshot(ctx context.Context, a argo.Argo, ro rollout.Rollout, app argo.Application, namespace string, deployments []string, jobLikes []jobLikeName) (string, error) {
+	snap, err := readWatchSnapshot(ctx, a, ro, app, namespace, deployments, jobLikes)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
+	fmt.Fprintf(&b, "  sync=%s health=%s revision=%s operation=%s reconciled=%s\n",
+		orNone(snap.SyncStatus), orNone(snap.HealthStatus), orNone(snap.Revision), orNone(snap.OperationPhase), formatTime(snap.ReconciledAt))
+	for _, w := range snap.Workloads {
+		fmt.Fprintf(&b, "  %s %s: %s", w.Kind, w.Name, w.Detail)
+		if len(w.Images) > 0 {
+			fmt.Fprintf(&b, " (%s)", strings.Join(w.Images, ", "))
+		}
+		fmt.Fprintln(&b)
+	}
+	return b.String(), nil
+}
+
+// readWatchSnapshot is the one read both faces of watch make: a.Get's current Argo status,
+// then ro.Deployment/ro.JobLike for every workload the family declares, flattened into the
+// watch screen's plain Snapshot (internal/app/watch carries no cluster types of its own). It
+// calls Argo.Get and Rollout.Deployment/JobLike only — never Argo.Refresh — which is the whole
+// of watch's read-only guarantee (see runWatch's own doc comment); TestWatchNeverCallsRefresh
+// and TestBuildWatchFuncNeverCallsRefresh each pin it from their own face.
+func readWatchSnapshot(ctx context.Context, a argo.Argo, ro rollout.Rollout, app argo.Application, namespace string, deployments []string, jobLikes []jobLikeName) (watch.Snapshot, error) {
 	st, err := a.Get(ctx, app)
 	if err != nil {
-		return "", fmt.Errorf("reading Argo Application %s: %w", app, err)
+		return watch.Snapshot{}, fmt.Errorf("reading Argo Application %s: %w", app, err)
 	}
-	fmt.Fprintf(&b, "  sync=%s health=%s revision=%s operation=%s reconciled=%s\n",
-		orNone(st.SyncStatus), orNone(st.HealthStatus), orNone(st.SyncRevision), orNone(st.OperationPhase), formatTime(st.ReconciledAt))
-
+	snap := watch.Snapshot{
+		App: app.Name, Namespace: namespace,
+		SyncStatus: st.SyncStatus, HealthStatus: st.HealthStatus, Revision: st.SyncRevision,
+		OperationPhase: st.OperationPhase, ReconciledAt: st.ReconciledAt,
+	}
 	for _, name := range deployments {
 		ds, err := ro.Deployment(ctx, namespace, name)
 		if err != nil {
-			return "", fmt.Errorf("reading Deployment %s/%s: %w", namespace, name, err)
+			return watch.Snapshot{}, fmt.Errorf("reading Deployment %s/%s: %w", namespace, name, err)
 		}
-		var images []string
+		w := watch.Workload{Kind: "Deployment", Name: name, Replicas: ds.Replicas, Complete: ds.Complete, DeadlineExceeded: ds.DeadlineExceeded, Detail: ds.Detail}
 		for _, img := range ds.Images {
 			kind := "container"
 			if img.Init {
 				kind = "initContainer"
 			}
-			images = append(images, fmt.Sprintf("%s %s=%s", kind, img.Name, img.Image))
+			w.Images = append(w.Images, fmt.Sprintf("%s %s=%s", kind, img.Name, img.Image))
 		}
-		fmt.Fprintf(&b, "  Deployment %s: %s", name, ds.Detail)
-		if len(images) > 0 {
-			fmt.Fprintf(&b, " (%s)", strings.Join(images, ", "))
-		}
-		fmt.Fprintln(&b)
+		snap.Workloads = append(snap.Workloads, w)
 	}
 	for _, jl := range jobLikes {
 		js, err := ro.JobLike(ctx, namespace, jl.Name, jl.Kind)
 		if err != nil {
-			return "", fmt.Errorf("reading %s %s/%s: %w", jl.Kind, namespace, jl.Name, err)
+			return watch.Snapshot{}, fmt.Errorf("reading %s %s/%s: %w", jl.Kind, namespace, jl.Name, err)
 		}
-		fmt.Fprintf(&b, "  %s %s: %s\n", jl.Kind, jl.Name, js.Detail)
+		snap.Workloads = append(snap.Workloads, watch.Workload{Kind: jl.Kind, Name: jl.Name, Detail: js.Detail})
 	}
-	return b.String(), nil
+	return snap, nil
 }
 
 func orNone(s string) string {

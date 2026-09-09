@@ -1,40 +1,40 @@
-╭─ hoist · matrix · repo ──────────────────────────────────────────────────────────────────────────────────────────────╮
-│ FAMILY      A                     B                    ▸ C ⚠                                                         │
-│ absent      v1            pinned                       v9    pinned                                                  │
-│ drift       v1          unpinned  v2           pinned  v2  unpinned                                                  │
-│ empty                             no images                                                                          │
-│ mixedtags   2 versions     split                                                                                     │
-│ multi       2 images      pinned  2 images   unpinned                                                                │
-│ pinned      v1            pinned  v1           pinned  v1    pinned                                                  │
-│ sidecar     v1            pinned  v1           pinned                                                                │
-│ thirdparty  7           external  8          external  8   external                                                  │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+╭─ hoist · watch ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│app-staging / web · web-app-staging                                                         polled just now · every 5s│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│⚠ c is a production env: writes there always open a PR                                                                │
+│sync Synced   health Healthy   revision 0123456789ab   operation Succeeded   reconciled 2m ago                        │
+│                                                                                                                      │
+│Deployment web  rolled out · 2 replica(s)                                                                             │
+│    deployment "web" successfully rolled out                                                                          │
+│    container web=ghcr.io/example/web:v1.4.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  │
+│                                                                                                                      │
+│CronJob web-purge                                                                                                     │
+│    schedule=0 3 * * * suspend=false active=0 lastSchedule=(never)                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c (production)                                           p promote • d deploy • w watch • r resume • ? help • q quit
+read-only · never refreshes                                                           r poll now · ↑/↓ scroll · esc back

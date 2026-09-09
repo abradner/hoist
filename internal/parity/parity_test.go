@@ -101,7 +101,7 @@ var registry = []op{
 	{
 		Name: "watch one Application converge, outside any promotion",
 		CLI:  "watch --app --once --repo --apps-root",
-		Gap:  "#101 — no watch screen yet",
+		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r polls now, esc pops (#101)",
 	},
 	{
 		Name: "override one repo's digest before planning",

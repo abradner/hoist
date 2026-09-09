@@ -15,6 +15,7 @@ import (
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/tags"
+	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
@@ -147,6 +148,9 @@ type Model struct {
 	// Zero when no cluster is configured; R then says so rather than opening a screen that
 	// cannot do anything.
 	restartFn apprestart.Funcs
+	// watchFn builds the watch screen's read function for one family in one env (WithWatch;
+	// cmd/hoist's buildWatchFunc). nil means no cluster is configured, and w says so.
+	watchFn watch.BuildFunc
 	// history is what the tag picker and both confirm screens call for commit history and the
 	// migration delta (M10). Set through WithHistory rather than New so the screens that
 	// consume it can land one at a time; zero means "no history available" and each screen
@@ -288,6 +292,13 @@ func (m Model) listInFlightAt(gen uint64) tea.Cmd {
 		summaries, err := list(ctx)
 		return inFlightMsg{gen: gen, list: summaries, err: err}
 	}
+}
+
+// WithWatch supplies the watch screen's builder — cmd/hoist's buildWatchFunc, the read-only
+// Get/Deployment/JobLike adapter `hoist watch` also uses. See Model.watchFn.
+func (m Model) WithWatch(b watch.BuildFunc) Model {
+	m.watchFn = b
+	return m
 }
 
 // WithDrift hands the matrix its cluster question — cmd/hoist's buildDriftFunc, the raw
@@ -659,6 +670,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.openRestart(msg.Family, msg.Target)
 	case apprestart.BackMsg:
 		return m.pop(), nil
+	case matrix.OpenWatchMsg:
+		return m.openWatch(msg.Family, msg.Target)
+	case watch.BackMsg:
+		return m.pop(), nil
 	case matrix.OpenTagsMsg:
 		var mapped bool
 		var listFn tags.ListFunc
@@ -771,6 +786,22 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 	rs := restartScreen{apprestart.New(target, family, names, plan.IsProduction(target, m.envs), m.restartFn, m.styles)}
 	m = m.push(rs)
 	return m, rs.Init()
+}
+
+// openWatch pushes the watch screen for one family in one env. Resolving the family to its
+// Application and workload names is the builder's job (cmd/hoist), the same split
+// openRestart makes: the matrix names a choice, the root asks what it means.
+func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
+	if m.watchFn == nil {
+		return m.withMatrixNotice("watching needs a cluster connection, and none is configured"), nil
+	}
+	funcs, err := m.watchFn(family, target)
+	if err != nil {
+		return m.withMatrixNotice(fmt.Sprintf("cannot watch %s in %s: %v", family, target, err)), nil
+	}
+	ws := watchScreen{watch.New(family, target, funcs, m.styles)}
+	m = m.push(ws)
+	return m, ws.Init()
 }
 
 // openDeploy builds the plan for one image into one env and pushes the confirm screen for it.

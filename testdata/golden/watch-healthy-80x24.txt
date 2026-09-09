@@ -1,0 +1,24 @@
+╭─ hoist · watch ──────────────────────────────────────────────────────────────╮
+│app-staging / web · web-app-staging                 polled just now · every 5s│
+├──────────────────────────────────────────────────────────────────────────────┤
+│sync Synced   health Healthy   revision 0123456789ab   operation Succeeded    │
+│  reconciled 2m ago                                                           │
+│                                                                              │
+│Deployment web  rolled out · 2 replica(s)                                     │
+│    deployment "web" successfully rolled out                                  │
+│    container                                                                 │
+│      web=ghcr.io/example/web:v1.4.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa                                          │
+│                                                                              │
+│CronJob web-purge                                                             │
+│    schedule=0 3 * * * suspend=false active=0 lastSchedule=(never)            │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+read-only · never refreshes                   r poll now · ↑/↓ scroll · esc back
