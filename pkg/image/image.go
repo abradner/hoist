@@ -147,6 +147,42 @@ func PromotionID(repoFullName, targetEnv string, refs []Ref) string {
 	return strings.ToLower(enc)[:10]
 }
 
+// ParseOverride parses one digest override as an operator writes it — `repo=repo:tag@sha256:…`
+// — and is the one predicate both faces apply to it: `hoist plan|promote --digest` (cmd/hoist's
+// digestFlag.Set) and the plan screen's `o` dialog (internal/app/plan) call this and nothing
+// else, so the two can never drift on what an override is (AGENTS.md §8, layered checks). It
+// lives here rather than in pkg/resolve because it is a rule about the shape of a reference
+// string — the same rules Parse applies plus three of its own — and knows nothing about
+// resolution order or sources: the left side must name the reference's own repo (a typo there
+// would otherwise plan a different repo than the one the operator meant), and the reference
+// must carry a tag and a digest, since hoist never writes anything else to a manifest (§4.2).
+// The returned Ref's Repo is the override's key.
+//
+// Politeness, not enforcement: gitops.BuildPlan refuses an unpinned or tagless override on
+// its own, whichever face let it through, so deleting a check here moves the refusal rather
+// than making a new state possible.
+func ParseOverride(s string) (Ref, error) {
+	repo, rest, ok := strings.Cut(s, "=")
+	repo = strings.TrimSpace(repo)
+	if !ok || repo == "" {
+		return Ref{}, fmt.Errorf("want repo=repo:tag@sha256:<digest>, got %q", s)
+	}
+	ref, err := Parse(strings.TrimSpace(rest))
+	if err != nil {
+		return Ref{}, err
+	}
+	if ref.Repo != repo {
+		return Ref{}, fmt.Errorf("override for %s names a different repo %s", repo, ref.Repo)
+	}
+	if !ref.Pinned() {
+		return Ref{}, fmt.Errorf("override for %s has no digest; hoist writes <repo>:<tag>@sha256:<digest> so a digest is required", repo)
+	}
+	if ref.Tag == "" {
+		return Ref{}, fmt.Errorf("override for %s has no tag; hoist writes <repo>:<tag>@sha256:<digest> so a tag is required", repo)
+	}
+	return ref, nil
+}
+
 // Canonical returns the repo in the registry's own spelling, so that the repo a manifest
 // names and the repo a pod's imageID names can be compared: docker.io/library/nginx,
 // docker.io/nginx and nginx all become index.docker.io/library/nginx, while

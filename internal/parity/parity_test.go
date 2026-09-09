@@ -106,7 +106,7 @@ var registry = []op{
 	{
 		Name: "override one repo's digest before planning",
 		CLI:  "plan --digest promote --digest",
-		Gap:  "#102 — the plan screen plans from the resolver alone",
+		TUI:  "o on the plan screen: a huh.Input dialog, validated like --digest, rebuilds the plan with the override named as its source",
 	},
 	{
 		Name: "treat a PR with no checks as green under ci.none: prompt",

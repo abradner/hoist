@@ -105,7 +105,7 @@ func TestImpactBodySaysAtLeastWhenMigrationsIncomplete(t *testing.T) {
 func TestAsyncLoad(t *testing.T) {
 	r := discoverFixture(t)
 	calls := 0
-	fake := ResolveFunc(func(_ context.Context, _ *gitops.Repo, source string) (ResolveOutcome, error) {
+	fake := ResolveFunc(func(_ context.Context, _ *gitops.Repo, source string, _ map[string]image.Ref) (ResolveOutcome, error) {
 		calls++
 		if source != "app-staging" {
 			t.Errorf("resolveFn source = %q, want app-staging", source)
@@ -166,7 +166,7 @@ func TestAsyncLoad(t *testing.T) {
 // draft followup caught it as the exact bypass the rule exists to prevent.)
 func TestResolveErrorFailsTheScreen(t *testing.T) {
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
 		return ResolveOutcome{}, errCannotReachCluster
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
@@ -193,7 +193,7 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 	redact.Register(secret)
 
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
 		return ResolveOutcome{
 			KubeContext:  "test-context",
 			RegistryAuth: "env",
@@ -624,7 +624,7 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 	redact.Register(secret)
 
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string) (ResolveOutcome, error) {
+	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
 		return ResolveOutcome{}, sentinelErr("cluster unreachable: token " + secret + " rejected")
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})

@@ -15,12 +15,12 @@
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
-│┃                                              │                                                                      │
-│┃                                              │                                                                      │
-│┃                                              │                                                                      │
-│┃                                              │                                                                      │
-│┃                                              │                                                                      │
-│┃                                              │                                                                      │
+│┃                     ╭─ override digest ──────────────────────────────────────────────────────╮                      │
+│┃                     │┃ override the digest for ghcr.io/example/counta                        │                      │
+│┃                     │┃ repo=repo:tag@sha256:<digest> — wins over every digest source, as --  │                      │
+│┃                     │┃ digest does                                                           │                      │
+│┃                     │┃ > ghcr.io/example/counta=                                             │                      │
+│┃                     ╰────────────────────────────────────────────────────────────────────────╯                      │
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
@@ -37,4 +37,4 @@
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                           tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back
+                                                                                                enter apply · esc cancel

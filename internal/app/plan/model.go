@@ -29,6 +29,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/resolve"
@@ -69,7 +70,27 @@ type ResolveOutcome struct {
 // inside a tea.Cmd, never from Update directly. A nil ResolveFunc means "digest sources:
 // none" from the start (no config, or resolution deliberately turned off); an error from a
 // non-nil one degrades the same way, with a warning, rather than failing the screen.
-type ResolveFunc func(ctx context.Context, repo *gitops.Repo, source string) (ResolveOutcome, error)
+// overrides are the operator's per-repo digest overrides (the o dialog, #102 — the TUI's
+// `--digest`): the adaptor hands them to pkg/resolve exactly as the CLI does, so each one
+// wins outright and is reported as [override] with the same alternatives and warnings.
+type ResolveFunc func(ctx context.Context, repo *gitops.Repo, source string, overrides map[string]image.Ref) (ResolveOutcome, error)
+
+// ValidateOverride is what the o dialog applies to the text on enter: image.ParseOverride —
+// the one predicate `--digest` applies too (AGENTS.md §8, layered checks: the CLI and the
+// TUI must refuse the same inputs with the same words) — plus the dialog's own rule that the
+// override is for the row it was opened on, since the dialog pre-fills that repo and a plan
+// built with an override for some other repo would not be the one the operator was looking
+// at. The returned Ref is what the resolver is handed.
+func ValidateOverride(repo, text string) (image.Ref, error) {
+	ref, err := image.ParseOverride(text)
+	if err != nil {
+		return image.Ref{}, err
+	}
+	if ref.Repo != repo {
+		return image.Ref{}, fmt.Errorf("this dialog overrides %s; got %s", repo, ref.Repo)
+	}
+	return ref, nil
+}
 
 // state is which part of the screen is showing.
 type state int
@@ -135,13 +156,14 @@ type historyMsg struct {
 var nextGen atomic.Uint64
 
 type keyMap struct {
-	SwitchPane, Mode, YAML, Enter, Back key.Binding
+	SwitchPane, Mode, Override, YAML, Enter, Back key.Binding
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
 		SwitchPane: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
 		Mode:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mode")),
+		Override:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "override")),
 		YAML:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "yaml")),
 		Enter:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),
 		Back:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
@@ -194,6 +216,20 @@ type Model struct {
 	// (confirmAgreed) — see internal/app/tags for why the field itself never moves.
 	confirmValue bool
 
+	// overrides are the digests the operator has pinned by hand through the o dialog
+	// (#102), keyed by image repo; every rebuild of the plan hands them to resolveFn and
+	// applies them over its answer exactly as `hoist plan --digest` does.
+	overrides map[string]image.Ref
+	// overriding is true while the o dialog is up; overrideRepo is the row it was opened
+	// on, and overrideErr the last refusal it showed (redacted), "" when none.
+	overriding    bool
+	overrideRepo  string
+	overrideErr   string
+	overrideInput *huh.Input
+	// overrideValue is huh's write target only, like confirmValue; the text is read back
+	// through GetValue (§9 entry 6).
+	overrideValue string
+
 	focus  focusPane
 	mode   string
 	notice string
@@ -225,6 +261,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Line)),
 		viewport:   viewport.New(),
 		deltas:     map[string]history.State{},
+		overrides:  map[string]image.Ref{},
 		styles:     ui.NewStyles(true),
 	}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
@@ -377,10 +414,14 @@ func (m Model) Init() tea.Cmd {
 // Update call stack (AGENTS.md §4.3: resolution opens a cluster/registry connection).
 func (m Model) loadCmd() tea.Cmd {
 	repo, source, target, promotable, resolveFn := m.repo, m.source, m.target, m.promotable, m.resolveFn
+	overrides := make(map[string]image.Ref, len(m.overrides))
+	for k, v := range m.overrides {
+		overrides[k] = v
+	}
 	return func() tea.Msg {
 		var outcome ResolveOutcome
 		if resolveFn != nil {
-			out, err := resolveFn(context.Background(), repo, source)
+			out, err := resolveFn(context.Background(), repo, source, overrides)
 			if err != nil {
 				// A resolveFn error means digest resolution was attempted and failed
 				// outright — the cluster was unreachable, or the resolution
@@ -394,7 +435,23 @@ func (m Model) loadCmd() tea.Cmd {
 			}
 			outcome = out
 		}
+		// The overrides win over whatever the resolver answered, exactly as cmd/hoist's
+		// resolutionReport.digests applies the --digest map over resolve.Digests; and in
+		// "digest sources: none" mode, where no resolver ran at all, each override still
+		// gets a Resolution so its row names [override] as its source rather than reading
+		// as a manifest pin.
+		if len(overrides) > 0 && outcome.Resolutions == nil {
+			outcome.Resolutions = map[string]resolve.Resolution{}
+		}
+		for r, ov := range overrides {
+			if res, ok := outcome.Resolutions[r]; !ok || res.Source != resolve.SourceOverride {
+				outcome.Resolutions[r] = resolve.Resolution{Repo: r, Ref: ov, Source: resolve.SourceOverride, Detail: "caller-supplied digest"}
+			}
+		}
 		digests := resolve.Digests(outcome.Resolutions)
+		for r, ov := range overrides {
+			digests[r] = ov
+		}
 		pl, err := gitops.BuildPlanWith(repo, source, target, promotable, digests, resolve.Reasons(outcome.Resolutions))
 		if err == nil {
 			pl.Warnings = append(resolve.Warnings(outcome.Resolutions), pl.Warnings...)
@@ -448,7 +505,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		if key.Matches(msg, m.keys.Back) && !m.confirming {
+		if key.Matches(msg, m.keys.Back) && !m.confirming && !m.overriding {
 			return m.leave(), func() tea.Msg { return BackMsg{} }
 		}
 	}
@@ -506,12 +563,24 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	if m.confirming {
 		return m.updateConfirm(msg)
 	}
+	if m.overriding {
+		return m.updateOverride(msg)
+	}
 	kmsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return m, nil
 	}
 	m.notice = ""
 	switch {
+	case key.Matches(kmsg, m.keys.Override):
+		r, ok := m.hoveredRow()
+		if !ok || m.err != nil {
+			m.notice = "no repo under the cursor to override"
+			return m, nil
+		}
+		m.overriding = true
+		m.buildOverride(r.Repo)
+		return m, tea.Batch(m.overrideInput.Init(), m.overrideInput.Focus())
 	case key.Matches(kmsg, m.keys.Enter):
 		if len(m.ticked) == 0 {
 			m.notice = "nothing ticked to promote"
@@ -621,6 +690,72 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
+// buildOverride builds the o dialog for repo: a huh.Input pre-filled with "<repo>=" so the
+// operator types only the reference, in the exact form `--digest` takes. WithKeyMap for the
+// same reason buildConfirm gives (§9 entry 6); the answer is read back with GetValue.
+func (m *Model) buildOverride(repo string) {
+	m.overrideRepo = repo
+	m.overrideErr = ""
+	m.overrideValue = repo + "="
+	if ov, ok := m.overrides[repo]; ok {
+		m.overrideValue = repo + "=" + ov.String()
+	}
+	m.overrideInput = huh.NewInput().
+		Title("override the digest for " + repo).
+		Description("repo=repo:tag@sha256:<digest> — wins over every digest source, as --digest does").
+		Value(&m.overrideValue)
+	m.overrideInput.WithKeyMap(huh.NewDefaultKeyMap())
+	m.overrideInput.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.overrideInput.WithWidth(m.dialogWidth())
+}
+
+// updateOverride drives the o dialog: esc closes it with nothing changed; enter validates
+// the text through ValidateOverride and, when it holds, records the override and rebuilds
+// the plan through resolveFn with it in place — the same load path the screen opened with —
+// or, when it does not, shows the refusal in the dialog and keeps it open. Enter is handled
+// here rather than left to huh's own Submit: a standalone Input's Submit only emits
+// NextField, which nothing on this screen listens for.
+func (m Model) updateOverride(msg tea.Msg) (Model, tea.Cmd) {
+	if kmsg, ok := msg.(tea.KeyPressMsg); ok {
+		m.overrideErr = ""
+		switch kmsg.String() {
+		case "esc":
+			m.overriding = false
+			return m, nil
+		case "enter":
+			text, _ := m.overrideInput.GetValue().(string)
+			ref, err := ValidateOverride(m.overrideRepo, text)
+			if err != nil {
+				// Redacted here as well as at View's boundary: the operator may paste a
+				// credential-bearing string by accident, and the refusal echoes what was typed.
+				m.overrideErr = redact.Strings(err.Error())
+				return m, nil
+			}
+			m.overriding = false
+			m.overrides[ref.Repo] = ref
+			m.gen = nextGen.Add(1) // a delta still loading for the old plan must not land on the new rows
+			m.state = stateLoading
+			m.status = fmt.Sprintf("re-resolving digests from %s pods with the override…", m.source)
+			m.showYAML = false
+			return m, tea.Batch(m.spinner.Tick, m.loadCmd())
+		}
+	}
+	f, cmd := m.overrideInput.Update(msg)
+	if in, ok := f.(*huh.Input); ok {
+		m.overrideInput = in
+	}
+	return m, cmd
+}
+
+// overrideBody is the dialog's content: the input, and under it the last refusal.
+func (m Model) overrideBody() string {
+	body := m.overrideInput.View()
+	if m.overrideErr != "" {
+		body += "\n" + m.styles.Bad.Render(ansi.Wordwrap(m.overrideErr, m.dialogWidth(), ""))
+	}
+	return body
+}
+
 func (m Model) confirmAgreed() bool {
 	if m.confirmDirect == nil {
 		return false
@@ -685,6 +820,8 @@ func (m Model) CapturesText() bool {
 	switch {
 	case m.state == stateSelectEnv:
 		return m.envSelect != nil && m.envSelect.GetFiltering()
+	case m.state == stateReady && m.overriding:
+		return true // the o dialog's input takes every character, q included
 	case m.state == stateReady && !m.confirming && m.focus == focusLeft:
 		return m.multiSelect != nil && m.multiSelect.GetFiltering()
 	default:
@@ -734,6 +871,9 @@ func (m Model) layout() Model {
 	if m.confirmDirect != nil {
 		m.confirmDirect.WithWidth(m.dialogWidth())
 	}
+	if m.overrideInput != nil {
+		m.overrideInput.WithWidth(m.dialogWidth())
+	}
 	resized := m.viewport.Width() != rightWidth
 	m.viewport.SetWidth(rightWidth)
 	m.viewport.SetHeight(body)
@@ -765,6 +905,9 @@ func (m Model) SetStyles(s ui.Styles) Model {
 	if m.confirmDirect != nil {
 		m.confirmDirect.WithTheme(theme)
 	}
+	if m.overrideInput != nil {
+		m.overrideInput.WithTheme(theme)
+	}
 	return m.refreshRight()
 }
 
@@ -790,6 +933,9 @@ func (m Model) View() string {
 	}
 	if m.confirming && m.confirmDirect != nil {
 		out = ui.Dialog(m.styles, out, "direct mode", m.confirmDirect.View(), m.width, m.height)
+	}
+	if m.overriding && m.overrideInput != nil {
+		out = ui.Dialog(m.styles, out, "override digest", m.overrideBody(), m.width, m.height)
 	}
 	return redact.Strings(out)
 }
@@ -933,10 +1079,12 @@ func (m Model) hints() string {
 		help = "↑/↓ choose · enter confirm · esc back"
 	case m.state == stateLoading:
 		help = "esc back"
+	case m.overriding:
+		help = "enter apply · esc cancel"
 	case IsProduction(m.target, m.envs):
-		help = "tab pane · x toggle · d yaml · enter confirm · esc back"
+		help = "tab pane · x toggle · d yaml · o override · enter confirm · esc back"
 	default:
-		help = "tab pane · x toggle · d yaml · m mode · enter confirm · esc back"
+		help = "tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back"
 	}
 	return ui.StatusBar(m.width, "", m.styles.Hint.Render(help))
 }

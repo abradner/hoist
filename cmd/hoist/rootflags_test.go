@@ -148,7 +148,7 @@ func TestRootDigestSourcesReachTheTUIResolveFunc(t *testing.T) {
 			t.Fatalf("%v: exit %d, want the runner's 42", tc.args, code)
 		}
 		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-		out, err := buildResolveFuncWith(gotCfg, got.cfg, got.promotable, got.resolveFlags())(context.Background(), r, "app-staging")
+		out, err := buildResolveFuncWith(gotCfg, got.cfg, got.promotable, got.resolveFlags())(context.Background(), r, "app-staging", nil)
 		if err != nil {
 			t.Fatalf("%v: resolve: %v", tc.args, err)
 		}

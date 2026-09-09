@@ -2,17 +2,17 @@
 │app-staging  →  app-production   images under ghcr.io/example/        mode: PR│
 │3 repos ticked · no history for 3                              d  see the yaml│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│┃ > ✓ db  → v202602201200           │db                                       │
-│┃   ✓ …alpha  → v202602201200       │v202602201200 → v202602201200            │
-│┃   ✓ …beta  → v202602201200        │1 occurrence · 1 file · digest from      │
+│┃ > ✓ counta  → v202602201200       │counta                                   │
+│┃   ✓ marketing  → sha-1a2b3c4d5e6f…│v202601151010 → v202602201200            │
+│┃   ✓ ! web  → v202602150930        │3 occurrences · 2 files · digest from    │
 │┃                                   │manifest                                 │
 │┃                                   │                                         │
-│┃                                   │no commit history — ghcr.io/example/db   │
-│┃                                   │has no app repo in repos[].apps          │
-│┃                                   │                                         │
-│┃                                   │                                         │
-│┃                                   │                                         │
-│┃                                   │                                         │
+│┃ ╭─ override digest ──────────────────────────────────────────────────────╮  │
+│┃ │┃ override the digest for ghcr.io/example/counta                        │in│
+│┃ │┃ repo=repo:tag@sha256:<digest> — wins over every digest source, as --  │  │
+│┃ │┃ digest does                                                           │  │
+│┃ │┃ > ghcr.io/example/counta=                                             │  │
+│┃ ╰────────────────────────────────────────────────────────────────────────╯  │
 │┃                                   │                                         │
 │┃                                   │                                         │
 │┃                                   │                                         │
@@ -21,4 +21,4 @@
 │┃                                   │                                         │
 │┃                                   │                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-   tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back
+                                                        enter apply · esc cancel

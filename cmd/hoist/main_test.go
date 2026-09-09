@@ -228,11 +228,14 @@ func TestPlanDigestFlagOverridesSource(t *testing.T) {
 	if out.Len() != 0 {
 		t.Errorf("stdout should be empty when the flag is refused:\n%s", out.String())
 	}
-	// A tagless override is refused by BuildPlan, still before anything is written.
+	// A tagless override is refused at flag parsing by the shared predicate (image.ParseOverride,
+	// #102), before anything is read — BuildPlan's own refusal stays behind it as the
+	// enforcement (TestBuildPlanDigestOverrideWins in pkg/gitops), which is why this is
+	// exitUsage now rather than exitFailure.
 	out.Reset()
 	errOut.Reset()
 	args = planArgs("--dry-run", "--digest", "ghcr.io/example/web=ghcr.io/example/web@"+digestC)
-	if got := run(args, &out, &errOut); got != exitFailure || !strings.Contains(errOut.String(), "a tag is required") {
+	if got := run(args, &out, &errOut); got != exitUsage || !strings.Contains(errOut.String(), "a tag is required") {
 		t.Errorf("tagless --digest: exit %d, stderr: %s", got, errOut.String())
 	}
 	if after := treeHash(t); after != before {

@@ -37,4 +37,4 @@
 │┃                                              │     spec:                                                            │
 │┃                                              │       containers:                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                        tab pane · x toggle · d yaml · m mode · enter confirm · esc back
+                                           tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back

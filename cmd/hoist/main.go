@@ -155,10 +155,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 // digestFlag is the repeatable --digest repo=repo:tag@sha256:… flag: per-repo overrides
-// handed to gitops.BuildPlan as its digests argument. Set parses the reference with
-// image.Parse (so a malformed digest is refused before anything is read), requires the left
-// side to name the reference's own repo, and refuses a repo given twice rather than letting
-// the last one silently win. Whether the override is pinned and tagged is BuildPlan's call.
+// handed to gitops.BuildPlan as its digests argument. Set applies image.ParseOverride — the
+// one predicate the plan screen's `o` dialog applies too (#102), so the CLI and the TUI
+// refuse the same inputs with the same words — and refuses a repo given twice rather than
+// letting the last one silently win. BuildPlan still enforces pinned-and-tagged itself;
+// ParseOverride's check is the polite early refusal (AGENTS.md §8, layered checks).
 type digestFlag map[string]image.Ref
 
 func (d digestFlag) String() string {
@@ -171,22 +172,14 @@ func (d digestFlag) String() string {
 }
 
 func (d digestFlag) Set(s string) error {
-	repo, rest, ok := strings.Cut(s, "=")
-	repo = strings.TrimSpace(repo)
-	if !ok || repo == "" {
-		return fmt.Errorf("want repo=repo:tag@sha256:<digest>, got %q", s)
-	}
-	ref, err := image.Parse(strings.TrimSpace(rest))
+	ref, err := image.ParseOverride(s)
 	if err != nil {
 		return err
 	}
-	if ref.Repo != repo {
-		return fmt.Errorf("override for %s names a different repo %s", repo, ref.Repo)
+	if _, dup := d[ref.Repo]; dup {
+		return fmt.Errorf("repo %s given more than once", ref.Repo)
 	}
-	if _, dup := d[repo]; dup {
-		return fmt.Errorf("repo %s given more than once", repo)
-	}
-	d[repo] = ref
+	d[ref.Repo] = ref
 	return nil
 }
 
@@ -770,14 +763,17 @@ func runningRefs(imgs []k8s.RunningImage) map[string][]image.Ref {
 
 func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []string, rf resolveFlags) plan.ResolveFunc {
 	opts, optsErr := resolutionOptions(cfg, rc, rf)
-	return func(ctx context.Context, r *gitops.Repo, source string) (plan.ResolveOutcome, error) {
+	return func(ctx context.Context, r *gitops.Repo, source string, overrides map[string]image.Ref) (plan.ResolveOutcome, error) {
 		if optsErr != nil {
 			return plan.ResolveOutcome{}, optsErr
 		}
 		if len(opts.order) == 0 {
 			return plan.ResolveOutcome{}, nil // digest sources: none
 		}
-		rep, err := runResolution(ctx, r, source, prefixes, opts, nil)
+		// overrides reach resolve.Resolve exactly as runPlan's --digest map does, so an
+		// override from the plan screen's o dialog is reported as [override] with the same
+		// alternatives and disagreement warnings the CLI's Resolution section shows (#102).
+		rep, err := runResolution(ctx, r, source, prefixes, opts, overrides)
 		if err != nil {
 			return plan.ResolveOutcome{}, err
 		}
