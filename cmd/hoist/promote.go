@@ -358,6 +358,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext, sel.resolve = *repo, *appsRoot, *promotable, *base, rf.kubeContext, rf
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
+	// The same refusal `hoist plan` and the root give an explicit empty
+	// --digest-sources/--registry-auth (#132's followup: promote had silently fallen back
+	// to the config's chain).
+	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", msg)
+		return exitUsage
+	}
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
