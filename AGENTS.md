@@ -397,7 +397,11 @@ the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at
 — since watching is not promoting. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (root
 `--base` and `--kube-context` apply to it as to the subcommands, whose own flags of those names
-default to the root's — #105; `q` quits,
+default to the root's — #105; root `--digest-sources`, `--registry-auth`, `--cluster-secret` and
+`--op-ref` likewise (#132): the plan screen resolves with them and the credential-chain
+overrides reach the tag picker's and the history's registry clients, the drift column stays
+pods-only, and an empty `--registry-auth`/`--digest-sources` is refused at the root with
+`plan`'s own message; `q` quits,
 `?` help; `F5`/`ctrl+r` re-asks the cluster what each env runs — every running build per image
 repo straight from the pods (`k8s.Cluster.RunningImages`, never the planning resolver's one pick),
 so a partial rollout reads "2 builds running" and the drift sentence names whether it compared by

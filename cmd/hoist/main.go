@@ -79,6 +79,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	promotable := fs.String("promotable", "ghcr.io/", "comma-separated image repo prefixes that count as first-party (the selected repo's promotable when configured)")
 	base := fs.String("base", defaultBase, "the GitOps repo's default branch: what a promotion or deploy branch is created from and the PR targets; the matrix's confirm path uses it too, and names it in the title when it is not main")
 	kubeContext := fs.String("kube-context", "", "kubeconfig context for everything the matrix asks the cluster — drift, restarts, the promotions it drives (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the title names the flag's or the config's context, never an address)")
+	// The digest-resolution flags (#132): the root's value is what the matrix's plan screen
+	// resolves with and what the tag picker's and history's registry clients authenticate
+	// with, and every subcommand's own flag of the same name defaults to it, as --base and
+	// --kube-context do (#105).
+	var rf resolveFlags
+	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins: pods, manifest, registry; none plans from the manifests alone (default: the selected repo's digest_sources when configured, else pods,manifest,registry; see hoist plan -h)")
+	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order: env, keychain, cluster, op — for the matrix's plan screen, the tag picker and the commit history alike (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op; see hoist plan -h)")
+	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; see hoist plan -h)")
+	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source (default: the matching registries[] entry's op when configured; see hoist plan -h)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
@@ -101,8 +110,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
-	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, base: *base, kubeContext: *kubeContext, given: map[string]bool{}}
+	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, base: *base, kubeContext: *kubeContext, resolve: rf, given: map[string]bool{}}
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
+	// The same refusal `hoist plan` gives an explicit empty --digest-sources/--registry-auth,
+	// here at the root so the no-command launch never resolves with an empty chain.
+	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
+		fmt.Fprintf(stderr, "hoist: %s\n", msg)
+		return exitUsage
+	}
 	if fs.NArg() == 0 {
 		eff, err := selectRepo(cfg, sel)
 		if err != nil {
@@ -207,7 +222,12 @@ type selection struct {
 	// `hoist promote --base dev` mean the same thing, and the no-command TUI launch has them
 	// at all.
 	base, kubeContext string
-	given             map[string]bool
+	// resolve holds the root --digest-sources/--registry-auth/--cluster-secret/--op-ref
+	// (#132), the same way: a subcommand's own flag of each name defaults to the root's and
+	// copies its answer back here. resolve.kubeContext is unused — kubeContext above is the
+	// one field for that flag.
+	resolve resolveFlags
+	given   map[string]bool
 }
 
 // kubeOverride is the root --kube-context when it was given, else "" — the operator's
@@ -230,13 +250,24 @@ const defaultBase = "main"
 // operator's override from the selected repo's own default (buildInFlightFuncs, whose
 // promotions may belong to another repo with another context). A subcommand copies its own
 // --base/--kube-context into selection before selectRepo, so both fields hold that
-// subcommand's answer, not only the root's.
+// subcommand's answer, not only the root's. resolve carries the digest-resolution flags
+// (#132) the same way — the flags as given, "" meaning "the config decides", exactly what
+// resolutionOptions takes; resolveFlags() is the value to hand it.
 type effective struct {
 	repo, appsRoot    string
 	promotable        []string
 	base, kubeContext string
 	kubeOverride      string
+	resolve           resolveFlags
 	cfg               *config.RepoConfig
+}
+
+// resolveFlags is what resolutionOptions and buildResolveFuncWith take for this run: the
+// reconciled kube context beside the digest-resolution overrides as given.
+func (e effective) resolveFlags() resolveFlags {
+	rf := e.resolve
+	rf.kubeContext = e.kubeContext
+	return rf
 }
 
 // selectRepo applies the precedence: a flag given on the command line wins; otherwise the
@@ -245,7 +276,8 @@ type effective struct {
 // --repo that matches no entry is a plain checkout path and takes the flag defaults, so
 // the config file never changes what an explicit command line means.
 func selectRepo(cfg *config.Config, sel selection) (effective, error) {
-	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable), base: sel.base, kubeContext: sel.kubeContext}
+	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable), base: sel.base, kubeContext: sel.kubeContext, resolve: sel.resolve}
+	eff.resolve.kubeContext = ""
 	if eff.base == "" {
 		eff.base = defaultBase
 	}
@@ -292,17 +324,17 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	dryRun := fs.Bool("dry-run", false, "print the diff, untouched images and warnings; write nothing")
 	var rf resolveFlags
 	fs.StringVar(&rf.kubeContext, "kube-context", sel.kubeContext, "kubeconfig context whose pods supply digests (default: the selected repo's kube.context when configured, else the kubeconfig's current context; the name in use is printed; may also be given before the command)")
-	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins: pods (what --from is running), manifest (its own pin), registry (HEAD of its tag); none plans from the manifests alone, exactly as M1 did (default: the selected repo's digest_sources when configured, else pods,manifest,registry)")
-	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order: env, keychain, cluster, op; the one that worked is reported by name (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op)")
-	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; unset skips the source)")
-	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source, read with `op read` (default: the matching registries[] entry's op when configured; unset skips the source and runs nothing)")
+	fs.StringVar(&rf.digestSources, "digest-sources", sel.resolve.digestSources, "comma-separated digest sources, first wins: pods (what --from is running), manifest (its own pin), registry (HEAD of its tag); none plans from the manifests alone, exactly as M1 did (default: the selected repo's digest_sources when configured, else pods,manifest,registry; may also be given before the command)")
+	fs.StringVar(&rf.registryAuth, "registry-auth", sel.resolve.registryAuth, "comma-separated registry credential sources tried in order: env, keychain, cluster, op; the one that worked is reported by name (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op; may also be given before the command)")
+	fs.StringVar(&rf.clusterSecret, "cluster-secret", sel.resolve.clusterSecret, "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; unset skips the source; may also be given before the command)")
+	fs.StringVar(&rf.opRef, "op-ref", sel.resolve.opRef, "op://vault/item/field for the op credential source, read with `op read` (default: the matching registries[] entry's op when configured; unset skips the source and runs nothing; may also be given before the command)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot, sel.promotable, sel.kubeContext = *repo, *appsRoot, *promotable, rf.kubeContext
+	sel.repo, sel.appsRoot, sel.promotable, sel.kubeContext, sel.resolve = *repo, *appsRoot, *promotable, rf.kubeContext, rf
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
@@ -317,11 +349,9 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	prefixes := eff.promotable
 	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
 	// default" only when the flag was not given at all.
-	for name, val := range map[string]string{"digest-sources": rf.digestSources, "registry-auth": rf.registryAuth} {
-		if sel.given[name] && strings.TrimSpace(val) == "" {
-			fmt.Fprintf(stderr, "hoist plan: --%s: empty; %s\n", name, map[string]string{"digest-sources": "use none to plan without resolution", "registry-auth": "list at least one of env, keychain, cluster, op"}[name])
-			return exitUsage
-		}
+	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
+		fmt.Fprintf(stderr, "hoist plan: %s\n", msg)
+		return exitUsage
 	}
 	opts, err := resolutionOptions(cfg, eff.cfg, rf)
 	if err != nil {
@@ -600,8 +630,18 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	// The root --kube-context (#105), already reconciled with the repo's kube.context by
 	// selectRepo, reaches every cluster-touching adaptor the TUI builds — the same value a
-	// subcommand's own flag would carry.
-	resolveFn := buildResolveFuncWith(cfg, eff.cfg, eff.promotable, resolveFlags{kubeContext: eff.kubeContext})
+	// subcommand's own flag would carry. The root --digest-sources/--registry-auth/
+	// --cluster-secret/--op-ref (#132) ride along the same way: the plan screen resolves
+	// with them, and the credential-chain overrides reach the tag picker's and the
+	// history's registry clients too. A malformed one is refused here, before the screen
+	// opens, exactly as `hoist plan` refuses it. The drift column (buildDriftFunc) asks the
+	// pods alone and takes none of them.
+	regOpts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitUsage
+	}
+	resolveFn := buildResolveFuncWith(cfg, eff.cfg, eff.promotable, eff.resolveFlags())
 
 	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
 	// reused for every promotion the operator confirms in this TUI session, mirroring
@@ -627,7 +667,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
-	tagsFn := buildTagsFunc(cfg, eff.cfg, eff.kubeContext)
+	tagsFn := buildTagsFunc(cfg, eff.cfg, eff.kubeContext, regOpts)
 	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
 	// The checkout's HEAD is what the plan's line numbers were read from, so it is what the
 	// live-age blame asks the forge about; the default branch is the fallback for a HEAD that
@@ -636,7 +676,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if sha, ok, err := newGit.RevParse(context.Background(), r.Root, "HEAD"); err == nil && ok {
 		blameRef = sha
 	}
-	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef, eff.base, eff.kubeContext)
+	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef, eff.base, eff.kubeContext, regOpts)
 	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).
 		WithHistory(historyFn).
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
@@ -750,15 +790,17 @@ func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []
 // by (M6's tag picker is "a direct caller that skips resolve", per resolution.go's own
 // multiRegistry doc comment) — registryEntryFor/entryAuthConfig still pick the one
 // registries[] entry (if any) covering imageRepo, so a repo a different entry covers, or none
-// does, never borrows another entry's credentials (F4's rule, unchanged here).
-func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string) tags.BuildFunc {
+// does, never borrows another entry's credentials (F4's rule, unchanged here). reg carries
+// the root --registry-auth/--cluster-secret/--op-ref (#132): given, they win for every image
+// repo exactly as they do in runResolution; only its auth, clusterSecret and opRef are read.
+func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string, reg resolveOptions) tags.BuildFunc {
 	var registries []config.RegistryConfig
 	if cfg != nil {
 		registries = cfg.Registries
 	}
 	return func(imageRepo string) (bool, tags.ListFunc, tags.MetaFunc) {
 		entry := registryEntryFor(registries, imageRepo)
-		auth, clusterSecret, opRef := entryAuthConfig(entry, resolveOptions{})
+		auth, clusterSecret, opRef := entryAuthConfig(entry, reg)
 		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
 		if clusterSecret != "" && has(auth, registry.AuthCluster) {
 			kctx := kubeContext

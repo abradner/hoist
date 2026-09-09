@@ -18,7 +18,11 @@ manifests declare plus its state as a word. `--base <branch>` and `--kube-contex
 before the command apply to everything the matrix does — the branch a confirmed plan is created
 from and its PR targets, and the cluster drift, restarts and resumed promotions talk to — exactly
 as the same flags do on `promote` or `restart`. The title names the base when it is not `main`,
-and the kube context in use — the flag's, else the repo's `kube.context` — by name.
+and the kube context in use — the flag's, else the repo's `kube.context` — by name. The same
+goes for `--digest-sources`, `--registry-auth`, `--cluster-secret` and `--op-ref`: given before
+the command they are what the plan screen resolves with and what the tag picker and the commit
+history authenticate to the registry with, exactly as on `plan` or `promote`; the drift column
+always asks the pods alone.
 
 ```
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮

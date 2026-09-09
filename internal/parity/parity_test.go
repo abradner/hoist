@@ -45,7 +45,7 @@ type op struct {
 var registry = []op{
 	{
 		Name: "launch: choose the config file and the repo, or print the version",
-		CLI:  "(launch) --version --config --repo --apps-root --promotable --base --kube-context",
+		CLI:  "(launch) --version --config --repo --apps-root --promotable --base --kube-context --digest-sources --registry-auth --cluster-secret --op-ref",
 		TUI:  "(launch) the same flags: the matrix is hoist with no subcommand, and --version exits before either face starts; --base and --kube-context (#105) reach the confirm path and every cluster adaptor, and the title names them when they are not the defaults",
 	},
 	{
@@ -126,7 +126,7 @@ var registry = []op{
 	{
 		Name: "per-run overrides of what the config file says: digest sources and the registry credential chain",
 		CLI:  "promote --digest-sources --registry-auth --cluster-secret --op-ref plan --digest-sources --registry-auth --cluster-secret --op-ref",
-		Gap:  "#132 — the TUI reads digest_sources and registries[] from config only",
+		TUI:  "(launch) --digest-sources --registry-auth --cluster-secret --op-ref — the root flags every subcommand's own flag defaults to (#132)",
 	},
 }
 

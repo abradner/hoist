@@ -59,7 +59,7 @@ func TestBuildHistoryFuncsLabelWinsAndPolicyIsRead(t *testing.T) {
 	}}
 	rc, forges := historyFixture(t, appForge, reg)
 	cfg := &config.Config{Registries: []config.RegistryConfig{{Prefix: "ghcr.io/example/", Auth: []string{"env"}}}}
-	h := buildHistoryFuncs(cfg, rc, &gitops.Repo{Root: "/x"}, &forge.Fake{}, nil, "head", "main", "")
+	h := buildHistoryFuncs(cfg, rc, &gitops.Repo{Root: "/x"}, &forge.Fake{}, nil, "head", "main", "", resolveOptions{})
 	if !h.Mapped("ghcr.io/example/app") || h.Mapped("ghcr.io/example/other") {
 		t.Fatal("Mapped must follow repos[].apps")
 	}
@@ -93,7 +93,7 @@ func TestBuildHistoryFuncsLabelWinsAndPolicyIsRead(t *testing.T) {
 // An unmapped image repo is a named gap, not a forge construction.
 func TestBuildHistoryFuncsUnmappedRepoIsUnresolved(t *testing.T) {
 	rc, forges := historyFixture(t, &forge.Fake{}, &registry.Fake{})
-	h := buildHistoryFuncs(nil, rc, nil, nil, nil, "", "main", "")
+	h := buildHistoryFuncs(nil, rc, nil, nil, nil, "", "main", "", resolveOptions{})
 	ref := image.Ref{Repo: "ghcr.io/example/other", Tag: "v1"}
 	_, err := h.Delta(context.Background(), ref, ref)
 	if !errors.Is(err, migrate.ErrUnresolved) || !strings.Contains(err.Error(), "repos[].apps") {
@@ -112,7 +112,7 @@ func TestBuildHistoryFuncsLabelNotInRepoIsNamed(t *testing.T) {
 		"ghcr.io/example/app:v2": {Labels: map[string]string{migrate.RevisionLabel: strings.Repeat("b", 40)}},
 	}}
 	rc, _ := historyFixture(t, appForge, reg)
-	h := buildHistoryFuncs(nil, rc, nil, nil, nil, "", "main", "")
+	h := buildHistoryFuncs(nil, rc, nil, nil, nil, "", "main", "", resolveOptions{})
 	_, err := h.Delta(context.Background(), image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"}, image.Ref{Repo: "ghcr.io/example/app", Tag: "v2"})
 	if !errors.Is(err, migrate.ErrUnresolved) || !strings.Contains(err.Error(), "is not in example/app") {
 		t.Fatalf("err = %v", err)
@@ -122,13 +122,13 @@ func TestBuildHistoryFuncsLabelNotInRepoIsNamed(t *testing.T) {
 // No forge for the gitops repo means no live age — the reason, not a panic.
 func TestBuildHistoryFuncsLiveAgeWithoutForge(t *testing.T) {
 	rc, _ := historyFixture(t, &forge.Fake{}, &registry.Fake{})
-	h := buildHistoryFuncs(nil, rc, nil, nil, errors.New("gh not logged in"), "head", "main", "")
+	h := buildHistoryFuncs(nil, rc, nil, nil, errors.New("gh not logged in"), "head", "main", "", resolveOptions{})
 	_, err := h.LiveAge(context.Background(), gitops.Occurrence{File: "f.yaml", Line: 3})
 	if err == nil || !strings.Contains(err.Error(), "gh not logged in") {
 		t.Fatalf("err = %v", err)
 	}
 	gitopsForge := &forge.Fake{Blames: map[string]map[int]forge.LineOrigin{"head f.yaml": {3: {SHA: "1111"}}}}
-	h = buildHistoryFuncs(nil, rc, nil, gitopsForge, nil, "head", "main", "")
+	h = buildHistoryFuncs(nil, rc, nil, gitopsForge, nil, "head", "main", "", resolveOptions{})
 	age, err := h.LiveAge(context.Background(), gitops.Occurrence{File: "f.yaml", Line: 3})
 	if err != nil || age.SHA != "1111" {
 		t.Fatalf("age=%+v err=%v", age, err)
@@ -139,7 +139,7 @@ func TestBuildHistoryFuncsLiveAgeWithoutForge(t *testing.T) {
 // mapping, so it is still wired (an empty repos[].apps used to lose "since 4 weeks ago" too).
 func TestBuildHistoryFuncsWithoutAppsKeepsLiveAge(t *testing.T) {
 	gitopsForge := &forge.Fake{Blames: map[string]map[int]forge.LineOrigin{"head f.yaml": {3: {SHA: "1111"}}}}
-	h := buildHistoryFuncs(nil, &config.RepoConfig{}, nil, gitopsForge, nil, "head", "main", "")
+	h := buildHistoryFuncs(nil, &config.RepoConfig{}, nil, gitopsForge, nil, "head", "main", "", resolveOptions{})
 	if h.Delta != nil || h.Revision != nil {
 		t.Fatal("no apps mapping: no delta or revision func, so screens degrade without a call")
 	}

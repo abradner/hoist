@@ -345,10 +345,10 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs (see hoist plan -h)")
 	var rf resolveFlags
 	fs.StringVar(&rf.kubeContext, "kube-context", sel.kubeContext, "kubeconfig context whose pods supply digests (see hoist plan -h)")
-	fs.StringVar(&rf.digestSources, "digest-sources", "", "comma-separated digest sources, first wins (see hoist plan -h)")
-	fs.StringVar(&rf.registryAuth, "registry-auth", "", "comma-separated registry credential sources tried in order (see hoist plan -h)")
-	fs.StringVar(&rf.clusterSecret, "cluster-secret", "", "namespace/name of a pull secret for the cluster credential source (see hoist plan -h)")
-	fs.StringVar(&rf.opRef, "op-ref", "", "op://vault/item/field for the op credential source (see hoist plan -h)")
+	fs.StringVar(&rf.digestSources, "digest-sources", sel.resolve.digestSources, "comma-separated digest sources, first wins (see hoist plan -h; may also be given before the command)")
+	fs.StringVar(&rf.registryAuth, "registry-auth", sel.resolve.registryAuth, "comma-separated registry credential sources tried in order (see hoist plan -h; may also be given before the command)")
+	fs.StringVar(&rf.clusterSecret, "cluster-secret", sel.resolve.clusterSecret, "namespace/name of a pull secret for the cluster credential source (see hoist plan -h; may also be given before the command)")
+	fs.StringVar(&rf.opRef, "op-ref", sel.resolve.opRef, "op://vault/item/field for the op credential source (see hoist plan -h; may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block, which has no override)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -356,7 +356,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 		return exitUsage
 	}
-	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext = *repo, *appsRoot, *promotable, *base, rf.kubeContext
+	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext, sel.resolve = *repo, *appsRoot, *promotable, *base, rf.kubeContext, rf
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {

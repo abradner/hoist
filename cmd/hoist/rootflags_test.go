@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
+	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/registry"
 )
 
 // The root --kube-context (#105) wins over the selected repo's kube.context when given, and
@@ -114,6 +120,133 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 		runResume([]string{"resume01"}, cfg, sel, &out, &errOut)
 		if argoCtx != tc.want {
 			t.Fatalf("override %q: resume's newArgo got %q, want %q", tc.override, argoCtx, tc.want)
+		}
+	}
+}
+
+// The root --digest-sources (#132) reaches the TUI's resolve function exactly as `plan
+// --digest-sources` reaches plan's: none means no resolution and no cluster adaptor is
+// even constructed. The default (pods first) is the positive control: it opens the cluster.
+func TestRootDigestSourcesReachTheTUIResolveFunc(t *testing.T) {
+	var got effective
+	var gotCfg *config.Config
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	tuiRunner = func(eff effective, cfg *config.Config, _, _ io.Writer) int { got, gotCfg = eff, cfg; return 42 }
+	r, err := gitops.Discover(fixture, gitops.DefaultAppsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args     []string
+		clusters int
+	}{
+		{[]string{"--repo", fixture, "--digest-sources", "none"}, 0},
+		{[]string{"--repo", fixture}, 1},
+	} {
+		if code := run(tc.args, io.Discard, io.Discard); code != 42 {
+			t.Fatalf("%v: exit %d, want the runner's 42", tc.args, code)
+		}
+		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
+		out, err := buildResolveFuncWith(gotCfg, got.cfg, got.promotable, got.resolveFlags())(context.Background(), r, "app-staging")
+		if err != nil {
+			t.Fatalf("%v: resolve: %v", tc.args, err)
+		}
+		if len(*contexts) != tc.clusters || (tc.clusters == 0) != (len(out.Resolutions) == 0) {
+			t.Errorf("%v: clusters opened %v, resolutions %d; want %d clusters", tc.args, *contexts, len(out.Resolutions), tc.clusters)
+		}
+	}
+}
+
+// An explicit empty --registry-auth is refused at the root with the message `hoist plan`
+// gives it — one refusal, one wording, whichever face it is given on.
+func TestRootEmptyRegistryAuthRefusedLikePlan(t *testing.T) {
+	const want = "--registry-auth: empty; list at least one of env, keychain, cluster, op\n"
+	code, _, rootErr := run3(t, "--repo", fixture, "--registry-auth", "")
+	if code != exitUsage || rootErr != "hoist: "+want {
+		t.Errorf("root: exit %d stderr %q; want %d and %q", code, rootErr, exitUsage, "hoist: "+want)
+	}
+	code, _, planErr := run3(t, planArgs("--dry-run", "--registry-auth", "")...)
+	if code != exitUsage || planErr != "hoist plan: "+want {
+		t.Errorf("plan: exit %d stderr %q; want %d and %q", code, planErr, exitUsage, "hoist plan: "+want)
+	}
+	if strings.TrimPrefix(rootErr, "hoist: ") != strings.TrimPrefix(planErr, "hoist plan: ") {
+		t.Errorf("messages differ:\n root %q\n plan %q", rootErr, planErr)
+	}
+}
+
+// A subcommand's own --digest-sources defaults to the root's and still wins when given:
+// `hoist --digest-sources none plan` builds no cluster, `hoist --digest-sources none plan
+// --digest-sources pods` builds one.
+func TestSubcommandResolveFlagDefaultsToRootAndStillWins(t *testing.T) {
+	for _, tc := range []struct {
+		extra    []string
+		clusters int
+	}{
+		{nil, 0},
+		{[]string{"--digest-sources", "pods"}, 1},
+	} {
+		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
+		args := append([]string{"--digest-sources", "none"}, planArgs(append([]string{"--dry-run"}, tc.extra...)...)...)
+		if code, _, errOut := run3(t, args...); code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, code, errOut)
+		}
+		if len(*contexts) != tc.clusters {
+			t.Errorf("%v: clusters opened %v, want %d", args, *contexts, tc.clusters)
+		}
+	}
+}
+
+// The root --registry-auth and --op-ref (#132) reach the tag picker's and the history's
+// registry clients: the order they build with is the flag's, not the registries[] entry's,
+// the same override runResolution applies. The entry's own order is the positive control.
+func TestRootRegistryAuthReachesTagPickerAndHistory(t *testing.T) {
+	cfgPath := writeConfig(t, `
+repos:
+  - path: `+absFixture(t)+`
+    promotable: [ghcr.io/example/]
+    apps: { ghcr.io/example/app: example/app }
+registries:
+  - prefix: ghcr.io/example/
+    auth: [keychain]
+`)
+	var got effective
+	var gotCfg *config.Config
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	tuiRunner = func(eff effective, cfg *config.Config, _, _ io.Writer) int { got, gotCfg = eff, cfg; return 42 }
+	prevForge := newForge
+	t.Cleanup(func() { newForge = prevForge })
+	newForge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--config", cfgPath, "--registry-auth", "env,op", "--op-ref", "op://vault/item/field"}, "env,op op://vault/item/field"},
+		{[]string{"--config", cfgPath}, "keychain "},
+	} {
+		if code := run(tc.args, io.Discard, io.Discard); code != 42 {
+			t.Fatalf("%v: exit %d, want 42", tc.args, code)
+		}
+		regOpts, err := resolutionOptions(gotCfg, got.cfg, got.resolveFlags())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, authCfgs := installFakes(t, &k8s.Fake{}, &registry.Fake{})
+		buildTagsFunc(gotCfg, got.cfg, got.kubeContext, regOpts)("ghcr.io/example/app")
+		h := buildHistoryFuncs(gotCfg, got.cfg, nil, &forge.Fake{}, nil, "head", got.base, got.kubeContext, regOpts)
+		_, _ = h.Revision(context.Background(), image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"})
+		if len(*authCfgs) != 2 {
+			t.Fatalf("%v: registries built %d, want the picker's and the history's", tc.args, len(*authCfgs))
+		}
+		for i, c := range *authCfgs {
+			order := make([]string, 0, len(c.Order))
+			for _, a := range c.Order {
+				order = append(order, string(a))
+			}
+			if g := strings.Join(order, ",") + " " + c.OpRef; g != tc.want {
+				t.Errorf("%v: registry %d built with %q, want %q", tc.args, i, g, tc.want)
+			}
 		}
 	}
 }
