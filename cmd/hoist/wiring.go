@@ -24,14 +24,6 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// tuiOverrideCINone is the default the TUI's own confirm path uses for
-// buildPromotionForConfirm's overrideCINone parameter. `hoist promote` takes it as
-// --override-ci-none (default false); the TUI has no equivalent yet (#103), so it uses the
-// exact same default runPromote's own flag falls back to rather than inventing a different
-// one. The base branch used to be a sibling constant ("main") and is now the root --base,
-// carried in effective.base (#105).
-const tuiOverrideCINone = false
-
 // buildStartPromotion adapts buildPromotionForConfirm (promote.go) and the engine's own drive
 // primitives (engine.AllSteps, engine.Drive, engine.Status) into an app.StartPromotionFunc the
 // TUI can call without importing pkg/git, pkg/forge or internal/config itself (AGENTS.md
@@ -135,7 +127,16 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 			return engine.PromotionState{}, nil, err
 		}
 
-		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, tuiOverrideCINone, g, f, argoApps)
+		// overrideCINone is false here and has no TUI launch flag or config knob on purpose:
+		// the confirm path never treats a PR with no checks as green (AGENTS.md §4.5 — a
+		// default may not weaken a gate). The TUI's override is per promotion and after the
+		// fact: `c` on the flight screen, behind a huh.Confirm, sets CINoneOverride on that
+		// one promotion's state (flight.Model.ApplyCINoneOverride, answering
+		// flight.OverrideCINoneMsg in internal/app), which the DriveFunc below carries into
+		// engine.Drive and CIGreenStep.Observe — the same field `hoist resume
+		// --override-ci-none` sets (#103). A re-confirm of the same id keeps a prior run's
+		// override, as buildPromotionForConfirm's own prev-state merge already does for the CLI.
+		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, false, g, f, argoApps)
 		if err != nil {
 			return engine.PromotionState{}, nil, err
 		}

@@ -104,8 +104,9 @@ func (s flightScreen) SetStyles(st ui.Styles) Screen {
 	return flightScreen{s.Model.SetStyles(st)}
 }
 
-// CapturesText implements Screen: the flight screen has no text-entry mode of its own.
-func (s flightScreen) CapturesText() bool { return false }
+// CapturesText implements Screen, delegating to flight.Model: true while the c gesture's
+// confirmation is open, so the root's q does not quit mid-decision.
+func (s flightScreen) CapturesText() bool { return s.Model.CapturesText() }
 
 // tagsScreen adapts tags.Model the same way. It is pushed on top of the matrix when the
 // operator asks to pick a new tag (matrix.OpenTagsMsg, handled in app.go).

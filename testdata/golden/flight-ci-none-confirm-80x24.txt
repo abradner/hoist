@@ -1,0 +1,24 @@
+╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+│abcd1234   app-staging → app-production                     started 4 days ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                      │
+│✓ commit                                                                      │
+│✓ push                                                                        │
+│✓ PR                                                                          │
+│✗ CI                                                                          │
+│  ╭─ treat no checks as green ─────────────────────────────────────────────╮  │
+│ex│┃ Treat this PR's missing checks as green and let app-production merge  │  │
+│· │┃ on approval alone? ci.none is prompt; this applies to promotion       │  │
+│· │┃ abcd1234 only.                                                        │  │
+│· │┃                                                                       │  │
+│· │┃                             Yes     No                                │  │
+│· ╰────────────────────────────────────────────────────────────────────────╯  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│blocked — no checks reported after the grace period; ci.none=prompt requires  │
+│an explicit override — re-run `hoist resume abcd1234 --override-ci-none`      │
+│press c to treat no checks as green for this promotion                        │
+│R to re-observe once resolved                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+blocke… o open PR · c treat as green · R re-observe · x abort · l log · esc back

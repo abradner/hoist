@@ -445,7 +445,12 @@ right with the common image-repo prefix lifted into the header so a version neve
 both `d` toggles the yaml diff into view and `enter` means the same from either; the flight and
 restart screens are framed the same way, with the blocked reason and its command
 (`hoist approve <id>`) as their own section, which a short terminal keeps by collapsing the step
-list to a one-line strip rather than dropping the verdict. Browsing the matrix, the picker and the
+list to a one-line strip rather than dropping the verdict; when that reason is `ci.none: prompt`'s
+"no checks reported" block — recognised by `engine.IsCINonePromptBlock`, the one Blocked reason with
+an override — the section offers `c`, which behind a `huh.Confirm` emits
+`flight.OverrideCINoneMsg` and the root sets `CINoneOverride` on that promotion's state and
+re-drives it: the TUI's `hoist resume <id> --override-ci-none` (#103), per promotion, never a
+launch flag or config default (§4.5). Browsing the matrix, the picker and the
 plan/confirm screen they open into is read-only, but confirming a
 plan there (Enter on either confirm screen) drives a real promotion or deploy exactly like
 `promote`/`deploy` above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same

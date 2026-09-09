@@ -163,6 +163,11 @@ func TestCIGreenNonePromptRequiresOverride(t *testing.T) {
 	if obs.Blocked == "" {
 		t.Fatalf("ci.none=prompt past grace without an override should Block, got %+v", obs)
 	}
+	// The one Blocked reason with an in-band override is the one the flight screen offers
+	// `c` for (#103); the predicate and the text must agree.
+	if !IsCINonePromptBlock(obs.Blocked) {
+		t.Errorf("IsCINonePromptBlock should recognise the step's own reason: %q", obs.Blocked)
+	}
 
 	s.CINoneOverride = true
 	obs, err = step.Observe(ctx(), s)
@@ -189,6 +194,9 @@ func TestCIGreenNoneBlockHasNoOverride(t *testing.T) {
 	}
 	if obs.Blocked == "" {
 		t.Fatalf("ci.none=block must stay Blocked even with CINoneOverride set, got %+v", obs)
+	}
+	if IsCINonePromptBlock(obs.Blocked) {
+		t.Errorf("ci.none=block's reason must not read as the overridable one: %q", obs.Blocked)
 	}
 	// The recovery the message names must be one that works: a same-id re-run and resume both
 	// keep this promotion's own ci.none, so "change the config and re-run" cannot reach it

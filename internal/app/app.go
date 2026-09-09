@@ -578,6 +578,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		fs := flightScreen{flight.New(msg.state, pollForFlight, msg.driveFn)}
 		m = m.push(fs)
 		return m, fs.Init()
+	case flight.OverrideCINoneMsg:
+		// The TUI's `hoist resume <id> --override-ci-none` (#103): the flight screen showing
+		// promotion msg.ID asked, behind its own huh.Confirm, to treat a PR with no reported
+		// checks as green under ci.none: prompt. The root decides what that means — set the
+		// override on THAT promotion's state and re-drive it — and the screen's own state is
+		// where the override lives (flight.Model.ApplyCINoneOverride): every driveCmd hands
+		// that state to the DriveFunc, so cmd/hoist's engine.Drive sees CINoneOverride on the
+		// next CIGreenStep.Observe and its save persists it. Nothing here is a default: a
+		// promotion whose screen never confirmed keeps false, and the confirm path
+		// (buildStartPromotion) never sets it (AGENTS.md §4.5).
+		top := len(m.stack) - 1
+		var fs flightScreen
+		ok := top >= 0
+		if ok {
+			fs, ok = m.stack[top].(flightScreen)
+		}
+		if !ok || fs.ID() != msg.ID {
+			m.notice = "override ignored: promotion " + msg.ID + " is not the flight screen on top"
+			return m, nil
+		}
+		next, cmd := fs.ApplyCINoneOverride()
+		m.stack[top] = flightScreen{next}
+		return m, cmd
 	case flight.BackMsg:
 		// Cancel the flight screen's shared drive context before popping it — see
 		// flight.Model.Cancel's own doc comment. Without this, a driveCmd already in flight

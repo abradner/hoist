@@ -111,7 +111,7 @@ var registry = []op{
 	{
 		Name: "treat a PR with no checks as green under ci.none: prompt",
 		CLI:  "resume --override-ci-none promote --override-ci-none deploy --override-ci-none",
-		Gap:  "#103 — the TUI's confirm path passes a fixed false; the flight screen shows the block but offers no override",
+		TUI:  "flight.OverrideCINoneMsg c on the flight screen, behind a huh.Confirm",
 	},
 	{
 		Name: "show the effective config and where it came from",
