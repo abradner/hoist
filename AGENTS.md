@@ -394,7 +394,12 @@ of any promotion: it prints one Application's current sync/health/revision and t
 progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
 the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
 `poll.argo`/`poll.rollout` is tighter; it never calls `Refresh` — only `Get`/`Deployment`/`JobLike`
-— since watching is not promoting. `mise exec -- go
+— since watching is not promoting. The same view is on the matrix as `w` (#101): the watch
+screen (`internal/app/watch`) for the cursor cell's family and env, first paint the `--once`
+snapshot, then polling at the same cadence through a `watch.Func` that `cmd/hoist`'s
+`buildWatchFunc` builds over the same reads (`readWatchSnapshot`, shared with the CLI); the
+screen package imports neither `pkg/argo` nor `pkg/rollout`, so it cannot name `Refresh`, and a
+test pins its import list. `mise exec -- go
 run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (root
 `--base` and `--kube-context` apply to it as to the subcommands, whose own flags of those names
 default to the root's — #105; root `--digest-sources`, `--registry-auth`, `--cluster-secret` and

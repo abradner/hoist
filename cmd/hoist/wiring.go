@@ -11,6 +11,7 @@ import (
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/flight"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
+	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
@@ -437,6 +438,41 @@ func deployRefOf(p gitops.Plan) image.Ref {
 		return image.Ref{}
 	}
 	return p.Edits[0].New
+}
+
+// buildWatchFunc is the watch screen's adapter (AGENTS.md §4.8: cmd/hoist owns the adapter
+// from adaptors to a screen's plain function type): for one family in one env it resolves the
+// family's Application (gitops.Family.App — the same wrapper `hoist watch --app` looks up by
+// name) and the workloads it declares (familyWorkloads, shared with `hoist watch`), and returns
+// a watch.Func that makes the same Get/Deployment/JobLike reads `hoist watch` makes
+// (readWatchSnapshot) at the same cadence (watchInterval). It never calls Refresh: the Func
+// closes over readWatchSnapshot only, and the screen package cannot name argo.Argo at all.
+// A missing cluster is a nil builder, and w on the matrix says so instead of opening a screen.
+func buildWatchFunc(r *gitops.Repo, a argo.Argo, ro rollout.Rollout, clusterErr error, argoNamespace string, poll config.PollConfig) watch.BuildFunc {
+	if clusterErr != nil || a == nil || ro == nil {
+		return nil
+	}
+	return func(family, env string) (watch.Funcs, error) {
+		e, ok := r.Envs[env]
+		if !ok {
+			return watch.Funcs{}, fmt.Errorf("no env %q in the repo", env)
+		}
+		fam, ok := e.Families[family]
+		if !ok || fam == nil {
+			return watch.Funcs{}, fmt.Errorf("no family %q in %s", family, env)
+		}
+		if fam.App == "" {
+			return watch.Funcs{}, fmt.Errorf("%s in %s has no Argo Application", family, env)
+		}
+		app := argo.Application{Namespace: argoNamespace, Name: fam.App}
+		deployments, jobLikes := familyWorkloads(fam)
+		return watch.Funcs{
+			Read: func(ctx context.Context) (watch.Snapshot, error) {
+				return readWatchSnapshot(ctx, a, ro, app, env, deployments, jobLikes)
+			},
+			Interval: watchInterval(poll),
+		}, nil
+	}
 }
 
 // buildRestartFuncs adapts internal/restart's core into the plain function values the restart

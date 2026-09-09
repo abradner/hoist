@@ -104,18 +104,18 @@ type Model struct {
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Resume, OpenPR, Refresh, Config, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Watch, Resume, OpenPR, Refresh, Config, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the footer: the writes first, since they are what an
 // operator is looking for the key of.
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Promote, k.DeployNew, k.Resume, k.Help, k.Quit}
+	return []key.Binding{k.Promote, k.DeployNew, k.Watch, k.Resume, k.Help, k.Quit}
 }
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Resume, k.OpenPR, k.Refresh, k.Config, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Watch, k.Resume, k.OpenPR, k.Refresh, k.Config, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
@@ -132,6 +132,10 @@ func defaultKeyMap() keyMap {
 		// opens is still a confirmation, so R asks rather than does — but it asks for a write,
 		// and the shift key is a cheap way to keep it out of reach of a mistyped r.
 		Restart: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "restart")),
+		// Lower-case, like every other key that only opens a screen to look at something:
+		// the watch screen reads the Application and its Deployments and never refreshes
+		// (`hoist watch`, #101).
+		Watch: key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "watch")),
 		// r and enter both open the in-flight promotion on the flight screen: r is the verb
 		// (`hoist resume`), enter is "details" for an operator reading the pane.
 		Resume:  key.NewBinding(key.WithKeys("r", "enter"), key.WithHelp("r", "resume")),
@@ -170,6 +174,14 @@ type OpenConfigMsg struct{}
 // what it rolls is every Deployment that family declares, which is the unit an Argo Application
 // already covers and therefore the unit the rollout is watched at.
 type OpenRestartMsg struct {
+	Family, Target string
+}
+
+// OpenWatchMsg is emitted when the operator asks to watch the family under the cursor
+// converge in CurrentEnv (w): the family's one Argo Application and every workload it
+// declares, the TUI's `hoist watch --app` (#101). It names a family rather than an
+// Application because the matrix knows families; the root resolves the Application.
+type OpenWatchMsg struct {
 	Family, Target string
 }
 
@@ -319,6 +331,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, func() tea.Msg { return OpenRestartMsg{Family: family, Target: env} }
+		case key.Matches(msg, m.keys.Watch):
+			env := m.CurrentEnv()
+			if env == "" {
+				m.notice = "no environments discovered"
+				return m, nil
+			}
+			family := m.CurrentFamily()
+			if family == "" {
+				m.notice = "no family under the cursor"
+				return m, nil
+			}
+			return m, func() tea.Msg { return OpenWatchMsg{Family: family, Target: env} }
 		case key.Matches(msg, m.keys.Resume):
 			switch len(m.inflight) {
 			case 0:

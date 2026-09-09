@@ -10,6 +10,7 @@ import (
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/tags"
+	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/ui"
 )
 
@@ -194,3 +195,25 @@ func (s configScreen) SetStyles(st ui.Styles) Screen {
 
 // CapturesText implements Screen: the config screen has no text-entry mode.
 func (s configScreen) CapturesText() bool { return false }
+
+// watchScreen adapts watch.Model. Pushed on top of the matrix by w; the matrix stays beneath
+// it, since watching changes nothing and esc should land on the cell it started from.
+type watchScreen struct{ watch.Model }
+
+func (s watchScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s watchScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return watchScreen{m}, cmd
+}
+
+func (s watchScreen) SetSize(width, height int) Screen {
+	return watchScreen{s.Model.SetSize(width, height)}
+}
+
+func (s watchScreen) SetStyles(st ui.Styles) Screen {
+	return watchScreen{s.Model.SetStyles(st)}
+}
+
+// CapturesText implements Screen: the watch screen takes no text.
+func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }

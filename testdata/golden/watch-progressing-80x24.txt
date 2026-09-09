@@ -1,0 +1,24 @@
+╭─ hoist · watch ──────────────────────────────────────────────────────────────╮
+│app-staging / web · web-app-staging                 polled just now · every 5s│
+├──────────────────────────────────────────────────────────────────────────────┤
+│sync OutOfSync   health Progressing   revision 0123456789ab   operation       │
+│  Running   reconciled 2m ago                                                 │
+│                                                                              │
+│Deployment web  rolling · 2 replica(s)                                        │
+│    Waiting for deployment "web" rollout to finish: 1 of 2 updated replicas   │
+│      are available...                                                        │
+│    container                                                                 │
+│      web=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb                                          │
+│                                                                              │
+│Deployment web-worker  rolling · 1 replica(s)                                 │
+│    Waiting for deployment "web-worker" rollout to finish: 0 of 1 updated     │
+│      replicas are available...                                               │
+│    initContainer                                                             │
+│      migrate=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb                                      │
+│    container                                                                 │
+│      worker=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+read-only · never refreshes                   r poll now · ↑/↓ scroll · esc back

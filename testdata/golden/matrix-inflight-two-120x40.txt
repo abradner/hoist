@@ -37,4 +37,4 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │blocked on you — comment on PR #103 to release it:    hoist approve 9xy8wv777u                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env a                                                                  p promote • d deploy • r resume • ? help • q quit
+env a                                                        p promote • d deploy • w watch • r resume • ? help • q quit
