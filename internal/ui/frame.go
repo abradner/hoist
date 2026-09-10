@@ -130,3 +130,34 @@ func fit(s string, width int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// NoticeMaxLines caps how many terminal rows a root-level notice may take. A notice is
+// reserved space stolen from the screen under it (app.Model.View), so an unbounded one — a
+// git or forge transport error can run to several hundred characters — would push the screen
+// it is explaining off the terminal instead.
+const NoticeMaxLines = 3
+
+// NoticeLines renders a transient message as at most NoticeMaxLines rows of exactly width
+// cells, word-wrapped, with the overflow marked "…" on the last row. It returns nil for an
+// empty message so the caller can size the screen above it by len(lines).
+//
+// The caller is expected to shrink whatever it draws above by exactly this many rows: a
+// Frame renders exactly `height` lines (Render, above), so a notice appended after one lands
+// on row height+1 and the alternate screen buffer never shows it — the whole defect this
+// exists to close (#164).
+func NoticeLines(st Styles, text string, width int) []string {
+	if text == "" || width <= 0 {
+		return nil
+	}
+	wrapped := strings.Split(ansi.Wrap(text, width, " -"), "\n")
+	if len(wrapped) > NoticeMaxLines {
+		wrapped = wrapped[:NoticeMaxLines]
+		last := len(wrapped) - 1
+		wrapped[last] = ansi.Truncate(wrapped[last], max(width-1, 0), "") + "…"
+	}
+	out := make([]string, len(wrapped))
+	for i, line := range wrapped {
+		out[i] = st.Notice.Render(fit(line, width))
+	}
+	return out
+}

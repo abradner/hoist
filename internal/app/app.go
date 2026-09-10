@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -773,18 +774,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the top screen in the alternate screen buffer, with the root's own transient
-// notice (see Model.notice) appended below it when one is set.
+// notice (see Model.notice) on the terminal's last rows when one is set.
+//
+// The notice's rows are taken OUT of the screen above rather than appended after it. Every
+// screen draws through ui.Frame.Render, which emits exactly `height` lines, so a notice
+// merely appended to that landed on row height+1 and the alternate screen buffer never
+// showed it: pressing enter on the deploy confirm screen and having the promotion refused —
+// an in-flight conflict, a missing repos[].github, a claim conflict — was indistinguishable
+// from a dead key, and the only way to read the reason was to re-run the equivalent command
+// on the CLI (#164). Re-sizing the top screen here rather than on the Update that set the
+// notice keeps this a pure render concern: nothing in the stack is mutated, and the screen
+// returns to full height on the next keypress, which clears the notice.
 func (m Model) View() tea.View {
+	// Every notice set above (a start failure whose error can embed a git/forge transport
+	// message, an open-URL failure) passes through redact.Strings here, once, at the render
+	// boundary — the same convention plan.Model.View and flight.Model.View already use,
+	// rather than wrapping each setter individually.
+	notice := ui.NoticeLines(m.styles, redact.Strings(m.notice), m.width)
 	content := ""
 	if n := len(m.stack); n > 0 {
-		content = m.stack[n-1].View()
+		top := m.stack[n-1]
+		// Never shrink the screen to nothing: a terminal too short to hold both keeps the
+		// screen at full height and the notice is the thing that goes missing, which is no
+		// worse than today and leaves the screen legible.
+		if h := m.height - len(notice); len(notice) > 0 && h > 0 {
+			top = top.SetSize(m.width, h)
+		}
+		content = top.View()
 	}
-	if m.notice != "" {
-		// Every notice set above (a start failure whose error can embed a git/forge
-		// transport message, an open-URL failure) passes through redact.Strings here,
-		// once, at the render boundary — the same convention plan.Model.View and
-		// flight.Model.View already use, rather than wrapping each setter individually.
-		content += "\n" + m.styles.Notice.Render(redact.Strings(m.notice))
+	if len(notice) > 0 {
+		content += "\n" + strings.Join(notice, "\n")
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true

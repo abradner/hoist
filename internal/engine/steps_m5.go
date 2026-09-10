@@ -216,10 +216,25 @@ func (a ArgoRefreshedStep) Act(ctx context.Context, s *PromotionState) error {
 	return nil
 }
 
-// ArgoSyncedStep is satisfied once every Application this promotion touches has synced to
-// exactly this promotion's own merge commit and is healthy (invariant 3: revision match alone,
-// or sync/health alone, never satisfies without the other).
-type ArgoSyncedStep struct{ Argo argo.Argo }
+// ArgoSyncedStep is satisfied once every Application this promotion touches has synced to a
+// revision that CARRIES this promotion's change and is healthy (invariant 3: revision agreement
+// alone, or sync/health alone, never satisfies without the other).
+//
+// "Carries", not "is". Argo tracks the BRANCH and reports whatever tip it last synced, so exact
+// equality with LandedSHA() holds only in the window between this promotion's merge and the next
+// commit to the base — after which the reported revision is a descendant, the comparison fails,
+// and it fails forever: the step returned Waiting indefinitely, RolledOutStep after it never
+// ran, and the promotion never reached a terminal phase. Three merged, long-since-rolled-out
+// promotions sat in the TUI's in-flight pane for days that way, each reporting a revision that
+// was the current tip of main and contained its own merge commit (#165).
+type ArgoSyncedStep struct {
+	Argo argo.Argo
+	// Git is the clone the ancestry and content checks run in (s.CloneDir). Nil is allowed and
+	// means exact-equality only — the pre-#165 behaviour — for a caller that has no clone at
+	// all. Every real driver has one: ConvergeSteps passes the same git.Git the earlier steps
+	// take.
+	Git git.Git
+}
 
 // Name implements Step.
 func (ArgoSyncedStep) Name() StepName { return StepArgoSynced }
@@ -236,6 +251,10 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 	if len(apps) == 0 {
 		return Observation{Satisfied: true, Detail: "no Argo Application in this promotion's plan"}, nil
 	}
+	// fetched keeps the base fetch to at most one per Observe rather than one per Application:
+	// every app in a promotion is on the same base, and this method is called on every poll
+	// tick (poll.argo, seconds apart) for the whole convergence window.
+	var fetched bool
 	var notSynced []string
 	for _, app := range apps {
 		st, err := a.Argo.Get(ctx, app)
@@ -251,9 +270,13 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
+		carries, why, err := a.revisionCarries(ctx, s, st.SyncRevision, &fetched)
+		if err != nil {
+			return Observation{}, err
+		}
 		switch {
-		case st.SyncRevision != s.LandedSHA():
-			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s", app.Name, orNone(st.SyncRevision), s.LandedSHA()))
+		case !carries:
+			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s%s", app.Name, orNone(st.SyncRevision), s.LandedSHA(), why))
 		case st.SyncStatus != argo.SyncStatusSynced || st.HealthStatus != argo.HealthStatusHealthy:
 			notSynced = append(notSynced, fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus)))
 		}
@@ -263,6 +286,61 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		return Observation{Waiting: true, Detail: strings.Join(notSynced, "; ")}, nil
 	}
 	return Observation{Satisfied: true, Detail: "synced and healthy at " + s.LandedSHA()}, nil
+}
+
+// revisionCarries reports whether the revision Argo says it synced to actually carries this
+// promotion's change, and a parenthetical for the Waiting detail when it does not.
+//
+// Three cases, in order:
+//
+//  1. rev IS LandedSHA() — the exact match, unchanged, and still the common one during the
+//     window before anything else lands on the base.
+//  2. LandedSHA() is not an ancestor of rev — Argo has not caught up (or has synced to a
+//     revision this promotion is not part of at all). Not carried.
+//  3. LandedSHA() is an ancestor of rev — the base advanced past us. Ancestry alone is NOT
+//     enough here, for exactly the reason DirectPushedStep.Observe documents: a revert commit
+//     never removes the reverted commit from history, so this stays true forever even after
+//     every byte has been undone. observeLanded reads what rev actually declares, and only
+//     landedIntact or landedSuperseded count as carried.
+//
+// With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
+// pre-#165 behaviour, and no caller in this repo takes that path.
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string, fetched *bool) (bool, string, error) {
+	if rev == s.LandedSHA() {
+		return true, "", nil
+	}
+	if a.Git == nil || rev == "" || s.CloneDir == "" {
+		return false, "", nil
+	}
+	// The revision Argo reports is one this clone may never have seen: fetch the base before
+	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
+	// Observe, not once per Application — see fetched's own declaration.
+	if !*fetched {
+		if _, _, err := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
+			return false, "", err
+		}
+		*fetched = true
+	}
+	isAncestor, err := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
+	if err != nil || !isAncestor {
+		// An unresolvable revision is not an error worth failing the whole promotion over —
+		// Argo can report a revision this clone genuinely does not have (a force-pushed base,
+		// a revision from another remote). Treated as "not carried", which is Waiting, which
+		// re-observes.
+		return false, "", nil
+	}
+	verdict, detail, err := observeLanded(ctx, a.Git, s.CloneDir, rev, s)
+	if err != nil {
+		return false, "", err
+	}
+	switch verdict {
+	case landedIntact:
+		return true, "", nil
+	case landedSuperseded:
+		return true, "", nil
+	default:
+		return false, " (" + detail + ")", nil
+	}
 }
 
 // Act implements Step: nothing to do. Syncing is Argo's own auto-sync/self-heal acting on the
@@ -478,14 +556,14 @@ func ObserveSteps(s *PromotionState, g git.Git, f forge.Forge, a argo.Argo, ro r
 	if a == nil && ro == nil {
 		return core
 	}
-	return append(core, ConvergeSteps(a, ro)...)
+	return append(core, ConvergeSteps(g, a, ro)...)
 }
 
 // AllSteps returns every step a promotion drives through, in order: CoreSteps' seven (branch,
 // commit, push, PR, CIGreen, Approved, Merged) then ArgoRefreshed, ArgoSynced and RolledOut
 // (M5). `hoist promote` and `hoist resume` always drive AllSteps to completion.
 func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
-	return append(CoreSteps(g, f, onWaiting), ConvergeSteps(a, ro)...)
+	return append(CoreSteps(g, f, onWaiting), ConvergeSteps(g, a, ro)...)
 }
 
 // ConvergeSteps is the post-landing tail both modes share: ask Argo to refresh, wait for it to
@@ -493,6 +571,11 @@ func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiti
 // identical three rather than a copy — the design has always said direct mode converges through
 // Argo too ("Pushed -> ArgoRefreshed -> ..."), and it only ever stopped at the push because
 // every step here used to gate on MergeSHA, which a direct push never produces (issue #66).
-func ConvergeSteps(a argo.Argo, ro rollout.Rollout) []Step {
-	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a}, RolledOutStep{Rollout: ro}}
+//
+// g reaches ArgoSyncedStep, which needs the clone to tell "Argo has synced past us with later
+// work" from "Argo has synced to a revision that reverted us" (#165). It may be nil only for a
+// caller with no clone at all, which costs that caller the ancestry check — see
+// ArgoSyncedStep.Git.
+func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
+	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g}, RolledOutStep{Rollout: ro}}
 }

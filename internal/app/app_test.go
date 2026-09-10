@@ -23,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -1694,5 +1695,77 @@ func TestConfigKeyPushesConfigScreen(t *testing.T) {
 	bare, _ = bare.Update(matrix.OpenConfigMsg{})
 	if n := len(bare.(Model).stack); n != 1 || !strings.Contains(plain(bare), "no config to show") {
 		t.Errorf("unwired C: stack %d, view:\n%s", n, plain(bare))
+	}
+}
+
+// TestNoticeIsOnScreen is #164's regression: every screen renders through ui.Frame.Render,
+// which emits exactly `height` lines, so a notice appended after that landed on row
+// height+1 and the alternate screen buffer never showed it — an in-flight refusal on the
+// deploy confirm screen was indistinguishable from a dead enter key.
+//
+// The existing notice tests (TestStartMsgShowsNoticeOnBuildError and friends) could not
+// catch it: strings.Contains over the whole view is true whether or not the line is on the
+// terminal. This asserts the SHAPE — exactly `height` lines, the notice on the last one, and
+// the screen still drawn above it — at both golden sizes (AGENTS.md §4.8).
+func TestNoticeIsOnScreen(t *testing.T) {
+	for _, size := range []struct{ w, h int }{{80, 24}, {120, 40}} {
+		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+			m := sized(t)
+			m, _ = m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			// A real refusal, not a synthetic string: this is the exact message the
+			// operator could not read (#164, #166).
+			const notice = "could not start promotion: promotion x5hz5gszie targeting spritz-staging is still in flight (at direct-pushed); run `hoist resume x5hz5gszie` instead of starting a second one"
+			root := m.(Model)
+			root.notice = notice
+			lines := strings.Split(ansi.Strip(root.View().Content), "\n")
+			if len(lines) != size.h {
+				t.Fatalf("view is %d lines on a %d-row terminal; a notice must take rows FROM the screen, never add one past the bottom", len(lines), size.h)
+			}
+			for i, line := range lines {
+				if w := ansi.StringWidth(line); w > size.w {
+					t.Errorf("line %d is %d cells wide, over %d:\n%s", i+1, w, size.w, line)
+				}
+			}
+			// The notice wraps, so it is the terminal's last ROWS: its head must sit
+			// within the final ui.NoticeMaxLines, and its tail on the very last row.
+			tail := strings.Join(lines[len(lines)-ui.NoticeMaxLines:], "\n")
+			if !strings.Contains(tail, "could not start promotion") {
+				t.Errorf("the notice does not start within the last %d rows; got:\n%s", ui.NoticeMaxLines, tail)
+			}
+			if !strings.Contains(lines[len(lines)-1], "starting a second one") {
+				t.Errorf("the notice does not end on the terminal's last row; got:\n%s", lines[len(lines)-1])
+			}
+			// Positive control: the screen the notice explains is still drawn above it, so
+			// this cannot pass by rendering the notice alone.
+			if !strings.Contains(strings.Join(lines[:len(lines)-1], "\n"), "FAMILY") {
+				t.Error("the matrix is gone from above the notice")
+			}
+		})
+	}
+}
+
+// TestNoticeTooLongForTheTerminalIsCapped: a git or forge transport error runs long, and the
+// notice's rows are taken from the screen it is explaining — so it is wrapped and capped at
+// ui.NoticeMaxLines rather than allowed to push that screen away.
+func TestNoticeTooLongForTheTerminalIsCapped(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	root := m.(Model)
+	root.notice = "could not start promotion: " + strings.Repeat("a very long transport error ", 40)
+	lines := strings.Split(ansi.Strip(root.View().Content), "\n")
+	if len(lines) != height {
+		t.Fatalf("view is %d lines on a %d-row terminal, want exactly %d", len(lines), height, height)
+	}
+	notice := 0
+	for _, line := range lines {
+		if strings.Contains(line, "very long transport error") || strings.Contains(line, "could not start promotion") {
+			notice++
+		}
+	}
+	if notice != ui.NoticeMaxLines {
+		t.Errorf("notice took %d rows, want it capped at %d", notice, ui.NoticeMaxLines)
+	}
+	if !strings.Contains(lines[len(lines)-1], "…") {
+		t.Errorf("a capped notice must mark its overflow with an ellipsis; last line:\n%s", lines[len(lines)-1])
 	}
 }
