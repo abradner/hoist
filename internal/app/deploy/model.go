@@ -319,8 +319,15 @@ func (m Model) layout() Model {
 	body := max(ui.BodyHeight(m.height, sections)-fixed, 3)
 	m.diff.SetWidth(inner)
 	m.diff.SetHeight(body)
+	resized := m.commits.Width() != inner
 	m.commits.SetWidth(inner)
 	m.commits.SetHeight(body)
+	if resized {
+		// The commit lines are truncated to the width they were rendered at, so a width
+		// change re-renders them — WithHistory runs before the root's first SetSize, where
+		// m.width is still zero and every subject would stay cut to the 20-column floor.
+		m.commits.SetContent(m.commitLines())
+	}
 	return m
 }
 

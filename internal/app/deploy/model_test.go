@@ -18,7 +18,7 @@ import (
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-func fixture(t *testing.T, envs config.EnvsConfig) Model {
+func unsizedFixture(t *testing.T, envs config.EnvsConfig) Model {
 	t.Helper()
 	// The fixture repo's app-production is the only env with a web occurrence to deploy into;
 	// named here rather than passed so the call sites read as what they vary — the env config.
@@ -36,8 +36,12 @@ func fixture(t *testing.T, envs config.EnvsConfig) Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(pl, r.Root, ref.String(), envs, ui.NewStyles(true))
-	return m.SetSize(120, 40)
+	return New(pl, r.Root, ref.String(), envs, ui.NewStyles(true))
+}
+
+func fixture(t *testing.T, envs config.EnvsConfig) Model {
+	t.Helper()
+	return unsizedFixture(t, envs).SetSize(120, 40)
 }
 
 // The screen's whole reason to exist: the operator sees the bytes before anything is written.
@@ -201,6 +205,10 @@ var fixedNow = time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
 
 func withHistory(t *testing.T, envs config.EnvsConfig) Model {
 	t.Helper()
+	return withHistoryOn(fixture(t, envs))
+}
+
+func withHistoryOn(m Model) Model {
 	commits := []migrate.Commit{
 		{SHA: "4a1c2ef0000", Subject: "Add rate limiting to the public API"},
 		{SHA: "e9b0d310000", Subject: "Fix N+1 query when resolving digests"},
@@ -217,7 +225,7 @@ func withHistory(t *testing.T, envs config.EnvsConfig) Model {
 		Migrations:       []string{"db/migrate/20260225T101500_add_events_created_at_index.rb", "db/migrate/20260301T090200_backfill_events_tenant_id.rb"},
 		MigrationCommits: 2, Prefix: "db/migrate/", PrefixSource: migrate.PrefixFromDefault,
 	}
-	return fixture(t, envs).WithNow(func() time.Time { return fixedNow }).WithHistory(History{
+	return m.WithNow(func() time.Time { return fixedNow }).WithHistory(History{
 		Delta:    &d,
 		Declared: image.Ref{Repo: "ghcr.io/example/web", Tag: "v202601010101"},
 		Since:    fixedNow.Add(-34 * 24 * time.Hour),
@@ -340,5 +348,17 @@ func TestModeDialogKeepsTheScreenVisible(t *testing.T) {
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "straight to app-production with no PR?") || !strings.Contains(v, "rolling out 14 commits") {
 		t.Fatalf("dialog must sit over the screen:\n%s", v)
+	}
+}
+
+// The root builds this screen and supplies its history before it ever knows the terminal's
+// size (internal/app/app.go), so the commit lines were first rendered against a zero width
+// and stayed cut to the 20-column floor on a wide terminal. layout re-renders them when the
+// viewport's width changes.
+func TestCommitSubjectsUseTheWidthTheRootSetsAfterHistory(t *testing.T) {
+	m := unsizedFixture(t, config.EnvsConfig{})
+	m = withHistoryOn(m).SetSize(120, 40)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "4a1c2ef  Add rate limiting to the public API") {
+		t.Fatalf("commit subjects truncated to the pre-SetSize width:\n%s", v)
 	}
 }
