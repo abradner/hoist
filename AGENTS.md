@@ -344,9 +344,11 @@ the user's own clone (never a fresh clone, never the user's own checkout — §4
 commit the edits (SSH-signed via the user's own git config, `hoist promote` says "waiting for
 signing approval" if a commit sits for 5s), push the branch, open a PR via the user's own `gh`
 login (`pkg/forge/github`, via `go-gh`: hoist defines no token flag and no environment variable
-of its own and never sees the value, but go-gh's own resolution order does read one — `GH_TOKEN`,
-then `GITHUB_TOKEN`, then `gh`'s config file, then `gh auth token` for a keyring-stored token,
-which is the one place the `gh` binary is execed at runtime), wait for CI to go green
+of its own, sets no host, and never sees the value, but go-gh's own resolution order does read
+one — for github.com `GH_TOKEN` then `GITHUB_TOKEN`, and for any other host, which only `gh`'s
+own config or `GH_HOST` can select, `GH_ENTERPRISE_TOKEN` then `GITHUB_ENTERPRISE_TOKEN` — then
+`gh`'s config file, then `gh auth token` for a keyring-stored token, which is the one place the
+`gh` binary is execed at runtime), wait for CI to go green
 (`ci.none` policy for a PR reporting no checks at all), wait for the human approval comment
 (`hoist approve <id>`, or immediately for an env whose approval mode is `auto`), then squash-merge
 and delete the branch — refusing the merge if the PR's head has moved since this promotion last
