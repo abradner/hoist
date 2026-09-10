@@ -12,9 +12,11 @@ hoist is a Go terminal UI that promotes container images between environments in
 GitOps repository, and drives the whole path from edit to rollout: commit, PR, CI, human approval,
 merge, Argo refresh, Deployment watch — with resume after interruption. It is a single-operator
 tool for the author's own GitOps repo first, written so other repos with the same shape can use it.
-Status: pre-alpha, first tag `v0.1.0`; milestones M0–M10 have landed on `main` and the remaining
-work (TUI/CLI parity gaps, the design questions the tracker flags, M13's first-run wizard) is
-tracked in issues.
+Status: pre-alpha, first tag `v0.1.0`; milestones M0–M10 have landed on `main`, and so has the
+TUI/CLI parity work that closed the registry's last one-sided rows (#101–#104, #132), so every
+operation is reachable from both faces. The remaining work — the design questions the tracker
+flags (#24, #41, #52, #53, #90), the migration delta and doctrine warnings of M7 (#7) and M13's
+first-run wizard (#106) — is tracked in issues.
 
 Domain nouns, as this repo uses them:
 
@@ -91,7 +93,7 @@ A conflict with a principle is a stop-and-check, never something to quietly work
 | TUI | Bubble Tea v2 (`charm.land/bubbletea/v2`), Bubbles v2, Lip Gloss v2, huh v2 | Hand-rolled panes; no layout library |
 | Manifests | `gopkg.in/yaml.v3` node API | Scan, byte-minimal edit, structural verify. No kustomize/helm libraries |
 | Registry | `github.com/google/go-containerregistry` | Tag list, manifest HEAD, config blobs; `authn` keychain chain |
-| Forge | `github.com/cli/go-gh/v2` + `exec gh` | Reuses the user's `gh` login. `Forge` interface; GitHub only today |
+| Forge | `github.com/cli/go-gh/v2` | Reuses the user's `gh` login — go-gh's own token resolution, which execs `gh auth token` for a keyring-stored one; hoist never execs `gh` itself. `Forge` interface; GitHub only today |
 | Git | `exec git` | Worktree per promotion; inherits the user's signing config. Not go-git (§4.6) |
 | Kubernetes | `k8s.io/client-go` (+ `api`, `apimachinery`) | Pods, secrets, dynamic client for Argo `Application` CRs, Deployment watches |
 | State | JSON files under `$XDG_STATE_HOME/hoist/` | No database, no workflow engine (§4.1) |
@@ -290,6 +292,11 @@ conversation context, only what's written down.
 - Cite risk-register IDs (R-00N) from rules, PRs, and code comments, so the register stays
   load-bearing instead of decorative.
 
+Two more docs are load-bearing for different readers, and a change to behaviour they describe
+belongs in the same PR as the change: `docs/guide.md` is the operator's walkthrough of every
+screen, key and stall (README links it as the user guide), and `docs/tui/mockups.html` with
+`docs/tui/genframes.py` is where a screen's intended shape is drawn before it is built.
+
 ## 6. Development Essentials
 
 ```bash
@@ -336,7 +343,12 @@ completion: create or reuse a `git worktree` under `$XDG_CACHE_HOME/hoist/worktr
 the user's own clone (never a fresh clone, never the user's own checkout — §4.6), apply and
 commit the edits (SSH-signed via the user's own git config, `hoist promote` says "waiting for
 signing approval" if a commit sits for 5s), push the branch, open a PR via the user's own `gh`
-login (`pkg/forge/github`, via `go-gh` — never a token flag or env var), wait for CI to go green
+login (`pkg/forge/github`, via `go-gh`: hoist defines no token flag and no environment variable
+of its own, sets no host, and never sees the value, but go-gh's own resolution reads an
+environment token first — `GH_TOKEN`/`GITHUB_TOKEN` for github.com, a different pair for an
+enterprise host, exactly as go-gh's `auth.tokenForHost` splits them, which is the authority
+rather than this sentence — then `gh`'s config file, then `gh auth token` for a keyring-stored
+token, which is the one place the `gh` binary is execed at runtime), wait for CI to go green
 (`ci.none` policy for a PR reporting no checks at all), wait for the human approval comment
 (`hoist approve <id>`, or immediately for an env whose approval mode is `auto`), then squash-merge
 and delete the branch — refusing the merge if the PR's head has moved since this promotion last
@@ -430,10 +442,13 @@ opens its PR, each asking which when several are in flight: the TUI's `hoist pro
 `hoist resume` (M10). `d` opens the tag picker — `internal/app/tags`, M6; a chooser first when the
 cell holds several first-party images — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
-repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91): releases
-(`v…`/`release-…` + digits) lead the list with no divider above them, then digest-named tags
-(`sha-<hex>`) and moving tags (`latest`, branch names) each sit under their own divider; nothing
-is hidden and `/` filters across all three, since
+repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91) by
+`tags.Classify`, a stated convention since no registry marks a tag's kind: releases lead the list
+with no divider above them (an optional `v` or `release-`/`release/`, then dot-separated digits,
+then an optional `-`/`+` suffix — so `v1.2.3`, `1.2.3`, `v202609060428`, `release-2026.09`), then
+digest-named tags (`sha-` or `sha256-` and at least seven hex) and moving tags (`latest`, branch
+names) each sit under their own divider; nothing is hidden and `/` filters across all three,
+since
 the operator is scanning for releases outnumbered several to one — and its own `D` key walks the
 same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
 deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
@@ -470,8 +485,9 @@ plan there (Enter on either confirm screen) drives a real promotion or deploy ex
 `internal/engine` pipeline. The two faces are held in step by `internal/parity`: a registry test
 that parses the subcommand dispatch, every flag set and every navigation message the TUI root
 switches on, and fails when any of them has no row, or when a row with one side empty cites no
-issue — so a new subcommand, flag or screen lands with its parity stated or not at all (the open
-gaps are #101–#105). Golden files under `testdata/golden/` regenerate with
+issue — so a new subcommand, flag or screen lands with its parity stated or not at all. Every row
+is two-sided as of the parity arc (#101–#104, #132); a `Gap:` reappearing is a deliberate act
+that has to name the issue that closes it. Golden files under `testdata/golden/` regenerate with
 `mise exec -- go test ./pkg/gitops ./internal/app/... ./internal/ui/... -update` (one shared flag
 for the screens, in `internal/ui/uitest`; files are `<name>-<w>x<h>.txt`); the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
@@ -525,8 +541,9 @@ Seeded at init from the design session rather than left empty (deviation recorde
 ## 7. CI & Deployment
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request, with **no path
-filters**: `test` (`go vet`, `go build`, `go test -count=1 -race ./...`), `lint` (golangci-lint v2)
-and `public-safety` (`scripts/public-safety.sh`, §4.4). All three are required for merge once
+filters**: `test` (`go vet`, `go build`, `go test -count=1 -race ./...`), `lint` (golangci-lint v2),
+`public-safety` (`scripts/public-safety.sh`, §4.4) and `release-config` (the snapshot build
+described below). All four are required for merge once
 branch protection exists — it does not yet; until then the merge gate is the operator go-ahead in
 §8 plus a green rollup you have read job-by-job. Renovate (`renovate.json5`) opens grouped
 dependency PRs on a weekly schedule; it is scheduled tooling, never a PR gate.
@@ -959,7 +976,8 @@ chain, kubeconfig, public output surfaces); every shipped skill — `single-pr` 
 (the approval-author check and the credential chain are genuine trust-boundary work; it was not in
 the plan because it post-dates the local keel checkout, kept under "when in doubt, keep"),
 `independent-commit-review`, `park-context`/`resume-context`, `dependabot-sweep` (Renovate is
-configured for gomod + github-actions); `docs/pr-review-machinery.md`; caveman tone module, fanned
+configured for gomod + github-actions), `quality-audit`/`quality-audit-refresh` (added after
+init, when the first audit of a landed milestone wanted a repeatable shape); `docs/pr-review-machinery.md`; caveman tone module, fanned
 out and appended below; Apache-2.0 license.
 
 **Pruned:** `docs/rails-prometheus-metrics.md` — not a Rails service. `[MERGE-COMMIT]` variants in

@@ -47,7 +47,7 @@ yours to do.
 ├──────────────────────────────────────────────────────────────────────────────┤
 │blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env a                          p promote • d deploy • r resume • ? help • q quit
+env a                p promote • d deploy • w watch • r resume • ? help • q quit
 ```
 
 (Rendered from the test fixture, which is why the environments are called `A`, `B` and `C`; a
@@ -86,12 +86,14 @@ go install github.com/abradner/hoist/cmd/hoist@latest
 That builds the newest tagged release (or `main`, before the first tag exists). Prebuilt binaries
 for macOS and Linux, amd64 and arm64, are attached to every
 [release](https://github.com/abradner/hoist/releases) with a `checksums.txt`; `hoist --version`
-names what you are running. hoist shells out to `git` and `gh` — both on `PATH`, and `gh auth
-status` logged in, is the whole prerequisite.
+names what you are running. `git` on `PATH` and `gh auth status` logged in is the whole
+prerequisite: hoist runs `git` directly, and reaches GitHub through go-gh, which reads your `gh`
+login (an environment token first if you have set one, then `gh`'s config, then `gh` itself for a
+token kept in the system keyring — the one case where `gh` has to be on `PATH` at runtime too).
 
 ## The three operations
 
-Everything hoist does is one of these. The [user guide](docs/guide.md) walks each screen and key,
+Every write hoist makes is one of these. The [user guide](docs/guide.md) walks each screen and key,
 says what to do when a promotion stops, and covers resuming, registry credentials and direct mode. Each is a subcommand and a key on the matrix, with the
 same gates either way, and each has a read-only form that prints what would happen and touches
 nothing: `plan` for a promotion, `--dry-run` on `deploy` and `restart`.
@@ -116,10 +118,17 @@ merge, for Argo to sync, for every Deployment it touched to roll out. On the mat
 hoist deploy --env app-staging --image ghcr.io/me/web:v3@sha256:…
 ```
 
+On the plan screen `o` does the same job for one repo inside a promotion — the TUI's `--digest`,
+overriding what the resolver chose for the row under the cursor. Which sources the resolver asks,
+and which registry credentials it tries, can be set for a whole session with the root
+`--digest-sources`, `--registry-auth`, `--cluster-secret` and `--op-ref` flags.
+
 The reference must carry its digest; hoist will not resolve a bare tag on the way in. On the matrix
 this is `d`: a picker lists the registry's tags with the build age of each, whether the paired
 staging environment has committed it, and the commits and migrations between the build the
-environment declares and the one under the cursor.
+environment declares and the one under the cursor. Releases lead the list; tags named after a
+digest and moving tags like `latest` or a branch name sit below their own dividers, so a handful
+of real builds are not buried among them — nothing is hidden, and `/` filters across all three.
 
 **Restart a family** — roll an environment's Deployments without changing what they declare:
 
@@ -153,6 +162,14 @@ convention, and the refusal says which one:
   before its merge (or its direct push), a second one for that env is refused and named;
   `hoist promotions` lists them and `hoist resume <id>` continues one. Once the change has landed
   the guard lifts, even if Argo is still converging.
+
+Three read-only screens sit beside them, each also a subcommand: `w` on the matrix watches one
+Application converge outside any promotion (`hoist watch --app`), `C` shows the effective config
+and the file it came from (`hoist config show`/`path`), and the in-flight pane under the matrix
+lists what is promoting right now (`hoist promotions`), with `r` reopening one and `o` opening its
+PR. On that reopened flight screen, `c` is the one override the TUI offers: when your `ci.none`
+policy is `prompt` and a PR reports no checks at all, it treats them as green for that promotion
+after a confirmation — the same thing `--override-ci-none` does at the CLI, and never a default.
 
 These, by contrast, are warnings and never refusals: a digest the source's pods and manifest
 disagree on, a promotion that jumps straight to production, a build staging has never committed,

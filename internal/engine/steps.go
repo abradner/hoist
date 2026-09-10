@@ -238,12 +238,16 @@ func (c CommittedStep) Act(ctx context.Context, s *PromotionState) error {
 }
 
 // expectedBlobs computes, once, what each edited file's blob hash will be once the plan's
-// edits are applied — read from the user's own clone (s.CloneDir) by default. See
-// ComputeExpectedBlobs's own doc comment for the read source and why it matters; cmd/hoist's
-// direct-mode planning calls ComputeExpectedBlobs directly, against a different, fresher
-// directory, and passes the result in via s.ExpectedBlobs before Drive ever starts — this
-// method's own lazy "if empty, compute from CloneDir" path (Observe/Act, both unchanged below)
-// is simply never reached in that case.
+// edits are applied — read from the user's own clone (s.CloneDir). See ComputeExpectedBlobs's
+// own doc comment for the read source and why it matters.
+//
+// "Once" is per promotion, not per process: PromotionState.ExpectedBlobs is persisted like any
+// other state field, and both call sites below compute only when it is empty, so a `hoist
+// resume` reads back what the first attempt decided rather than recomputing it. A fresh
+// `hoist promote`/`deploy` re-run does recompute, deliberately — cmd/hoist carries History and
+// policy forward onto a new state but not this (see promote.go's resume merge). #52 asked
+// whether that asymmetry is right; the answer for the resume path is that it already does the
+// pinning the issue asked for.
 func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (map[string]string, error) {
 	return ComputeExpectedBlobs(ctx, c.Git, s.CloneDir, s.Edits)
 }
@@ -256,16 +260,21 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 // particular) would try to re-apply the edit on top of its own result and fail — dir must be
 // something that reflects the pre-edit state and stays that way across any number of calls.
 //
-// CommittedStep.expectedBlobs (Observe/Act, both unchanged) calls this with dir = s.CloneDir —
-// the PR flow's own long-standing choice, validated ahead of time by cmd/hoist's
+// CommittedStep.expectedBlobs is this function's only caller, for both the PR and the direct
+// flow, and it always passes dir = s.CloneDir — validated ahead of time by cmd/hoist's
 // checkCloneCurrentForBase, which refuses to start the engine at all when the clone disagrees
 // with origin/<base>. Direct mode cannot lean on that same validate-and-refuse dance for the
 // files it never even knew to look at (a new occurrence origin/<base> gained that the clone's
-// own disk never had — round-N finding): cmd/hoist's own direct-mode planning instead calls
-// this directly against a throwaway snapshot of origin/<base>'s actual current tree (see
-// discoverAtFreshBase in cmd/hoist/promote.go) and passes the result into PromotionState.
-// ExpectedBlobs up front, so CommittedStep's own lazy computation from CloneDir is never
-// reached for a direct-mode promotion at all.
+// own disk never had — round-N finding), so cmd/hoist guards that case separately: it discovers
+// against a throwaway snapshot of origin/<base>'s actual current tree and refuses on a missing
+// occurrence (discoverAtFreshBase and checkNoMissingOccurrenceAtFreshBase in
+// cmd/hoist/promote.go). That snapshot never feeds this function.
+//
+// An earlier version of this comment claimed cmd/hoist called this directly against the
+// snapshot and passed the result in via PromotionState.ExpectedBlobs before Drive started, so
+// that the lazy path "is never reached" for a direct promotion. That was an intent, never the
+// code; corrected in place rather than deleted, per AGENTS.md §10 meta-rule 2, because it made
+// #52 read as a live hazard for months.
 func ComputeExpectedBlobs(ctx context.Context, g git.Git, dir string, edits []gitops.Edit) (map[string]string, error) {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
