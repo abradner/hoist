@@ -561,3 +561,33 @@ func findUnmanaged(root, appsRoot string, managed map[string]ArgoApp) ([]string,
 	sort.Strings(out)
 	return out, nil
 }
+
+// OccurrencesIn scans raw manifest bytes for every image scalar, exactly as Discover does when
+// it walks a family's files — the same parse, the same containers/initContainers/
+// ephemeralContainers rule, the same position checks — so a caller cannot end up recognising a
+// narrower or wider grammar than discovery does (§9 gotcha 3 is the general form of that
+// mistake). file is used only for the positions and error messages; nothing is read from disk.
+//
+// It exists for callers holding a version of a manifest that is not on disk: engine's
+// observeLanded reads what the base branch declares at some revision (`git show <rev>:<path>`)
+// and has to say which reference each RECORDED occurrence carries there. Matching an Edit
+// against the file's bytes instead — even by full reference — cannot do that: a file with two
+// occurrences of one image repo (a Deployment and its worker, the ordinary case) satisfies a
+// whole-file search on the strength of either one, so an occurrence repointed elsewhere reads as
+// unchanged (Codex, PR #167).
+func OccurrencesIn(file string, b []byte) ([]Occurrence, error) {
+	docs, err := parseDocs(b)
+	if err != nil {
+		return nil, err
+	}
+	lines := bytes.Split(b, []byte{'\n'})
+	var out []Occurrence
+	for i, doc := range docs {
+		occ, err := scanDoc(file, i, doc, lines)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, occ...)
+	}
+	return out, nil
+}

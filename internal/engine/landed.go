@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/image"
 )
 
 // landedVerdict is what a revision of the base branch says about a promotion that already
@@ -90,21 +88,45 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, s *Promotion
 		if !ok {
 			return landedGone, fmt.Sprintf("%s is not present at %s", f, rev), nil
 		}
+		// Scan the manifest as discovery does and index by (document, YAML path), so each Edit
+		// is judged at the occurrence it actually recorded. Searching the file's bytes instead
+		// cannot do that: a file with two occurrences of one image repo — a Deployment and its
+		// worker, the ordinary shape — satisfies a whole-file predicate on the strength of
+		// either one, so an occurrence repointed elsewhere reads as unchanged, and a false
+		// landedIntact here silently retires findInFlight's one-in-flight-per-env invariant
+		// (Codex, PR #167).
+		//
+		// A file that no longer parses, or whose recorded occurrence is gone from it, is
+		// landedGone: a promotion cannot claim to have landed at a revision where it cannot
+		// find the scalar it wrote.
+		found, err := gitops.OccurrencesIn(f, content)
+		if err != nil {
+			return landedGone, fmt.Sprintf("%s does not parse at %s: %v", f, rev, err), nil
+		}
+		declared := make(map[occKey]string, len(found))
+		for _, o := range found {
+			declared[occKey{doc: o.Doc, path: o.Path}] = o.Ref.String()
+		}
 		for _, e := range byFile[f] {
+			now, present := declared[occKey{doc: e.Doc, path: e.Path}]
 			switch {
-			case !e.NoOp() && declaresRef(content, e.Ref):
-				return landedReverted, fmt.Sprintf(
-					"%s still declares %s — the reference this promotion edited away from",
-					f, e.Ref.String(),
+			case !present:
+				return landedGone, fmt.Sprintf(
+					"%s no longer declares an image at %s (document %d)", f, e.Path, e.Doc,
 				), nil
-			case declaresRef(content, e.New):
-				// This occurrence carries exactly what was planned. Some other file or
-				// occurrence is what made the blob check fail; keep looking.
-			case declaresRepo(content, e.New.Repo):
-				superseded = append(superseded, fmt.Sprintf("%s declares %s", f, strings.Join(refsOf(content, e.New.Repo), ", ")))
+			case now == e.New.String():
+				// This occurrence carries exactly what was planned. Some other occurrence is
+				// what made the blob check fail; keep looking.
+			case !e.NoOp() && now == e.Ref.String():
+				return landedReverted, fmt.Sprintf(
+					"%s declares %s at %s — the reference this promotion edited away from",
+					f, now, e.Path,
+				), nil
+			case repoOf(now) == e.New.Repo:
+				superseded = append(superseded, fmt.Sprintf("%s declares %s at %s", f, now, e.Path))
 			default:
 				return landedGone, fmt.Sprintf(
-					"%s no longer declares %s at all", f, e.New.Repo,
+					"%s declares %s at %s — not %s at all", f, now, e.Path, e.New.Repo,
 				), nil
 			}
 		}
@@ -121,6 +143,32 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, s *Promotion
 		"superseded by a later change to the same image repo: %s (this promotion planned %s)",
 		strings.Join(superseded, "; "), plannedRefs(s),
 	), nil
+}
+
+// occKey identifies one occurrence within one file the way Occurrence itself does: the document
+// index and the YAML path. Line/column are deliberately not part of it — the whole point is to
+// find the same logical scalar at a revision where the file's lines have moved.
+type occKey struct {
+	doc  int
+	path string
+}
+
+// repoOf returns the image repo of a reference — everything before the tag or digest delimiter.
+// image.Ref carries the repo already for anything hoist parsed itself; this handles the string
+// a foreign change wrote, which may be any shape at all.
+func repoOf(ref string) string {
+	if i := strings.IndexAny(ref, ":@"); i >= 0 {
+		// A registry host may carry a port (localhost:5000/app:v1), in which case the first
+		// ":" is not the tag delimiter — the tag delimiter is the last one after the final "/".
+		if slash := strings.LastIndexByte(ref, '/'); slash > i {
+			if j := strings.IndexAny(ref[slash:], ":@"); j >= 0 {
+				return ref[:slash+j]
+			}
+			return ref
+		}
+		return ref[:i]
+	}
+	return ref
 }
 
 // blobsIntact reports whether every path in s.ExpectedBlobs is byte-identical at rev to what
@@ -142,47 +190,6 @@ func blobsIntact(ctx context.Context, g git.Git, dir, rev string, s *PromotionSt
 		}
 	}
 	return true, nil
-}
-
-// declaresRef reports whether content declares exactly ref. A full reference carries the repo,
-// the tag and the digest, so a plain substring search cannot collide across repos: neither
-// "ghcr.io/o/app:v1@sha256:…" nor any prefix of it appears inside "ghcr.io/o/app-web:v1@…".
-func declaresRef(content []byte, ref image.Ref) bool {
-	return bytes.Contains(content, []byte(ref.String()))
-}
-
-// declaresRepo reports whether content names repo as an image repo — followed by ":" (a tag)
-// or "@" (a bare digest). The delimiter is what makes this safe: "ghcr.io/o/spritz" is a
-// prefix of "ghcr.io/o/spritz-marketing", so a bare Contains would report the wrong repo as
-// still declared and turn a repo that had been swapped out entirely into a "supersede".
-func declaresRepo(content []byte, repo string) bool {
-	return bytes.Contains(content, []byte(repo+":")) || bytes.Contains(content, []byte(repo+"@"))
-}
-
-// refsOf lists every distinct reference to repo in content, for the Detail line. Best effort
-// and presentational only: nothing decides anything on it.
-func refsOf(content []byte, repo string) []string {
-	var out []string
-	rest := content
-	for {
-		i := bytes.Index(rest, []byte(repo))
-		if i < 0 {
-			break
-		}
-		tail := rest[i:]
-		end := bytes.IndexFunc(tail, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\''
-		})
-		if end < 0 {
-			end = len(tail)
-		}
-		if end > len(repo) && (tail[len(repo)] == ':' || tail[len(repo)] == '@') {
-			out = append(out, string(tail[:end]))
-		}
-		rest = tail[end:]
-	}
-	sort.Strings(out)
-	return dedupe(out)
 }
 
 // plannedRefs names every distinct reference this promotion planned to write, for the Detail.

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -641,5 +642,154 @@ func TestDirectModeNeverPushedIsNotASupersede(t *testing.T) {
 	}
 	if s.PushedSHA != "" {
 		t.Errorf("PushedSHA must stay empty for a promotion that never landed, got %q", s.PushedSHA)
+	}
+}
+
+// newTwoOccurrenceFixture is a fixture whose target env declares ONE image repo at TWO
+// occurrences in a single file — a Deployment and its worker on the same image, which is the
+// ordinary shape of a real app, not an edge case (the author's own spritz family is exactly
+// this). It states that property because the shared newFixture has one occurrence per file and
+// therefore cannot exercise anything that depends on telling two apart (§9 gotcha 9: a fixture
+// without a stated control property archives whatever shape it was first given).
+func newTwoOccurrenceFixture(t *testing.T) fixture {
+	t.Helper()
+	home := t.TempDir()
+	gitconfig := filepath.Join(home, ".gitconfig")
+	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" + noBackgroundGitConfig
+	if err := os.WriteFile(gitconfig, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", gitconfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
+
+	seed := t.TempDir()
+	runHost(t, "", "init", "-q", "-b", "main", seed)
+	write := func(rel, content string) {
+		p := filepath.Join(seed, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrapper := func(env string) string {
+		return "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: app-" + env +
+			"\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n" +
+			"    targetRevision: main\n    path: cluster/apps/" + env + "/app\n  destination:\n" +
+			"    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
+	}
+	// Two Deployments, one document each, both on the same image repo and reference.
+	twoOccurrences := func(env, ref string) string {
+		out := ""
+		for _, name := range []string{"web", "worker"} {
+			if out != "" {
+				out += "---\n"
+			}
+			out += "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app-" + name +
+				"\n  namespace: " + env + "\nspec:\n  template:\n    spec:\n      containers:\n        - name: " + name +
+				"\n          image: " + ref + "\n"
+		}
+		return out
+	}
+	digestOld := "sha256:" + strings.Repeat("0", 64)
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	write("cluster/apps/app-staging-app.yaml", wrapper("app-staging"))
+	write("cluster/apps/app-production-app.yaml", wrapper("app-production"))
+	write("cluster/apps/app-staging/app/deployment.yaml", twoOccurrences("app-staging", "ghcr.io/example/app:v2@"+digestNew))
+	write("cluster/apps/app-production/app/deployment.yaml", twoOccurrences("app-production", "ghcr.io/example/app:v1@"+digestOld))
+	runHost(t, seed, "add", ".")
+	runHost(t, seed, "commit", "-q", "-m", "seed")
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runHost(t, "", "init", "-q", "--bare", "-b", "main", origin)
+	runHost(t, seed, "remote", "add", "origin", origin)
+	runHost(t, seed, "push", "-q", "origin", "main")
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	runHost(t, "", "clone", "-q", origin, clone)
+	repo, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	plan, err := gitops.BuildPlan(repo, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Edits) != 2 {
+		t.Fatalf("fixture precondition: want exactly two occurrences in one file, got %d", len(plan.Edits))
+	}
+	return fixture{cloneDir: clone, originDir: origin, plan: plan}
+}
+
+// TestDirectModeJudgesEachOccurrenceNotTheWholeFile is Codex's P1 on PR #167, and the reason
+// observeLanded matches each Edit at its RECORDED document and YAML path rather than searching
+// the file's bytes.
+//
+// A file with two occurrences of one image repo — a Deployment and its worker, the ordinary
+// shape — satisfies a whole-file search on the strength of either one. So a later change that
+// repointed only ONE of them at a different image repo left the other still carrying the
+// planned reference, the file-wide check reported landedIntact, and DirectPushedStep satisfied
+// without even reaching the ancestry gate. That is not cosmetic: findInFlight treats Satisfied
+// as "no longer in flight", so a false Satisfied silently retires the one-in-flight-per-env
+// invariant while the env does not declare the promoted digest at all.
+func TestDirectModeJudgesEachOccurrenceNotTheWholeFile(t *testing.T) {
+	// Both occurrences sit at the SAME YAML path in DIFFERENT documents, which is what the
+	// ordinary two-Deployment manifest looks like. Repointing each in turn is deliberate: with
+	// only the second case, a near-miss fix that indexed occurrences by path and ignored the
+	// document still passed, because the collapsed map happened to keep the repointed one.
+	for _, which := range []int{1, 2} {
+		t.Run(fmt.Sprintf("occurrence-%d-repointed", which), func(t *testing.T) {
+			fx := newTwoOccurrenceFixture(t)
+			wt := filepath.Join(t.TempDir(), "wt")
+			g := git.Exec{}
+
+			if err := Drive(ctx(), DirectSteps(g, nil, true, nil), newState(fx, wt), nil); err != nil {
+				t.Fatalf("first Drive: %v", err)
+			}
+
+			// A later change repoints ONE occurrence at a different image repo. The other still
+			// carries exactly what this promotion planned, so every file-wide predicate — the
+			// planned reference, the image repo — still matches.
+			other := filepath.Join(t.TempDir(), "other-clone")
+			runHost(t, "", "clone", "-q", fx.originDir, other)
+			p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(string(b), "\n")
+			seen := 0
+			for i, line := range lines {
+				if strings.Contains(line, "image: ghcr.io/") {
+					seen++
+					if seen == which {
+						lines[i] = "          image: ghcr.io/example/other:v9@sha256:" + strings.Repeat("9", 64)
+					}
+				}
+			}
+			if seen != 2 {
+				t.Fatalf("fixture precondition: want two image lines, got %d", seen)
+			}
+			if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runHost(t, other, "commit", "-q", "-a", "-m", "repoint one occurrence at a different image repo")
+			runHost(t, other, "push", "-q", "origin", "main")
+
+			resumed := newState(fx, wt)
+			if _, err := (CommittedStep{Git: g}).Observe(ctx(), resumed); err != nil {
+				t.Fatalf("CommittedStep.Observe: %v", err)
+			}
+			obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), resumed)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if obs.Satisfied {
+				t.Fatalf("occurrence %d no longer declares this promotion's image repo at all; the other one carrying the planned ref must not satisfy the whole promotion: %+v", which, obs)
+			}
+		})
 	}
 }
