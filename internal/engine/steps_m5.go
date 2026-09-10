@@ -251,6 +251,10 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 	if len(apps) == 0 {
 		return Observation{Satisfied: true, Detail: "no Argo Application in this promotion's plan"}, nil
 	}
+	// fetched keeps the base fetch to at most one per Observe rather than one per Application:
+	// every app in a promotion is on the same base, and this method is called on every poll
+	// tick (poll.argo, seconds apart) for the whole convergence window.
+	var fetched bool
 	var notSynced []string
 	for _, app := range apps {
 		st, err := a.Argo.Get(ctx, app)
@@ -266,7 +270,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
-		carries, why, err := a.revisionCarries(ctx, s, st.SyncRevision)
+		carries, why, err := a.revisionCarries(ctx, s, st.SyncRevision, &fetched)
 		if err != nil {
 			return Observation{}, err
 		}
@@ -301,7 +305,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
-func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string) (bool, string, error) {
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string, fetched *bool) (bool, string, error) {
 	if rev == s.LandedSHA() {
 		return true, "", nil
 	}
@@ -309,9 +313,13 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		return false, "", nil
 	}
 	// The revision Argo reports is one this clone may never have seen: fetch the base before
-	// asking about its object graph, exactly as DirectPushedStep.Observe does.
-	if _, _, err := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
-		return false, "", err
+	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
+	// Observe, not once per Application — see fetched's own declaration.
+	if !*fetched {
+		if _, _, err := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
+			return false, "", err
+		}
+		*fetched = true
 	}
 	isAncestor, err := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
 	if err != nil || !isAncestor {

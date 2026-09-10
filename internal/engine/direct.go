@@ -174,6 +174,29 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 	if verdict == landedReverted || verdict == landedGone {
 		return Observation{Satisfied: false, Detail: detail}, nil
 	}
+	if verdict == landedSuperseded {
+		// A supersede — unlike an intact match — is not by itself evidence that THIS promotion
+		// ever landed. "The occurrence names our image repo at some other reference" is equally
+		// true of a promotion that was pushed and then replaced, and of one that was never
+		// pushed at all while somebody else deployed that repo in the meantime. Reporting the
+		// second as satisfied would skip the push and claim, in the Detail below, that the
+		// promotion "landed and has since been replaced" — a claim the mechanism does not
+		// deliver (AGENTS.md principle 1), leaving `hoist deploy` exiting successfully without
+		// having written anything.
+		//
+		// Ancestry is exactly the missing evidence, and is sound HERE precisely because it is
+		// paired with content: on its own it cannot see a revert (which is why the intact/
+		// reverted judgement above is content-only), but "our commit is in the base's history"
+		// is a fact about whether we published, which is the question a supersede leaves open.
+		// ArgoSyncedStep pairs them the same way round.
+		landed, err := d.Git.IsAncestor(ctx, s.CloneDir, s.CommitSHA, remoteSHA)
+		if err != nil || !landed {
+			return Observation{Satisfied: false, Detail: fmt.Sprintf(
+				"origin/%s declares another reference for this promotion's image repo, but this promotion's own commit %s is not in its history — it was never pushed",
+				s.Base, s.CommitSHA,
+			)}, nil
+		}
+	}
 	// PushedSHA is the base-branch revision that CARRIES this promotion's content, which here
 	// is remoteSHA, not s.CommitSHA. Recording the original commit instead reads better as a
 	// field name and is unobservable in the world: Argo tracks the branch and reports the tip,

@@ -597,3 +597,49 @@ func TestDirectModeSupersedeDoesNotCoverAReplacedImageRepo(t *testing.T) {
 		t.Errorf("PushedSHA must stay empty when the promotion's image repo is gone from the occurrence, got %q", resumed.PushedSHA)
 	}
 }
+
+// TestDirectModeNeverPushedIsNotASupersede is the control the supersede rule needs to stay
+// honest about WHOSE change is on the base. "The occurrence names our image repo at some other
+// reference" is equally true of a promotion that was pushed and then replaced, and of one that
+// was never pushed at all while somebody else deployed the same repo in the meantime.
+//
+// Only the first has landed. Reporting the second as satisfied would skip the push entirely and
+// have `hoist deploy` exit successfully without writing anything, while its own Detail claimed
+// the promotion "landed and has since been replaced" — a claim the mechanism does not deliver
+// (AGENTS.md principle 1). Ancestry of this promotion's own commit is the missing evidence, and
+// is only ever consulted for the supersede case: on its own it cannot see a revert, which is why
+// the intact/reverted judgement stays content-only.
+func TestDirectModeNeverPushedIsNotASupersede(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	// Commit, but never push: BranchedStep and CommittedStep only, no DirectPushedStep.
+	s := newState(fx, wt)
+	if _, err := (BranchedStep{Git: g}).Observe(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (CommittedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Meanwhile someone else deploys the same image repo at a different reference.
+	supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+
+	obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("this promotion was never pushed; someone else's deploy of the same repo is not a supersede OF IT: %+v", obs)
+	}
+	if !strings.Contains(obs.Detail, "never pushed") {
+		t.Errorf("Detail should say the promotion was never pushed, got %q", obs.Detail)
+	}
+	if s.PushedSHA != "" {
+		t.Errorf("PushedSHA must stay empty for a promotion that never landed, got %q", s.PushedSHA)
+	}
+}
