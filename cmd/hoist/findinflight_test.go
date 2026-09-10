@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -294,5 +296,89 @@ func TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending(t *testing.T) {
 	}
 	if conflict != nil {
 		t.Fatalf("a merged promotion must not block a new one for the same env just because its Argo/rollout convergence is still pending: reported stuck at %s: %+v", status.Step, status.Observation)
+	}
+}
+
+// TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy is #166's operator-visible defect,
+// written from the attacker's side: the state that wedged a real env, and the request it
+// refused.
+//
+// findInFlight observes a DIRECT state through DirectPushedStep, which judges whether the base
+// still carries the promotion's planned content. A later deploy into the same env rewrites the
+// very same image scalar, so by blob hash that is indistinguishable from a revert — and the
+// step reported unsatisfied, i.e. still in flight, i.e. every subsequent promotion or deploy
+// into that env refused, permanently, with no recovery but deleting the state file by hand.
+// spritz-staging sat that way for four days.
+func TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy(t *testing.T) {
+	_, clone, f := newPromoteFixture(t)
+
+	r, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, id),
+		CloneDir:      clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Direct:        true,
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+	}
+	if err := engine.Drive(context.Background(), engine.DirectSteps(newGit, nil, true, nil), s, nil); err != nil {
+		t.Fatalf("driving the direct deploy: %v", err)
+	}
+	if err := engine.SaveState(statePath, s); err != nil {
+		t.Fatal(err)
+	}
+
+	// A LATER deploy into the same env replaces the reference this one wrote, from a separate
+	// clone of the same origin — exactly what pressing enter on the tag picker a second time
+	// does.
+	origin := strings.TrimSpace(outGitHost(t, clone, "remote", "get-url", "origin"))
+	other := filepath.Join(t.TempDir(), "later-deploy")
+	runGitHost(t, "", "clone", "-q", origin, other)
+	p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := "ghcr.io/example/app:v3@sha256:" + strings.Repeat("2", 64)
+	lines := strings.Split(string(b), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "image: ghcr.io/") {
+			lines[i] = "          image: " + newer
+		}
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, other, "commit", "-q", "-a", "-m", "a later deploy into the same env")
+	runGitHost(t, other, "push", "-q", "origin", "main")
+
+	conflict, status, err := findInFlight(context.Background(), newGit, f, "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("a direct deploy superseded by a later one has landed and is finished; it must not refuse every later promotion into %s forever — reported stuck at %s: %+v",
+			"app-production", status.Step, status.Observation)
 	}
 }

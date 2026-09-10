@@ -72,6 +72,17 @@ type Git interface {
 	// LsTreeBlob reports the blob hash of path in rev's tree, ok=false when rev cannot be
 	// resolved (nothing committed yet) or path is not present in it.
 	LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (blob string, ok bool, err error)
+	// CatFile reports the CONTENT of path in rev's tree (`git show <rev>:<path>`), ok=false
+	// when rev cannot be resolved or path is not present in it. Like LsTreeBlob, rev must
+	// already be resolvable locally, so a caller asking about a remote branch's tip fetches
+	// it first.
+	//
+	// LsTreeBlob answers "is this file byte-identical to what we planned"; CatFile is for the
+	// case where it is NOT and the caller has to say why. A blob hash cannot distinguish a
+	// revert of this promotion from a later, legitimate deploy that superseded it, and those
+	// two need opposite answers (engine.DirectPushedStep.Observe, #166) — telling them apart
+	// means reading which image references the file actually declares now.
+	CatFile(ctx context.Context, worktreeDir, rev, path string) (content []byte, ok bool, err error)
 	// IsAncestor reports whether ancestor is an ancestor of (or identical to) descendant in
 	// dir's object graph — `git merge-base --is-ancestor`, which git itself defines as true for
 	// a commit and itself, not just for a strict ancestor. Both revs must already be resolvable
@@ -534,6 +545,24 @@ func (e Exec) LsTreeBlob(ctx context.Context, worktreeDir, rev, path string) (st
 		return "", false, fmt.Errorf("git ls-tree: unparseable output %q", out)
 	}
 	return fields[2], true, nil
+}
+
+// CatFile implements Git: `git show <rev>:<path>`. A rev that cannot be resolved, or a path
+// absent from its tree, is ok=false rather than an error — the same shape LsTreeBlob uses, so
+// a caller checking "what does the base declare now" handles both the same way.
+//
+// runRaw rather than run: this returns file bytes, which no caller wants trimmed.
+func (e Exec) CatFile(ctx context.Context, worktreeDir, rev, path string) ([]byte, bool, error) {
+	out, exitCode, err := e.runRaw(ctx, worktreeDir, "show", rev+":"+path)
+	if err != nil {
+		if exitCode == 128 || isMissingRevision(err) {
+			// 128 is git's "invalid object name" / "path does not exist in" — both of which
+			// are this method's ok=false, not a failure to ask.
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return []byte(out), true, nil
 }
 
 // IsAncestor implements Git: `git merge-base --is-ancestor`, which exits 0 when ancestor is an

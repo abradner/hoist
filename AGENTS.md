@@ -119,6 +119,21 @@ process will be killed, the laptop will sleep. A durable event log (Temporal was
 declined — see §11) would only cache facts GitHub and Argo already hold, and a random id would open
 a second PR on restart.
 
+**Re-observing "did this land" is a three-way question, never two.** A step asking whether its own
+change is still in effect at a revision must sort that revision into *intact*, *superseded* or
+*reverted* — `engine.observeLanded` (`internal/engine/landed.go`) is the one place that judgement
+is made, and `DirectPushedStep` and `ArgoSyncedStep` both call it rather than each rolling their
+own. Neither of the two obvious single signals can do it: ancestry cannot see a revert (a revert
+commit never removes the reverted commit from history, so "our commit is an ancestor" stays true
+forever), and blob equality cannot see a supersede (a later, legitimate deploy into the same env
+rewrites the very same image scalars, which by hash is identical to being reverted). Superseded is
+*satisfied* — the change landed and was replaced, and re-acting would undo the newer deploy —
+while reverted is not; conflating them is what wedged a real env for four days, because
+`findInFlight`'s one-in-flight-per-target-env rule observes a direct state through exactly that
+step and so refused every later promotion into it (#165, #166). "Same image repo at a different
+reference" is the supersede test; a repo swapped out entirely is not a supersede, since the
+promotion's subject is gone.
+
 ### 4.2 Digests, not tags — and byte-minimal edits
 
 Anything hoist writes to a manifest is `<repo>:<tag>@sha256:<digest>`. The digest comes from what
@@ -935,6 +950,38 @@ test lives** (if one exists).
    and the case that exercises the defect gets its own fixture rather than the shared one. Regression
    coverage: `internal/app/tags/history_test.go` keeps an unsplit control alongside the split
    case (PR #143).
+10. **A notice appended after a full-height frame is a notice nobody reads.** What happened:
+   `app.Model.View` added the root's transient notice below the top screen's content, but every
+   screen renders through `ui.Frame.Render`, which emits exactly `height` lines — so the notice
+   was row `height+1` and the alternate screen buffer never showed it. Pressing enter on the
+   deploy confirm screen and having the promotion refused (an in-flight conflict, a missing
+   `repos[].github`, a claim conflict) was indistinguishable from a dead key for the whole life
+   of the feature. Root cause: two independently-correct conventions — "the frame owns every
+   row of the terminal" and "the root appends its notice" — that had never been read together.
+   Rule: anything drawn outside a screen's own frame takes its rows OUT of that screen
+   (`ui.NoticeLines` measures, `View` sizes the top screen to `height-len(notice)`); and a test
+   that asserts a message is shown asserts the SHAPE — exact line count, and which row the
+   message is on — never `strings.Contains` over the whole view, which is true whether or not
+   the line is on the terminal. Regression tests: `TestNoticeIsOnScreen` and
+   `TestNoticeTooLongForTheTerminalIsCapped` in `internal/app/app_test.go` (#164).
+11. **"Not the content we planned" is two opposite situations, and telling them apart needs the
+   references, not the hash.** What happened: `DirectPushedStep.Observe` compared planned blob
+   hashes at the base tip, and `ArgoSyncedStep.Observe` compared Argo's reported revision to the
+   merge SHA by string equality. Both are correct only until the next thing lands: a later deploy
+   into the same env rewrites the same image scalars (blob differs — read as a revert), and any
+   later commit at all moves Argo's revision to a descendant (string differs — read as not
+   synced). Neither could ever become satisfied again, so promotions never went terminal, three
+   sat in the TUI's in-flight pane for days, and one direct deploy blocked every further
+   promotion into `spritz-staging` for four days via `findInFlight`. Root cause: a two-valued
+   check (match / no match) on a three-valued question. Rule: §4.1's three-way `observeLanded`,
+   called by both steps; a step that asks "is my change still in effect" never answers it from
+   ancestry alone or from a blob hash alone. Regression tests:
+   `TestDirectModeTreatsSupersededContentAsSatisfied` and
+   `TestDirectModeSupersedeDoesNotCoverAReplacedImageRepo` in `internal/engine/direct_test.go`,
+   the five `TestArgoSynced{Accepts,Rejects,Carried}…` cases in
+   `internal/engine/steps_m5_test.go`, and
+   `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `cmd/hoist/findinflight_test.go`
+   (#165, #166).
 
 ## 10. Maintaining This Document
 

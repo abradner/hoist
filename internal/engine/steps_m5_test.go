@@ -663,3 +663,161 @@ func TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge(t *testing.T) {
 		t.Fatalf("branch %s should still be deleted on origin, found at %s", s.Branch, remoteSHA)
 	}
 }
+
+// gitBackedArgoState is one real, merged promotion in a real git fixture: the plan committed
+// and pushed onto origin/main, MergeSHA set to that commit, and the Argo fields argoState()
+// fakes. Everything the revision checks in #165 need — a clone, an object graph, and the
+// planned content actually present at a known revision — is real here; only Argo is a fake.
+func gitBackedArgoState(t *testing.T) (*PromotionState, fixture) {
+	t.Helper()
+	fx := newFixture(t)
+	s := newState(fx, filepath.Join(t.TempDir(), "wt"))
+	g := git.Exec{}
+	if _, err := (BranchedStep{Git: g}).Observe(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (CommittedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	mergeToBase(t, s)
+	s.MergeSHA = s.CommitSHA
+	s.ArgoNamespace = testArgoNamespace
+	s.ArgoApps = []string{testApp}
+	s.History = []HistoryEntry{{Step: StepMerged, At: time.Now().Add(-time.Minute)}}
+	return s, fx
+}
+
+func syncedAt(t *testing.T, rev string) *argo.Fake {
+	t.Helper()
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: rev, HealthStatus: argo.HealthStatusHealthy})
+	return a
+}
+
+// TestArgoSyncedAcceptsARevisionThatCarriesTheMerge is #165's regression. Argo tracks the
+// BRANCH and reports whatever tip it last synced, so exact equality with the merge SHA holds
+// only until the next commit lands on the base — after which the reported revision is a
+// descendant and the comparison fails permanently: Waiting forever, RolledOutStep never runs,
+// and the promotion never goes terminal. Three merged, long-since-rolled-out promotions sat in
+// the TUI's in-flight pane for days exactly this way.
+func TestArgoSyncedAcceptsARevisionThatCarriesTheMerge(t *testing.T) {
+	s, fx := gitBackedArgoState(t)
+	g := git.Exec{}
+
+	// Someone else's later, unrelated commit advances main past this promotion's merge.
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	runHost(t, other, "commit", "-q", "--allow-empty", "-m", "a later, unrelated change")
+	runHost(t, other, "push", "-q", "origin", "main")
+	tip, ok, err := g.LsRemoteBranch(ctx(), other, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+	if tip == s.LandedSHA() {
+		t.Fatal("fixture precondition: main should have moved past the merge")
+	}
+
+	obs, err := (ArgoSyncedStep{Argo: syncedAt(t, tip), Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("Argo is synced and healthy at %s, which contains this promotion's merge %s and still declares the promoted digest; must satisfy: %+v", tip, s.LandedSHA(), obs)
+	}
+}
+
+// TestArgoSyncedRejectsARevisionThatRevertedTheMerge is the control that keeps the ancestry
+// check honest — the whole reason it is not ancestry ALONE. A revert commit never removes the
+// reverted commit from history, so "the merge is an ancestor" stays true forever after the
+// promoted digest has been undone. Satisfying on ancestry there would declare a promotion
+// deployed while the cluster runs the old image.
+func TestArgoSyncedRejectsARevisionThatRevertedTheMerge(t *testing.T) {
+	s, fx := gitBackedArgoState(t)
+	g := git.Exec{}
+
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	runHost(t, other, "revert", "--no-edit", s.MergeSHA)
+	runHost(t, other, "push", "-q", "origin", "main")
+	tip, ok, err := g.LsRemoteBranch(ctx(), other, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+	isAncestor, err := g.IsAncestor(ctx(), other, s.MergeSHA, tip)
+	if err != nil || !isAncestor {
+		t.Fatalf("fixture precondition: the reverted merge must still be an ancestor of the tip (%v, %v)", isAncestor, err)
+	}
+
+	obs, err := (ArgoSyncedStep{Argo: syncedAt(t, tip), Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("the promoted digest was reverted at %s; ancestry alone must not satisfy: %+v", tip, obs)
+	}
+	if !obs.Waiting {
+		t.Errorf("Observe = %+v, want Waiting (retryable), not Blocked", obs)
+	}
+}
+
+// TestArgoSyncedAcceptsARevisionThatSupersededTheMerge: a later deploy into the same env
+// replaced the promoted reference. This promotion landed and has been legitimately replaced —
+// the same judgement DirectPushedStep makes for the same situation (#166) — so it must go
+// terminal rather than wait for a revision that will never be reported again.
+func TestArgoSyncedAcceptsARevisionThatSupersededTheMerge(t *testing.T) {
+	s, fx := gitBackedArgoState(t)
+	g := git.Exec{}
+	tip := supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+
+	obs, err := (ArgoSyncedStep{Argo: syncedAt(t, tip), Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a promotion superseded by a later deploy has landed and is finished: %+v", obs)
+	}
+}
+
+// TestArgoSyncedRejectsAnUnrelatedRevisionWithAGit: with a real clone wired in, a revision that
+// does not contain the merge at all is still not synced — the ancestry check must not degrade
+// into "any revision will do".
+func TestArgoSyncedRejectsAnUnrelatedRevisionWithAGit(t *testing.T) {
+	s, _ := gitBackedArgoState(t)
+	// A well-formed sha this clone has never seen.
+	obs, err := (ArgoSyncedStep{Argo: syncedAt(t, strings.Repeat("a", 40)), Git: git.Exec{}}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("a revision that does not contain the merge must not satisfy: %+v", obs)
+	}
+}
+
+// TestArgoSyncedCarriedRevisionStillNeedsHealth: invariant 3 in the new shape — a revision that
+// carries the merge satisfies only alongside Synced/Healthy, never on its own.
+func TestArgoSyncedCarriedRevisionStillNeedsHealth(t *testing.T) {
+	s, fx := gitBackedArgoState(t)
+	g := git.Exec{}
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	runHost(t, other, "commit", "-q", "--allow-empty", "-m", "a later, unrelated change")
+	runHost(t, other, "push", "-q", "origin", "main")
+	tip, _, err := g.LsRemoteBranch(ctx(), other, "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing"})
+	obs, err := (ArgoSyncedStep{Argo: a, Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("revision carries the merge but health is Progressing; must not satisfy: %+v", obs)
+	}
+}

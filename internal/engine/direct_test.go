@@ -485,3 +485,115 @@ func TestDirectModeBlocksOnGenuineConflict(t *testing.T) {
 		t.Fatal("PushedSHA must not be set after a rejected push")
 	}
 }
+
+// supersedeBase rewrites the app-production deployment's image reference on origin/main from a
+// separate clone, exactly as a LATER deploy into the same env would, and returns the new tip.
+// The replacement is written whole rather than edited through gitops so the test states the
+// bytes it is asserting about.
+func supersedeBase(t *testing.T, fx fixture, ref string) string {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	replaced := false
+	for i, line := range lines {
+		if strings.Contains(line, "image: ghcr.io/") {
+			lines[i] = "          image: " + ref
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatalf("fixture precondition: no image line in %s:\n%s", p, b)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, other, "commit", "-q", "-a", "-m", "a later deploy into the same env")
+	runHost(t, other, "push", "-q", "origin", "main")
+	tip, ok, err := (git.Exec{}).LsRemoteBranch(ctx(), other, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+	return tip
+}
+
+// TestDirectModeTreatsSupersededContentAsSatisfied is #166's regression, and the third case
+// TestDirectModeReObserveToleratesBaseAdvancingFurther (content intact) and
+// TestDirectModeDoesNotTreatRevertedContentAsSatisfied (content reverted) between them left
+// undecided: a LATER deploy into the same env rewrote the very same image scalar.
+//
+// By blob hash that is indistinguishable from a revert — the planned blob is not at the tip
+// either way — so it was reported unsatisfied. Nothing could ever satisfy it: this step's Act
+// would push this promotion's now-stale reference back over the newer deploy, and until then
+// findInFlight, which observes a direct state through exactly this step, refused every further
+// promotion into that env. A real spritz-staging sat wedged that way for four days, and in the
+// TUI the refusal was invisible on top of it (#164).
+func TestDirectModeTreatsSupersededContentAsSatisfied(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	first := newState(fx, wt)
+	if err := Drive(ctx(), DirectSteps(g, nil, true, nil), first, nil); err != nil {
+		t.Fatalf("first Drive: %v", err)
+	}
+	// A later deploy of the SAME image repo at a newer reference — neither what this promotion
+	// planned nor what it edited away from.
+	tip := supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+
+	resumed := newState(fx, wt)
+	if _, err := (CommittedStep{Git: g}).Observe(ctx(), resumed); err != nil {
+		t.Fatalf("CommittedStep.Observe: %v", err)
+	}
+	obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a promotion superseded by a later deploy of the same image repo has landed and is finished; must not stay unsatisfied forever: %+v", obs)
+	}
+	if !strings.Contains(obs.Detail, "superseded") {
+		t.Errorf("Detail should say the promotion was superseded, got %q", obs.Detail)
+	}
+	if resumed.PushedSHA != tip {
+		t.Errorf("PushedSHA = %q, want the base tip %q that actually carries what the env declares now", resumed.PushedSHA, tip)
+	}
+}
+
+// TestDirectModeSupersedeDoesNotCoverAReplacedImageRepo is the control that keeps
+// TestDirectModeTreatsSupersededContentAsSatisfied honest: "not the planned reference and not
+// the original one" is satisfied only when the occurrence still names the SAME image repo. A
+// later change that repointed it at a different repo entirely has removed this promotion's
+// subject, and reporting that as landed would claim success for a write nobody made.
+func TestDirectModeSupersedeDoesNotCoverAReplacedImageRepo(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	if err := Drive(ctx(), DirectSteps(g, nil, true, nil), newState(fx, wt), nil); err != nil {
+		t.Fatalf("first Drive: %v", err)
+	}
+	// A different image repo — and deliberately one that has the promoted repo as a strict
+	// PREFIX, which is what a bare substring check would report as "still declared".
+	supersedeBase(t, fx, "ghcr.io/example/app-marketing:v3@sha256:"+strings.Repeat("3", 64))
+
+	resumed := newState(fx, wt)
+	if _, err := (CommittedStep{Git: g}).Observe(ctx(), resumed); err != nil {
+		t.Fatalf("CommittedStep.Observe: %v", err)
+	}
+	obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("the occurrence no longer names ghcr.io/example/app at all; that is not a supersede: %+v", obs)
+	}
+	if resumed.PushedSHA != "" {
+		t.Errorf("PushedSHA must stay empty when the promotion's image repo is gone from the occurrence, got %q", resumed.PushedSHA)
+	}
+}

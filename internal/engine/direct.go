@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
@@ -112,26 +111,30 @@ type DirectPushedStep struct{ Git git.Git }
 // Name implements Step.
 func (DirectPushedStep) Name() StepName { return StepDirectPushed }
 
-// Observe implements Step: satisfied when origin's Base ref already carries what this
-// promotion actually planned to write — either because the tip IS this promotion's own commit
-// (the common case, checked by exact equality first) or because every one of this promotion's
-// planned paths already matches its planned content at whatever the tip currently is (AGENTS.md
-// gotcha, same class as MergedStep's own revert check elsewhere in this milestone's history).
+// Observe implements Step: satisfied when origin's Base ref already carries this promotion's
+// change — either because the tip IS this promotion's own commit (the common case, checked by
+// exact equality first) or because observeLanded says the change is intact or has since been
+// superseded at whatever the tip currently is.
 //
-// This deliberately compares planned blob CONTENT at the tip, never mere object-graph ANCESTRY
-// (an earlier revision of this method used git.Git.IsAncestor instead — reverted here; see this
-// package's own doc.go for the history). Ancestry alone cannot tell two cases apart that need
-// opposite answers: "Base advanced further with a distinct, later, legitimate change" (this
-// promotion's own commit is still an ancestor, AND the planned content is still genuinely there
-// — Satisfied is correct) from "someone git-reverted this exact promotion's commit" (this
-// promotion's own commit remains an ancestor forever — a revert commit never removes it from
-// history — but the file content it changed is no longer at the tip; treating that as Satisfied
-// would let a re-run of the identical promotion exit "successfully" without restoring anything).
-// Comparing content directly gets both right without needing the ancestry relationship at all: a
-// legitimate later change that never touches these paths still matches, and a revert (or any
-// other rewrite) that changes them back no longer does.
+// This deliberately judges CONTENT, never mere object-graph ANCESTRY (an earlier revision of
+// this method used git.Git.IsAncestor — reverted; see this package's own doc.go for that
+// history). Ancestry cannot tell "Base advanced with a distinct, later change" from "someone
+// git-reverted this exact promotion's commit": a revert never removes the original commit from
+// history, so the ancestry relation holds forever, and treating that as Satisfied would let a
+// re-run exit "successfully" without restoring anything.
 //
-// A Base ref that exists but doesn't yet carry the planned content is reported unsatisfied, not
+// But content compared by BLOB HASH alone was only half the answer, and the missing half wedged
+// a real env (#166). A later deploy into the same env rewrites the very same image scalars, so
+// the planned blob is no longer at the tip — by hash, identical to a revert. Reported
+// unsatisfied, that state could never be satisfied by anything: this step's own Act would push
+// this promotion's now-stale ref back over the newer deploy, and until then findInFlight (which
+// observes a direct state through exactly this step) refused every further promotion into that
+// env, permanently. observeLanded separates the two: same image repo at some other reference is
+// landedSuperseded — landed, and legitimately replaced — while the promotion's own original
+// reference back at the tip is landedReverted, and the repo gone from the occurrence entirely is
+// landedGone. Only the first is satisfied.
+//
+// A Base ref that exists but does not yet carry the planned content is reported unsatisfied, not
 // Blocked — Act's own push is what actually discovers whether that is "not pushed yet" or "a
 // genuine conflict" (mirroring PushedStep's shape one step later, since direct mode has no
 // separate branch push to observe first).
@@ -153,43 +156,41 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 		s.Direct = true
 		return Observation{Satisfied: true, Detail: "origin/" + s.Base + " is already at " + remoteSHA}, nil
 	}
-	// remoteSHA differs from this promotion's own commit. Fetch first: the per-path content
-	// check below needs the object for remoteSHA to actually exist in s.CloneDir's own
-	// repository (a bare sha from LsRemoteBranch alone is not enough — ls-tree operates on
-	// local history), and FetchBranch only ever refreshes the remote-tracking ref, never
-	// s.CloneDir's own local branch of the same name (AGENTS.md §4.6; see FetchBranch's own doc
-	// comment in pkg/git).
+	// remoteSHA differs from this promotion's own commit. Fetch first: every check below needs
+	// the objects for remoteSHA to actually exist in s.CloneDir's own repository (a bare sha
+	// from LsRemoteBranch is not enough — ls-tree and show operate on local history), and
+	// FetchBranch only ever refreshes the remote-tracking ref, never s.CloneDir's own local
+	// branch of the same name (AGENTS.md §4.6; see FetchBranch's own doc comment in pkg/git).
 	if _, _, err := d.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
 		return Observation{}, err
 	}
-	// s.ExpectedBlobs is guaranteed populated by the time this runs: Drive runs steps strictly
-	// in order (engine.go) and CommittedStep — which always computes it before reporting
-	// Satisfied — precedes this step in DirectSteps' own list.
-	paths := make([]string, 0, len(s.ExpectedBlobs))
-	for p := range s.ExpectedBlobs {
-		paths = append(paths, p)
+	// s.ExpectedBlobs and s.Edits are guaranteed populated by the time this runs: Drive runs
+	// steps strictly in order (engine.go) and CommittedStep — which always computes
+	// ExpectedBlobs before reporting Satisfied — precedes this step in DirectSteps' own list.
+	verdict, detail, err := observeLanded(ctx, d.Git, s.CloneDir, remoteSHA, s)
+	if err != nil {
+		return Observation{}, err
 	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		blob, ok, err := d.Git.LsTreeBlob(ctx, s.CloneDir, remoteSHA, p)
-		if err != nil {
-			return Observation{}, err
-		}
-		if !ok || blob != s.ExpectedBlobs[p] {
-			return Observation{Satisfied: false}, nil
-		}
+	if verdict == landedReverted || verdict == landedGone {
+		return Observation{Satisfied: false, Detail: detail}, nil
 	}
 	// PushedSHA is the base-branch revision that CARRIES this promotion's content, which here
 	// is remoteSHA, not s.CommitSHA. Recording the original commit instead reads better as a
 	// field name and is unobservable in the world: Argo tracks the branch and reports the tip,
-	// so ArgoSyncedStep — which compares status.sync.revision against LandedSHA() exactly —
-	// would wait out its whole deadline for a SHA the branch has already moved past and will
-	// never report again. Re-derived on every observation rather than pinned once, so a base
-	// that keeps moving keeps converging (§4.1: re-observe, never remember). The exact-match
-	// branch above records the same thing; the two only look different because there the tip
-	// and this promotion's commit happen to be equal.
+	// so ArgoSyncedStep — which compares status.sync.revision against LandedSHA() — would wait
+	// out its whole deadline for a SHA the branch has already moved past and will never report
+	// again. Re-derived on every observation rather than pinned once, so a base that keeps
+	// moving keeps converging (§4.1: re-observe, never remember). The exact-match branch above
+	// records the same thing; the two only look different because there the tip and this
+	// promotion's commit happen to be equal.
 	s.PushedSHA = remoteSHA
 	s.Direct = true
+	if verdict == landedSuperseded {
+		return Observation{Satisfied: true, Detail: fmt.Sprintf(
+			"origin/%s has moved to %s and %s — this promotion landed and has since been replaced; nothing left to do",
+			s.Base, remoteSHA, detail,
+		)}, nil
+	}
 	return Observation{Satisfied: true, Detail: fmt.Sprintf(
 		"origin/%s has moved to %s (not this promotion's own commit %s), but every planned path still matches the planned content there — already effectively promoted, not reverted",
 		s.Base, remoteSHA, s.CommitSHA,
@@ -254,5 +255,5 @@ func DirectSteps(g git.Git, productionEnvs []string, confirmed bool, onWaiting f
 // cluster, while the exported pairing keeps a caller from silently driving a promotion that
 // lands a commit and then never tells Argo about it (issue #66).
 func AllDirectSteps(g git.Git, a argo.Argo, ro rollout.Rollout, productionEnvs []string, confirmed bool, onWaiting func()) []Step {
-	return append(DirectSteps(g, productionEnvs, confirmed, onWaiting), ConvergeSteps(a, ro)...)
+	return append(DirectSteps(g, productionEnvs, confirmed, onWaiting), ConvergeSteps(g, a, ro)...)
 }
