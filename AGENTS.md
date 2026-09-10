@@ -132,7 +132,15 @@ while reverted is not; conflating them is what wedged a real env for four days, 
 `findInFlight`'s one-in-flight-per-target-env rule observes a direct state through exactly that
 step and so refused every later promotion into it (#165, #166). "Same image repo at a different
 reference" is the supersede test; a repo swapped out entirely is not a supersede, since the
-promotion's subject is gone.
+promotion's subject is gone. A supersede additionally requires this promotion's own commit to be
+in the base's history — unlike an intact match, a differing reference is not by itself evidence
+that *this* promotion ever landed (ancestry is sound there precisely because it is paired with
+content, the mirror of why intact/reverted is content-only). And every one of these judgements is
+made per *occurrence*, at the document index and YAML path the `Edit` recorded, re-scanned from
+the manifest at that revision through `gitops.OccurrencesIn` — never by searching the file's
+bytes, since a file with two occurrences of one image repo (a Deployment and its worker) satisfies
+a whole-file predicate on the strength of either one, and a false *intact* here silently retires
+the one-in-flight-per-env rule (#167).
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
