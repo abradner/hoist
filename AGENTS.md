@@ -140,7 +140,12 @@ made per *occurrence*, at the document index and YAML path the `Edit` recorded, 
 the manifest at that revision through `gitops.OccurrencesIn` — never by searching the file's
 bytes, since a file with two occurrences of one image repo (a Deployment and its worker) satisfies
 a whole-file predicate on the strength of either one, and a false *intact* here silently retires
-the one-in-flight-per-env rule (#167).
+the one-in-flight-per-env rule (#167). And the verdict has to reach *every* step that gates on the
+promotion's own references, not just the one where the wedge was found: `RolledOutStep` compares
+live containers against `Edit.New`, which a superseded promotion will never see again, so it stops
+gating on its own images rather than waiting out a rollout that belongs to the change that
+replaced it (#167 round 2). `ArgoSyncedStep` still gates a superseded promotion on Synced/Healthy,
+deliberately — health is transient and converges, while that image match is permanent and cannot.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 

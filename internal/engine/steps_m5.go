@@ -442,7 +442,14 @@ func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []stri
 // before this Observe gets to it — or transient) becomes a report line and the loop continues,
 // rather than a hard error that would gate the whole promotion on a status this step's own
 // contract says it never gates on (round-1 review finding).
-type RolledOutStep struct{ Rollout rollout.Rollout }
+//
+// Git is consulted for one thing only, and only when a Deployment's live image does not match
+// what this promotion wrote: whether a LATER change superseded this promotion at the base. It
+// may be nil, which costs that check — see the mismatch branch in Observe.
+type RolledOutStep struct {
+	Rollout rollout.Rollout
+	Git     git.Git
+}
 
 // Name implements Step.
 func (RolledOutStep) Name() StepName { return StepRolledOut }
@@ -460,7 +467,11 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	}
 	sort.Strings(names)
 
-	var blocked, waiting, done []string
+	// mismatched is kept apart from waiting: an image that does not match is the one waiting
+	// reason that can be permanent rather than transient, so it gets the supersede check below
+	// before it is reported. Everything else here (an incomplete rollout, a progressing
+	// Deployment) converges on its own.
+	var blocked, waiting, mismatched, done []string
 	for _, name := range names {
 		ds, err := r.Rollout.Deployment(ctx, s.TargetEnv, name)
 		if err != nil {
@@ -475,7 +486,7 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		case ds.DeadlineExceeded:
 			blocked = append(blocked, fmt.Sprintf("%s/%s: %s", s.TargetEnv, name, ds.Detail))
 		case len(mismatches) > 0:
-			waiting = append(waiting, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
+			mismatched = append(mismatched, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
 		case !ds.Complete:
 			waiting = append(waiting, fmt.Sprintf("%s: %s", name, ds.Detail))
 		default:
@@ -485,6 +496,30 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	if len(blocked) > 0 {
 		sort.Strings(blocked)
 		return Observation{Blocked: strings.Join(blocked, "; ")}, nil
+	}
+	if len(mismatched) > 0 {
+		// A live container carrying something other than what this promotion wrote is normally
+		// "not rolled out yet". But once a LATER change has superseded this promotion at the
+		// base, the cluster is converging on that newer reference, and Edit.New is a value no
+		// container will ever carry again — so this step waited forever, exactly relocating the
+		// wedge that #165 and #166 removed from ArgoSyncedStep and DirectPushedStep rather than
+		// closing it (Codex, PR #167 round 2).
+		//
+		// A superseded promotion is finished. Waiting for the replacing change's own rollout
+		// would gate this promotion on somebody else's work, which is not this step's question.
+		// (ArgoSyncedStep still gates a superseded promotion on Synced/Healthy, deliberately:
+		// health is transient and converges, while this image match is permanent and cannot.)
+		superseded, detail, err := r.supersededAtBase(ctx, s)
+		if err != nil {
+			return Observation{}, err
+		}
+		if superseded {
+			return Observation{Satisfied: true, Detail: fmt.Sprintf(
+				"not gating on this promotion's own images: %s. Live: %s",
+				detail, strings.Join(mismatched, "; "),
+			)}, nil
+		}
+		waiting = append(waiting, mismatched...)
 	}
 
 	var jobReports []string
@@ -508,6 +543,26 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	}
 	sort.Strings(done)
 	return Observation{Satisfied: true, Detail: strings.Join(append(done, jobReports...), "; ")}, nil
+}
+
+// supersededAtBase reports whether a later change replaced this promotion's references at the
+// revision it landed on — the same three-way judgement DirectPushedStep and ArgoSyncedStep make
+// (AGENTS.md §4.1), asked here only when a live image already failed to match, so the ordinary
+// rollout path costs no git work at all.
+//
+// A nil Git answers false: no clone, no judgement, and the pre-existing behaviour of waiting.
+func (r RolledOutStep) supersededAtBase(ctx context.Context, s *PromotionState) (bool, string, error) {
+	if r.Git == nil || s.CloneDir == "" || s.LandedSHA() == "" {
+		return false, "", nil
+	}
+	if _, _, err := r.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
+		return false, "", err
+	}
+	verdict, detail, err := observeLanded(ctx, r.Git, s.CloneDir, s.LandedSHA(), s)
+	if err != nil {
+		return false, "", err
+	}
+	return verdict == landedSuperseded, detail, nil
 }
 
 // Act implements Step: nothing to do. The rollout is the kubelet/Deployment controller acting
@@ -577,5 +632,5 @@ func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiti
 // caller with no clone at all, which costs that caller the ancestry check — see
 // ArgoSyncedStep.Git.
 func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
-	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g}, RolledOutStep{Rollout: ro}}
+	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g}, RolledOutStep{Rollout: ro, Git: g}}
 }
