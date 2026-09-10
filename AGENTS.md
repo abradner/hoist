@@ -140,12 +140,16 @@ made per *occurrence*, at the document index and YAML path the `Edit` recorded, 
 the manifest at that revision through `gitops.OccurrencesIn` — never by searching the file's
 bytes, since a file with two occurrences of one image repo (a Deployment and its worker) satisfies
 a whole-file predicate on the strength of either one, and a false *intact* here silently retires
-the one-in-flight-per-env rule (#167). And the verdict has to reach *every* step that gates on the
-promotion's own references, not just the one where the wedge was found: `RolledOutStep` compares
-live containers against `Edit.New`, which a superseded promotion will never see again, so it stops
-gating on its own images rather than waiting out a rollout that belongs to the change that
-replaced it (#167 round 2). `ArgoSyncedStep` still gates a superseded promotion on Synced/Healthy,
-deliberately — health is transient and converges, while that image match is permanent and cannot.
+the one-in-flight-per-env rule (#167).
+
+*Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
+`ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
+superseded promotion will never see again — so such a promotion stops blocking its env (which is
+what #166 was about) but still shows as non-terminal at `rolled-out`. Closing that needs the
+verdict *per occurrence* rather than per promotion, and the current base tip rather than
+`LandedSHA()`, which on the PR path is the merge commit where the edits were necessarily intact.
+An aggregate verdict applied to the whole step over-satisfies it: one superseded occurrence would
+retire the gate on every other edit in the same block.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
