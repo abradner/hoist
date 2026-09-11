@@ -33,7 +33,21 @@ import (
 // whole run); forgeErr is newForge's own error building f, deferred to here (rather than
 // failing runTUI outright) since a repo with no github configured never needs f at all — see
 // the eff.cfg check below, which reports that more specific case first.
-func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
+// viewDir is what the plan was actually discovered from — the TUI's own cached view of
+// origin/<base> (repoview.go, runTUI), not eff.repo's working tree. checkRepoViewCurrent below
+// replaces checkCloneCurrentForBase's old job here: since r (and therefore every plan built
+// from it) already comes from origin's own committed content, there is no local-disk-vs-origin
+// gap left to reconcile the way checkCloneCurrentForBase exists to catch (its own comparison
+// against refs/heads/<base>, the LOCAL branch, would misfire here — viewDir is deliberately
+// checked out from origin, never the local branch, so the two are expected to differ whenever
+// local is behind, which is exactly the case #PR7 exists to stop refusing). What's left to
+// check is narrower and simpler: has origin/<base> moved again since viewDir was last
+// refreshed. Every OTHER read in this function still goes through eff.repo unchanged:
+// buildPromotionForConfirm's worktree is built from the operator's own clone (that is what
+// makes a signed commit possible at all), and checkNoMissingOccurrenceAtFreshBase's own
+// fresh-base check is a separate, later-timed freshness check unrelated to which content the
+// plan itself was built from.
+func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
 	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		// report is progress with the nil check made once, here, rather than at every call
 		// site below — mirrors onWaiting's own nil-safety convention throughout
@@ -69,7 +83,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
 		// disagree about when a plan is trustworthy.
 		report("checking your checkout against origin/" + eff.base)
-		if err := checkCloneCurrentForBase(ctx, g, eff.repo, eff.base, p.Edits); err != nil {
+		if err := checkRepoViewCurrent(ctx, g, eff.repo, eff.base, viewDir); err != nil {
 			return engine.PromotionState{}, nil, err
 		}
 		if !anyRealEdit(p.Edits) {

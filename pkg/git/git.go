@@ -303,20 +303,39 @@ func (e Exec) Worktree(ctx context.Context, cloneDir, worktreeDir, branch, base 
 }
 
 // RemoveWorktree implements Git. Removing an absent worktree is treated as success: git
-// itself errors on a path it doesn't recognise, which here just means there is nothing to
-// clean up.
+// itself errors on a path it doesn't recognise, which here just means there is nothing
+// registered to deregister — but, per the fix below, still ends in an unconditional
+// os.RemoveAll of the path itself, since a directory git never recognised as a worktree can
+// still exist there and block a future caller.
 func (e Exec) RemoveWorktree(ctx context.Context, cloneDir, worktreeDir string) error {
 	if err := guardDisposablePath(cloneDir, worktreeDir); err != nil {
 		return err
 	}
 	if _, err := e.run(ctx, cloneDir, "worktree", "remove", "--force", worktreeDir); err != nil {
-		if strings.Contains(err.Error(), "is not a working tree") || strings.Contains(err.Error(), "not a valid path") {
-			return nil
+		recognizedAsMissing := strings.Contains(err.Error(), "is not a working tree") || strings.Contains(err.Error(), "not a valid path")
+		_, statErr := os.Stat(worktreeDir)
+		if !recognizedAsMissing && !os.IsNotExist(statErr) {
+			// A real failure `git worktree remove` ran into, not "there was nothing to
+			// deregister" — propagate it rather than silently discarding a path
+			// guardDisposablePath has confirmed is safe to remove: the caller needs to know
+			// the removal did not actually happen.
+			return err
 		}
-		if _, statErr := os.Stat(worktreeDir); os.IsNotExist(statErr) {
-			return nil
-		}
-		return err
+	}
+	// Either `git worktree remove` succeeded above (which deregisters git's own record, but —
+	// contrary to what this function's doc comment used to claim, a principle-1 violation
+	// found while building #PR7's cached repo view — does not itself guarantee the directory
+	// is gone), or the error branch above recognised this path as never having been one of
+	// git's own worktrees to begin with, in which case there was nothing to deregister but
+	// the directory can still be sitting there (a leftover plain directory, an interrupted
+	// checkout). Either way there is a real, still-possibly-present directory left to clear,
+	// and guardDisposablePath has already confirmed this exact path is safe to remove
+	// outright — a caller that skipped this (repoview.go's refreshRepoView, reusing one fixed
+	// cache path across every TUI boot and F5 refresh) would otherwise wedge permanently: the
+	// next WorktreeAtRef at the identical path fails "already exists", forever, with no way to
+	// recover short of the operator manually deleting the cache directory.
+	if err := os.RemoveAll(worktreeDir); err != nil {
+		return fmt.Errorf("removing %s: %w", worktreeDir, err)
 	}
 	return nil
 }

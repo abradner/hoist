@@ -44,7 +44,7 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)

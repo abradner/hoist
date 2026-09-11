@@ -278,6 +278,140 @@ func TestWithDriftLeavesAnsweredEnvsAlone(t *testing.T) {
 	}
 }
 
+// TestRefreshKeyAlsoRefreshesTheRepo (#PR7): F5 asks the cluster (its own long-standing job)
+// and, now, re-reads the repo too — driven through a real keypress and a real drained
+// command (uitest.Keys/Drain), never by constructing repoRefreshedMsg by hand and calling
+// Update directly (AGENTS.md §9 entry 6's own lesson, generalized: a gesture's test presses
+// the key).
+func TestRefreshKeyAlsoRefreshesTheRepo(t *testing.T) {
+	// A realistic refresh: still a real, populated repo — not an all-empty one, which is its
+	// own separate, pre-existing edge case (internal/app/matrix's own layout panics on zero
+	// columns, unrelated to WithRepo; filed rather than chased here).
+	refreshed := fixture()
+	refreshed.Root = "refreshed-repo"
+	called := false
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
+			called = true
+			return refreshed, nil
+		})
+	m = m.SetSize(80, 24)
+	if strings.Contains(ansi.Strip(m.View()), "refreshed-repo") {
+		t.Fatal("setup: the refreshed repo's root is already visible before F5")
+	}
+
+	m = uitest.Keys(m, update, "f5")
+
+	if !called {
+		t.Fatal("F5 never called the installed RefreshRepoFunc")
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "refreshed-repo") {
+		t.Errorf("view does not reflect the refreshed repo's root after F5:\n%s", ansi.Strip(m.View()))
+	}
+}
+
+// TestWithRepoToEmptyRepoDoesNotPanic is a regression test for a real bug WithRepo (#PR7)
+// introduced: bubbles' own table.SetColumns re-renders synchronously against whatever rows
+// the table already holds (layout's own comment explains why), so shrinking the column count
+// while old, differently-shaped rows are still set panicked in table.renderRow. Never
+// reachable before WithRepo existed — a drift answer or a resize only ever change cell
+// content or width, never how many envs (columns) the matrix has; a live repo refresh can,
+// down to zero in the limit.
+func TestWithRepoToEmptyRepoDoesNotPanic(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(80, 24)
+	empty := &gitops.Repo{Root: "empty", Envs: map[string]*gitops.Env{}}
+	m = m.WithRepo(empty) // must not panic
+	if m.repo.Root != "empty" {
+		t.Errorf("repo not adopted: root = %q, want %q", m.repo.Root, "empty")
+	}
+}
+
+// TestRefreshRepoFailureKeepsTheOldRepo: a failed refresh (network down, origin unreachable)
+// must not blank the table or crash — the same graceful-degradation boot's own fallback
+// applies (repoview.go). The matrix keeps showing what it already had and surfaces the
+// error as a notice, never a silent drop.
+func TestRefreshRepoFailureKeepsTheOldRepo(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
+			return nil, errors.New("dial tcp: no route to host")
+		})
+	m = m.SetSize(80, 24)
+
+	m = uitest.Keys(m, update, "f5")
+
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "no route to host") {
+		t.Errorf("view missing the refresh failure notice:\n%s", got)
+	}
+	if m.repo.Root != "repo" {
+		t.Errorf("repo root changed to %q after a failed refresh, want unchanged %q", m.repo.Root, "repo")
+	}
+}
+
+// TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped is a regression test for a P2 an
+// adversarial review of #PR7 found: askRepoRefresh had no in-flight guard, so a second F5
+// pressed before the first refresh resolved could run two concurrent refreshes against the
+// same fixed cache path (#PR7's repoview.go), corrupting git state (index.lock contention,
+// broken worktree registrations, per the review). This drives askRepoRefresh directly rather
+// than through a keypress because the point is to inspect the *outstanding* command before
+// it resolves — uitest.Keys drains a command to completion, which would hide the overlap.
+func TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped(t *testing.T) {
+	var calls int
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
+			calls++
+			return fixture(), nil
+		})
+
+	m, cmd1 := m.askRepoRefresh()
+	if cmd1 == nil {
+		t.Fatal("setup: first askRepoRefresh issued no command")
+	}
+	_, cmd2 := m.askRepoRefresh() // a second F5 while the first is still outstanding
+	if cmd2 != nil {
+		t.Error("a second askRepoRefresh while one is outstanding returned a command instead of being skipped")
+	}
+
+	cmd1()
+	if calls != 1 {
+		t.Errorf("refreshRepo called %d times across both askRepoRefresh calls, want 1", calls)
+	}
+}
+
+// TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored is a regression test for the
+// paired P3 finding: repoRefreshedMsg carried no generation, unlike DriftMsg, so an
+// outstanding refresh from an earlier instance of this screen (popped, then re-pushed — the
+// same "two matrices" case nextGen's own doc comment names) could land after a newer
+// instance's own refresh and silently overwrite its repo. m1 stands in for the popped screen;
+// m2 for the one currently on the root's stack — m1's stale answer must never reach m2's repo.
+func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
+	stale := fixture()
+	stale.Root = "stale-repo"
+
+	m1 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) { return stale, nil })
+	_, cmd1 := m1.askRepoRefresh()
+	if cmd1 == nil {
+		t.Fatal("setup: m1's askRepoRefresh issued no command")
+	}
+
+	// A later Model instance draws a later generation from the same shared counter.
+	m2 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) { return fixture(), nil }).
+		SetSize(80, 24)
+	m2, cmd2 := m2.askRepoRefresh()
+	if cmd2 == nil {
+		t.Fatal("setup: m2's askRepoRefresh issued no command")
+	}
+
+	// m1's outstanding command finally resolves, but is delivered to m2 — the only screen
+	// bubbletea's root still has on the stack.
+	m2, _ = m2.Update(cmd1())
+
+	if m2.repo.Root == "stale-repo" {
+		t.Error("a superseded repo-refresh answer from an earlier Model generation overwrote the current one's repo")
+	}
+}
+
 // A long notice wraps inside the frame instead of being clipped at the first clause (#85).
 func TestLongNoticeWrapsInsideTheFrame(t *testing.T) {
 	notice := "cannot deploy ghcr.io/x/app:v3 to a: env: GHCR_TOKEN not set; keychain: no credential for ghcr.io; cluster: not configured (registries[].cluster); op: not configured (registries[].op)"

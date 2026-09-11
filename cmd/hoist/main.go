@@ -612,7 +612,19 @@ var tuiRunner = runTUI
 // alone — the plan screen then runs in "digest sources: none" mode with default resolution
 // options and an empty envs config, matching what M1 offered before this milestone.
 func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	// viewDir is a cached worktree at origin/<base> (repoview.go), fetched fresh here and on
+	// every F5 — never eff.repo's own working tree directly, and never the operator's own
+	// checkout touched to get it (AGENTS.md §4.6). Falls back to eff.repo itself (today's
+	// exact pre-#PR7 behavior — a pure local disk read, no network needed) when origin can't
+	// be reached at all: browsing the matrix must stay possible offline, warn-don't-block
+	// (principle 5) rather than a new hard requirement a read-only screen never had before.
+	viewDir := eff.repo
+	if fresh, verr := refreshRepoView(context.Background(), newGit, eff.repo, eff.base); verr != nil {
+		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, verr, eff.repo)
+	} else {
+		viewDir = fresh
+	}
+	r, err := gitops.Discover(viewDir, eff.appsRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
@@ -655,7 +667,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	a, _, argoErr := newArgo(eff.kubeContext)
 	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
+		Start:      buildStartPromotion(eff, r, viewDir, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
@@ -680,6 +692,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithHistory(historyFn).
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
+		WithRefreshRepo(buildRefreshRepoFunc(newGit, eff.repo, eff.base, eff.appsRoot)).
 		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).
 		WithRun(eff.base, eff.kubeContext)
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
