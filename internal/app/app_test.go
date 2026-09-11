@@ -1841,6 +1841,33 @@ func TestConfigKeyPushesConfigScreen(t *testing.T) {
 	}
 }
 
+// TestRepoRefreshedMsgUpdatesTheRootRepoToo is the round-2 review finding against PR #182: the
+// matrix screen's own WithRepo (called from its nested Update on matrix.RepoRefreshedMsg) only
+// ever replaced the matrix's OWN internal *gitops.Repo — the root's own m.repo, which plan.New,
+// the tag picker's StagingMismatch/DeclaredIn, restart.Targets and gitops.BuildDeployPlan all
+// read directly, stayed whatever New was built with at boot forever. An F5 that revealed a new
+// occurrence would show it in the table (matrix's own copy) while every plan opened afterward
+// silently kept building from the stale boot-time snapshot missing it.
+func TestRepoRefreshedMsgUpdatesTheRootRepoToo(t *testing.T) {
+	tm := sized(t)
+	m := tm.(Model)
+	before := m.repo
+	if before == nil {
+		t.Fatal("fixture precondition: sized(t) must boot with a non-nil repo")
+	}
+
+	fresh := &gitops.Repo{Root: before.Root, AppsRoot: before.AppsRoot, Envs: map[string]*gitops.Env{}}
+	// Gen 0 matches a freshly-built matrix.Model's own zero-value repoGen (askRepoRefresh was
+	// never called in this test, so nothing has advanced it) — the same "not stale" answer a
+	// real F5 round-trip would get.
+	tm2, _ := tm.Update(matrix.RepoRefreshedMsg{Gen: 0, Repo: fresh})
+	m2 := tm2.(Model)
+
+	if m2.repo != fresh {
+		t.Fatalf("root repo = %p, want the RepoRefreshedMsg's own repo (%p) adopted — plan.New and friends must see what F5 just found", m2.repo, fresh)
+	}
+}
+
 // TestNoticeIsOnScreen is #164's regression: every screen renders through ui.Frame.Render,
 // which emits exactly `height` lines, so a notice appended after that landed on row
 // height+1 and the alternate screen buffer never showed it — an in-flight refusal on the

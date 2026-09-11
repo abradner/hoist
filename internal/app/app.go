@@ -433,6 +433,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// forwards to the top screen only, and an env whose answer landed while the plan or
 		// picker was open stayed "resolving…" for good (Copilot, #110).
 		return m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms }), nil
+	case matrix.RepoRefreshedMsg:
+		// Same #110-shaped routing as DriftMsg just above — F5's fetch can land after the
+		// operator has already navigated onto the plan screen or the tag picker. Round-2
+		// review (PR #182) found a second gap this case also closes: m.repo (this struct's own
+		// field, below — what plan.New/tags/restart/deploy all read) was never updated by an
+		// F5 refresh at all, only the matrix screen's OWN internal copy was, so a plan opened
+		// after F5 silently kept building from the boot-time snapshot even while the table
+		// itself had moved on. matrixRepo() reads back whatever the matrix screen's own
+		// RepoRefreshedMsg handling just decided (WithRepo's nil-repo and stale-generation
+		// guards live there, once, not duplicated here) and adopts it as the root's own.
+		m = m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms })
+		if r := m.matrixRepo(); r != nil {
+			m.repo = r
+		}
+		return m, nil
 	case inFlightMsg:
 		if msg.gen != m.listGen {
 			return m, nil
@@ -1126,6 +1141,20 @@ func (m Model) withMatrix(f func(matrix.Model) matrix.Model) Model {
 		return m
 	}
 	return m
+}
+
+// matrixRepo reads the matrix screen's own current *gitops.Repo back out, wherever it actually
+// sits in the stack — nil only if no matrix screen exists at all, which withMatrix's own
+// no-op-if-absent contract means never happens in practice (the bottom of the stack always is
+// one). Used by the RepoRefreshedMsg case above so the root's own repo snapshot follows F5
+// without re-deriving matrix.Model's staleness/nil guards a second time here.
+func (m Model) matrixRepo() *gitops.Repo {
+	for _, s := range m.stack {
+		if ms, ok := s.(matrixScreen); ok {
+			return ms.Model.Repo()
+		}
+	}
+	return nil
 }
 
 // withMatrixNotice sets notice on the matrix screen, wherever it actually sits in the stack —

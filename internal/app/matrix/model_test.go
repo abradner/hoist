@@ -280,7 +280,7 @@ func TestWithDriftLeavesAnsweredEnvsAlone(t *testing.T) {
 
 // TestRefreshKeyAlsoRefreshesTheRepo (#PR7): F5 asks the cluster (its own long-standing job)
 // and, now, re-reads the repo too — driven through a real keypress and a real drained
-// command (uitest.Keys/Drain), never by constructing repoRefreshedMsg by hand and calling
+// command (uitest.Keys/Drain), never by constructing RepoRefreshedMsg by hand and calling
 // Update directly (AGENTS.md §9 entry 6's own lesson, generalized: a gesture's test presses
 // the key).
 func TestRefreshKeyAlsoRefreshesTheRepo(t *testing.T) {
@@ -378,7 +378,7 @@ func TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped(t *testing.T) {
 }
 
 // TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored is a regression test for the
-// paired P3 finding: repoRefreshedMsg carried no generation, unlike DriftMsg, so an
+// paired P3 finding: RepoRefreshedMsg carried no generation, unlike DriftMsg, so an
 // outstanding refresh from an earlier instance of this screen (popped, then re-pushed — the
 // same "two matrices" case nextGen's own doc comment names) could land after a newer
 // instance's own refresh and silently overwrite its repo. m1 stands in for the popped screen;
