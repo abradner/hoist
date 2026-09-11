@@ -228,6 +228,22 @@ func ArchiveDir() (string, error) {
 // archive only once that confirms done — never infer it from age alone, since an old
 // promotion can still be genuinely in flight (blocked for weeks, say). `hoist promotions` is
 // the one caller, and follows exactly that order.
+//
+// Two known, accepted edge cases (a fresh-eyes cross-stack review; recorded rather than fixed,
+// since both are narrow and the single-operator CLI mostly serializes itself):
+//
+//   - `LastActivity`'s own "when did anything last happen" reading resets every time
+//     `engine.Drive` re-saves a state — including a pure re-observation of an already-satisfied
+//     step (`Drive`'s own doc comment: it saves after *every* step, not only ones that acted).
+//     So a `hoist resume <id>` of a long-done promotion pushes its own retention clock back out
+//     to a fresh state.retain window — arguably correct (an operator explicitly touched it), but
+//     worth knowing retention measures "last touched", not strictly "last changed".
+//   - A `hoist promotions` archiving id and a concurrent `hoist resume <id>` that already loaded
+//     the pre-archive state can race: `SaveState` after `ArchiveState`'s own rename recreates a
+//     live file at the now-vacated path, alongside the archived copy — a duplicate, not a lost
+//     write, and self-heals on the next `hoist promotions` pass (the rename simply happens
+//     again). Two different single-operator commands running at the literal same instant against
+//     the same id is the only way to hit it.
 func ArchiveState(id string) error {
 	src, err := StatePath(id)
 	if err != nil {

@@ -564,8 +564,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// first — the buildCancel() call above already orphans that earlier attempt's
 		// eventual result (buildGen no longer matches it), but without also removing its
 		// screen, the abandoned one stays buried in the stack forever: invisible, its own
-		// progressCh already closed by its own cancelled goroutine, surfacing only if the
-		// operator ever pops back far enough to reach it.
+		// progressCh still open (deliberately never closed — see buildCmd's own comment
+		// below) but nothing left writing to it once its goroutine has returned via the
+		// cancelled context, surfacing only if the operator ever pops back far enough to
+		// reach it.
 		m = m.popIfBuilding()
 		progressCh := make(chan string, 32)
 		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})

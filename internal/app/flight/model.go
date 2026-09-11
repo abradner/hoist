@@ -214,8 +214,13 @@ type Model struct {
 	buildLog []buildLogLine
 	// progressCh is drained one line at a time by listenCmd, which re-issues itself after
 	// every receive — a raw channel read inside Update would block the whole program, so this
-	// is the standard bubbletea "listen on a channel" shape. nil once the channel's owner
-	// (app.go) closes it, or for a screen built with New, which never has one.
+	// is the standard bubbletea "listen on a channel" shape. nil for a screen built with New,
+	// which never has one — listenCmd's own nil check treats that as "nothing to listen for"
+	// rather than blocking forever. app.go deliberately never closes the channel in
+	// production (see its own buildCmd comment on why: the same channel is reused across the
+	// whole build-then-drive lifetime, and closing it early would panic the next send —
+	// sending on a closed channel panics unconditionally in Go); only test helpers
+	// (building_test.go) close one, to make listenCmd's ok=false path reachable at all.
 	progressCh <-chan string
 
 	styles        ui.Styles
