@@ -116,10 +116,18 @@ func TestFlightAbandonMsgWithoutHandlerShowsNotice(t *testing.T) {
 	}
 }
 
-// TestFlightAbandonMsgCancelsInFlightDriveCmd is TestFlightAbortMsgCancelsInFlightDriveCmd's
-// own twin: popping the flight screen must cancel its shared drive context immediately, not
-// only once the (slower, real) abandonFn call eventually resolves.
-func TestFlightAbandonMsgCancelsInFlightDriveCmd(t *testing.T) {
+// TestFlightAbandonMsgWaitsForBusyDriveCmdBeforeAbandoning is the round-2 review finding
+// against PR #182: Cancel() signals the shared ctx but does not wait for the goroutine a
+// driveCmd already in flight is running in to actually notice and return, so popping and
+// firing abandonFn immediately (the original shape this test used to assert) could delete the
+// state file — or close the PR, or delete the branch — the instant before that canceled drive
+// finished its own last write. flight.New sets busy=true at construction whenever driveFn is
+// non-nil (the ordinary "adopted a real, already-driving promotion" shape), so this fixture is
+// genuinely Busy() the moment it is pushed, without needing Init() run at all. Cancellation
+// must still reach the hung driveFn right away; the pop itself must wait, bounded by
+// abandonWaitMaxAttempts since this fixture's driveFn blocks forever and never flips Busy()
+// back to false through the normal driveResultMsg path.
+func TestFlightAbandonMsgWaitsForBusyDriveCmdBeforeAbandoning(t *testing.T) {
 	gotErr := make(chan error, 1)
 	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		<-ctx.Done()
@@ -136,10 +144,13 @@ func TestFlightAbandonMsgCancelsInFlightDriveCmd(t *testing.T) {
 	root = root.push(fs)
 	go runBatch(initCmd)
 
-	rootTM, _ := root.Update(flight.AbandonMsg{ID: "abcd1234"})
+	rootTM, cmd := root.Update(flight.AbandonMsg{ID: "abcd1234"})
 	root = rootTM.(Model)
-	if n := len(root.stack); n != 1 {
-		t.Fatalf("setup: AbandonMsg should return to the matrix: stack has %d screens, want 1", n)
+	if n := len(root.stack); n != 2 {
+		t.Fatalf("AbandonMsg must not pop while the drive is still Busy(): stack has %d screens, want 2", n)
+	}
+	if cmd == nil {
+		t.Fatal("AbandonMsg produced no wait command while the drive is busy")
 	}
 
 	select {
@@ -148,6 +159,19 @@ func TestFlightAbandonMsgCancelsInFlightDriveCmd(t *testing.T) {
 			t.Errorf("hung driveFn's own ctx.Err() = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("AbandonMsg did not cancel the popped flight screen's in-flight driveCmd within 2s")
+		t.Fatal("AbandonMsg did not cancel the still-busy flight screen's in-flight driveCmd within 2s")
+	}
+
+	for i := 0; i <= abandonWaitMaxAttempts; i++ {
+		if cmd == nil {
+			t.Fatalf("wait loop stopped producing commands at attempt %d, before giving up", i)
+		}
+		msg := cmd()
+		var tm tea.Model
+		tm, cmd = root.Update(msg)
+		root = tm.(Model)
+	}
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("AbandonMsg should abandon once the wait gives up (the fixture's driveFn never clears Busy()): stack has %d screens, want 1", n)
 	}
 }

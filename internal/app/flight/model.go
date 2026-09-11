@@ -345,6 +345,14 @@ func NewBuilding(source, target string, direct bool, poll PollDurations, progres
 // building — driveFn is nil until AdoptBuilt — so Cancel alone cannot reach it).
 func (m Model) Building() bool { return m.building }
 
+// Busy reports whether a driveCmd call is currently outstanding for this screen — app.go's
+// AbandonMsg handler uses it to know that Cancel alone does not mean the drive has actually
+// stopped: Cancel only signals m.ctx, and the goroutine driveCmd is already running keeps
+// executing until the DriveFunc call it wraps notices ctx.Done() and returns, which can be
+// after engine.Drive has already saved state (or pushed/merged) again — round-2 review, PR
+// #182 (see the AbandonMsg case's own doc comment for the full race and the wait this enables).
+func (m Model) Busy() bool { return m.busy }
+
 // AdoptBuilt transitions this screen from preflight into a real, driving promotion once
 // cmd/hoist's StartPromotionFunc call actually returns one — NewBuilding's counterpart.
 // poll/deadlineAt are left exactly as NewBuilding already set them (computed the moment the

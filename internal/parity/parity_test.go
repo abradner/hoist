@@ -76,7 +76,7 @@ var registry = []op{
 	{
 		Name: "what an env is running right now, from its pods",
 		CLI:  "plan --from --dry-run (the Resolution section names each repo's running digest and its source)",
-		TUI:  "matrix.DriftMsg at boot and on F5/ctrl+r: the drifted word on the cell and the sentence under the table",
+		TUI:  "matrix.DriftMsg at boot and on F5/ctrl+r: the drifted word on the cell and the sentence under the table; the same F5 also fires matrix.RepoRefreshedMsg (#PR7's fetched view of origin/<base>, adopted by both the matrix table and the root's own repo snapshot — PR #182 round-2)",
 	},
 	{
 		Name: "list what is in flight, re-observed",
