@@ -91,7 +91,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: hoist [flags] [<command> [command flags]]\n\n")
 		fmt.Fprintf(stderr, "no command: open the env/family matrix for --repo\n\n")
-		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable)\n  deploy         write one named image into one env and drive the same pipeline (--env, --image repo:tag@sha256:...); the image-bump half of promote\n  restart        roll an env's Deployments without changing the refs they declare (--env, optional --family); patches the live pod template like kubectl, writes nothing to git\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
+		fmt.Fprintf(stderr, "commands:\n  plan           build a promotion plan for one env pair; --dry-run prints it and touches nothing\n  promote        drive a promotion to completion: worktree, commit, push, PR, CI, approval, merge, Argo refresh, Argo sync, rollout (resumable)\n  deploy         write one named image into one env and drive the same pipeline (--env, --image repo:tag@sha256:...); the image-bump half of promote\n  restart        roll an env's Deployments without changing the refs they declare (--env, optional --family); patches the live pod template like kubectl, writes nothing to git\n  promotions     list every promotion state file, with phase re-observed against the forge\n  resume <id>    re-drive a specific promotion (or --env <target-env>) from wherever it actually is\n  abandon <id>   retire a promotion that never landed (--confirm-abandon=<id>); closes its PR and deletes its branch if it opened one\n  watch --app    read-only: an Argo Application's sync/health/revision and its Deployments' rollout progress\n  config show    print the effective config (defaults filled in, secrets redacted)\n  config path    print where the config file is read from\n\n")
 		fmt.Fprintf(stderr, "hoist %s\n\n", versionString())
 		fs.PrintDefaults()
 	}
@@ -143,6 +143,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPromotions(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "resume":
 		return runResume(fs.Args()[1:], cfg, sel, stdout, stderr)
+	case "abandon":
+		return runAbandon(fs.Args()[1:], cfg, stdout, stderr)
 	case "watch":
 		return runWatch(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
@@ -691,6 +693,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithConfigView(cfg.File, cfg.Found, configText).
 		WithHistory(historyFn).
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
+		WithAbandon(buildAbandonFunc(cfg)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(newGit, eff.repo, eff.base, eff.appsRoot)).
 		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).

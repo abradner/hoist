@@ -19,7 +19,11 @@ func TestStatusBar(t *testing.T) {
 		{"exact", 10, "left", "right", "left right", false},
 		{"left truncated", 12, "a long left side", "right", "a lon… right", false},
 		{"only right fits", 5, "left", "right", "right", false},
-		{"right cut", 3, "left", "right", "rig", false},
+		// PR5's own regression: a bare "" tail here used to hard-cut mid-word with no marker
+		// at all (the flight screen's own hint widened past 80 cols and hit this exact path
+		// for the first time) — right now truncates with "…", matching the left side's own
+		// truncation convention just above.
+		{"right cut", 3, "left", "right", "ri…", false},
 		{"no left", 8, "", "right", "   right", false},
 		{"zero width", 0, "left", "right", "", false},
 		{"styled widths", 12, NewStyles(true).Notice.Render("left"), "right", "left   right", true},

@@ -256,6 +256,17 @@ func SaveState(path string, s *PromotionState) error {
 	return nil
 }
 
+// DeleteState removes the state file at path — `hoist abandon`'s own write. Idempotent, the
+// same way git.Exec.RemoveWorktree and git.Exec.DeleteRemoteBranch are: a file already gone
+// (a second abandon of the same id, a resume racing an abandon) is success, not an error, since
+// the caller's own goal ("this state file should not exist") is already satisfied either way.
+func DeleteState(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // LoadState reads the state file at path. A missing file is not an error: it returns
 // (nil, nil), since a state file is only ever a cache of History — Observe never needs it to
 // determine truth (AGENTS.md invariant 4; see PromotionState's doc comment).

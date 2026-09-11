@@ -16,7 +16,11 @@ func StatusBar(width int, left, right string) string {
 	}
 	rw := ansi.StringWidth(right)
 	if rw > width {
-		return ansi.Truncate(right, width, "")
+		// PR5 (`X abandon` widened the flight screen's own hint enough to hit this path for
+		// the first time): a bare "" tail silently hard-cuts mid-word with no marker at
+		// all — every other truncation in this file (the left status, just below) uses "…"
+		// so the reader can at least tell text is missing; the right side deserves the same.
+		return ansi.Truncate(right, width, "…")
 	}
 	// One cell of gap between the two halves, when there is a left half at all.
 	avail := width - rw - 1

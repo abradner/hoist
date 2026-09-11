@@ -529,6 +529,27 @@ func (c *Client) MergePR(ctx context.Context, prNumber int, expectedHeadSHA stri
 	return c.getPR(ctx, prNumber)
 }
 
+type closePayload struct {
+	State string `json:"state"`
+}
+
+// ClosePR implements forge.Forge: closes prNumber without merging — GitHub has no separate
+// "close" endpoint, only a PATCH on the PR resource itself (mirroring MergePR's own shape one
+// call up: marshal a payload, PATCH, re-getPR for the caller's own current-state view). Closing
+// an already-closed or already-merged PR is not itself an error GitHub raises, matching
+// MergePR's own idempotency note.
+func (c *Client) ClosePR(ctx context.Context, prNumber int) (forge.PR, error) {
+	body, err := json.Marshal(closePayload{State: "closed"})
+	if err != nil {
+		return forge.PR{}, err
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", c.owner, c.repo, prNumber)
+	if err := c.rest.DoWithContext(ctx, http.MethodPatch, path, bytes.NewReader(body), nil); err != nil {
+		return forge.PR{}, translateErr(fmt.Sprintf("closing PR #%d", prNumber), err)
+	}
+	return c.getPR(ctx, prNumber)
+}
+
 // GetPR implements forge.Forge: getPR with a 404 reported as ok=false rather than an error,
 // since "no such PR" is an answer the caller falls back from, not a failure.
 func (c *Client) GetPR(ctx context.Context, number int) (forge.PR, bool, error) {

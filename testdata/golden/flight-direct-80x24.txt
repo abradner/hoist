@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                       R re-observe · x abort · l log · esc back
+                           X abandon · R re-observe · x abort · l log · esc back

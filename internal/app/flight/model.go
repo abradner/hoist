@@ -57,7 +57,7 @@ type DriveFunc func(ctx context.Context, s engine.PromotionState) (next engine.P
 
 // keyMap is this screen's own key vocabulary, on top of the root's global quit keys.
 type keyMap struct {
-	Open, Reobserve, Abort, Log, Back, Override key.Binding
+	Open, Reobserve, Abort, Abandon, Log, Back, Override key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -65,9 +65,14 @@ func defaultKeyMap() keyMap {
 		Open:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open PR")),
 		Reobserve: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "re-observe")),
 		Abort:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "abort")),
-		Log:       key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
-		Back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Override:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "treat no checks as green")),
+		// Capital, like R: x already means "stop watching" (read-only, nothing engine-side —
+		// AbortMsg's own doc comment), so a write this destructive gets the shift key out of
+		// reach of a mistyped x, mirroring the matrix screen's own R/r convention (AGENTS.md
+		// §4.8).
+		Abandon:  key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "abandon")),
+		Log:      key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
+		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Override: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "treat no checks as green")),
 	}
 }
 
@@ -81,6 +86,19 @@ type OpenPRMsg struct{ URL string }
 // the branch, or whatever "abort" means operationally is out of scope for this screen; it
 // only requests it (same convention as OpenPRMsg above).
 type AbortMsg struct{ ID string }
+
+// AbandonMsg asks whatever composes screens to retire promotion ID for good: `hoist abandon`'s
+// own write — release the state file, and close the PR / delete the branch if it opened either.
+// A distinct type from AbortMsg on purpose, not a repurposing of it: AbortMsg's own doc comment
+// and parity row both describe purely-local, non-destructive semantics ("the branch, PR and
+// state file stay") that predate this message and are still what x means; giving the identical
+// name new, destructive behavior would silently invalidate that description without anything
+// able to catch the drift. Emitted only after the X gesture's own huh.Confirm answers yes
+// (AGENTS.md invariant 5's keypress-then-confirm shape), and never for a promotion this screen
+// itself believes has already landed — the root's real handler re-observes and refuses
+// authoritatively regardless (this screen's own guard is UI politeness only, the same relation
+// OverrideCINoneMsg has to CIGreenStep's own re-check).
+type AbandonMsg struct{ ID string }
 
 // BackMsg pops this screen back to whatever was underneath it (mirrors plan.BackMsg).
 type BackMsg struct{}
@@ -216,6 +234,16 @@ type Model struct {
 	confirming      bool
 	confirmOverride *huh.Confirm
 	confirmValue    bool
+
+	// confirmingAbandon/confirmAbandon/confirmAbandonValue are the X gesture's own instance of
+	// the identical pattern — a second, independent dialog, never sharing confirming/
+	// confirmOverride with the c gesture above (two screens in this codebase already carry two
+	// independent huh.Confirm gestures this way; sharing one widget's fields between two
+	// distinct questions would have the second gesture's answer silently reset whichever
+	// dialog opens first).
+	confirmingAbandon   bool
+	confirmAbandon      *huh.Confirm
+	confirmAbandonValue bool
 }
 
 // WithNow fixes the clock (tests).
@@ -729,6 +757,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		return m.updateConfirm(msg)
 	}
+	if m.confirmingAbandon {
+		if key.Matches(msg, m.keys.Back) {
+			m.confirmingAbandon = false
+			return m, nil
+		}
+		return m.updateConfirmAbandon(msg)
+	}
 	switch {
 	case key.Matches(msg, m.keys.Override):
 		if !m.offersCINoneOverride() {
@@ -775,6 +810,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		id := m.state.ID
 		return m, func() tea.Msg { return AbortMsg{ID: id} }
+	case key.Matches(msg, m.keys.Abandon):
+		// Same emptiness guard as Abort above — a UI politeness check only, since the root's
+		// real handler re-observes and refuses authoritatively regardless (AbandonMsg's own
+		// doc comment).
+		if m.driveFn == nil || m.state.ID == "" {
+			m.notice = "nothing to abandon — this promotion isn't being driven yet"
+			return m, nil
+		}
+		if m.done {
+			m.notice = "this promotion has already landed — abandoning is not a rollback"
+			return m, nil
+		}
+		return m.openConfirmAbandon()
 	case key.Matches(msg, m.keys.Log):
 		m.showLog = !m.showLog
 		return m, nil
@@ -853,6 +901,47 @@ func (m Model) confirmAgreed() bool {
 
 func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 
+// openConfirmAbandon raises the X gesture's own dialog — the identical keypress-then-confirm
+// shape as openConfirm/the tag picker's D, on its own independent widget.
+func (m Model) openConfirmAbandon() (Model, tea.Cmd) {
+	m.confirmingAbandon = true
+	m.confirmAbandonValue = false
+	title := fmt.Sprintf("Abandon promotion %s? This retires its state and, if it opened a PR, closes it and deletes the branch. This is not a rollback.", m.state.ID)
+	m.confirmAbandon = huh.NewConfirm().Title(title).Value(&m.confirmAbandonValue)
+	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
+	// (AGENTS.md §9 entry 6).
+	m.confirmAbandon.WithKeyMap(huh.NewDefaultKeyMap())
+	m.confirmAbandon.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.confirmAbandon.WithWidth(m.dialogWidth())
+	return m, tea.Batch(m.confirmAbandon.Init(), m.confirmAbandon.Focus())
+}
+
+func (m Model) updateConfirmAbandon(msg tea.Msg) (Model, tea.Cmd) {
+	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
+		m.confirmingAbandon = false
+		if !m.confirmAbandonAgreed() {
+			return m, nil
+		}
+		id := m.state.ID
+		return m, func() tea.Msg { return AbandonMsg{ID: id} }
+	}
+	f, cmd := m.confirmAbandon.Update(msg)
+	if c, ok := f.(*huh.Confirm); ok {
+		m.confirmAbandon = c
+	}
+	return m, cmd
+}
+
+// confirmAbandonAgreed reads the operator's answer from the widget, never from
+// confirmAbandonValue — see confirmAgreed's own comment; the identical reasoning.
+func (m Model) confirmAbandonAgreed() bool {
+	if m.confirmAbandon == nil {
+		return false
+	}
+	v, _ := m.confirmAbandon.GetValue().(bool)
+	return v
+}
+
 // ApplyCINoneOverride is what the root calls in answer to OverrideCINoneMsg: it sets
 // CINoneOverride on this screen's own copy of the state — the state every driveCmd hands to
 // DriveFunc, so the next engine.Drive's CIGreenStep.Observe reads it (and the drive's own
@@ -894,6 +983,9 @@ func (m Model) SetSize(width, height int) Model {
 	if m.confirmOverride != nil {
 		m.confirmOverride.WithWidth(m.dialogWidth())
 	}
+	if m.confirmAbandon != nil {
+		m.confirmAbandon.WithWidth(m.dialogWidth())
+	}
 	return m.layout()
 }
 
@@ -926,13 +1018,16 @@ func (m Model) layout() Model {
 // hand every key to this screen rather than treat q as quit, or an operator deciding
 // whether to treat no checks as green can quit the program mid-decision (Arc 2 review,
 // the same gap the tag picker's D dialog closes through tags.Model.CapturesText).
-func (m Model) CapturesText() bool { return m.confirming }
+func (m Model) CapturesText() bool { return m.confirming || m.confirmingAbandon }
 
-// SetStyles applies the palette (and re-themes the `c` dialog when one is up).
+// SetStyles applies the palette (and re-themes whichever dialog is up).
 func (m Model) SetStyles(s ui.Styles) Model {
 	m.styles = s
 	if m.confirmOverride != nil {
 		m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	}
+	if m.confirmAbandon != nil {
+		m.confirmAbandon.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	}
 	return m
 }
@@ -968,6 +1063,9 @@ func (m Model) View() string {
 	out := ui.Frame{Title: m.title(), Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Status.Render(m.statusLeft()), m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height)
 	if m.confirming && m.confirmOverride != nil {
 		out = ui.Dialog(m.styles, out, "treat no checks as green", m.confirmOverride.View(), m.width, m.height)
+	}
+	if m.confirmingAbandon && m.confirmAbandon != nil {
+		out = ui.Dialog(m.styles, out, "abandon this promotion", m.confirmAbandon.View(), m.width, m.height)
 	}
 	return redact.Strings(out)
 }
@@ -1169,6 +1267,12 @@ func (m Model) statusLeft() string {
 
 func (m Model) hint() string {
 	h := "R re-observe · x abort · l log · esc back"
+	// Offering X on a finished promotion just refuses (handleKey's own guard: "abandoning is
+	// not a rollback"), the same reasoning "o open PR" already applies below for a promotion
+	// with no PR yet — a key that only ever leads to a notice is not worth advertising.
+	if !m.done {
+		h = "X abandon · " + h
+	}
 	if m.offersCINoneOverride() {
 		h = "c treat as green · " + h
 	}

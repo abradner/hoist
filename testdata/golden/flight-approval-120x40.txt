@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                   o open PR · R re-observe · x abort · l log · esc back
+                                                       o open PR · X abandon · R re-observe · x abort · l log · esc back
