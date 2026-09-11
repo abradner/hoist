@@ -16,9 +16,9 @@
 │blocked — branch hoist/app-production/abcd1234 already exists with different  │
 │content                                                                       │
 │R to re-observe once resolved                                                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
-
-
-
-
+├──────────────────────────────────────────────────────────────────────────────┤
+│history                                                                       │
+│2026-09-01T12:00:00Z  branched      acted                                     │
+│                                                                              │
+│                                                                              │
 blocked: resolve the conf… o open PR · R re-observe · x abort · l log · esc back

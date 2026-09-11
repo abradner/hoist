@@ -165,6 +165,41 @@ type Model struct {
 	// successful poll clears it.
 	errNotice string
 
+	// building is true from NewBuilding until AdoptBuilt lands this screen's first real
+	// PromotionState — see NewBuilding's own doc comment for why this screen exists at all
+	// before one does. While true, the existing rendering already does most of the work
+	// unmodified: m.rows (derived from m.order, which NewBuilding sets from state.Direct the
+	// same way a real promotion's would be) render every step pending, exactly the "screenful
+	// of not-yet-reached dots" New's own doc comment already describes for the gap before a
+	// real promotion's first poll lands — building is only checked where that reuse isn't
+	// enough: the spinner's tick chain (Update's spinner.TickMsg case), and actionSection,
+	// which has nothing else to say yet.
+	building bool
+	// buildLog accumulates progress lines received over progressCh since the last real state
+	// landed — before a PromotionState exists at all (preflight: claim, in-flight check,
+	// fetch, plan, state save, from cmd/hoist's own StartPromotionFunc implementation), and
+	// again during drive, between driveResultMsg arrivals (defect B/C: engine.Drive's own
+	// save/onWaiting hooks report through the very same callback, so a long single Act — a
+	// push, a commit sitting on signing approval — shows up here before the whole Drive call
+	// that contains it ever returns). Cleared by onDriveResult the instant a real state
+	// lands — from there m.state.History is the authoritative record of everything buildLog
+	// was covering for, and repeating those lines would duplicate them. AdoptBuilt
+	// deliberately does NOT clear this (its own doc comment): the preflight lines it was
+	// showing stay visible until the first drive result actually supersedes them, and the
+	// listener that feeds it keeps running past AdoptBuilt for exactly that reason. logView
+	// renders state.History first, buildLog after — oldest to newest. Each entry keeps its
+	// own arrival time separate from its text (buildLogLine, below) rather than one
+	// pre-formatted string: logView needs the "<timestamp>  <text>" shape, but
+	// actionSection's own live-status label needs the bare text alone — the timestamp
+	// belongs on a log line, not folded into a one-line "still working" indicator next to a
+	// spinner.
+	buildLog []buildLogLine
+	// progressCh is drained one line at a time by listenCmd, which re-issues itself after
+	// every receive — a raw channel read inside Update would block the whole program, so this
+	// is the standard bubbletea "listen on a channel" shape. nil once the channel's owner
+	// (app.go) closes it, or for a screen built with New, which never has one.
+	progressCh <-chan string
+
 	styles        ui.Styles
 	keys          keyMap
 	width, height int
@@ -206,6 +241,14 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		now:     time.Now,
 		log:     viewport.New(),
 		styles:  ui.NewStyles(true),
+		// Visible by default (no stated convention before now — §4.8 proposal, this PR):
+		// "what is hoist actually doing" is the operator's question every time a promotion
+		// runs, not a fact to go looking for behind a key. layout's own sizing already
+		// treats the log as the first thing to shrink on a short terminal (it is handed
+		// whatever's left after the fixed sections, clamped to a 3-line minimum, never the
+		// other way around), so this does not reopen the §4.8/#164 "blocked reason always
+		// visible" guarantee — l still hides it for an operator who wants the room back.
+		showLog: true,
 	}
 	if poll.Deadline > 0 {
 		// One absolute deadline for this screen's whole drive, from the moment it starts —
@@ -234,6 +277,122 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 // ID is the promotion this screen shows — what the root matches an OverrideCINoneMsg against.
 func (m Model) ID() string { return m.state.ID }
 
+// NewBuilding starts the flight screen before a PromotionState exists at all — the preflight
+// phase between the operator confirming a plan and cmd/hoist's own StartPromotionFunc
+// actually producing one (claim, in-flight check, fetch, plan rebuild, initial state save;
+// direct mode's fresh-base check too). Without this, app.go had nothing to push until that
+// whole call returned, so pressing enter looked like a dead key for however long the
+// preflight took — the confirm screen re-rendered unchanged, and a second enter (the natural
+// response to a key that looks dead) cancelled the first attempt and started it over, since
+// the confirm screen stayed on top and kept receiving keys. Pushing this screen on the
+// keypress instead means something visibly changes at once, the confirm screen is no longer
+// on top to receive that second enter, and the same screen instance carries through into the
+// real drive once AdoptBuilt lands it — no flicker, no second screen.
+//
+// source/target/direct are already known from the confirmed plan (gitops.Plan, translated by
+// app.go — this package still never imports it, AGENTS.md §4.8) and are enough to render a
+// sensible header and pick the right step order (OrderFor only needs Direct) before anything
+// else exists; every other field of state stays zero-valued, which New already renders
+// correctly with a nil driveFn — this constructor is built on top of New for exactly that
+// reuse, not a parallel rendering path. progressCh is drained by listenCmd; its lines are
+// shown via buildLog until AdoptBuilt clears it.
+func NewBuilding(source, target string, direct bool, poll PollDurations, progressCh <-chan string) Model {
+	m := New(engine.PromotionState{SourceEnv: source, TargetEnv: target, Direct: direct}, poll, nil)
+	m.building = true
+	m.busy = true
+	m.progressCh = progressCh
+	return m
+}
+
+// Building reports whether this screen is still in its preflight phase — app.go's
+// promotionBuiltMsg handler uses it to decide whether to adopt this screen (AdoptBuilt) or
+// fall back to pushing a fresh one (the matrix.ResumeMsg path, which has no building screen
+// pre-pushed to adopt into); its flight.BackMsg handler uses it to know whether backing out
+// here must also cancel an outstanding build (this screen's own m.cancel is nil throughout
+// building — driveFn is nil until AdoptBuilt — so Cancel alone cannot reach it).
+func (m Model) Building() bool { return m.building }
+
+// AdoptBuilt transitions this screen from preflight into a real, driving promotion once
+// cmd/hoist's StartPromotionFunc call actually returns one — NewBuilding's counterpart.
+// poll/deadlineAt are left exactly as NewBuilding already set them (computed the moment the
+// operator confirmed, not recomputed here): that is what makes the whole build-and-drive
+// share one budget, the same guarantee a single ctx.WithTimeout already gives the CLI path —
+// recomputing a fresh window at this point would let the time the build itself took go
+// uncounted against it.
+//
+// building clears (the view stops rendering the preflight spinner/label), but progressCh and
+// buildLog do NOT — cmd/hoist's DriveFunc (driveFuncFor) closes over the exact same progress
+// callback this screen's preflight lines arrived through, and reuses it for engine.Drive's own
+// per-step save/onWaiting hooks (defect B/C): a long single Act — a git push, a commit sitting
+// on signing approval — still needs somewhere live to show up before the whole Drive call that
+// contains it returns and replaces m.state wholesale. Nil-ing progressCh here (an earlier
+// version of this method did) stopped listenCmd's own re-issue chain the moment building went
+// false, which silently dropped every drive-phase progress line from that point on — the
+// channel stayed open (nothing here ever closes it) but nothing was left reading from it, so
+// each send hit the select's own default case and vanished. buildLog itself is cleared by
+// onDriveResult instead, the moment a real state lands and m.state.History becomes the
+// authoritative record of everything buildLog was covering for — never here, before the first
+// one has landed at all.
+func (m Model) AdoptBuilt(state engine.PromotionState, driveFn DriveFunc) (Model, tea.Cmd) {
+	m.building = false
+	m.state = state
+	m.order = OrderFor(state)
+	m.rows = DeriveRows(m.order, false, nil)
+	m.driveFn = driveFn
+	if driveFn == nil {
+		m.busy = false
+		return m, m.listenCmd()
+	}
+	ctx := context.Background()
+	if m.deadlineAt.IsZero() {
+		m.ctx, m.cancel = context.WithCancel(ctx)
+	} else {
+		m.ctx, m.cancel = context.WithDeadline(ctx, m.deadlineAt)
+	}
+	m.busy = true
+	// listenCmd appended, index 2: driveCmd stays at index 1, matching this batch's shape
+	// before this field was added — a test or caller that already knows "index 1 is the
+	// drive call" (the shape flight.Model's own doc comments have described since New) does
+	// not need to change alongside this.
+	return m, tea.Batch(m.spinner.Tick, m.driveCmd(), m.listenCmd())
+}
+
+// progressMsg carries one line off progressCh, or reports it closed (ok=false) — a distinct,
+// explicit case in Update rather than folding "closed" into "nothing more to do", so the
+// listen loop stops cleanly instead of spinning on a channel that will only ever return the
+// zero value from here on.
+type progressMsg struct {
+	line string
+	ok   bool
+}
+
+// buildLogLine is one entry in Model.buildLog: at is stamped once, at arrival (the
+// progressMsg handler in Update), never recomputed at render time — logView runs on every
+// layout, including a spinner tick, and formatting m.now() there would print a fresh
+// timestamp on every frame for a line that already happened.
+type buildLogLine struct {
+	at   time.Time
+	text string
+}
+
+// listenCmd reads one value off m.progressCh and returns it as a progressMsg; Update
+// re-issues this after every receive, for as long as the channel stays open — the standard
+// bubbletea shape for draining a channel without blocking Update itself (a raw <-ch inside
+// Update would stall the whole program until a line arrived). Returns nil once progressCh is
+// nil, whether because this screen was built with New (no build phase at all) or because a
+// prior progressMsg already observed the channel closed and cleared it — bubbletea treats a
+// nil tea.Cmd as a no-op, so re-issuing this at the end of that branch is safe.
+func (m Model) listenCmd() tea.Cmd {
+	ch := m.progressCh
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		line, ok := <-ch
+		return progressMsg{line: line, ok: ok}
+	}
+}
+
 // Cancel interrupts this screen's shared drive context immediately, rather than waiting for
 // m.deadlineAt or for driveFn to notice at its own next Observe/Act that nobody is watching
 // anymore. app.go calls this on the current flight screen before popping it for AbortMsg or
@@ -255,7 +414,14 @@ func (m Model) Cancel() {
 // ever rendering it (PR #39 review finding #5). The first poll runs immediately rather than
 // waiting a full pollInterval, so the screen shows real status as soon as it opens instead
 // of a screenful of "not yet reached" dots.
+//
+// A building screen (NewBuilding, driveFn still nil by construction) is the one other case
+// that starts the spinner: there is nothing to drive yet, but there is something to animate
+// and something to listen for — listenCmd, draining progressCh as preflight lines arrive.
 func (m Model) Init() tea.Cmd {
+	if m.building {
+		return tea.Batch(m.spinner.Tick, m.listenCmd())
+	}
 	if m.driveFn == nil {
 		return nil
 	}
@@ -298,6 +464,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case driveResultMsg:
 		return m.onDriveResult(msg)
+	case progressMsg:
+		if !msg.ok {
+			// The channel closed — app.go's build goroutine returned (successfully or not)
+			// and drained nothing more into it. Stop listening; AdoptBuilt (success) or the
+			// root popping this screen (failure) is what happens next, neither of which this
+			// screen drives itself.
+			m.progressCh = nil
+			return m, nil
+		}
+		m.buildLog = append(m.buildLog, buildLogLine{at: m.now(), text: msg.line})
+		return m, m.listenCmd()
 	case tickMsg:
 		if m.busy || m.done || m.stopped || m.driveFn == nil {
 			return m, nil
@@ -312,7 +489,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		// included (PR #39 review finding #5) — busy already implies driveFn != nil and
 		// !done (see onDriveResult and the tickMsg/Reobserve guards above), but the extra
 		// checks are cheap and keep this case as defensive as the tickMsg case it mirrors.
-		if !m.busy || m.done || m.driveFn == nil {
+		// building is the one case busy alone doesn't already cover: NewBuilding sets busy
+		// true with driveFn still nil (nothing to drive yet), so the plain guard below would
+		// stop the spinner on its very first tick — building keeps it alive until AdoptBuilt.
+		if !m.building && (!m.busy || m.done || m.driveFn == nil) {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -356,6 +536,13 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 	// gets it too, matching how far the underlying promotion has actually progressed regardless
 	// of whether this particular poll ended cleanly.
 	m.state = msg.state
+	// buildLog is cleared HERE, not in AdoptBuilt (see that method's own doc comment): a real
+	// state has just landed, so m.state.History is now the authoritative record of everything
+	// buildLog was covering for since the last one. Unconditional, error included, for the same
+	// reason m.state itself is adopted unconditionally just above — engine.Drive still appends
+	// to History (and this screen's own progress callback still reports it) right up to the
+	// step whose Act actually failed.
+	m.buildLog = nil
 	// m.done/m.rows are derived unconditionally too, before msg.err is classified — the same
 	// reasoning as m.state just above, extended: cmd/hoist/wiring.go's DriveFunc always calls
 	// engine.Status after engine.Drive regardless of whether Drive itself errored, so
@@ -763,11 +950,20 @@ func (m Model) View() string {
 	if a := m.actionSection(); a != "" {
 		sections = append(sections, a)
 	}
-	if m.showLog {
-		sections = append(sections, m.styles.Dim.Render("history")+"\n"+m.log.View())
-	}
+	// notes (the transient notice, the last plumbing error) comes BEFORE the log, not after —
+	// ui.Frame.Render crops from the bottom when a short terminal can't hold everything
+	// (#164's own lesson, AGENTS.md §9 entry 10: a notice appended after a full-height frame
+	// is a notice nobody reads). layout's own log-height floor of 3 lines is unconditional —
+	// it does not shrink to 0 even when there is no room at all — so on a terminal short
+	// enough that header+steps+action+notes alone nearly fill it, the log's floor can still
+	// push the total past height. Ordering the log last means THAT is what gets cropped, never
+	// the notice — the log already accepts being shrunk to its floor; the notice never should
+	// be.
 	if n := m.notes(); n != "" {
 		sections = append(sections, n)
+	}
+	if m.showLog {
+		sections = append(sections, m.styles.Dim.Render("history")+"\n"+m.log.View())
 	}
 	out := ui.Frame{Title: m.title(), Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Status.Render(m.statusLeft()), m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height)
 	if m.confirming && m.confirmOverride != nil {
@@ -881,6 +1077,17 @@ func (m Model) stepsSection() string {
 // — the same words the matrix's in-flight pane uses (Summary), so the two never disagree.
 // Empty when there is nothing to say beyond the step list itself.
 func (m Model) actionSection() string {
+	if m.building {
+		// The one thing this section says during preflight: it's alive, and — via the same
+		// spinner.View() the step list uses for an Active row — what it's doing right now,
+		// the last line buildLog received. Before the first line arrives there is nothing
+		// truer to say than "starting".
+		label := "starting"
+		if n := len(m.buildLog); n > 0 {
+			label = m.buildLog[n-1].text
+		}
+		return m.styles.Warn.Render(m.spinner.View() + " " + label)
+	}
 	sum := Summary{ID: m.state.ID, Source: m.state.SourceEnv, Target: m.state.TargetEnv, Direct: m.state.Direct, PR: m.state.PR, Rows: m.rows, Done: m.done}
 	text, command := sum.Action()
 	switch {
@@ -908,13 +1115,23 @@ func (m Model) actionSection() string {
 	return ""
 }
 
+// logView renders state.History first, then buildLog — chronological order, oldest to
+// newest: state.History is the settled record up to the last driveResultMsg (or, before the
+// first one has landed at all, empty); buildLog is whatever has arrived since — preflight
+// lines before a PromotionState exists, or a step mid-Act during drive that hasn't reached its
+// own appendHistory yet — so it always describes what's NEWER than state.History, never what's
+// already in it (onDriveResult's own doc comment: buildLog is cleared the instant a real state
+// lands, precisely so the two never describe the same line twice).
 func (m Model) logView() string {
-	if len(m.state.History) == 0 {
+	if len(m.buildLog) == 0 && len(m.state.History) == 0 {
 		return m.styles.Dim.Render("(no history yet)")
 	}
 	var b strings.Builder
 	for _, h := range m.state.History {
 		fmt.Fprintf(&b, "%s  %-12s  %s\n", h.At.Format(time.RFC3339), h.Step, h.Detail)
+	}
+	for _, line := range m.buildLog {
+		fmt.Fprintf(&b, "%s  %s\n", line.at.Format(time.RFC3339), line.text)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

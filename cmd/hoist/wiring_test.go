@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,7 +110,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
-	state, driveFn, err := start(context.Background(), plan, app.StartOpts{})
+	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -162,6 +163,68 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected %s among ListStates, got %+v", final.ID, states)
+	}
+}
+
+// TestDriveFuncForProgressSurvivesAClosedChannel is a regression test for a P1 an adversarial
+// review found (and internal/app's own fix corrected — see AdoptBuilt's and app.go's doc
+// comments): driveFuncFor's own wrapped save reuses the SAME progress callback the preflight
+// used for engine.Drive's per-step history hook (defect B/C: a long single Act streams into
+// the log as it happens, not only once the whole Drive call returns), across the WHOLE
+// promotion, not only its first step. This test is the wiring-level half of that coverage: it
+// proves progress is actually called from real drive steps — branch, commit, push, PR-open,
+// merge — reached through a REAL buildStartPromotion-produced DriveFunc driving a full,
+// real promotion (the same fixture and driveToDone helper
+// TestTUIStartPromotionDrivesRealPromotionEndToEnd uses), not a stub that never touches
+// progress at all. The other half — that internal/app/app.go's own channel, reused across
+// its preflight-then-adopt-then-drive lifecycle, is never closed while anything can still
+// send on it (the actual panic this bug produced: a send on a closed channel panics
+// unconditionally in Go, select/default only guards a full buffer, never a closed one) — is
+// covered where that lifecycle actually lives, internal/app/app_test.go's
+// TestProgressSurvivesFromPreflightThroughDrive.
+func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	eff := buildEffForFixture(t, cfgPath)
+
+	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, ro, cerr := tuiCluster(t)
+	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+
+	var mu sync.Mutex
+	var lines []string
+	progress := func(line string) {
+		mu.Lock()
+		lines = append(lines, line)
+		mu.Unlock()
+	}
+	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, progress)
+	if err != nil {
+		t.Fatalf("startPromotion: %v", err)
+	}
+	if driveFn == nil {
+		t.Fatal("startPromotion returned a nil DriveFunc for a real, driveable plan")
+	}
+	mu.Lock()
+	preflightLines := len(lines)
+	mu.Unlock()
+	if preflightLines == 0 {
+		t.Fatal("progress was never called during preflight")
+	}
+
+	driveToDone(t, clone, driveFn, state, 500)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) <= preflightLines {
+		t.Fatalf("progress was never called during the drive itself: %d lines after preflight, still %d after a full promotion", preflightLines, len(lines))
 	}
 }
 
@@ -218,7 +281,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
 	}
@@ -256,7 +319,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
 	}
@@ -307,7 +370,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{})
+	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
 	}
@@ -354,7 +417,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
-	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{})
+	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
 	}
@@ -363,7 +426,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 	_ = driveFn1 // deliberately never called — see the test's own doc comment
 
-	state2, driveFn2, err := start(context.Background(), plan, app.StartOpts{})
+	state2, driveFn2, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("second startPromotion call failed — the first call's claim was not released before it ever returned driveFn: %v", err)
 	}
@@ -455,7 +518,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 	a, ro, cerr := tuiCluster(t)
 	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
 
-	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true})
+	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -474,7 +537,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 
 	// The asymmetry: a PR-mode start must not set it, or the assertion above passes on a
 	// field that is simply always true.
-	prState, _, err := start(context.Background(), plan, app.StartOpts{})
+	prState, _, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil && prState.Direct {
 		t.Error("a PR-mode start must not record Direct")
 	}
@@ -515,7 +578,7 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	a, ro, cerr := tuiCluster(t)
 	forgeErr := errors.New("gh: not logged in")
 	start := buildStartPromotion(eff, r, newGit, nil, forgeErr, a, ro, cerr)
-	_, _, err = start(context.Background(), plan, app.StartOpts{})
+	_, _, err = start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)
 	}
