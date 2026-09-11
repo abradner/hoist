@@ -58,11 +58,11 @@ func resolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
 	return "dev"
 }
 
-// Exit codes. 1 is a runtime failure, 2 a usage error, 3 "not implemented in this milestone".
+// Exit codes. 1 is a runtime failure, 2 a usage error, 3 "asked a read-only command to write".
 const (
-	exitFailure        = 1
-	exitUsage          = 2
-	exitNotImplemented = 3
+	exitFailure       = 1
+	exitUsage         = 2
+	exitReadOnlyWrite = 3
 )
 
 func main() {
@@ -404,8 +404,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		}
 	}
 	if !*dryRun {
-		fmt.Fprintln(stderr, "hoist plan: promotion without --dry-run lands in a later milestone; nothing was written. The output above is what it would change.")
-		return exitNotImplemented
+		fmt.Fprintln(stderr, "hoist plan: plan never writes — nothing was written. The output above is what it would change; run `hoist promote` to act on it.")
+		return exitReadOnlyWrite
 	}
 	return 0
 }

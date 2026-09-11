@@ -15,7 +15,7 @@ tool for the author's own GitOps repo first, written so other repos with the sam
 Status: pre-alpha, first tag `v0.1.0`; milestones M0–M10 have landed on `main`, and so has the
 TUI/CLI parity work that closed the registry's last one-sided rows (#101–#104, #132), so every
 operation is reachable from both faces. The remaining work — the design questions the tracker
-flags (#24, #41, #52, #53, #90), the migration delta and doctrine warnings of M7 (#7) and M13's
+flags (#24, #41, #53, #90), the migration delta and doctrine warnings of M7 (#7) and M13's
 first-run wizard (#106) — is tracked in issues.
 
 Domain nouns, as this repo uses them:
