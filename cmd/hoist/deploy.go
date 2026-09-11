@@ -165,6 +165,11 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
 	}
+	editApps, err := engine.EditApps(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
+		return exitFailure
+	}
 	a, _, err := newArgo(kctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
@@ -184,7 +189,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		defer cancel()
 	}
 
-	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps)
+	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps, editApps)
 	if s != nil {
 		s.Direct = *direct
 	}

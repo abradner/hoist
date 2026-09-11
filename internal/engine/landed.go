@@ -46,9 +46,18 @@ const (
 	landedGone
 )
 
-// observeLanded reports what rev says about s's own change, reading dir's object database
-// (which must already have rev — callers FetchBranch first, exactly as every other
+// observeLanded reports what rev says about the given edits' own change, reading dir's object
+// database (which must already have rev — callers FetchBranch first, exactly as every other
 // content-checking Observe in this package does).
+//
+// edits and expectedBlobs scope the question: a caller asking about the whole promotion passes
+// s.Edits and s.ExpectedBlobs unfiltered (DirectPushedStep); a caller asking about one
+// Application's own share of a multi-Application promotion passes just that Application's
+// edits and the matching subset of expectedBlobs (ArgoSyncedStep.revisionCarries, scoped via
+// PromotionState.EditApps — round-2 review finding, PR #182: passing the whole promotion here
+// for a per-Application question meant one Application superseded by a later change made every
+// OTHER Application in the same loop report superseded too, silently skipping their own health
+// check).
 //
 // The returned detail is a human sentence for the Observation, naming what is actually
 // declared at rev when that differs from the plan; it is never the only signal — the verdict
@@ -61,8 +70,8 @@ const (
 // a partially-applied file writes the remaining occurrences, while calling it landed leaves
 // them wrong forever. A no-op edit is exempt, since for those the original and the planned
 // reference are the same string.
-func observeLanded(ctx context.Context, g git.Git, dir, rev string, s *PromotionState) (landedVerdict, string, error) {
-	intact, err := blobsIntact(ctx, g, dir, rev, s)
+func observeLanded(ctx context.Context, g git.Git, dir, rev string, edits []gitops.Edit, expectedBlobs map[string]string) (landedVerdict, string, error) {
+	intact, err := blobsIntact(ctx, g, dir, rev, expectedBlobs)
 	if err != nil {
 		return landedGone, "", err
 	}
@@ -70,7 +79,7 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, s *Promotion
 		return landedIntact, "", nil
 	}
 	byFile := map[string][]gitops.Edit{}
-	for _, e := range s.Edits {
+	for _, e := range edits {
 		byFile[e.File] = append(byFile[e.File], e)
 	}
 	files := make([]string, 0, len(byFile))
@@ -141,7 +150,7 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, s *Promotion
 	superseded = dedupe(superseded)
 	return landedSuperseded, fmt.Sprintf(
 		"superseded by a later change to the same image repo: %s (this promotion planned %s)",
-		strings.Join(superseded, "; "), plannedRefs(s),
+		strings.Join(superseded, "; "), plannedRefs(edits),
 	), nil
 }
 
@@ -171,12 +180,12 @@ func repoOf(ref string) string {
 	return ref
 }
 
-// blobsIntact reports whether every path in s.ExpectedBlobs is byte-identical at rev to what
-// this promotion planned to write. This is the fast, exact path — no file content is read at
-// all when it holds.
-func blobsIntact(ctx context.Context, g git.Git, dir, rev string, s *PromotionState) (bool, error) {
-	paths := make([]string, 0, len(s.ExpectedBlobs))
-	for p := range s.ExpectedBlobs {
+// blobsIntact reports whether every path in expectedBlobs is byte-identical at rev to what was
+// planned to write there. This is the fast, exact path — no file content is read at all when it
+// holds. Scoped by the caller exactly as observeLanded's own doc comment describes.
+func blobsIntact(ctx context.Context, g git.Git, dir, rev string, expectedBlobs map[string]string) (bool, error) {
+	paths := make([]string, 0, len(expectedBlobs))
+	for p := range expectedBlobs {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
@@ -185,17 +194,17 @@ func blobsIntact(ctx context.Context, g git.Git, dir, rev string, s *PromotionSt
 		if err != nil {
 			return false, err
 		}
-		if !ok || blob != s.ExpectedBlobs[p] {
+		if !ok || blob != expectedBlobs[p] {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-// plannedRefs names every distinct reference this promotion planned to write, for the Detail.
-func plannedRefs(s *PromotionState) string {
+// plannedRefs names every distinct reference edits planned to write, for the Detail.
+func plannedRefs(edits []gitops.Edit) string {
 	var out []string
-	for _, e := range s.Edits {
+	for _, e := range edits {
 		out = append(out, e.New.String())
 	}
 	sort.Strings(out)

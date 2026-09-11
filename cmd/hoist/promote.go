@@ -461,6 +461,11 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
+	editApps, err := engine.EditApps(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
+		return exitFailure
+	}
 	a, _, err := newArgo(opts.kubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
@@ -480,7 +485,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		defer cancel()
 	}
 
-	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps)
+	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps, editApps)
 	// Recorded from this invocation's own flag, not carried from any prior state: like
 	// --override-ci-none, an operator re-running with (or without) --direct is asking for that
 	// mode now. DirectCommitGateStep re-derives the production refusal independently either
@@ -567,14 +572,17 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 // adaptor is needed here despite that: the two findInFlight scans below are scoped to
 // engine.CoreSteps, never AllSteps, precisely so a merged-but-still-converging promotion does
 // not block a new one (see findInFlight's own doc comment), which also means they never reach
-// the steps that would need one.
+// the steps that would need one. editApps is engine.EditApps over the same plan — the per-file
+// half of argoApps' own computation, carried on PromotionState.EditApps so ArgoSyncedStep can
+// scope a landed-verdict question to one Application's own files instead of the whole
+// promotion (round-2 review finding, PR #182).
 //
 // On success, release must be called by the caller exactly once the returned state's first
 // successful save lands (ClaimInFlight's own doc comment: the claim's job is done once a durable
 // state file exists for a future findInFlight/ObserveAll scan to see) — never held for the whole
 // promotion. On error, any claim this call acquired has already been released; release is nil
 // whenever err is non-nil.
-func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge, argoApps []string) (*engine.PromotionState, func(), error) {
+func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Plan, base string, overrideCINone bool, g git.Git, f forge.Forge, argoApps []string, editApps map[string]string) (*engine.PromotionState, func(), error) {
 	id := engine.DeriveID(eff.cfg.GitHub, plan)
 	branch := engine.BranchName(plan.TargetEnv, id)
 	worktreeDir, err := engine.WorktreeDir(id)
@@ -656,6 +664,7 @@ func buildPromotionForConfirm(ctx context.Context, eff effective, plan gitops.Pl
 		Collaborators:  eff.cfg.Collaborators,
 		ArgoNamespace:  eff.cfg.Kube.ArgoNamespace,
 		ArgoApps:       argoApps,
+		EditApps:       editApps,
 	}
 	// The state file is an index of what to look at, never evidence of what happened
 	// (AGENTS.md §4.1) — every Observe below re-derives truth from the worktree and the

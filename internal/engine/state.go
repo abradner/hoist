@@ -133,6 +133,18 @@ type PromotionState struct {
 	// upgrading past M5 — everywhere else in this package, ArgoApps is read as carried, never
 	// recomputed.
 	ArgoApps []string
+	// EditApps maps each Edits[i].File to the Argo Application name that owns it — the same
+	// Family->Application walk ArgoAppNames does, kept per-file rather than deduped so a caller
+	// can scope a question ("is Application X's own share of this promotion still landed") to
+	// just that Application's files instead of asking it of the whole promotion. Computed once
+	// by EditApps when the promotion is first built, carried like ArgoApps, and repaired by
+	// ensureArgoApps for a state file saved before this field existed (round-2 review finding,
+	// PR #182: ArgoSyncedStep.revisionCarries used to call observeLanded over the whole
+	// promotion and apply that one verdict to every Application in the loop, so one Application
+	// superseded by a later deploy silently skipped the health check on every OTHER Application
+	// in the same block — the same class of bug AGENTS.md §4.1's #168 interim-state note
+	// already names for RolledOutStep, found independently in ArgoSyncedStep too).
+	EditApps map[string]string
 }
 
 // StateDir is $XDG_STATE_HOME/hoist, else ~/.local/state/hoist — the XDG rule on every
