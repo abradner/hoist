@@ -80,8 +80,9 @@ var registry = []op{
 	},
 	{
 		Name: "list what is in flight, re-observed",
-		CLI:  "promotions --kube-context",
+		CLI:  "promotions --kube-context --repo --archived",
 		TUI:  "the in-flight pane under the matrix, re-observed at boot and every poll.approval, in the launch's --kube-context when given",
+		Gap:  "--repo/--archived scope and retire terminal state files by age (state.retain) — no TUI equivalent yet, #171",
 	},
 	{
 		Name: "resume a promotion from wherever Observe finds it",

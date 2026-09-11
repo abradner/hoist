@@ -105,10 +105,20 @@ func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 // worktree, never the state file's own possibly-stale Phase field — AGENTS.md §4.1). A
 // promotion whose repo is no longer in the config file is listed with its last-recorded phase
 // and a note, since there is nothing to re-observe it against.
+//
+// A terminal promotion (done, per this same re-observation) older than state.retain
+// (StateConfig.Retain, default 30 days, measured from PromotionState.LastActivity) is archived
+// — moved to engine.ArchiveDir, out of the live listing by default. This never changes what the
+// re-observation just concluded: archiving only ever happens AFTER done is confirmed true, never
+// inferred from age alone, so a promotion still genuinely in flight (however old) is untouched
+// regardless of --repo/--archived. --archived additionally lists what is already archived,
+// scoped by --repo exactly like the live listing.
 func runPromotions(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist promotions", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to re-observe every promotion in, instead of each repo's own kube.context (may also be given before the command)")
+	repoFilter := fs.String("repo", "", "only list promotions for this repo (owner/name, repos[].github) — default every configured repo")
+	archived := fs.Bool("archived", false, "also list archived promotions (state.retain; still plain, readable JSON under the promotions/archive/ subdirectory)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -120,7 +130,24 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		fmt.Fprintf(stderr, "hoist promotions: %v\n", err)
 		return exitFailure
 	}
-	if len(states) == 0 {
+	if *repoFilter != "" {
+		var filtered []*engine.PromotionState
+		for _, s := range states {
+			if s.RepoFullName == *repoFilter {
+				filtered = append(filtered, s)
+			}
+		}
+		states = filtered
+	}
+	if len(states) == 0 && !*archived {
+		if *repoFilter != "" {
+			// Named explicitly rather than folded into the bare message below: a --repo typo
+			// (repos[].github is owner/name, not the config entry's own name: or path:) would
+			// otherwise print identically to "you have no promotions at all", with nothing to
+			// suggest the filter itself might be the reason (round-2 review finding).
+			fmt.Fprintf(stdout, "hoist promotions: no promotions found for --repo %s\n", *repoFilter)
+			return 0
+		}
 		fmt.Fprintln(stdout, "hoist promotions: no promotions found")
 		return 0
 	}
@@ -135,6 +162,11 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
+	retain := time.Duration(cfg.State.Retain)
+	// archivedThisRun tracks ids this same invocation just moved to the archive, so --archived's
+	// own listing below (which reads ArchiveDir fresh, after the loop) does not print one of
+	// them a second time — round-2 review finding.
+	archivedThisRun := map[string]bool{}
 	for _, s := range states {
 		rc, ok := repoConfigFor(cfg, s.RepoFullName)
 		if !ok {
@@ -162,10 +194,33 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		switch {
 		case err != nil:
 			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
+		case done && retain > 0 && time.Since(s.LastActivity()) > retain:
+			if aerr := engine.ArchiveState(s.ID); aerr != nil {
+				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archiving failed: %v\n", s.ID, s.TargetEnv, statusDetail(status.Observation), aerr)
+			} else {
+				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archived (older than %s)\n", s.ID, s.TargetEnv, statusDetail(status.Observation), retain)
+				archivedThisRun[s.ID] = true
+			}
 		case done:
 			fmt.Fprintf(stdout, "%s  %-20s  done (%s)\n", s.ID, s.TargetEnv, statusDetail(status.Observation))
 		default:
 			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, status.Step, statusDetail(status.Observation))
+		}
+	}
+	if *archived {
+		arch, err := engine.ListArchivedStates()
+		if err != nil {
+			fmt.Fprintf(stderr, "hoist promotions: listing archived promotions: %v\n", err)
+			return exitFailure
+		}
+		for _, s := range arch {
+			if *repoFilter != "" && s.RepoFullName != *repoFilter {
+				continue
+			}
+			if archivedThisRun[s.ID] {
+				continue
+			}
+			fmt.Fprintf(stdout, "%s  %-20s  archived (last activity %s)\n", s.ID, s.TargetEnv, s.LastActivity().Format(time.RFC3339))
 		}
 	}
 	return 0

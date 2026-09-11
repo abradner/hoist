@@ -124,3 +124,92 @@ func TestStateDirNeverFallsBackToLibrary(t *testing.T) {
 		t.Fatalf("StateDir() = %q, want it to end in .local/state/hoist", got)
 	}
 }
+
+// TestArchiveStateMovesOutOfListStates: ListStates' own entries.IsDir() check already skips
+// ArchiveDir as a subdirectory of the live promotions dir — this proves that holds for a real
+// archived file, not just by reading the code: an archived promotion is invisible to
+// ListStates() (and therefore to findInFlight, or anything else walking it) purely because it
+// physically isn't under promotions/ anymore, never a second, separately-maintained exclusion.
+func TestArchiveStateMovesOutOfListStates(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path, err := StatePath("abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(path, &PromotionState{ID: "abc", TargetEnv: "app-production"}); err != nil {
+		t.Fatal(err)
+	}
+	if states, err := ListStates(); err != nil || len(states) != 1 {
+		t.Fatalf("fixture precondition: ListStates() = %v, %v, want exactly one", states, err)
+	}
+
+	if err := ArchiveState("abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := ListStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("ListStates() after archiving = %v, want empty", states)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("live state file should be gone after archiving: stat err = %v", err)
+	}
+
+	archived, err := ListArchivedStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archived) != 1 || archived[0].ID != "abc" {
+		t.Fatalf("ListArchivedStates() = %v, want exactly [abc]", archived)
+	}
+}
+
+// TestArchiveStateIsIdempotent mirrors DeleteState/DeleteRemoteBranch's own convention: an
+// already-archived (or never-existed) id is success, not an error — a retry (or two concurrent
+// `hoist promotions` runs) must not fail on it.
+func TestArchiveStateIsIdempotent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path, err := StatePath("abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(path, &PromotionState{ID: "abc"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ArchiveState("abc"); err != nil {
+		t.Fatalf("first ArchiveState: %v", err)
+	}
+	if err := ArchiveState("abc"); err != nil {
+		t.Fatalf("second ArchiveState (already archived) should be a no-op success: %v", err)
+	}
+	if err := ArchiveState("never-existed"); err != nil {
+		t.Fatalf("ArchiveState on an id with no state file should be a no-op success: %v", err)
+	}
+}
+
+// TestLastActivityPrefersTheLatestHistoryEntryOverGeneratedAt: History's own most recent entry
+// is a closer proxy for "when did anything last actually happen" than construction time, which
+// never advances again once a promotion starts converging.
+func TestLastActivityPrefersTheLatestHistoryEntryOverGeneratedAt(t *testing.T) {
+	generated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	latest := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	s := &PromotionState{
+		GeneratedAt: generated,
+		History: []HistoryEntry{
+			{Step: StepBranched, At: generated},
+			{Step: StepRolledOut, At: latest},
+			{Step: StepMerged, At: generated.AddDate(0, 1, 0)},
+		},
+	}
+	if got := s.LastActivity(); !got.Equal(latest) {
+		t.Errorf("LastActivity() = %v, want the latest History entry %v", got, latest)
+	}
+
+	empty := &PromotionState{GeneratedAt: generated}
+	if got := empty.LastActivity(); !got.Equal(generated) {
+		t.Errorf("LastActivity() with no History = %v, want GeneratedAt %v", got, generated)
+	}
+}

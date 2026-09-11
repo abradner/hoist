@@ -49,6 +49,13 @@ registries:
 
 poll: { ci: 20s, approval: 30s, argo: 5s, rollout: 3s, deadline: 4h }   # M4/M5
 
+state:
+  retain: 720h                       # 30 days; how long a TERMINAL promotion's state file stays
+                                      # in the live promotions dir before `hoist promotions`
+                                      # archives it (never on age alone — only once re-observed
+                                      # as done). Archived files are still plain, readable JSON,
+                                      # just out of the default listing (--archived shows them).
+
 preferences:                       # operator UX, not promotion policy; safe to change on a whim
   open_pr: both                    # launch|display|both; default both. launch = open the PR
                                     # in a browser on `o`; display = only ever show the URL as

@@ -22,6 +22,7 @@ type Config struct {
 	Registries  []RegistryConfig  `yaml:"registries,omitempty"`
 	Poll        PollConfig        `yaml:"poll"`
 	Preferences PreferencesConfig `yaml:"preferences"`
+	State       StateConfig       `yaml:"state"`
 
 	// File is the path Load read, or looked for. Found reports whether it existed.
 	File  string `yaml:"-"`
@@ -123,6 +124,20 @@ type ClusterSecret struct {
 	Secret    string `yaml:"secret,omitempty"`
 }
 
+// StateConfig governs how long a promotion's state file lives in the live promotions dir after
+// it goes terminal (M-retention). This never changes what findInFlight (or anything else
+// walking engine.ListStates) concludes about whether a promotion is in flight: a state is only
+// ever archived once it has already been re-observed as done, never on age alone — an old
+// promotion that is STILL genuinely in flight (blocked for weeks, say) is never touched, no
+// matter how far past Retain it is.
+type StateConfig struct {
+	// Retain is how long a terminal state file stays in the live promotions dir before
+	// `hoist promotions` moves it to the archive subdirectory (engine.ArchiveDir) — still a
+	// plain, readable, deletable JSON file, just out of the set `hoist promotions` and every
+	// re-observation loop walks by default. Default 30 days.
+	Retain Duration `yaml:"retain"`
+}
+
 // PollConfig is how often the engine re-observes each remote (M4/M5).
 type PollConfig struct {
 	CI       Duration `yaml:"ci"`
@@ -175,6 +190,10 @@ const (
 
 	DefaultOpenPR               = OpenPRBoth
 	DefaultBrowserLaunchTimeout = Duration(5 * time.Second)
+
+	// DefaultStateRetain is how long a terminal promotion's state file stays live before
+	// `hoist promotions` archives it (StateConfig.Retain) — 30 days.
+	DefaultStateRetain = Duration(30 * 24 * time.Hour)
 )
 
 var (
@@ -328,6 +347,7 @@ func (c *Config) Normalize() error {
 		c.Preferences.OpenPR = DefaultOpenPR
 	}
 	fill(&c.Preferences.BrowserLaunchTimeout, DefaultBrowserLaunchTimeout)
+	fill(&c.State.Retain, DefaultStateRetain)
 	return nil
 }
 
@@ -412,6 +432,9 @@ func (c *Config) Validate() error {
 	validateEnum(p, "preferences.open_pr", c.Preferences.OpenPR, OpenPRLaunch, OpenPRDisplay, OpenPRBoth)
 	if c.Preferences.BrowserLaunchTimeout <= 0 {
 		p.add("preferences.browser_launch_timeout", "must be a positive duration, got %s", c.Preferences.BrowserLaunchTimeout)
+	}
+	if c.State.Retain <= 0 {
+		p.add("state.retain", "must be a positive duration, got %s", c.State.Retain)
 	}
 	return errors.Join(sortedErrs(p.errs)...)
 }
