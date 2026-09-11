@@ -801,17 +801,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.pop(), nil
 	case matrix.OpenTagsMsg:
 		var mapped bool
-		var listFn tags.ListFunc
+		var regTagsFn tags.RegTagsFunc
+		var gitTagsFn tags.GitTagsFunc
 		var metaFn tags.MetaFunc
 		if m.tagsFn != nil {
-			mapped, listFn, metaFn = m.tagsFn(msg.ImageRepo)
+			mapped, regTagsFn, gitTagsFn, metaFn = m.tagsFn(msg.ImageRepo)
 		}
 		production := plan.IsProduction(msg.Target, m.envs)
 		stagingEnv, stagingTags, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
 		opts := tags.Options{
 			Mapped: mapped, Production: production,
 			StagingEnv: stagingEnv, StagingTags: stagingTags, HasStagingMismatch: hasMismatch,
-			List: listFn, Meta: metaFn,
+			RegTags: regTagsFn, GitTags: gitTagsFn, Meta: metaFn,
 			History: m.history,
 		}
 		if d, ok := tags.DeclaredIn(m.repo, msg.ImageRepo, msg.Target); ok {

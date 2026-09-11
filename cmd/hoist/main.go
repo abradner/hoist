@@ -825,7 +825,7 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string
 	if cfg != nil {
 		registries = cfg.Registries
 	}
-	return func(imageRepo string) (bool, tags.ListFunc, tags.MetaFunc) {
+	return func(imageRepo string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
 		entry := registryEntryFor(registries, imageRepo)
 		auth, clusterSecret, opRef := entryAuthConfig(entry, reg)
 		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
@@ -843,8 +843,8 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string
 		}
 		reg, err := newRegistry(regCfg)
 		if err != nil {
-			failed := func(context.Context) ([]string, []forge.GitTag, bool, error) { return nil, nil, false, err }
-			return false, failed, nil
+			failedRegTags := func(context.Context) ([]string, error) { return nil, err }
+			return false, failedRegTags, nil, nil
 		}
 
 		appRepo, mapped := "", false
@@ -862,30 +862,36 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string
 			}
 		}
 
-		// listFn's own mapped return (finding 3, round 2) is this call's actually-observed
-		// answer, not the outer mapped closed over above: the outer value can already be false
-		// here (no config mapping, or newForge failed above), but it can also start true and
-		// still need to degrade below, once fc.Tags is actually asked and fails at runtime —
-		// the caller (internal/app/tags.Model.onListLoaded) trusts THIS return, every call,
-		// over whatever BuildFunc's own static mapped result said when the picker was opened.
-		listFn := func(ctx context.Context) ([]string, []forge.GitTag, bool, error) {
-			regTags, err := reg.Tags(ctx, imageRepo)
-			if err != nil {
-				return nil, nil, false, err
+		// #PR8: the single blocking listFn this used to be is now two independent calls, so
+		// the picker can render regTagsFn's own fast answer without waiting on gitTagsFn's
+		// slow N+1 crawl (pkg/forge.Forge.Tags' own doc comment) — internal/app/tags.Model's
+		// Init fires both as separate tea.Cmds (regTagsCmd/gitTagsCmd) and backfills the
+		// ordering whenever gitTagsFn actually answers, in whichever order the two land.
+		regTagsFn := func(ctx context.Context) ([]string, error) {
+			return reg.Tags(ctx, imageRepo)
+		}
+		// nil when this repo was never mapped at all — tags.Model.gitTagsCmd treats a nil
+		// GitTagsFunc as "nothing to eventually ask", never a call that runs and reports
+		// mapped=false (that shape is for a config mapping that fails at RUNTIME, below, not
+		// for a repo with no mapping in the config to begin with).
+		var gitTagsFn tags.GitTagsFunc
+		if mapped {
+			// mapped is this call's own observed answer (GitTagsFunc's doc comment) — closed
+			// over as the value fc was actually built with (finding 3, round 2, carried over
+			// from the pre-split design): the caller (internal/app/tags.Model.onGitTagsLoaded)
+			// trusts THIS return, every call, over whatever BuildFunc's own static mapped
+			// result said when the picker was opened.
+			gitTagsFn = func(ctx context.Context) ([]forge.GitTag, bool, error) {
+				gitTags, err := fc.Tags(ctx)
+				if err != nil {
+					// Degrade, not fail (AGENTS.md principle 5): the registry tags alone
+					// (regTagsFn's own answer, already rendered by the time this can ever
+					// return) are still a usable picker without invariant 3's own preferred
+					// ordering.
+					return nil, false, nil
+				}
+				return gitTags, true, nil
 			}
-			if !mapped {
-				return regTags, nil, false, nil
-			}
-			gitTags, err := fc.Tags(ctx)
-			if err != nil {
-				// Same degrade-not-fail call as above, now that the forge has actually been
-				// asked: the registry tags are still useful without git-tag ordering — and
-				// mapped=false here is what tells the caller to actually fall back to
-				// Created-based ordering (invariant 3), not merely to receive an empty git-tag
-				// list while still believing every row is "mapped but unmatched".
-				return regTags, nil, false, nil
-			}
-			return regTags, gitTags, true, nil
 		}
 		metaFn := func(ctx context.Context, tag string) (registry.ImageMeta, error) {
 			ref, err := image.Parse(imageRepo + ":" + tag)
@@ -894,6 +900,6 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string
 			}
 			return reg.Config(ctx, ref)
 		}
-		return mapped, listFn, metaFn
+		return mapped, regTagsFn, gitTagsFn, metaFn
 	}
 }

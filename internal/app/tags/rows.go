@@ -85,14 +85,53 @@ func DeriveRows(regTags []string, gitTags []forge.GitTag, mapped bool) []Row {
 	return rows
 }
 
+// BackfillGitDates applies git-tag dates that arrive AFTER rows already exist — #PR8's
+// progressive load: the registry's own tag list renders immediately (DeriveRows with
+// gitTags nil, mapped false), and the app repo's own tag→commit-date crawl (the slow N+1
+// half a mapped repo pays, pkg/forge.Forge.Tags' own doc comment) no longer gates that first
+// render. Unlike Reorder, this is never a no-op when mapped: applying the dates IS its job.
+// Every row's own already-fetched Config metadata (Meta/MetaLoaded/MetaLoading/MetaErr) is
+// preserved — a fresh DeriveRows call here would discard it, refetching rows the picker
+// already has real data for. Re-sorts with the exact comparator DeriveRows itself uses
+// (class, then HasGitDate, then GitDate descending, incoming order preserved among the
+// rest) — invariant 3's own ordering, landing a beat later than the row list rather than
+// gating it.
+func BackfillGitDates(rows []Row, gitTags []forge.GitTag) []Row {
+	dates := make(map[string]time.Time, len(gitTags))
+	for _, gt := range gitTags {
+		dates[gt.Name] = gt.Date
+	}
+	out := make([]Row, len(rows))
+	copy(out, rows)
+	for i := range out {
+		if d, ok := dates[out[i].Tag]; ok {
+			out[i].HasGitDate = true
+			out[i].GitDate = d
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Class != out[j].Class {
+			return out[i].Class < out[j].Class
+		}
+		if out[i].HasGitDate != out[j].HasGitDate {
+			return out[i].HasGitDate
+		}
+		if out[i].HasGitDate {
+			return out[i].GitDate.After(out[j].GitDate)
+		}
+		return false // preserve incoming order among the unordered rest — DeriveRows' own rule
+	})
+	return out
+}
+
 // Reorder re-sorts rows by each one's own Created metadata, descending, for the "no app repo
 // mapping" case only (AGENTS.md invariant 3's fallback) — call it after a row's MetaLoaded
 // flips true when mapped is false; it is a no-op when mapped is true, since a mapped repo's
-// ordering is fixed once, at DeriveRows, and a matched git-tag row is never re-ranked by its
-// own registry Created once loaded (that would silently blend the two orderings invariant 3
-// keeps separate). A row not yet loaded keeps its current relative position, appended after
-// every loaded row, so a row already visible under the cursor never jumps out from under it
-// mid-fetch.
+// ordering is fixed once, at DeriveRows (and now BackfillGitDates), and a matched git-tag row
+// is never re-ranked by its own registry Created once loaded (that would silently blend the
+// two orderings invariant 3 keeps separate). A row not yet loaded keeps its current relative
+// position, appended after every loaded row, so a row already visible under the cursor never
+// jumps out from under it mid-fetch.
 //
 // This sort is only ever complete among rows that have actually loaded (finding 4, round 5):
 // fetchVisible (model.go) only fetches metadata for whatever window is currently visible, so a

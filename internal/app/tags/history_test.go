@@ -89,10 +89,11 @@ func historyModelOver(t *testing.T, repo *gitops.Repo, delta history.DeltaFunc, 
 		"v3": {Digest: "sha256:" + strings.Repeat("3", 64)},
 	}
 	d, _ := DeclaredIn(repo, "ghcr.io/example/app", "app-production")
+	regFn, gitFn := splitListFn(true, func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil })
 	m := New("ghcr.io/example/app", "app-production", Options{
 		Mapped: true, Production: true,
 		StagingEnv: "app-staging", StagingTags: []string{"v3"}, HasStagingMismatch: true,
-		List: func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil },
+		RegTags: regFn, GitTags: gitFn,
 		Meta: fixedMetas(metas),
 		History: history.Funcs{
 			Mapped:  func(string) bool { return true },
@@ -108,6 +109,66 @@ func historyModelOver(t *testing.T, repo *gitops.Repo, delta history.DeltaFunc, 
 		t.Fatalf("state = %v (err=%v)", m.state, m.err)
 	}
 	return m
+}
+
+// TestGitTagsReorderRefreshesTheNewSelectionsHistoryAndMetadata is the regression test for a
+// P1 an adversarial review of #PR8 found: onGitTagsLoaded moves the default selection to the
+// newly-confirmed top row once BackfillGitDates lands, but never re-fired historyCmd or
+// fetchVisible for it — the commit delta stayed keyed to whichever tag was selected before the
+// reorder (the registry's own first-returned tag here), and in the common timing where every
+// visible-window meta fetch already finishes before gitTagsCmd's own answer lands
+// (onGitTagsLoaded's own doc comment), the reordered top row's registry metadata (digest,
+// created) was left unloaded too. Registry order (v1, v2, v3) deliberately differs from
+// git-tag date order (v3 newest) so the reorder actually moves row 0 — every other fixture in
+// this package has the two orders agree, which would let this regression hide (§9 entry 9).
+func TestGitTagsReorderRefreshesTheNewSelectionsHistoryAndMetadata(t *testing.T) {
+	regTags := []string{"v1", "v2", "v3"}
+	gitTags := []forge.GitTag{
+		{Name: "v1", Date: fixedNow.Add(-62 * 24 * time.Hour)},
+		{Name: "v2", Date: fixedNow.Add(-32 * 24 * time.Hour)},
+		{Name: "v3", Date: fixedNow.Add(-3 * 24 * time.Hour)},
+	}
+	metas := map[string]registry.ImageMeta{
+		"v1": {Digest: "sha256:" + strings.Repeat("1", 64)},
+		"v2": {Digest: "sha256:" + strings.Repeat("2", 64)},
+		"v3": {Digest: "sha256:" + strings.Repeat("3", 64)},
+	}
+	repo := unsplitRepo()
+	d, ok := DeclaredIn(repo, "ghcr.io/example/app", "app-production")
+	if !ok {
+		t.Fatal("fixture precondition: DeclaredIn must find the declared reference")
+	}
+	regFn, gitFn := splitListFn(true, func(context.Context) ([]string, []forge.GitTag, bool, error) {
+		return regTags, gitTags, true, nil
+	})
+	m := New("ghcr.io/example/app", "app-production", Options{
+		Mapped: true, Production: true,
+		RegTags: regFn, GitTags: gitFn,
+		Meta: fixedMetas(metas),
+		History: history.Funcs{
+			Mapped:  func(string) bool { return true },
+			Delta:   fourteenAhead,
+			LiveAge: liveAge34Days,
+		},
+		Declared: &d,
+		Now:      func() time.Time { return fixedNow },
+	})
+	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.state != stateReady {
+		t.Fatalf("state = %v (err=%v)", m.state, m.err)
+	}
+
+	if m.selectedTag != "v3" {
+		t.Fatalf("selectedTag = %q, want v3 (newest by git-tag date) once the reorder lands", m.selectedTag)
+	}
+	if m.currentDelta() == nil {
+		t.Fatalf("no commit delta loaded for the reordered selection %q — historyCmd was never re-fired for it", m.selectedTag)
+	}
+	i := IndexOf(m.rows, "v3")
+	if i < 0 || !m.rows[i].MetaLoaded {
+		t.Fatalf("v3's own registry metadata never loaded after the reorder moved it to row 0: row=%+v", m.rows[i])
+	}
 }
 
 func fourteenAhead(_ context.Context, from, to image.Ref) (migrate.Delta, error) {

@@ -32,6 +32,31 @@ func prose(v string) string {
 	return strings.Join(strings.Fields(v), " ")
 }
 
+// splitListFn adapts the pre-#PR8 combined test-fixture shape (regTags, gitTags, mapped,
+// err) most of this file's fixtures were originally written against into the
+// RegTagsFunc/GitTagsFunc pair Options now takes (#PR8: one blocking call split into two
+// independent ones — regTagsCmd/gitTagsCmd, fired as separate tea.Cmds). gitTagsFn is nil
+// exactly when staticMapped is false, mirroring cmd/hoist's own buildTagsFunc: a genuinely
+// unmapped repo (no repos[].apps entry) has no app repo to ask, so there is nothing for
+// gitTagsCmd to ever call — model.go's own gitTagsCmd doc comment. staticMapped true still
+// gets a non-nil gitTagsFn even when fn's own runtime mapped return is false, so a fixture
+// simulating "config says mapped, forge lookup fails at runtime" keeps working exactly as
+// before the split.
+func splitListFn(staticMapped bool, fn func(context.Context) ([]string, []forge.GitTag, bool, error)) (RegTagsFunc, GitTagsFunc) {
+	reg := func(ctx context.Context) ([]string, error) {
+		regTags, _, _, err := fn(ctx)
+		return regTags, err
+	}
+	if !staticMapped {
+		return reg, nil
+	}
+	git := func(ctx context.Context) ([]forge.GitTag, bool, error) {
+		_, gitTags, mapped, err := fn(ctx)
+		return gitTags, mapped, err
+	}
+	return reg, git
+}
+
 // fixedMetas builds a MetaFunc over a fixed table — deterministic, synchronous, no real
 // registry — keyed by tag.
 func fixedMetas(table map[string]registry.ImageMeta) MetaFunc {
@@ -63,7 +88,8 @@ func readyModel(t *testing.T, target string, mapped, production bool) Model {
 		}
 		return regTags, gitTags, true, nil
 	}
-	m := New("ghcr.io/example/app", target, Options{Mapped: mapped, Production: production, StagingEnv: "app-staging", StagingTags: []string{"v1"}, HasStagingMismatch: target == "app-production", List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
+	regFn, gitFn := splitListFn(mapped, listFn)
+	m := New("ghcr.io/example/app", target, Options{Mapped: mapped, Production: production, StagingEnv: "app-staging", StagingTags: []string{"v1"}, HasStagingMismatch: target == "app-production", RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -127,7 +153,8 @@ func TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime(t *testing.T)
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true /* config says mapped */, List: listFn, Meta: fixedMetas(metas)})
+	regFn, gitFn := splitListFn(true, listFn) // config says mapped; the runtime call itself reports false
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true /* config says mapped */, RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 30)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -192,7 +219,8 @@ func TestViewWindowsAroundCursorPastFirstPage(t *testing.T) {
 		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("1", 64), Created: date}
 	}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
-	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas)})
+	regFn, gitFn := splitListFn(true, listFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -258,7 +286,8 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 	// outside the window that ever gets fetched, so Reorder never learns its date at all.
 	metas["v29"] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat("9", 64), Created: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, nil, false, nil }
-	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: fixedMetas(metas)})
+	regFn, gitFn := splitListFn(false, listFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas)})
 	m = m.SetSize(100, 10) // pageSize = max(10-4, 5) = 6
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
@@ -331,7 +360,8 @@ func TestFailedMetaFetchIsNotRetriedForever(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: metaFn})
+	regFn, gitFn := splitListFn(false, listFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{RegTags: regFn, GitTags: gitFn, Meta: metaFn})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -384,7 +414,8 @@ func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return regTags, nil, false, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: metaFn})
+	regFn, gitFn := splitListFn(false, listFn)
+	m := New("ghcr.io/example/app", "app-staging", Options{RegTags: regFn, GitTags: gitFn, Meta: metaFn})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -472,10 +503,11 @@ func TestStagingNoteRendersDisagreementAcrossMultipleTags(t *testing.T) {
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
 		return []string{"v1"}, nil, false, nil
 	}
+	regFn, gitFn := splitListFn(false, listFn)
 	metaFn := fixedMetas(map[string]registry.ImageMeta{
 		"v1": {Digest: "sha256:" + strings.Repeat("1", 64)},
 	})
-	m := New("ghcr.io/example/app", "app-production", Options{Production: true, StagingEnv: "app-staging", StagingTags: []string{"v1", "v2"}, HasStagingMismatch: true, List: listFn, Meta: metaFn})
+	m := New("ghcr.io/example/app", "app-production", Options{Production: true, StagingEnv: "app-staging", StagingTags: []string{"v1", "v2"}, HasStagingMismatch: true, RegTags: regFn, GitTags: gitFn, Meta: metaFn})
 	m = m.SetSize(300, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -633,11 +665,11 @@ func TestEscEmitsBackMsg(t *testing.T) {
 // would silently overwrite the new picker's own rows.
 func TestStaleListResultFromDifferentRepoIsDiscarded(t *testing.T) {
 	left := New("ghcr.io/example/other", "app-staging", Options{
-		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
-			return []string{"stale"}, nil, false, nil
+		RegTags: func(context.Context) ([]string, error) {
+			return []string{"stale"}, nil
 		},
 		Meta: fixedMetas(nil)})
-	staleMsg := left.loadCmd()()
+	staleMsg := left.regTagsCmd()()
 
 	current := readyModel(t, "app-staging", true, false)
 	beforeRows := append([]Row(nil), current.rows...)
@@ -686,11 +718,11 @@ func TestStaleMetaResultFromDifferentRepoIsDiscarded(t *testing.T) {
 func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
 	first := New(repo, "app-staging", Options{Mapped: true,
-		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
-			return []string{"stale-from-first"}, nil, false, nil
+		RegTags: func(context.Context) ([]string, error) {
+			return []string{"stale-from-first"}, nil
 		},
 		Meta: fixedMetas(nil)})
-	staleMsg := first.loadCmd()() // captured, never delivered — the operator backs out first.
+	staleMsg := first.regTagsCmd()() // captured, never delivered — the operator backs out first.
 
 	// Reopen: a brand new Model for the identical repo, exactly as internal/app's root would
 	// construct on a fresh 'd' keypress.
@@ -722,8 +754,8 @@ func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	const repo = "ghcr.io/example/app"
 	first := New(repo, "app-staging", Options{Mapped: true,
-		List: func(context.Context) ([]string, []forge.GitTag, bool, error) { return []string{"v1"}, nil, false, nil },
-		Meta: fixedMetas(nil)})
+		RegTags: func(context.Context) ([]string, error) { return []string{"v1"}, nil },
+		Meta:    fixedMetas(nil)})
 	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
 
 	second := readyModel(t, "app-staging", true, false)
@@ -743,8 +775,8 @@ func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 
 func TestListErrorRendersInsteadOfHanging(t *testing.T) {
 	m := New("ghcr.io/example/app", "app-staging", Options{
-		List: func(context.Context) ([]string, []forge.GitTag, bool, error) {
-			return nil, nil, false, errors.New("registry unreachable")
+		RegTags: func(context.Context) ([]string, error) {
+			return nil, errors.New("registry unreachable")
 		}})
 	m = drain(m, m.Init())
 	if m.err == nil {
@@ -779,10 +811,9 @@ func TestNilListFuncErrorNamesRepoAndConfigKnob(t *testing.T) {
 // tag, no pointer to how to fix it. The row's own recorded error must name the image repo and
 // the tag this fetch was for, and point at the same registries[] config knob.
 func TestNilMetaFuncErrorNamesRepoTagAndConfigKnob(t *testing.T) {
-	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
-		return []string{"v1"}, nil, false, nil
-	}
-	m := New("ghcr.io/example/nilmeta", "app-staging", Options{List: listFn})
+	m := New("ghcr.io/example/nilmeta", "app-staging", Options{
+		RegTags: func(context.Context) ([]string, error) { return []string{"v1"}, nil },
+	})
 	m = m.SetSize(100, 30)
 	m = drain(m, m.Init())
 	if m.state != stateReady {
@@ -801,27 +832,27 @@ func TestNilMetaFuncErrorNamesRepoTagAndConfigKnob(t *testing.T) {
 	}
 }
 
-// TestLoadCmdUsesModelsCancellableContext and TestFetchCmdUsesModelsCancellableContext are
+// TestRegTagsCmdUsesModelsCancellableContext and TestFetchCmdUsesModelsCancellableContext are
 // finding 8's own wiring regression tests (round N, Codex P2, "cancel tag loads when leaving
-// the picker"): loadCmd/fetchCmd used to close over context.Background(), which nothing can
+// the picker"): regTagsCmd/fetchCmd used to close over context.Background(), which nothing can
 // ever cancel — the fix is a context.Context/CancelFunc pair stored on Model (New's own doc
 // comment) and threaded through both. Cancelling the model's own context before invoking the
-// command must be visible to listFn/metaFn, proving the wiring, not just that a cancel field
-// exists somewhere unused.
-func TestLoadCmdUsesModelsCancellableContext(t *testing.T) {
+// command must be visible to regTagsFn/metaFn, proving the wiring, not just that a cancel
+// field exists somewhere unused.
+func TestRegTagsCmdUsesModelsCancellableContext(t *testing.T) {
 	var gotCtx context.Context
-	listFn := func(ctx context.Context) ([]string, []forge.GitTag, bool, error) {
+	regTagsFn := func(ctx context.Context) ([]string, error) {
 		gotCtx = ctx
-		return nil, nil, false, nil
+		return nil, nil
 	}
-	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn})
+	m := New("ghcr.io/example/app", "app-staging", Options{RegTags: regTagsFn})
 	m.cancel()
-	m.loadCmd()()
+	m.regTagsCmd()()
 	if gotCtx == nil {
-		t.Fatal("listFn was never called")
+		t.Fatal("regTagsFn was never called")
 	}
 	if gotCtx.Err() != context.Canceled {
-		t.Fatalf("loadCmd must pass the model's own cancellable context to listFn, not context.Background(): Err()=%v", gotCtx.Err())
+		t.Fatalf("regTagsCmd must pass the model's own cancellable context to regTagsFn, not context.Background(): Err()=%v", gotCtx.Err())
 	}
 }
 
@@ -952,8 +983,9 @@ func TestViewGroupsTagsByClass(t *testing.T) {
 		metas[tag] = registry.ImageMeta{Digest: "sha256:" + strings.Repeat(string(rune('1'+i)), 64), Created: fixedNow.AddDate(0, 0, -1-i)}
 	}
 	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) { return regTags, gitTags, true, nil }
+	regFn, gitFn := splitListFn(true, listFn)
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
-		m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
+		m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
 		m = drain(m.SetSize(size[0], size[1]).SetStyles(ui.NewStyles(true)), m.Init())
 		v := ansi.Strip(m.View())
 		for _, want := range []string{"digest tags (sha-…)", "moving tags (latest, branches)", "sha-055c877f", "latest", "main", "fix-docker-workflow-secre"} {
@@ -967,7 +999,7 @@ func TestViewGroupsTagsByClass(t *testing.T) {
 		uitest.Golden(t, "tags-grouped", m.View(), size[0], size[1])
 	}
 	// `/` searches every group: "a" matches no release, one digest tag and two moving ones.
-	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, List: listFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
+	m := New("ghcr.io/example/app", "app-staging", Options{Mapped: true, RegTags: regFn, GitTags: gitFn, Meta: fixedMetas(metas), Now: func() time.Time { return fixedNow }})
 	m = drain(m.SetSize(80, 24).SetStyles(ui.NewStyles(true)), m.Init())
 	m = uitest.Keys(m, updateFn, "/", "a")
 	if got := tagsOf(m.filtered()); len(got) != 3 || got[0] != "sha-055c877f" || got[2] != "main" {
@@ -1042,10 +1074,10 @@ func TestCredentialErrorIsWrappedSoEveryClauseIsVisible(t *testing.T) {
 		"env: neither HOIST_GHCR_TOKEN nor GHCR_TOKEN is set; keychain: status 403 Forbidden; " +
 		"cluster: not configured; op: not configured; anonymous: status 401 Unauthorized"
 
-	listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
-		return nil, nil, false, errors.New(chain)
-	}
-	m := New("ghcr.io/example/app", "app-staging", Options{List: listFn, Meta: fixedMetas(nil)})
+	m := New("ghcr.io/example/app", "app-staging", Options{
+		RegTags: func(context.Context) ([]string, error) { return nil, errors.New(chain) },
+		Meta:    fixedMetas(nil),
+	})
 	m = m.SetSize(100, 20)
 	m = m.SetStyles(ui.NewStyles(true))
 	m = drain(m, m.Init())
