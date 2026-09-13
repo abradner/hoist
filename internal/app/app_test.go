@@ -64,6 +64,43 @@ func sizedWithPromotion(t *testing.T, promo Promotion) tea.Model {
 	return tm
 }
 
+// extractBuildCmd unwraps the tea.Batch(fs.Init(), buildCmd) shape plan.StartMsg/deploy.StartMsg
+// now return (the preflight phase, #PR2 — the building flight screen is pushed on the
+// keypress itself, not once the build finishes) and returns buildCmd itself, uncalled — never
+// fs.Init(), which starts flight.Model's own progressCh listener (listenCmd) and would block
+// forever receiving from a test channel nothing sends on or closes. buildCmd is always the
+// batch's last element by construction (app.go's plan.StartMsg/deploy.StartMsg build it that
+// way); a test that changes that order needs to update this comment along with it, per
+// AGENTS.md §10 meta-rule 2. Returned uncalled so a caller that needs to run it in its own
+// goroutine (a test proving cancellation actually reaches the hung call) can.
+func extractBuildCmd(t *testing.T, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil command")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("command yields %T, want tea.BatchMsg(fs.Init(), buildCmd)", msg)
+	}
+	last := batch[len(batch)-1]
+	if last == nil {
+		t.Fatal("batch's last element (expected buildCmd) is nil")
+	}
+	return last
+}
+
+// buildResultFrom is extractBuildCmd plus running it, for the common case of a test that just
+// wants the eventual promotionBuiltMsg.
+func buildResultFrom(t *testing.T, cmd tea.Cmd) promotionBuiltMsg {
+	t.Helper()
+	pbm, ok := extractBuildCmd(t, cmd)().(promotionBuiltMsg)
+	if !ok {
+		t.Fatal("buildCmd did not yield a promotionBuiltMsg")
+	}
+	return pbm
+}
+
 func press(t *testing.T, m tea.Model, k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	t.Helper()
 	return m.Update(k)
@@ -241,7 +278,7 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		return s, true, nil, nil
 	}
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		if p.SourceEnv != "app-staging" || p.TargetEnv != "app-production" {
 			t.Errorf("startPromotion called with unexpected plan: %+v", p)
@@ -254,24 +291,84 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg with a wired startPromotion produced no command")
 	}
-	built := cmd()
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens right after StartMsg, want 2 (the building flight screen pushed on the keypress)", n)
+	}
+	pbm := buildResultFrom(t, cmd)
 	if !called {
 		t.Fatal("the command never called the wired startPromotion")
-	}
-	pbm, ok := built.(promotionBuiltMsg)
-	if !ok {
-		t.Fatalf("command yields %T, want promotionBuiltMsg", built)
 	}
 	if pbm.err != nil {
 		t.Fatalf("unexpected error from a successful startPromotion: %v", pbm.err)
 	}
 	m, _ = m.Update(pbm)
 	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("stack has %d screens after a successful promotionBuiltMsg, want 2", n)
+		t.Fatalf("stack has %d screens after a successful promotionBuiltMsg, want 2 (adopted into the same screen, not pushed again)", n)
 	}
 	if v := plain(m); !strings.Contains(v, "app-staging → app-production") || !strings.Contains(v, wantState.ID) {
 		t.Errorf("flight screen view missing the real state's envs/id:\n%s", v)
 	}
+}
+
+// TestProgressSurvivesFromPreflightThroughDrive is a regression test for a P1 two independent
+// adversarial reviews of this same commit found: the build goroutine plan.StartMsg/
+// deploy.StartMsg spawn used to close progressCh the instant startPromotion returned
+// (`defer close(progressCh)`) — on the wrong assumption that the channel's job ended with
+// preflight. But cmd/hoist's real driveFuncFor reuses the SAME progress callback for
+// engine.Drive's own per-step save hook (defect B/C: a long single Act streams into the log as
+// it happens, not only once the whole Drive call returns) — so the very first real drive call
+// after a successful build sent on an already-closed channel, and a send on a closed channel
+// panics unconditionally in Go; select/default only guards a full buffer, never a closed one.
+// No other test in this file could have caught it: every other fake Start/driveFn pair here
+// (stubDriveFn and friends) never calls progress from the driveFn side at all, so the bug's
+// actual trigger — the SAME closure called again, later, from a different goroutine, after the
+// build's own goroutine returned — never fired. This one does: the fake DriveFunc below calls
+// progress from a REAL DriveFunc, driven through the REAL plan.StartMsg → promotionBuiltMsg →
+// AdoptBuilt → driveCmd path, the same sequence a real cmd/hoist wiring drives — proving app.go
+// itself never closes the channel out from under a drive that is still going to use it.
+func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+		// Preflight: exactly what buildStartPromotion's own report(...) calls do.
+		progress("checking your checkout against origin/main")
+		progress("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
+		return engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv},
+			func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+				// Drive: exactly what driveFuncFor's own wrapped save does — call the SAME
+				// progress closure the preflight above just used, from a call that only
+				// happens after the build goroutine that constructed it has already
+				// returned. This is the exact shape that panicked.
+				progress("branched: acted")
+				s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: "acted"})
+				return s, true, nil, nil
+			}, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("panicked reaching drive with a live progress callback: %v", r)
+			}
+		}()
+		m, cmd := m.Update(msg)
+		pbm := buildResultFrom(t, cmd)
+		m, adoptCmd := m.Update(pbm)
+		if adoptCmd == nil {
+			t.Fatal("promotionBuiltMsg's adopt path produced no command")
+		}
+		batch, ok := adoptCmd().(tea.BatchMsg)
+		if !ok || len(batch) < 2 {
+			t.Fatalf("AdoptBuilt's command = %#v, want a batch including the drive call at index 1", adoptCmd())
+		}
+		// index 1: driveCmd — the call that used to panic. Never index 2 (listenCmd): that
+		// would block forever on this test's own internal, unreferenced channel.
+		driveMsg := batch[1]()
+		m, _ = m.Update(driveMsg)
+		if v := plain(m); !strings.Contains(v, "acted") {
+			t.Errorf("flight screen view missing the real drive result:\n%s", v)
+		}
+	}()
 }
 
 // TestPromotionBuiltMsgStampsCurrentBuildGen is the direct, narrow check that a StartMsg's
@@ -279,7 +376,7 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // mirrors TestDriveCmdStampsCurrentGen at the flight layer (internal/app/flight/model_test.go),
 // one layer up the stack, guarding the build step instead of the drive step.
 func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -288,35 +385,34 @@ func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg with a wired startPromotion produced no command")
 	}
-	pbm, ok := cmd().(promotionBuiltMsg)
-	if !ok {
-		t.Fatalf("command yields %T, want promotionBuiltMsg", pbm)
-	}
+	pbm := buildResultFrom(t, cmd)
 	if pbm.gen != m.(Model).buildGen {
 		t.Errorf("promotionBuiltMsg.gen = %d, want %d (m.buildGen)", pbm.gen, m.(Model).buildGen)
 	}
 }
 
 // TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped is PR #50 round-4 review finding #4
-// (Codex): the plan screen stays fully interactive while its StartMsg's startPromotion call
-// runs in the background, so the operator can press Esc (plan.BackMsg, popping back to the
-// matrix) before that call's result ever arrives. Without a generation check, the
-// promotionBuiltMsg would still be adopted unconditionally once it landed — pushing a flight
-// screen (which immediately starts driving: committing, pushing, opening a PR) for a plan the
-// operator already backed out of. This proves the stale result is dropped: the stack stays on
-// the matrix, and nothing is pushed.
+// (Codex), updated for the preflight phase (#PR2): StartMsg now pushes a building flight
+// screen on the keypress itself, so the plan screen is no longer on top and the operator's
+// Esc is real UI now routes to flight.BackMsg, not plan.BackMsg — the building screen's own
+// handler (app.go's flight.BackMsg case) is what bumps buildGen and cancels the outstanding
+// build, mirroring what plan.BackMsg used to do for the pre-preflight design. Without that
+// generation check, the promotionBuiltMsg would still be adopted unconditionally once it
+// landed — resurrecting a flight screen (which immediately starts driving: committing,
+// pushing, opening a PR) for a plan the operator already backed out of. This proves the stale
+// result is dropped: the stack stays on the plan screen it returned to, and nothing new is
+// pushed or adopted.
 func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		return s, true, nil, nil
 	}
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		return wantState, stubDriveFn, nil
 	}}
 	m := sizedWithPromotion(t, promo)
 
-	// Push the plan screen (mirrors TestPromotePushesPlanScreen) so plan.BackMsg has
-	// something real to pop.
+	// Push the plan screen (mirrors TestPromotePushesPlanScreen).
 	m, _ = m.Update(matrix.OpenPlanMsg{Source: "app-staging"})
 	if n := len(m.(Model).stack); n != 2 {
 		t.Fatalf("stack has %d screens after opening the plan screen, want 2", n)
@@ -327,32 +423,38 @@ func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg with a wired startPromotion produced no command")
 	}
-	built := cmd() // the request completes...
+	if n := len(m.(Model).stack); n != 3 {
+		t.Fatalf("stack has %d screens right after StartMsg, want 3 (matrix, plan, the building flight screen)", n)
+	}
+	pbm := buildResultFrom(t, cmd) // the request completes...
 
-	// ...but before its result is delivered, the operator backs out of the plan screen
-	// (Esc — plan.Model emits BackMsg for this key regardless of screen state).
-	m, _ = m.Update(plan.BackMsg{})
-	if n := len(m.(Model).stack); n != 1 {
-		t.Fatalf("plan.BackMsg left stack at %d screens, want 1 (popped back to the matrix)", n)
+	// ...but before its result is delivered, the operator backs out of the building flight
+	// screen (Esc — flight.Model emits BackMsg for this key regardless of screen state).
+	m, _ = m.Update(flight.BackMsg{})
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("flight.BackMsg left stack at %d screens, want 2 (popped back to the plan screen)", n)
 	}
 
-	m, cmd = m.Update(built)
+	m, cmd = m.Update(pbm)
 	if cmd != nil {
 		t.Errorf("a stale promotionBuiltMsg produced a command: %#v", cmd())
 	}
-	if n := len(m.(Model).stack); n != 1 {
-		t.Errorf("stack changed to %d screens processing a stale promotionBuiltMsg, want unchanged at 1 (no flight screen pushed for an abandoned plan)", n)
+	if n := len(m.(Model).stack); n != 2 {
+		t.Errorf("stack changed to %d screens processing a stale promotionBuiltMsg, want unchanged at 2 (no flight screen adopted or pushed for an abandoned plan)", n)
 	}
 }
 
 // TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped is PR #50 round-4 review finding
-// #4 (Codex): the plan screen has no "confirming" indicator once Enter fires StartMsg, so
-// nothing stops the operator pressing Enter again before the first request's result arrives.
-// Without a generation check, whichever of the two overlapping requests happened to resolve
-// last was adopted unconditionally — risking two independent flight screens (two goroutines)
-// driving the very same promotion at once. This proves only the second (current) request's
-// result is ever adopted: the first, superseded one is dropped even though it is the one
-// actually delivered to Update.
+// #4 (Codex), updated for the preflight phase (#PR2). Through real UI interaction this
+// scenario can no longer arise the way it originally did — the plan screen is buried under
+// the first StartMsg's own building flight screen the instant it fires, so it no longer
+// receives keys and cannot itself emit a second StartMsg — but the invariant this test proves
+// (buildGen decides which result is adopted, not delivery order) still has to hold for
+// whatever DOES call Update with a second StartMsg while a first is outstanding, and
+// popIfBuilding's own job (plan.StartMsg's comment) is exactly to stop that second call from
+// stacking a second building screen on top of the first rather than replacing it — this test
+// is what proves that: only ONE flight screen ever exists at a time across both requests, and
+// it always ends up showing the current (second) one's state, never the superseded first.
 func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 	first := engine.PromotionState{ID: "first-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	second := engine.PromotionState{ID: "second-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
@@ -360,7 +462,7 @@ func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 		return s, true, nil, nil
 	}
 	calls := 0
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		calls++
 		if calls == 1 {
 			return first, stubDriveFn, nil
@@ -370,22 +472,30 @@ func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
 
-	// First confirmation: request issued, not yet resolved.
+	// First confirmation: request issued, not yet resolved. Pushes a building screen.
 	m, cmd1 := m.Update(msg)
 	if cmd1 == nil {
 		t.Fatal("first StartMsg produced no command")
 	}
-	firstResult := cmd1()
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after the first StartMsg, want 2 (matrix, the building flight screen)", n)
+	}
+	firstResult := buildResultFrom(t, cmd1)
 
-	// Second confirmation, before the first ever resolved (the plan screen is still on top
-	// and still fully interactive): supersedes the first.
+	// Second confirmation, before the first ever resolved: supersedes the first. popIfBuilding
+	// (inside the plan.StartMsg case) removes the first building screen before pushing a
+	// second — the stack must stay at 2, never grow to 3, or the first would be leaked,
+	// buried and invisible underneath.
 	m, cmd2 := m.Update(msg)
 	if cmd2 == nil {
 		t.Fatal("second StartMsg produced no command")
 	}
-	secondResult := cmd2()
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after the superseding StartMsg, want 2 (the first building screen replaced, not stacked under a second)", n)
+	}
+	secondResult := buildResultFrom(t, cmd2)
 
-	// The first (now-stale) result arrives first: must be dropped, not pushed.
+	// The first (now-stale) result arrives first: must be dropped, not adopted.
 	before := len(m.(Model).stack)
 	m, cmd := m.Update(firstResult)
 	if cmd != nil {
@@ -395,10 +505,11 @@ func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 		t.Fatalf("stack changed to %d screens processing the stale first result, want unchanged at %d", n, before)
 	}
 
-	// The second (current) result arrives: must be adopted.
+	// The second (current) result arrives: must be adopted into the same screen instance,
+	// never pushed again.
 	m, _ = m.Update(secondResult)
-	if n := len(m.(Model).stack); n != before+1 {
-		t.Fatalf("stack has %d screens after the current second result, want %d (flight screen pushed)", n, before+1)
+	if n := len(m.(Model).stack); n != before {
+		t.Fatalf("stack has %d screens after the current second result, want unchanged at %d (adopted in place)", n, before)
 	}
 	if v := plain(m); !strings.Contains(v, second.ID) {
 		t.Errorf("flight screen view missing the second request's own state ID %q:\n%s", second.ID, v)
@@ -424,7 +535,7 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -441,7 +552,7 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg produced no command")
 	}
-	cmd()
+	buildResultFrom(t, cmd)
 	if !called {
 		t.Fatal("the command never called the wired startPromotion")
 	}
@@ -475,7 +586,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -492,7 +603,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg produced no command")
 	}
-	cmd()
+	buildResultFrom(t, cmd)
 	if !called {
 		t.Fatal("the command never called the wired startPromotion")
 	}
@@ -541,7 +652,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 	var got StartOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
@@ -556,7 +667,7 @@ func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("direct-mode StartMsg produced no command; the confirm should start a promotion")
 	}
-	cmd() // the start call happens off the Update stack
+	buildResultFrom(t, cmd) // the start call happens off the Update stack
 	if !called {
 		t.Fatal("startPromotion was never called for a direct-mode confirm")
 	}
@@ -571,8 +682,9 @@ func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 // The PR path must not accidentally inherit direct mode.
 func TestStartMsgPRModeIsNotDirect(t *testing.T) {
 	var got StartOpts
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
-		got = opts
+	called := false
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -583,7 +695,13 @@ func TestStartMsgPRModeIsNotDirect(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("PR-mode StartMsg produced no command")
 	}
-	cmd()
+	buildResultFrom(t, cmd)
+	if !called {
+		// Direct/Confirmed both default false, the same values a correct PR-mode call
+		// itself passes — without this, the assertion below would pass whether or not
+		// startPromotion was ever actually called.
+		t.Fatal("startPromotion was never called")
+	}
 	if got.Direct || got.Confirmed {
 		t.Errorf("PR mode leaked direct opts: %+v", got)
 	}
@@ -615,7 +733,7 @@ func TestPromotionBuiltMsgNilDriveFnShowsNotice(t *testing.T) {
 // pushed) rather than crashing.
 func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	wantErr := errors.New("promotion existing-id targeting app-production is still in flight (at pr-opened: open); run `hoist resume existing-id` instead of starting a second one")
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{}, nil, wantErr
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -625,9 +743,15 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg with a wired startPromotion produced no command")
 	}
-	m, _ = m.Update(cmd())
+	// The building flight screen goes up on the keypress itself (#PR2), before the error is
+	// known — popIfBuilding (inside promotionBuiltMsg's own error branch) is what takes the
+	// stack back to `before` once the error actually arrives, not the absence of a push.
+	if n := len(m.(Model).stack); n != before+1 {
+		t.Fatalf("stack has %d screens right after StartMsg, want %d (the building flight screen pushed)", n, before+1)
+	}
+	m, _ = m.Update(buildResultFrom(t, cmd))
 	if n := len(m.(Model).stack); n != before {
-		t.Errorf("stack changed from %d to %d screens after a construction error; must stay put", before, n)
+		t.Errorf("stack ended at %d screens after a construction error, want back to %d (the building screen popped)", n, before)
 	}
 	if v := plain(m); !strings.Contains(v, "still in flight") {
 		t.Errorf("view missing the construction-error notice:\n%s", v)
@@ -640,7 +764,7 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 // flight.Model.driveCmd's own DriveFunc call, so this returns with ctx's deadline error instead
 // of the goroutine blocking indefinitely.
 func TestStartMsgBoundedByPollDeadline(t *testing.T) {
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		<-ctx.Done()
 		return engine.PromotionState{}, nil, ctx.Err()
 	}
@@ -651,8 +775,9 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg with a wired startPromotion produced no command")
 	}
+	buildCmd := extractBuildCmd(t, cmd)
 	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
+	go func() { done <- buildCmd() }()
 	select {
 	case built := <-done:
 		pbm, ok := built.(promotionBuiltMsg)
@@ -676,7 +801,7 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 // startPromotion call's own context, not just its result.
 func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
 		return engine.PromotionState{}, nil, ctx.Err()
@@ -688,11 +813,17 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("StartMsg produced no command")
 	}
-	go cmd()
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after StartMsg, want 2 (matrix, the building flight screen)", n)
+	}
+	go extractBuildCmd(t, cmd)()
 
-	m, _ = m.Update(plan.BackMsg{})
+	// Esc on the building flight screen (real UI routes here now, not plan.BackMsg — see
+	// flight.BackMsg's own handler, which is what actually reaches m.buildCancel for a
+	// screen still in its preflight phase).
+	m, _ = m.Update(flight.BackMsg{})
 	if m.(Model).buildCancel != nil {
-		t.Error("buildCancel should be cleared after BackMsg cancels it")
+		t.Error("buildCancel should be cleared after flight.BackMsg cancels it")
 	}
 
 	select {
@@ -712,7 +843,7 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	firstErr := make(chan error, 1)
 	callCount := 0
-	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		callCount++
 		if callCount == 1 {
 			<-ctx.Done()
@@ -727,7 +858,7 @@ func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	if cmd1 == nil {
 		t.Fatal("first StartMsg produced no command")
 	}
-	go cmd1()
+	go extractBuildCmd(t, cmd1)()
 
 	_, cmd2 := m.Update(msg)
 	if cmd2 == nil {
@@ -745,15 +876,18 @@ func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	}
 }
 
-// TestFlightScreenSharesBuildDeadlineWithDrive is Copilot's PR #50 round-7 finding: flight.New
-// used to be handed the raw m.poll.Deadline and would start a FRESH poll.Deadline-length window
-// of its own from the moment it was constructed — after the build step (this StartMsg's own
-// startPromotion call) had already spent some of the SAME configured budget. The CLI path wraps
-// build+drive under one ctx.WithTimeout, so the TUI's total wait exceeding poll.deadline is a
-// real divergence. This proves the opposite: a startPromotion call that consumes most of a tiny
-// deadline still leaves the flight screen's own drive call bounded by only whatever's left, not
+// TestFlightScreenSharesBuildDeadlineWithDrive is Copilot's PR #50 round-7 finding, reproved
+// against the preflight phase's own mechanism (#PR2): flight.New used to be handed the raw
+// m.poll.Deadline and start a FRESH poll.Deadline-length window of its own once CONSTRUCTED —
+// and construction used to happen only once the build (this StartMsg's own startPromotion
+// call) had already spent some of that SAME configured budget. The fix used to be an explicit
+// "how much of poll.Deadline is left" recompute at construction time; now there is nothing to
+// recompute, because construction itself (flight.NewBuilding) happens BEFORE the build even
+// starts — deadlineAt is fixed once, at the keypress, and AdoptBuilt reuses it unchanged. This
+// proves the guarantee still holds under the new mechanism: a build that consumes most of a
+// tiny deadline still leaves the drive call that follows bounded by only whatever's left, not
 // a fresh full window — the drive call (which blocks forever on its own ctx.Done() otherwise)
-// must report context.DeadlineExceeded almost immediately, not after another full poll.Deadline.
+// must report context.DeadlineExceeded almost immediately.
 func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 	const total = 200 * time.Millisecond
 	const buildSleep = 150 * time.Millisecond // leaves ~50ms of the budget for drive
@@ -762,7 +896,7 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 		return s, false, nil, ctx.Err()
 	}
 	promo := Promotion{
-		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 			time.Sleep(buildSleep)
 			return engine.PromotionState{ID: "abcd1234"}, hungDrive, nil
 		},
@@ -770,15 +904,24 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 	}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
+	// deadlineAt is fixed HERE, by flight.NewBuilding inside this StartMsg handler — before
+	// Start's own buildSleep ever runs.
 	m, cmd := m.Update(msg)
-	built := cmd() // runs Start's own buildSleep synchronously in this goroutine
-	m, fsInitCmd := m.Update(built)
-	if fsInitCmd == nil {
-		t.Fatal("pushing the flight screen produced no Init command")
+	buildCmd := extractBuildCmd(t, cmd)
+	pbm := buildCmd() // runs Start's own buildSleep synchronously in this goroutine
+
+	m, adoptCmd := m.Update(pbm)
+	if adoptCmd == nil {
+		t.Fatal("AdoptBuilt (via promotionBuiltMsg's adopt path) produced no command")
 	}
-	batch, ok := fsInitCmd().(tea.BatchMsg)
-	if !ok || len(batch) != 2 {
-		t.Fatalf("flight screen's Init = %#v, want a 2-command batch (spinner tick, drive)", fsInitCmd())
+	// 3 commands: spinner tick, drive (index 1 — this test's own concern), and listenCmd
+	// (AdoptBuilt keeps the preflight progress listener alive into the drive phase, its own
+	// doc comment) — never called here, since this test has no reference to the internal
+	// channel plan.StartMsg's own handler constructed, and calling it would block forever on
+	// an empty, unclosed channel nothing in this test ever sends on or closes.
+	batch, ok := adoptCmd().(tea.BatchMsg)
+	if !ok || len(batch) != 3 {
+		t.Fatalf("AdoptBuilt's command = %#v, want a 3-command batch (spinner tick, drive, listen)", adoptCmd())
 	}
 
 	done := make(chan tea.Msg, 1)
@@ -802,13 +945,13 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
 	const secret = "ghp_totallysecrettoken1234567890"
 	redact.Register(secret)
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 		return engine.PromotionState{}, nil, fmt.Errorf("push failed: authentication using %s rejected", secret)
 	}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
 	m, cmd := m.Update(msg)
-	m, _ = m.Update(cmd())
+	m, _ = m.Update(buildResultFrom(t, cmd))
 	v := plain(m)
 	if strings.Contains(v, secret) {
 		t.Errorf("view leaks the registered secret unredacted:\n%s", v)
@@ -1379,7 +1522,7 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var got StartOpts
 			called := false
-			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
 				called, got = true, opts
 				return engine.PromotionState{}, nil, nil
 			}}
@@ -1394,7 +1537,7 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 			if cmd == nil {
 				t.Fatal("confirming a deploy produced no command")
 			}
-			cmd()
+			buildResultFrom(t, cmd)
 			if !called {
 				t.Fatal("startPromotion was never called for a confirmed deploy")
 			}

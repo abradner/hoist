@@ -34,7 +34,15 @@ import (
 // failing runTUI outright) since a repo with no github configured never needs f at all — see
 // the eff.cfg check below, which reports that more specific case first.
 func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
-	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts) (engine.PromotionState, flight.DriveFunc, error) {
+	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+		// report is progress with the nil check made once, here, rather than at every call
+		// site below — mirrors onWaiting's own nil-safety convention throughout
+		// internal/engine (a nil hook is exactly as valid as a real one, never a special
+		// case a caller has to guard against itself).
+		report := func(string) {}
+		if progress != nil {
+			report = progress
+		}
 		if eff.cfg == nil || eff.cfg.GitHub == "" {
 			// The same check runPromote itself makes before ever calling
 			// buildPromotionForConfirm (which assumes eff.cfg.GitHub is non-empty: it's
@@ -60,6 +68,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// from it, not only one that happens to come out all-no-op. runPromote does exactly
 		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
 		// disagree about when a plan is trustworthy.
+		report("checking your checkout against origin/" + eff.base)
 		if err := checkCloneCurrentForBase(ctx, g, eff.repo, eff.base, p.Edits); err != nil {
 			return engine.PromotionState{}, nil, err
 		}
@@ -115,6 +124,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 				}
 				return gitops.BuildPlanWith(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests, reasons)
 			}
+			report("checking origin/" + eff.base + " for occurrences your checkout hasn't seen")
 			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, eff.base, eff.appsRoot, p, buildFresh); err != nil {
 				return engine.PromotionState{}, nil, err
 			}
@@ -136,6 +146,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// engine.Drive and CIGreenStep.Observe — the same field `hoist resume
 		// --override-ci-none` sets (#103). A re-confirm of the same id keeps a prior run's
 		// override, as buildPromotionForConfirm's own prev-state merge already does for the CLI.
+		report("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
 		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, false, g, f, argoApps)
 		if err != nil {
 			return engine.PromotionState{}, nil, err
@@ -170,6 +181,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		// DirectPushedStep still sets it independently, because the step that does the
 		// landing is what makes it true (Copilot, PR #72).
 		s.Direct = opts.Direct
+		report("saving promotion state")
 		if err := engine.SaveState(statePath, s); err != nil {
 			release()
 			return engine.PromotionState{}, nil, fmt.Errorf("writing initial promotion state: %w", err)
@@ -178,12 +190,19 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		save := func(st *engine.PromotionState) error {
 			return engine.SaveState(statePath, st)
 		}
+		report("preflight complete, driving")
 
-		// onWaiting is nil here: the interactive "waiting for signing approval" text
-		// runPromote prints to stderr has no analogue wired into flight.Model yet (it would
-		// need a way to deliver a message mid-driveCmd, which this brief does not add) — the
-		// flight screen's own spinner keeps animating for the whole Act call regardless, so
-		// the operator still sees the screen is busy, just without that specific wording.
+		// onWaiting used to be nil unconditionally here: the interactive "waiting for signing
+		// approval" text runPromote prints to stderr had no analogue wired into flight.Model
+		// (it would need a way to deliver a message mid-driveCmd) — the flight screen's own
+		// spinner kept animating for the whole Act call regardless, so the operator still saw
+		// the screen was busy, just without that specific wording. progress is that way now
+		// (defect B): the same callback this preflight reported through carries the wait into
+		// the drive too.
+		var onWaiting func()
+		if progress != nil {
+			onWaiting = func() { progress("waiting for signing approval") }
+		}
 		// The full ten either way, now that direct mode converges too (issue #66). The TUI drove
 		// only CoreSteps while three things were missing: DirectSteps stopped at the push,
 		// flight.retryableStep classified only CIGreen/Approved so a transient Kubernetes Get
@@ -194,12 +213,12 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 		if opts.Direct {
 			// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
 			// caller narrowing it. Confirmed comes from the screen that ran the gesture.
-			steps = engine.AllDirectSteps(g, a, ro, eff.cfg.Envs.Production, opts.Confirmed, nil)
+			steps = engine.AllDirectSteps(g, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)
 		} else {
-			steps = engine.AllSteps(g, f, a, ro, nil)
+			steps = engine.AllSteps(g, f, a, ro, onWaiting)
 		}
 
-		return *s, driveFuncFor(steps, save), nil
+		return *s, driveFuncFor(steps, save, progress), nil
 	}
 }
 
@@ -208,7 +227,29 @@ func buildStartPromotion(eff effective, r *gitops.Repo, g git.Git, f forge.Forge
 // are read from statuses, not surfaced as err — see flight.DriveFunc's own doc comment. Any
 // other error from Drive (a plumbing hiccup on a retryable step, or a terminal Act/Observe
 // failure) is a genuine failure and is returned as err.
-func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error) flight.DriveFunc {
+//
+// progress, when non-nil, turns engine.Drive's own per-step save calls into a live line the
+// flight screen shows as it happens (defect C: previously the screen only learned anything
+// once a WHOLE Drive call returned — and Drive can walk through several already-satisfied or
+// newly-acted steps in one call before it stops, so a first drive that branches, commits,
+// pushes and opens a PR before hitting CI's own Waiting could render nothing at all for the
+// whole time that took). save's own persistence still happens on every call; progress is
+// layered on top of it, never instead of it. buildStartPromotion passes the operator's
+// preflight progress callback through unchanged so preflight and drive read as one log; the
+// TUI's resumed-promotion path (buildInFlightFuncs.Resume) has no progress channel wired yet
+// and passes nil here, same as before this change — its own live streaming is a natural,
+// separately-scoped followup once this lands.
+func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error, progress func(string)) flight.DriveFunc {
+	if progress != nil {
+		wrapped := save
+		save = func(st *engine.PromotionState) error {
+			if n := len(st.History); n > 0 {
+				h := st.History[n-1]
+				progress(fmt.Sprintf("%s: %s", h.Step, h.Detail))
+			}
+			return wrapped(st)
+		}
+	}
 	return func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
 		next := cur
 		driveErr := engine.Drive(ctx, steps, &next, save)
@@ -298,7 +339,10 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			if s.Direct {
 				steps = engine.AllDirectSteps(newGit, a, ro, rc.Envs.Production, true, nil)
 			}
-			return *s, driveFuncFor(steps, save), nil
+			// No live progress channel wired for a resumed promotion yet — driveFuncFor's
+			// own doc comment names this as the scoped-out follow-up; nil here is unchanged
+			// from before this PR.
+			return *s, driveFuncFor(steps, save, nil), nil
 		},
 	}
 }

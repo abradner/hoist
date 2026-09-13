@@ -459,19 +459,22 @@ func TestBackKey(t *testing.T) {
 }
 
 // TestLogToggle: l shows/hides PromotionState.History in View().
+// TestLogToggle: the log is visible by default (this PR — §4.8 proposal, "what is hoist
+// actually doing" should not be a fact the operator has to know a key for), and l still
+// toggles it off and back on.
 func TestLogToggle(t *testing.T) {
 	m := New(fixtureState(), PollDurations{}, nil)
 	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
+	if !strings.Contains(m.View(), "history") || !strings.Contains(m.View(), "acted") {
+		t.Fatalf("history not shown by default:\n%s", m.View())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	if strings.Contains(m.View(), "acted") {
-		t.Fatal("history shown before l was pressed")
+		t.Error("history still shown after l")
 	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	if !strings.Contains(m.View(), "history") || !strings.Contains(m.View(), "acted") {
-		t.Errorf("history not shown after l:\n%s", m.View())
-	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if strings.Contains(m.View(), "acted") {
-		t.Error("history still shown after a second l")
+		t.Errorf("history not shown after a second l:\n%s", m.View())
 	}
 }
 
@@ -1029,9 +1032,8 @@ func TestLogScrollsByKeypress(t *testing.T) {
 		st.History = append(st.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
 	}
 	m := New(st, PollDurations{}, nil).SetSize(80, 24).SetStyles(ui.NewStyles(true))
-	m, _ = m.Update(uitest.Key("l"))
 	if !m.showLog || m.log.YOffset() != 0 {
-		t.Fatalf("after l: showLog=%v offset=%d", m.showLog, m.log.YOffset())
+		t.Fatalf("log visible by default: showLog=%v offset=%d", m.showLog, m.log.YOffset())
 	}
 	m = uitest.Keys(m, updateFn, "down", "down", "down")
 	if m.log.YOffset() != 3 {

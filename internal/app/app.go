@@ -42,7 +42,19 @@ import (
 // popped up plan.StartMsg, rather than pushing the flight screen at all. p is expected to
 // already be filtered to the operator's ticked selection (see filterTicked below) — this type
 // itself carries no notion of "ticked", only whatever Plan the caller hands it.
-type StartPromotionFunc func(ctx context.Context, p gitops.Plan, opts StartOpts) (engine.PromotionState, flight.DriveFunc, error)
+//
+// progress, when non-nil, is called with one short line per preflight stage as the
+// implementation reaches it (claiming the target env, checking for a conflicting promotion,
+// fetching and comparing the checkout against origin, direct mode's fresh-base check, saving
+// the initial state) — never blocking, never required: a nil progress is exactly as valid as
+// a nil onWaiting already is throughout internal/engine, and this package's own caller (the
+// flight screen pushed by plan.StartMsg/deploy.StartMsg, via flight.NewBuilding) is what
+// turns these lines into something the operator sees while the preflight work — a real git
+// fetch, a real forge round trip — runs off the Update call stack. cmd/hoist's own
+// implementation reuses the same callback for engine.Drive's onWaiting and per-step save
+// hooks once driving starts, so preflight and the drive that follows it read as one
+// continuous log, not two.
+type StartPromotionFunc func(ctx context.Context, p gitops.Plan, opts StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error)
 
 // StartOpts is how a screen says which shape of promotion it confirmed. It is a struct rather
 // than a bool so that adding a future mode does not change every call site's meaning silently.
@@ -507,7 +519,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		ctx, cancel := context.WithCancel(ctx)
 		m.buildCancel = cancel
-		return m, func() tea.Msg {
+		// Pushed on the keypress, not once the build finishes: without this, nothing on
+		// screen changed for however long the preflight work (a real git fetch, the
+		// claim-then-rescan in-flight check, a state save) took, the plan screen stayed on
+		// top and kept receiving keys, and a second enter — the natural response to a key
+		// that looks dead — cancelled the first attempt and started it over (defect A). The
+		// building screen renders with what's already known (source/target/direct) and a
+		// spinner; AdoptBuilt below turns this SAME instance into a normal driving one once
+		// the build actually returns, so there is no flicker and no second screen.
+		//
+		// popIfBuilding first: a superseding StartMsg (this same case, reached again before
+		// the previous one resolved) must not stack a second building screen on top of the
+		// first — the buildCancel() call above already orphans that earlier attempt's
+		// eventual result (buildGen no longer matches it), but without also removing its
+		// screen, the abandoned one stays buried in the stack forever: invisible, its own
+		// progressCh already closed by its own cancelled goroutine, surfacing only if the
+		// operator ever pops back far enough to reach it.
+		m = m.popIfBuilding()
+		progressCh := make(chan string, 32)
+		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})
+		fs := m.stack[len(m.stack)-1]
+		buildCmd := func() tea.Msg {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
 			// any conflicting promotion for this target env — so this runs off the
@@ -517,13 +549,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cancelDeadline != nil {
 				defer cancelDeadline()
 			}
+			// progressCh is deliberately never closed here. The same channel — captured by
+			// this same progress closure — is reused for the whole drive that follows a
+			// successful build (AdoptBuilt keeps listening; driveFuncFor's wrapped save and
+			// onWaiting report through the identical callback), so this build call finishing
+			// is not this channel's end of life; closing it here would panic the very next
+			// send from engine.Drive's own history hook once driving actually starts — sending
+			// on a closed channel panics unconditionally in Go, select/default only guards a
+			// full buffer, never a closed one. An unclosed, undrained channel is harmless
+			// (every send already goes through the same select/default below, so a channel
+			// nobody is reading from just silently drops); the one cost is that listenCmd's
+			// goroutine, if this screen is ever abandoned (backed out of, or the promotion
+			// finishes) with no one left to close or read it, blocks forever rather than
+			// exiting — one leaked goroutine per screen's whole lifetime, not per line, and
+			// not per poll tick; accepted for now rather than adding a second signal whose own
+			// lifecycle would have to be gotten right just as carefully as this one.
 			// The plan screen's mode toggle (m) is gated on IsProduction and sits behind its own
 			// huh.Confirm, so reaching ModeDirect here IS the keypress-then-confirm gesture
 			// engine.DirectCommitGateStep asks Confirmed to attest — which the gate then
 			// re-checks against envs.production independently anyway.
-			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: direct})
+			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: direct}, func(line string) {
+				// Never blocks the build goroutine on a slow-draining UI: the channel is
+				// generously buffered for the handful of preflight lines this ever carries,
+				// and a genuinely full buffer means dropping a line, not stalling a real
+				// git/forge call on rendering.
+				select {
+				case progressCh <- line:
+				default:
+				}
+			})
 			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
 		}
+		return m, tea.Batch(fs.Init(), buildCmd)
 	case promotionBuiltMsg:
 		if msg.gen != m.buildGen {
 			// Stale: superseded by a later StartMsg (a second confirmation before this
@@ -539,10 +596,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (successfully or not), so there is nothing left for that cancel to interrupt.
 		m.buildCancel = nil
 		if msg.err != nil {
-			// A real in-flight conflict, missing github config, or a claim failure —
-			// shown as a notice on whatever screen is still on top (matrix or plan,
-			// whichever popped up plan.StartMsg) rather than crashing or silently
-			// pushing a broken flight screen.
+			// A real in-flight conflict, missing github config, or a claim failure. popIfBuilding
+			// removes the preflight flight screen plan.StartMsg/deploy.StartMsg pushed on the
+			// keypress (matrix.ResumeMsg never pushes one, so this is a no-op for that path,
+			// unchanged from before this PR) — reverting to whatever was underneath restores
+			// exactly the pre-existing, #164-tested behavior: the notice on the now-visible
+			// confirm screen, never crashing or silently leaving a dead building screen up.
+			m = m.popIfBuilding()
 			m.notice = fmt.Sprintf("could not start promotion: %v", msg.err)
 			return m, nil
 		}
@@ -553,15 +613,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// adaptor), not a state this screen should silently paper over by pushing a
 			// read-only flight screen — that would reintroduce exactly the pre-wiring stub
 			// behavior this PR exists to remove, with no visible sign anything is wrong.
+			m = m.popIfBuilding()
 			m.notice = "promotion built with no error but no way to drive it (internal bug) — refusing to open a read-only flight screen"
 			return m, nil
 		}
-		// pollForFlight shares msg.deadlineAt's own absolute instant rather than handing
-		// flight.New the raw m.poll.Deadline it would otherwise recompute a fresh window
-		// from (time.Now() at THIS point, after the build already spent some of the
-		// budget) — Deadline becomes "however much of that instant is left", which is
-		// what actually keeps build+drive under one shared deadline, the same guarantee
-		// the CLI path gets for free from a single ctx.WithTimeout wrapping both.
+		// The common case: plan.StartMsg/deploy.StartMsg already pushed a building flight
+		// screen on the keypress (flight.NewBuilding), and its own poll/deadlineAt were fixed
+		// at that moment — the same instant msg.deadlineAt names, since both were computed
+		// from m.poll.Deadline within the same Update call. AdoptBuilt turns this SAME
+		// instance into a real, driving screen without recomputing either, which is what
+		// keeps build+drive sharing one budget (its own doc comment) — no "remaining time"
+		// recompute needed here at all once the screen already exists.
+		if top := len(m.stack) - 1; top >= 0 {
+			if fs, ok := m.stack[top].(flightScreen); ok && fs.Building() {
+				adopted, cmd := fs.AdoptBuilt(msg.state, msg.driveFn)
+				stack := append([]Screen(nil), m.stack...)
+				stack[top] = flightScreen{adopted}
+				m.stack = stack
+				return m, cmd
+			}
+		}
+		// Fallback: no building screen was pre-pushed — matrix.ResumeMsg's own path
+		// (re-observing an already-existing promotion, not starting a fresh one, so there is
+		// no preflight phase to show). pollForFlight recomputes the remaining budget exactly
+		// as this whole handler always has, since flight.New is only now constructing this
+		// screen's own deadlineAt, unlike the adopt path above.
 		pollForFlight := m.poll
 		if !msg.deadlineAt.IsZero() {
 			if remaining := time.Until(msg.deadlineAt); remaining > 0 {
@@ -610,6 +686,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if top := len(m.stack) - 1; top >= 0 {
 			if fs, ok := m.stack[top].(flightScreen); ok {
 				fs.Cancel()
+				if fs.Building() {
+					// fs.Cancel() is a no-op here — a building screen's own m.cancel is nil
+					// until AdoptBuilt (driveCmd has nothing to run yet). The build this
+					// screen is watching is m.buildCancel's, not this screen's own, so
+					// backing out has to reach that instead: bump buildGen and cancel it the
+					// same way a superseding StartMsg already does (plan.StartMsg's own
+					// comment on buildGen). Without this, the build goroutine keeps running
+					// after the operator has already backed out, and its eventual
+					// promotionBuiltMsg — still carrying the gen this popped screen was
+					// built under — would resurrect a screen the operator explicitly left:
+					// the success branch would push (or, with a second building screen
+					// already up from a fresh attempt, wrongly adopt into) a flight screen
+					// nobody asked to see again.
+					m.buildGen++
+					if m.buildCancel != nil {
+						m.buildCancel()
+						m.buildCancel = nil
+					}
+				}
 			}
 		}
 		return m.popAndRelist()
@@ -753,14 +848,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ctx, cancel := context.WithCancel(ctx)
 		m.buildCancel = cancel
 		p := msg.Plan
-		return m, func() tea.Msg {
+		// Same preflight-phase push as plan.StartMsg above — see its own comment for why,
+		// and its popIfBuilding comment for why a superseding StartMsg must not stack a
+		// second building screen on top of the first.
+		m = m.popIfBuilding()
+		progressCh := make(chan string, 32)
+		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})
+		fs := m.stack[len(m.stack)-1]
+		buildCmd := func() tea.Msg {
 			defer cancel()
 			if cancelDeadline != nil {
 				defer cancelDeadline()
 			}
-			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: msg.Confirmed})
+			// progressCh is deliberately never closed here — see plan.StartMsg's own comment
+			// on this same pattern above for why: this channel is reused for the whole drive
+			// that follows, and closing it here would panic the first send engine.Drive's own
+			// history hook makes once driving starts.
+			state, driveFn, err := start(ctx, p, StartOpts{Direct: direct, Confirmed: msg.Confirmed}, func(line string) {
+				select {
+				case progressCh <- line:
+				default:
+				}
+			})
 			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
 		}
+		return m, tea.Batch(fs.Init(), buildCmd)
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -902,6 +1014,21 @@ func (m Model) pop() Model {
 		return m
 	}
 	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
+	return m
+}
+
+// popIfBuilding pops the top screen only when it is a flight screen still in its preflight
+// phase (flight.NewBuilding, flight.Model.Building) — promotionBuiltMsg's own error branches
+// use it to undo the screen plan.StartMsg/deploy.StartMsg pushed on the keypress, reverting to
+// whatever was underneath (the confirm screen, #164-tested to show the notice correctly)
+// exactly as if that screen had never been pushed. A no-op for any other top screen, in
+// particular matrix.ResumeMsg's own path, which never pushes a building screen at all.
+func (m Model) popIfBuilding() Model {
+	if top := len(m.stack) - 1; top >= 0 {
+		if fs, ok := m.stack[top].(flightScreen); ok && fs.Building() {
+			return m.pop()
+		}
+	}
 	return m
 }
 
