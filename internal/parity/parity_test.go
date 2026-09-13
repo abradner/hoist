@@ -99,6 +99,11 @@ var registry = []op{
 		TUI:  "flight.AbortMsg x on the flight screen",
 	},
 	{
+		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",
+		CLI:  "abandon --confirm-abandon",
+		TUI:  "flight.AbandonMsg X on the flight screen, behind a huh.Confirm",
+	},
+	{
 		Name: "watch one Application converge, outside any promotion",
 		CLI:  "watch --app --once --repo --apps-root",
 		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r polls now, esc pops (#101)",

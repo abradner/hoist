@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │history                                                                       │
 │2026-09-01T12:00:00Z  branched      acted                                     │
-blocke… o open PR · c treat as green · R re-observe · x abort · l log · esc back
+o open PR · c treat as green · X abandon · R re-observe · x abort · l log · esc…

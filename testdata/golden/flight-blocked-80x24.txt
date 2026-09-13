@@ -21,4 +21,4 @@
 │2026-09-01T12:00:00Z  branched      acted                                     │
 │                                                                              │
 │                                                                              │
-blocked: resolve the conf… o open PR · R re-observe · x abort · l log · esc back
+blocked: reso… o open PR · X abandon · R re-observe · x abort · l log · esc back

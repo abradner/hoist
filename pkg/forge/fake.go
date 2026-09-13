@@ -43,6 +43,8 @@ type Fake struct {
 	AllowedErr error
 	// MergeErr, when set, is returned by every call to MergePR regardless of head sha.
 	MergeErr error
+	// CloseErr, when set, is returned by every call to ClosePR.
+	CloseErr error
 
 	// M10 (pkg/migrate) configuration. Refs maps a ref name (tag, branch, full or abbreviated
 	// sha) to the full sha ResolveRef answers with; absent means ok=false. Comparisons is keyed
@@ -296,6 +298,28 @@ func (f *Fake) MergePR(_ context.Context, prNumber int, expectedHeadSHA string) 
 				f.prs[i].MergeSHA = "merged-" + f.prs[i].HeadSHA
 			}
 		}
+		return f.prs[i], nil
+	}
+	return PR{}, fmt.Errorf("forge: no PR #%d", prNumber)
+}
+
+// ClosePR implements Forge: closes prNumber without merging. Idempotent — closing an
+// already-closed or already-merged PR is not an error, matching MergePR's own note (and
+// github.Client's real behavior, since GitHub's PATCH state=closed is not itself an error
+// against either state). Distinct from SetClosed, which is a test-only hook standing in for an
+// operator closing a PR out-of-band on GitHub, never recorded as a real Forge call.
+func (f *Fake) ClosePR(_ context.Context, prNumber int) (PR, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, fmt.Sprintf("ClosePR %d", prNumber))
+	if f.CloseErr != nil {
+		return PR{}, f.CloseErr
+	}
+	for i := range f.prs {
+		if f.prs[i].Number != prNumber {
+			continue
+		}
+		f.prs[i].Closed = true
 		return f.prs[i], nil
 	}
 	return PR{}, fmt.Errorf("forge: no PR #%d", prNumber)

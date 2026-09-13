@@ -177,6 +177,11 @@ type Forge interface {
 	// caller must re-check FindPR before concluding a merge failed outright (a killed process
 	// cannot always tell whether its own call landed server-side).
 	MergePR(ctx context.Context, prNumber int, expectedHeadSHA string) (PR, error)
+	// ClosePR closes prNumber WITHOUT merging — `hoist abandon`'s own write (M-abandon).
+	// Closing an already-closed or already-merged PR is not an error the caller must avoid
+	// causing (mirrors MergePR's own idempotency note): a caller re-observing after a kill
+	// must not treat "already closed" as a failure.
+	ClosePR(ctx context.Context, prNumber int) (PR, error)
 	// Tags lists this forge's repo's git tags, each with the date of the commit it points to
 	// — bounded, not exhaustive: an adaptor may cap how many it returns rather than crawl an
 	// unbounded tag list in full (pkg/forge/github's own Client.Tags stops after

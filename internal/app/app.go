@@ -180,6 +180,10 @@ type Model struct {
 	poll           flight.PollDurations
 	openURL        func(url string) error
 	openPRMode     string
+	// abandonFn is flight.AbandonMsg's own handler — cmd/hoist's real `hoist abandon` write,
+	// wired through WithAbandon. A nil field (never wired) degrades to a notice, matching
+	// startPromotion/openURL's own convention above.
+	abandonFn AbandonFunc
 
 	// notice is a transient, root-level message shown below the top screen — used for
 	// plan.StartMsg's own construction failure (a real in-flight conflict, missing config) and
@@ -275,6 +279,27 @@ func (m Model) History() history.Funcs { return m.history }
 func (m Model) WithInFlight(f InFlight) Model {
 	m.inFlight = f
 	return m
+}
+
+// AbandonFunc retires promotion id for good — `hoist abandon`'s own write (release the state
+// file, close its PR and delete its branch if it opened either — cmd/hoist's real
+// implementation re-observes and refuses outright if the promotion has already landed).
+// cmd/hoist supplies it, wrapping pkg/git/pkg/forge/internal/engine's state-file path (AGENTS.md
+// §4.8: this package only ever sees the plain function type). Called from inside a tea.Cmd (the
+// flight.AbandonMsg case below), never directly from Update.
+type AbandonFunc func(ctx context.Context, id string) error
+
+// WithAbandon installs the real `hoist abandon` handler for the flight screen's X gesture.
+func (m Model) WithAbandon(f AbandonFunc) Model {
+	m.abandonFn = f
+	return m
+}
+
+// abandonResultMsg is AbandonFunc's answer for one promotion id, delivered by the command
+// flight.AbandonMsg's handler issues — mirrors openURLResultMsg's own shape one field up.
+type abandonResultMsg struct {
+	id  string
+	err error
 }
 
 // listInFlight issues one listing for the current generation, or nil when List is not wired.
@@ -781,6 +806,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
 		return m.listInFlight()
+	case flight.AbandonMsg:
+		// Same cancel-then-pop shape as AbortMsg above (a driveCmd left running for the
+		// popped screen is not harmless — see that case's own comment), but this one has a
+		// real engine-level write to fire: the operator already confirmed through the X
+		// gesture's own huh.Confirm, so popping optimistically here and reporting the
+		// abandon's real outcome through a notice once it lands (below) is the same shape
+		// openURLResultMsg already uses for a real call that must not block Update.
+		if top := len(m.stack) - 1; top >= 0 {
+			if fs, ok := m.stack[top].(flightScreen); ok {
+				fs.Cancel()
+			}
+		}
+		if len(m.stack) > 1 {
+			m.stack = append([]Screen(nil), m.stack[:1]...)
+		}
+		nm, relistCmd := m.listInFlight()
+		if nm.abandonFn == nil {
+			// Mirrors startPromotion/openURL's own nil convention — a clear notice instead
+			// of a nil-pointer panic for a launch that never wired this in.
+			nm.notice = fmt.Sprintf("abandon not wired up — run `hoist abandon %s --confirm-abandon=%s` yourself", msg.ID, msg.ID)
+			return nm, relistCmd
+		}
+		fn, id := nm.abandonFn, msg.ID
+		abandonCmd := func() tea.Msg { return abandonResultMsg{id: id, err: fn(context.Background(), id)} }
+		return nm, tea.Batch(relistCmd, abandonCmd)
+	case abandonResultMsg:
+		if msg.err != nil {
+			m.notice = fmt.Sprintf("abandon %s failed: %v", msg.id, msg.err)
+			return m, nil
+		}
+		m.notice = "abandoned " + msg.id
+		// Re-list now that the state file is actually gone — the earlier relist (fired
+		// alongside this command) ran before the abandon itself completed and would still
+		// have found it.
+		return m, m.listInFlightAt(m.listGen)
 	case matrix.OpenConfigMsg:
 		if m.configText == "" {
 			m.notice = "no config to show: the launcher supplied none"
