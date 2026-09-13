@@ -1417,14 +1417,14 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 		Production: []string{"app-production"},
 		Pairs:      map[string]string{"app-staging": "app-production"},
 	}
-	tagsFn := func(string) (bool, tags.ListFunc, tags.MetaFunc) {
-		listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
-			return []string{"v202601010101"}, nil, false, nil
+	tagsFn := func(string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
+		regTagsFn := func(context.Context) ([]string, error) {
+			return []string{"v202601010101"}, nil
 		}
 		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
 			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil
 		}
-		return false, listFn, metaFn
+		return false, regTagsFn, nil, metaFn
 	}
 	m := New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m
@@ -1453,14 +1453,14 @@ func TestQuitKeyTypedIntoTagsFilterDoesNotQuit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tagsFn := func(string) (bool, tags.ListFunc, tags.MetaFunc) {
-		listFn := func(context.Context) ([]string, []forge.GitTag, bool, error) {
-			return []string{"v1", "v2"}, nil, false, nil
+	tagsFn := func(string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
+		regTagsFn := func(context.Context) ([]string, error) {
+			return []string{"v1", "v2"}, nil
 		}
 		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
 			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil
 		}
-		return false, listFn, metaFn
+		return false, regTagsFn, nil, metaFn
 	}
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m

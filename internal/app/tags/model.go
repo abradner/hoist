@@ -25,51 +25,52 @@ import (
 	"github.com/abradner/hoist/pkg/registry"
 )
 
-// ListFunc lists ImageRepo's registry tags and, when the app repo mapping has an entry for it
-// AND this call actually managed to fetch that app repo's own git tags with dates (pkg/forge),
-// mapped is true and gitTags carries them. cmd/hoist builds this, wrapping whichever registry
-// client and (when configured) pkg/forge/github.Client this run already built — this package
-// never opens a registry or forge connection itself (AGENTS.md §4.8).
-//
-// mapped is this call's own, actually-observed answer — never the config's static "is this
-// image repo mapped at all" fact alone (finding 3, round 2: cmd/hoist's config check can say
-// mapped, but the forge lookup this same call makes can still fail at runtime; a caller that
-// returned the config's static answer regardless left the model believing every tag had been
-// deliberately left out of a real git-tag match, rather than that ordering had fallen back to
-// registry Created entirely — invariant 3's fallback never actually engaging). GitTags is
-// always nil/empty when mapped is false, whichever reason made it false.
-type ListFunc func(ctx context.Context) (regTags []string, gitTags []forge.GitTag, mapped bool, err error)
+// RegTagsFunc lists ImageRepo's registry tags alone — the fast half of what used to be one
+// combined, blocking call (#PR8): the picker renders as soon as this answers, no longer
+// blocked on GitTagsFunc's own slow crawl below. cmd/hoist builds this, wrapping whichever
+// registry client this run already built — this package never opens a registry connection
+// itself (AGENTS.md §4.8).
+type RegTagsFunc func(ctx context.Context) (regTags []string, err error)
+
+// GitTagsFunc returns the mapped app repo's own git tags (commit dates, for invariant 3's
+// ordering) — the N+1 half (pkg/forge.Forge.Tags' own doc comment: one call to list tags,
+// one more per tag for its commit date), split out from RegTagsFunc so it loads
+// progressively after the row list has already rendered, rather than gating it (#PR8). mapped
+// is this call's own observed answer: it supersedes BuildFunc's static guess below, since the
+// config can say an image repo is mapped while the forge lookup this call makes still fails
+// at runtime — DeriveRows/BackfillGitDates use THIS return, never BuildFunc's, once a result
+// arrives. GitTags is always nil/empty when mapped is false, whichever reason made it false.
+type GitTagsFunc func(ctx context.Context) (gitTags []forge.GitTag, mapped bool, err error)
 
 // MetaFunc fetches one tag's registry metadata, lazily, only for the row the picker currently
 // needs it for (New's own doc comment on laziness, AGENTS.md invariant 4).
 type MetaFunc func(ctx context.Context, tag string) (registry.ImageMeta, error)
 
 // BuildFunc is what internal/app.Model calls once per OpenTagsMsg to get imageRepo's own
-// ListFunc/MetaFunc and whether RepoConfig.Apps maps it to an app git repo — RepoConfig's own
-// static, config-known fact, used only as New's initial guess before the list has loaded.
-// ListFunc's own mapped return value (not this one) is what DeriveRows/Reorder actually use
-// once the list result arrives (see ListFunc's doc comment) — this one can be true while that
-// one later comes back false, when the config names a mapping but the forge lookup itself
-// fails at runtime. cmd/hoist builds this, wrapping whichever registry client (and, when
+// RegTagsFunc/GitTagsFunc/MetaFunc and whether RepoConfig.Apps maps it to an app git repo —
+// RepoConfig's own static, config-known fact, used only as New's initial guess before either
+// list has loaded. cmd/hoist builds this, wrapping whichever registry client (and, when
 // mapped, pkg/forge/github.Client) the run already built — this package never opens either
 // connection itself (AGENTS.md §4.8, mirroring plan.ResolveFunc's own wiring).
-type BuildFunc func(imageRepo string) (mapped bool, listFn ListFunc, metaFn MetaFunc)
+type BuildFunc func(imageRepo string) (mapped bool, regTagsFn RegTagsFunc, gitTagsFn GitTagsFunc, metaFn MetaFunc)
 
 // Options is everything New takes beyond the image repo and the target env (M10: nine
 // positional parameters had become a call nobody could read). Mapped is RepoConfig.Apps'
 // static answer (see BuildFunc); Production gates the D key (the UI-side half of AGENTS.md
 // §4.5 — internal/engine.DirectCommitGateStep is the half that matters); StagingEnv,
 // StagingTags and HasStagingMismatch are StagingMismatch's result, computed by the root from
-// data already discovered; List and Meta are nil-safe (a nil List reports an error state
-// rather than hanging). History is the commit-history bundle (nil funcs degrade to a named
-// gap); Declared is what the target env declares today (nil for a first deploy); Now is the
-// clock relative dates are worded against, time.Now when nil.
+// data already discovered; RegTags, GitTags and Meta are nil-safe (a nil RegTags reports an
+// error state rather than hanging; a nil GitTags just never backfills git-tag dates). History
+// is the commit-history bundle (nil funcs degrade to a named gap); Declared is what the
+// target env declares today (nil for a first deploy); Now is the clock relative dates are
+// worded against, time.Now when nil.
 type Options struct {
 	Mapped, Production bool
 	StagingEnv         string
 	StagingTags        []string
 	HasStagingMismatch bool
-	List               ListFunc
+	RegTags            RegTagsFunc
+	GitTags            GitTagsFunc
 	Meta               MetaFunc
 	History            history.Funcs
 	Declared           *Declared
@@ -141,7 +142,7 @@ type DirectRequestedMsg struct {
 // cannot serve this purpose.
 var nextGeneration atomic.Int64
 
-// listLoadedMsg, metaLoadedMsg, historyMsg and ageMsg all carry gen, the picker instance that
+// regTagsLoadedMsg, gitTagsLoadedMsg, metaLoadedMsg, historyMsg and ageMsg all carry gen, the picker instance that
 // requested them: each command closes over m.generation at the moment it is created, and the
 // handlers discard a result whose gen doesn't match this model's own current one.
 // internal/app's root routes a message to whatever screen is currently on top of its stack by
@@ -158,12 +159,22 @@ var nextGeneration atomic.Int64
 // every instance regardless of repo, so it discriminates same-repo reopens exactly as it
 // discriminates cross-repo ones; imageRepo is kept on these messages for context/debugging
 // only, not as part of the discard decision.
-type listLoadedMsg struct {
+// regTagsLoadedMsg carries RegTagsFunc's own answer — the fast half of the load (#PR8).
+type regTagsLoadedMsg struct {
 	imageRepo string
 	gen       int64
 	regTags   []string
+	err       error
+}
+
+// gitTagsLoadedMsg carries GitTagsFunc's own answer — the slow half, arriving independently
+// (#PR8): onRegTagsLoaded and onGitTagsLoaded each handle whichever order the two actually
+// land in.
+type gitTagsLoadedMsg struct {
+	imageRepo string
+	gen       int64
 	gitTags   []forge.GitTag
-	mapped    bool // this call's own observed answer — see ListFunc's doc comment.
+	mapped    bool // this call's own observed answer — see GitTagsFunc's doc comment.
 	err       error
 }
 
@@ -227,7 +238,7 @@ type Model struct {
 	// commands are still in flight, then immediately reopening a new picker for the identical
 	// repo) get different generations — imageRepo alone cannot tell them apart, since a
 	// reopened picker's imageRepo is, by definition, identical to the one it replaced. See
-	// listLoadedMsg/metaLoadedMsg's own doc comment.
+	// regTagsLoadedMsg/metaLoadedMsg's own doc comment.
 	generation int64
 
 	// ctx/cancel scope every listFn/metaFn/history call this instance ever makes (the
@@ -247,8 +258,19 @@ type Model struct {
 	stagingTags        []string // rows.StagingMismatch's own doc comment: 1+ distinct tags, sorted
 	hasStagingMismatch bool
 
-	listFn ListFunc
-	metaFn MetaFunc
+	regTagsFn RegTagsFunc
+	gitTagsFn GitTagsFunc
+	metaFn    MetaFunc
+
+	// regTags/gitTags/gitTagsLoaded (#PR8) persist each half's own answer independently of
+	// arrival order: onRegTagsLoaded and onGitTagsLoaded are two separate commands (Init's own
+	// tea.Batch), and either can land first. gitTagsLoaded — not len(gitTags) > 0 — is the
+	// "has this call returned yet" flag, since a real, successful answer for an unmapped repo
+	// is legitimately empty.
+	regTags       []string
+	regTagsLoaded bool
+	gitTags       []forge.GitTag
+	gitTagsLoaded bool
 
 	// history (M10): what the target env declares, the commit delta per tag against it, and
 	// the declared line's live age. deltas is keyed by tag; a tag absent from it has not been
@@ -266,6 +288,15 @@ type Model struct {
 
 	rows        []Row
 	selectedTag string
+	// cursorMoved is false until the operator's first real cursor movement (moveCursor).
+	// onGitTagsLoaded's own backfill uses it to decide whether the still-default initial
+	// selection should track the newly-confirmed top row (#PR8: before this, the initial
+	// selection could freeze on whatever the picker happened to render first — the
+	// registry's own arbitrary order, or a provisional Created-based guess — and never catch
+	// up once the real git-date order landed). Once the operator has moved the cursor
+	// themselves, their selection is never overridden by a later reorder, mirroring
+	// Reorder's own promise for a row loading mid-fetch.
+	cursorMoved bool
 
 	// focus is which list the arrow keys move; commitIdx the cursor in the commit pane;
 	// reading is the commit-detail view (mockup 08), a mode of this screen rather than a
@@ -316,7 +347,8 @@ func New(imageRepo, target string, o Options) Model {
 		stagingEnv:         o.StagingEnv,
 		stagingTags:        o.StagingTags,
 		hasStagingMismatch: o.HasStagingMismatch,
-		listFn:             o.List,
+		regTagsFn:          o.RegTags,
+		gitTagsFn:          o.GitTags,
 		metaFn:             o.Meta,
 		histFn:             o.History,
 		declared:           o.Declared,
@@ -334,26 +366,48 @@ func New(imageRepo, target string, o Options) Model {
 // Init starts the spinner, the async tag/git-tag list load and, when the env declares this
 // image already, the blame that dates that declaration. Listing talks to a registry (and,
 // when mapped, a forge), so it is a tea.Cmd here, never run inside Update (AGENTS.md §4.3).
+// Init fires regTagsCmd and gitTagsCmd as two independent commands (#PR8), not one after the
+// other: the picker renders as soon as regTagsCmd answers, and gitTagsCmd's own slow N+1
+// crawl (a mapped repo's cost) backfills the ordering whenever it lands, in either order —
+// onRegTagsLoaded/onGitTagsLoaded each handle both.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.loadCmd(), m.ageCmd())
+	return tea.Batch(m.spinner.Tick, m.regTagsCmd(), m.gitTagsCmd(), m.ageCmd())
 }
 
-func (m Model) loadCmd() tea.Cmd {
-	listFn := m.listFn
+func (m Model) regTagsCmd() tea.Cmd {
+	regTagsFn := m.regTagsFn
 	imageRepo := m.imageRepo
 	gen := m.generation
 	ctx := m.ctx
 	return func() tea.Msg {
-		if listFn == nil {
+		if regTagsFn == nil {
 			// Findings 4/5 (round N): this used to say "no registry configured for this
 			// repo" — a hardcoded placeholder naming neither the actual image repo nor how
-			// to fix it. Name imageRepo and point at the config knob that supplies listFn
-			// (cmd/hoist wires this from the matching registries[] entry — BuildFunc's own
-			// doc comment).
-			return listLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
+			// to fix it. Name imageRepo and point at the config knob that supplies
+			// regTagsFn (cmd/hoist wires this from the matching registries[] entry —
+			// BuildFunc's own doc comment).
+			return regTagsLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
 		}
-		regTags, gitTags, mapped, err := listFn(ctx)
-		return listLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, gitTags: gitTags, mapped: mapped, err: err}
+		regTags, err := regTagsFn(ctx)
+		return regTagsLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, err: err}
+	}
+}
+
+// gitTagsCmd is a no-op command (nil) when this repo was never mapped at all (m.mapped false
+// from BuildFunc's own static guess, GitTagsFn nil) — an unmapped repo has no app repo to ask,
+// so there is nothing for this to eventually answer; the picker's own unmapped-ordering
+// fallback (Reorder) is already in effect from the moment regTagsCmd's own rows render.
+func (m Model) gitTagsCmd() tea.Cmd {
+	if m.gitTagsFn == nil {
+		return nil
+	}
+	gitTagsFn := m.gitTagsFn
+	imageRepo := m.imageRepo
+	gen := m.generation
+	ctx := m.ctx
+	return func() tea.Msg {
+		gitTags, mapped, err := gitTagsFn(ctx)
+		return gitTagsLoadedMsg{imageRepo: imageRepo, gen: gen, gitTags: gitTags, mapped: mapped, err: err}
 	}
 }
 
@@ -408,8 +462,10 @@ func (m Model) ageCmd() tea.Cmd {
 // Update handles the async loads, the spinner tick, and the screen's own keys.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case listLoadedMsg:
-		return m.onListLoaded(msg)
+	case regTagsLoadedMsg:
+		return m.onRegTagsLoaded(msg)
+	case gitTagsLoadedMsg:
+		return m.onGitTagsLoaded(msg)
 	case metaLoadedMsg:
 		return m.onMetaLoaded(msg)
 	case historyMsg:
@@ -434,11 +490,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
+// onRegTagsLoaded (#PR8) renders rows the instant the registry's own tag list answers,
+// without waiting for gitTagsCmd's own slower crawl: if gitTags has ALREADY landed by this
+// point (onGitTagsLoaded ran first — a genuine possibility, not just a hypothetical, when a
+// large registry's own tag list is slower than a small app repo's git-tag crawl), this builds
+// the fully-ordered result directly via DeriveRows; otherwise it builds the unmapped-shaped
+// rows DeriveRows already produces for that case, and onGitTagsLoaded backfills them once it
+// lands.
+func (m Model) onRegTagsLoaded(msg regTagsLoadedMsg) (Model, tea.Cmd) {
 	if msg.gen != m.generation {
 		// A stale result from a picker instance this model is not (a closed-and-reopened
 		// picker for the same repo, or a different repo entirely) — discard it without
-		// touching any of this model's own state (see listLoadedMsg's own doc comment; gen,
+		// touching any of this model's own state (see this message's own doc comment; gen,
 		// not imageRepo, is what actually discriminates instances here).
 		return m, nil
 	}
@@ -447,13 +510,9 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		return m, nil
 	}
-	// msg.mapped is this call's own observed answer (ListFunc's doc comment), which supersedes
-	// New's constructor-time guess: the config can say this image repo is mapped while the
-	// forge lookup this same call made still fails at runtime (finding 3, round 2) — m.mapped
-	// must reflect that, or DeriveRows/Reorder below keep treating every row as "mapped but
-	// unmatched" instead of falling back to Created-based ordering as invariant 3 requires.
-	m.mapped = msg.mapped
-	m.rows = DeriveRows(msg.regTags, msg.gitTags, m.mapped)
+	m.regTags = msg.regTags
+	m.regTagsLoaded = true
+	m.rows = DeriveRows(msg.regTags, m.gitTags, m.gitTagsLoaded && m.mapped)
 	if len(m.rows) > 0 {
 		m.selectedTag = m.rows[0].Tag
 	}
@@ -462,9 +521,75 @@ func (m Model) onListLoaded(msg listLoadedMsg) (Model, tea.Cmd) {
 	return m, tea.Batch(fetch, m.historyCmd(m.selectedTag))
 }
 
+// onGitTagsLoaded (#PR8) backfills git-tag dates onto rows that already rendered from
+// onRegTagsLoaded — or, if this lands FIRST, just records the answer for onRegTagsLoaded to
+// use directly once it runs. Never blocks the picker's own opening: gitTagsCmd's own slow N+1
+// crawl (a mapped repo's cost) is exactly what this exists to keep off the critical path.
+func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
+	if msg.gen != m.generation {
+		return m, nil
+	}
+	m.gitTagsLoaded = true
+	if msg.err != nil {
+		// Degrade, not fail (AGENTS.md principle 5): the registry tags alone are still a
+		// usable picker, just without invariant 3's own preferred ordering — the same
+		// degrade-not-fail shape cmd/hoist's own GitTagsFunc implementation already applies
+		// when the forge call itself errors. Folded into the msg.mapped==false handling below
+		// (GitTagsFunc's own doc comment: "GitTags is always nil/empty when mapped is false,
+		// whichever reason made it false") rather than returning early here unchanged — this
+		// call's own error is latent in real wiring today (cmd/hoist's own GitTagsFunc already
+		// converts a forge error to mapped=false, nil err), but a second forge adaptor
+		// shouldn't have to rediscover the fallback gap below by hitting it directly.
+		msg.mapped = false
+	}
+	// This call's own observed answer (GitTagsFunc's doc comment) supersedes New's
+	// constructor-time guess: the config can say this image repo is mapped while the forge
+	// lookup this call made still comes back false at runtime (finding 3, round 2, carried
+	// over from the pre-split design) — m.mapped must reflect that unconditionally, on
+	// success, whether or not msg.mapped itself is true, or a stale true guess would leave
+	// onRegTagsLoaded (if it runs later) treating an unmapped answer as mapped.
+	m.mapped = msg.mapped
+	if !m.mapped {
+		// A regression this split introduced: onMetaLoaded's own Reorder call already reads
+		// m.mapped, but real bubbletea dispatch (and uitest.Drain's own depth-first traversal
+		// — regTagsCmd's whole subtree, every meta fetch included, finishes before
+		// gitTagsCmd's single command even starts) commonly finishes every meta fetch for the
+		// visible window before this msg ever arrives. Without this, a runtime forge failure
+		// discovered only after every visible row already loaded left rows in the registry's
+		// own arbitrary order forever — no later onMetaLoaded call remains to re-trigger the
+		// Created-based fallback (invariant 3) once mapped is known to be false.
+		if m.regTagsLoaded {
+			m.rows = Reorder(m.rows, false)
+		}
+		return m, nil
+	}
+	m.gitTags = msg.gitTags
+	if !m.regTagsLoaded {
+		return m, nil
+	}
+	m.rows = BackfillGitDates(m.rows, msg.gitTags)
+	if m.cursorMoved || len(m.rows) == 0 {
+		return m, nil
+	}
+	// Same reasoning as m.selectedTag's own assignment in onRegTagsLoaded: the initial
+	// selection is a default cursor position, not an operator choice, so once the real
+	// (git-date) order is known it should track the new top row — but only while the
+	// operator hasn't moved the cursor themselves yet (cursorMoved's own doc comment). And,
+	// found by an adversarial review of this commit: a selection change means nothing renders
+	// for it without the same two commands onRegTagsLoaded/moveCursor already fire on every
+	// OTHER selection change — without these, the reordered top row's commit delta was never
+	// requested (the stale one from the old top row stuck around instead) and, in the common
+	// timing where every visible-window meta fetch already finished before this message
+	// landed, its registry metadata (digest, created) never loaded either.
+	m.selectedTag = m.rows[0].Tag
+	var fetch tea.Cmd
+	m, fetch = m.fetchVisible()
+	return m, tea.Batch(fetch, m.historyCmd(m.selectedTag))
+}
+
 func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
 	if msg.gen != m.generation {
-		// Same stale-result guard as onListLoaded — see listLoadedMsg's own doc comment.
+		// Same stale-result guard as onRegTagsLoaded — see regTagsLoadedMsg's own doc comment.
 		return m, nil
 	}
 	for i, r := range m.rows {
@@ -478,7 +603,16 @@ func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
 			break
 		}
 	}
-	m.rows = Reorder(m.rows, m.mapped)
+	// Reorder must not trust a bare m.mapped here (#PR8): before gitTagsCmd's own answer has
+	// landed, m.mapped is still New's constructor-time guess, not this instance's own
+	// observed fact — passing it unconditionally left a mapped-but-not-yet-loaded repo's rows
+	// un-reordered even once every visible row's metadata was in (onGitTagsLoaded's own doc
+	// comment). Reorder only when mapped is both true AND confirmed by gitTagsCmd's own
+	// return; otherwise (unmapped, or mapped-but-still-unconfirmed) it's safe to apply the
+	// Created-based fallback now — BackfillGitDates fully re-sorts from scratch if gitTags
+	// does later confirm mapped=true, so an early Created-order here is never load-bearing
+	// wrong, only provisional.
+	m.rows = Reorder(m.rows, m.mapped && m.gitTagsLoaded)
 	return m.fetchVisible()
 }
 
@@ -690,6 +824,7 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 		idx = len(rows) - 1
 	}
 	m.selectedTag = rows[idx].Tag
+	m.cursorMoved = true
 	m.commitIdx = 0
 	var fetch tea.Cmd
 	m, fetch = m.fetchVisible()
