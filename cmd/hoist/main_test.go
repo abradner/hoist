@@ -150,13 +150,13 @@ func TestPlanTakesRootFlagsAsDefaults(t *testing.T) {
 func TestPlanWithoutDryRunExitsThreeAndWritesNothing(t *testing.T) {
 	before := treeHash(t)
 	var out, errOut bytes.Buffer
-	if got := run(planArgs(), &out, &errOut); got != exitNotImplemented {
-		t.Fatalf("exit %d, want %d", got, exitNotImplemented)
+	if got := run(planArgs(), &out, &errOut); got != exitReadOnlyWrite {
+		t.Fatalf("exit %d, want %d", got, exitReadOnlyWrite)
 	}
 	if after := treeHash(t); after != before {
 		t.Fatal("non-dry-run modified the fixture")
 	}
-	if !strings.Contains(errOut.String(), "later milestone") {
+	if !strings.Contains(errOut.String(), "plan never writes") {
 		t.Errorf("stderr does not say why: %s", errOut.String())
 	}
 	var dry bytes.Buffer
