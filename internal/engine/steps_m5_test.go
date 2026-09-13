@@ -821,3 +821,184 @@ func TestArgoSyncedCarriedRevisionStillNeedsHealth(t *testing.T) {
 		t.Fatalf("revision carries the merge but health is Progressing; must not satisfy: %+v", obs)
 	}
 }
+
+// TestArgoSyncedNamesTheStalledDeploymentWhenHealthIsProgressing is #PR4's own regression test:
+// Argo can report sync=Synced health=Progressing indefinitely with no cause of its own to name
+// (never Degraded, never a Failed/Error operation phase) — exactly what a real stuck promotion
+// (y2ef7pknhu, spritz-production) reported. Wired with a Rollout, ArgoSyncedStep borrows
+// RolledOutStep's own per-Deployment read one gate earlier and names it, instead of leaving the
+// operator with the bare sync/health tuple they can already read straight off Argo.
+func TestArgoSyncedNamesTheStalledDeploymentWhenHealthIsProgressing(t *testing.T) {
+	s, _ := gitBackedArgoState(t)
+	g := git.Exec{}
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: s.LandedSHA(), HealthStatus: "Progressing"})
+
+	deployments, _ := groupEditsByWorkload(s.Edits)
+	ro := &rollout.Fake{}
+	for name, wants := range deployments {
+		imgs := make([]rollout.ContainerImage, len(wants))
+		for i, w := range wants {
+			imgs[i] = rollout.ContainerImage{Name: w.Container, Init: w.Init, Image: w.New}
+		}
+		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name, Images: imgs,
+			Complete: false, Detail: "1 of 2 updated replicas are available",
+		})
+	}
+
+	obs, err := (ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied || !obs.Waiting {
+		t.Fatalf("Observe = %+v, want Waiting (not yet satisfied, retryable)", obs)
+	}
+	if !strings.Contains(obs.Detail, "1 of 2 updated replicas") {
+		t.Errorf("Detail = %q, want it to name what the rollout is actually doing, not just the bare sync=Synced health=Progressing tuple", obs.Detail)
+	}
+}
+
+// TestArgoSyncedBlocksOnADeadlineExceededRollout is #PR4's own DeadlineExceeded regression
+// test: without a Rollout wired, ArgoSyncedStep would Wait out its own poll interval forever on
+// a rollout that RolledOutStep, one step later, would immediately Block on — this saves the
+// operator that extra cycle by surfacing the identical verdict here.
+func TestArgoSyncedBlocksOnADeadlineExceededRollout(t *testing.T) {
+	s, _ := gitBackedArgoState(t)
+	g := git.Exec{}
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: s.LandedSHA(), HealthStatus: "Progressing"})
+
+	deployments, _ := groupEditsByWorkload(s.Edits)
+	ro := &rollout.Fake{}
+	for name := range deployments {
+		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name,
+			DeadlineExceeded: true, Detail: "ProgressDeadlineExceeded: ReplicaSet has timed out progressing",
+		})
+	}
+
+	obs, err := (ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Blocked == "" {
+		t.Fatalf("Observe = %+v, want Blocked — a deadline-exceeded rollout will not resolve by waiting", obs)
+	}
+	if !strings.Contains(obs.Blocked, "ProgressDeadlineExceeded") {
+		t.Errorf("Blocked = %q, want it to name kubectl's own deadline-exceeded detail", obs.Blocked)
+	}
+}
+
+// TestArgoSyncedDoesNotGateOnRolloutOnceThisPromotionWasSuperseded is the round-2 review
+// regression test: an earlier version called rolloutCause even when this Application's synced
+// revision had already been SUPERSEDED (a later, legitimate deploy replaced this promotion's
+// own change — landedSuperseded, satisfied per AGENTS.md §4.1). At that point the live
+// containers legitimately run someone ELSE's later change, not this promotion's own Edit.New —
+// comparing them produced a confusing "image not yet live" message at best, and could wrongly
+// Block an already-finished promotion on an unrelated later deploy's own failed rollout at
+// worst, which this test drives directly: the rollout fake reports the superseded Deployment as
+// DeadlineExceeded, and Observe must still report Satisfied.
+func TestArgoSyncedDoesNotGateOnRolloutOnceThisPromotionWasSuperseded(t *testing.T) {
+	s, fx := gitBackedArgoState(t)
+	g := git.Exec{}
+	tip := supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+	// Deliberately NOT syncedAt (which reports Healthy): the superseded revision has only
+	// just synced and is still converging, exactly the case that reaches the
+	// sync/health-mismatch branch where rolloutCause used to be called unconditionally.
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing"})
+
+	deployments, _ := groupEditsByWorkload(s.Edits)
+	ro := &rollout.Fake{}
+	for name := range deployments {
+		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name,
+			DeadlineExceeded: true, Detail: "an unrelated later deploy's own rollout failed",
+		})
+	}
+
+	obs, err := (ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a promotion superseded by a later deploy has landed and is finished; an unrelated deploy's own failed rollout must not gate it: %+v", obs)
+	}
+}
+
+// twoDeploymentState is a minimal, git-free PromotionState (rolloutCause reads only
+// s.Edits/s.TargetEnv, never git or forge) with two distinct Deployments — "app" and "web",
+// sorted-iteration order — for the multi-Deployment tests below, which an adversarial review
+// found nothing in this package exercised: every existing fixture has exactly one Deployment,
+// so a regression in the sorted-iteration or first-match-wins logic would pass unnoticed.
+func twoDeploymentState() *PromotionState {
+	return &PromotionState{
+		TargetEnv: "app-production",
+		Edits: []gitops.Edit{
+			{Occurrence: gitops.Occurrence{Kind: "Deployment", Name: "app", Container: "app"}, New: image.Ref{Repo: "ghcr.io/example/app", Tag: "v3"}},
+			{Occurrence: gitops.Occurrence{Kind: "Deployment", Name: "web", Container: "web"}, New: image.Ref{Repo: "ghcr.io/example/web", Tag: "v3"}},
+		},
+	}
+}
+
+// TestRolloutCauseFindsADeadlineExceededDeploymentThatIsNotFirst proves the sorted-iteration
+// path actually reaches every Deployment, not just whichever happened to iterate first out of
+// the underlying map: "app" (first alphabetically, and reported as rolled out) is fine; "web"
+// (second) is the one that has exceeded its deadline, and must still be found and named.
+func TestRolloutCauseFindsADeadlineExceededDeploymentThatIsNotFirst(t *testing.T) {
+	s := twoDeploymentState()
+	ro := &rollout.Fake{}
+	ro.SetDeployment(s.TargetEnv, "app", rollout.DeploymentStatus{
+		Images: []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v3"}}, Complete: true,
+	})
+	ro.SetDeployment(s.TargetEnv, "web", rollout.DeploymentStatus{
+		DeadlineExceeded: true, Detail: "ProgressDeadlineExceeded: web's own ReplicaSet timed out",
+	})
+
+	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s)
+	if !blocked {
+		t.Fatalf("rolloutCause = (%q, %v), want blocked=true — web has exceeded its deadline", detail, blocked)
+	}
+	if !strings.Contains(detail, "web") || !strings.Contains(detail, "timed out") {
+		t.Errorf("detail = %q, want it to name web specifically, not app (which is fine)", detail)
+	}
+}
+
+// errOnDeployment wraps a *rollout.Fake and returns a transient (non-ErrNotFound) error for one
+// named Deployment, delegating everything else — the shape needed to prove rolloutCause does
+// not build a confident verdict from an incomplete read (see the test below).
+type errOnDeployment struct {
+	*rollout.Fake
+	name string
+	err  error
+}
+
+func (e errOnDeployment) Deployment(ctx context.Context, namespace, name string) (rollout.DeploymentStatus, error) {
+	if name == e.name {
+		return rollout.DeploymentStatus{}, e.err
+	}
+	return e.Fake.Deployment(ctx, namespace, name)
+}
+
+// TestRolloutCauseDegradesRatherThanReportAPartialVerdict is the P3 review finding's own
+// regression test: "app" (sorted first) errors transiently while "web" (sorted second) has
+// genuinely exceeded its deadline. rolloutCause must not swallow app's error and confidently
+// report/Block on web alone — a verdict built on an incomplete read is worse than the plain
+// sync/health tuple the caller falls back to when rolloutCause returns nothing.
+func TestRolloutCauseDegradesRatherThanReportAPartialVerdict(t *testing.T) {
+	s := twoDeploymentState()
+	inner := &rollout.Fake{}
+	inner.SetDeployment(s.TargetEnv, "web", rollout.DeploymentStatus{
+		DeadlineExceeded: true, Detail: "ProgressDeadlineExceeded: web's own ReplicaSet timed out",
+	})
+	ro := errOnDeployment{Fake: inner, name: "app", err: errors.New("dial tcp: connection reset by peer")}
+
+	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s)
+	if blocked || detail != "" {
+		t.Fatalf("rolloutCause = (%q, %v), want (\"\", false) — app's transient error must not be silently skipped in favor of a confident verdict about web", detail, blocked)
+	}
+}

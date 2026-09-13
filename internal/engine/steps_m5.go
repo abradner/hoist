@@ -234,6 +234,16 @@ type ArgoSyncedStep struct {
 	// all. Every real driver has one: ConvergeSteps passes the same git.Git the earlier steps
 	// take.
 	Git git.Git
+	// Rollout is optional, nil-safe like Git above (#PR4): when set, a synced-but-not-yet-
+	// healthy Application borrows RolledOutStep's own per-Deployment read — one gate earlier —
+	// to name which Deployment is still converging and what kubectl would say, rather than
+	// leaving the operator with the bare "sync=Synced health=Progressing" tuple a real stuck
+	// promotion (y2ef7pknhu, spritz-production) reported with no cause at all: Argo can sit
+	// Progressing indefinitely without ever tripping its own Degraded/Failed cases above, so
+	// the pipeline stalled behind the least-informed step while RolledOutStep, one step later,
+	// already had the read that would have named it. ConvergeSteps wires the same
+	// rollout.Rollout the later step takes.
+	Rollout rollout.Rollout
 }
 
 // Name implements Step.
@@ -270,15 +280,36 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
-		carries, why, err := a.revisionCarries(ctx, s, st.SyncRevision, &fetched)
+		carries, superseded, why, err := a.revisionCarries(ctx, s, st.SyncRevision, &fetched)
 		if err != nil {
 			return Observation{}, err
 		}
 		switch {
 		case !carries:
 			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s%s", app.Name, orNone(st.SyncRevision), s.LandedSHA(), why))
+		case superseded:
+			// This app's synced revision landed and was replaced by a later, legitimate
+			// change (AGENTS.md §4.1: superseded is satisfied, not reverted) — the live
+			// containers now legitimately run someone else's later change, not this
+			// promotion's own Edit.New. Round-2 review finding: calling rolloutCause here
+			// compared the wrong thing against imageMismatches (reporting "image not yet
+			// live" for an image this promotion never expects to see live again) and, worse,
+			// could Block an already-finished promotion on an unrelated later deploy's own
+			// failed rollout. This app needs nothing further from this step.
 		case st.SyncStatus != argo.SyncStatusSynced || st.HealthStatus != argo.HealthStatusHealthy:
-			notSynced = append(notSynced, fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus)))
+			msg := fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus))
+			// Naming a cause only makes sense once Argo itself agrees the sync landed — a
+			// SyncStatus other than Synced is Argo's own problem to report, not a rollout
+			// question yet.
+			if st.SyncStatus == argo.SyncStatusSynced {
+				if cause, blocked := a.rolloutCause(ctx, s); cause != "" {
+					if blocked {
+						return Observation{Blocked: fmt.Sprintf("%s: %s", app.Name, cause)}, nil
+					}
+					msg += " (" + cause + ")"
+				}
+			}
+			notSynced = append(notSynced, msg)
 		}
 	}
 	if len(notSynced) > 0 {
@@ -289,7 +320,13 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 }
 
 // revisionCarries reports whether the revision Argo says it synced to actually carries this
-// promotion's change, and a parenthetical for the Waiting detail when it does not.
+// promotion's change, and a parenthetical for the Waiting detail when it does not. superseded
+// is true only for the landedSuperseded verdict — carries is true for both landedIntact and
+// landedSuperseded (the original "carried" meaning, unchanged), but the caller needs to tell
+// them apart: a superseded app's live containers legitimately run a LATER, unrelated change,
+// so comparing them against this promotion's own stale Edit.New (rolloutCause, below) would be
+// meaningless at best and a wrong Block at worst — round-2 review finding against an earlier
+// version of this split.
 //
 // Three cases, in order:
 //
@@ -305,42 +342,92 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
-func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string, fetched *bool) (bool, string, error) {
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string, fetched *bool) (carries, superseded bool, why string, err error) {
 	if rev == s.LandedSHA() {
-		return true, "", nil
+		return true, false, "", nil
 	}
 	if a.Git == nil || rev == "" || s.CloneDir == "" {
-		return false, "", nil
+		return false, false, "", nil
 	}
 	// The revision Argo reports is one this clone may never have seen: fetch the base before
 	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
 	// Observe, not once per Application — see fetched's own declaration.
 	if !*fetched {
-		if _, _, err := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); err != nil {
-			return false, "", err
+		if _, _, ferr := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); ferr != nil {
+			return false, false, "", ferr
 		}
 		*fetched = true
 	}
-	isAncestor, err := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
-	if err != nil || !isAncestor {
+	isAncestor, aerr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
+	if aerr != nil || !isAncestor {
 		// An unresolvable revision is not an error worth failing the whole promotion over —
 		// Argo can report a revision this clone genuinely does not have (a force-pushed base,
 		// a revision from another remote). Treated as "not carried", which is Waiting, which
 		// re-observes.
-		return false, "", nil
+		return false, false, "", nil
 	}
-	verdict, detail, err := observeLanded(ctx, a.Git, s.CloneDir, rev, s)
-	if err != nil {
-		return false, "", err
+	verdict, detail, lerr := observeLanded(ctx, a.Git, s.CloneDir, rev, s)
+	if lerr != nil {
+		return false, false, "", lerr
 	}
 	switch verdict {
 	case landedIntact:
-		return true, "", nil
+		return true, false, "", nil
 	case landedSuperseded:
-		return true, "", nil
+		return true, true, "", nil
 	default:
-		return false, " (" + detail + ")", nil
+		return false, false, " (" + detail + ")", nil
 	}
+}
+
+// rolloutCause borrows RolledOutStep's own per-Deployment read (this file, below) to name what
+// is actually converging behind a synced-but-not-yet-healthy Application (#PR4). Returns ""
+// when Rollout is nil, every read fails (degrades to the plain sync/health tuple — this read is
+// a courtesy for the operator, never a gate this step depends on), or nothing here has anything
+// to say yet. blocked is true only when a Deployment's own rollout has exceeded its deadline —
+// RolledOutStep would Block on that identical read one step later; surfacing it here saves the
+// operator a full extra poll cycle waiting to learn what RolledOutStep already knows.
+func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState) (detail string, blocked bool) {
+	if a.Rollout == nil {
+		return "", false
+	}
+	deployments, _ := groupEditsByWorkload(s.Edits)
+	names := make([]string, 0, len(deployments))
+	for name := range deployments {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var parts []string
+	for _, name := range names {
+		ds, err := a.Rollout.Deployment(ctx, s.TargetEnv, name)
+		if err != nil {
+			if errors.Is(err, rollout.ErrNotFound) {
+				// The same signal RolledOutStep itself would Block on one step later (its
+				// own "Deployment not found" case) — safe to skip here rather than build a
+				// verdict on it, since this read is a courtesy, never the actual gate.
+				continue
+			}
+			// A transient error (not "genuinely absent") means this read cannot be trusted
+			// for ANY Deployment this round — reporting a confident cause built from an
+			// incomplete picture (round-2 review finding: an earlier version silently
+			// swallowed this on one Deployment while confidently naming or Blocking on
+			// another) would be worse than the plain sync/health tuple the caller falls
+			// back to. RolledOutStep's own poll loop is what actually retries a transient
+			// failure; this courtesy read simply says nothing this round.
+			return "", false
+		}
+		if ds.DeadlineExceeded {
+			return fmt.Sprintf("%s/%s: %s", s.TargetEnv, name, ds.Detail), true
+		}
+		if mismatches := imageMismatches(ds, deployments[name]); len(mismatches) > 0 {
+			parts = append(parts, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
+			continue
+		}
+		if !ds.Complete {
+			parts = append(parts, fmt.Sprintf("%s: %s", name, ds.Detail))
+		}
+	}
+	return strings.Join(parts, "; "), false
 }
 
 // Act implements Step: nothing to do. Syncing is Argo's own auto-sync/self-heal acting on the
@@ -577,5 +664,5 @@ func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiti
 // caller with no clone at all, which costs that caller the ancestry check — see
 // ArgoSyncedStep.Git.
 func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
-	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g}, RolledOutStep{Rollout: ro}}
+	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}, RolledOutStep{Rollout: ro}}
 }
