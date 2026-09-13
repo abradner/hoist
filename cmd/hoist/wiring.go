@@ -150,6 +150,10 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 		if err != nil {
 			return engine.PromotionState{}, nil, err
 		}
+		editApps, err := engine.EditApps(r, p.TargetEnv, p.Edits)
+		if err != nil {
+			return engine.PromotionState{}, nil, err
+		}
 
 		// overrideCINone is false here and has no TUI launch flag or config knob on purpose:
 		// the confirm path never treats a PR with no checks as green (AGENTS.md §4.5 — a
@@ -161,7 +165,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 		// --override-ci-none` sets (#103). A re-confirm of the same id keeps a prior run's
 		// override, as buildPromotionForConfirm's own prev-state merge already does for the CLI.
 		report("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
-		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, false, g, f, argoApps)
+		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, false, g, f, argoApps, editApps)
 		if err != nil {
 			return engine.PromotionState{}, nil, err
 		}

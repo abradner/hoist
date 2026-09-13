@@ -302,6 +302,51 @@ type abandonResultMsg struct {
 	err error
 }
 
+// abandonWaitMsg re-checks whether the flight screen's driveCmd has actually stopped after an
+// AbandonMsg canceled it — see that case's own doc comment for the race this closes. attempt
+// counts retries so abandonWaitTick can give up after abandonWaitMaxAttempts rather than poll
+// forever.
+type abandonWaitMsg struct {
+	id      string
+	attempt int
+}
+
+// abandonWaitInterval and abandonWaitMaxAttempts bound the AbandonMsg wait at exactly the same
+// order of magnitude as the network/git call it is waiting on to notice ctx cancellation and
+// return — long enough for an ordinary cancellation to land, short enough that the operator's X
+// keypress is never left hanging for more than about a second before abandonPromotion's own
+// re-observation is trusted to catch anything the wait didn't.
+const (
+	abandonWaitInterval    = 100 * time.Millisecond
+	abandonWaitMaxAttempts = 10
+)
+
+// abandonWaitTick schedules the next abandonWaitMsg re-check.
+func abandonWaitTick(id string, attempt int) tea.Cmd {
+	return tea.Tick(abandonWaitInterval, func(time.Time) tea.Msg {
+		return abandonWaitMsg{id: id, attempt: attempt}
+	})
+}
+
+// doAbandon is flight.AbandonMsg's real dispatch, run once the driving screen (if any) has
+// either confirmed it is no longer Busy() or the wait above gave up — the pop-then-fire shape
+// the AbandonMsg case originally ran unconditionally, now gated on that wait.
+func (m Model) doAbandon(id string) (Model, tea.Cmd) {
+	if len(m.stack) > 1 {
+		m.stack = append([]Screen(nil), m.stack[:1]...)
+	}
+	nm, relistCmd := m.listInFlight()
+	if nm.abandonFn == nil {
+		// Mirrors startPromotion/openURL's own nil convention — a clear notice instead of a
+		// nil-pointer panic for a launch that never wired this in.
+		nm.notice = fmt.Sprintf("abandon not wired up — run `hoist abandon %s --confirm-abandon=%s` yourself", id, id)
+		return nm, relistCmd
+	}
+	fn := nm.abandonFn
+	abandonCmd := func() tea.Msg { return abandonResultMsg{id: id, err: fn(context.Background(), id)} }
+	return nm, tea.Batch(relistCmd, abandonCmd)
+}
+
 // listInFlight issues one listing for the current generation, or nil when List is not wired.
 func (m Model) listInFlight() (Model, tea.Cmd) {
 	if m.inFlight.List == nil {
@@ -433,6 +478,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// forwards to the top screen only, and an env whose answer landed while the plan or
 		// picker was open stayed "resolving…" for good (Copilot, #110).
 		return m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms }), nil
+	case matrix.RepoRefreshedMsg:
+		// Same #110-shaped routing as DriftMsg just above — F5's fetch can land after the
+		// operator has already navigated onto the plan screen or the tag picker. Round-2
+		// review (PR #182) found a second gap this case also closes: m.repo (this struct's own
+		// field, below — what plan.New/tags/restart/deploy all read) was never updated by an
+		// F5 refresh at all, only the matrix screen's OWN internal copy was, so a plan opened
+		// after F5 silently kept building from the boot-time snapshot even while the table
+		// itself had moved on. matrixRepo() reads back whatever the matrix screen's own
+		// RepoRefreshedMsg handling just decided (WithRepo's nil-repo and stale-generation
+		// guards live there, once, not duplicated here) and adopts it as the root's own.
+		m = m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms })
+		if r := m.matrixRepo(); r != nil {
+			m.repo = r
+		}
+		return m, nil
 	case inFlightMsg:
 		if msg.gen != m.listGen {
 			return m, nil
@@ -564,8 +624,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// first — the buildCancel() call above already orphans that earlier attempt's
 		// eventual result (buildGen no longer matches it), but without also removing its
 		// screen, the abandoned one stays buried in the stack forever: invisible, its own
-		// progressCh already closed by its own cancelled goroutine, surfacing only if the
-		// operator ever pops back far enough to reach it.
+		// progressCh still open (deliberately never closed — see buildCmd's own comment
+		// below) but nothing left writing to it once its goroutine has returned via the
+		// cancelled context, surfacing only if the operator ever pops back far enough to
+		// reach it.
 		m = m.popIfBuilding()
 		progressCh := make(chan string, 32)
 		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})
@@ -807,30 +869,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.listInFlight()
 	case flight.AbandonMsg:
-		// Same cancel-then-pop shape as AbortMsg above (a driveCmd left running for the
-		// popped screen is not harmless — see that case's own comment), but this one has a
-		// real engine-level write to fire: the operator already confirmed through the X
-		// gesture's own huh.Confirm, so popping optimistically here and reporting the
-		// abandon's real outcome through a notice once it lands (below) is the same shape
-		// openURLResultMsg already uses for a real call that must not block Update.
+		// Cancel signals this screen's shared ctx, but does not wait for the goroutine a
+		// driveCmd already in flight is running in to actually notice and return — a plain
+		// context cancel is not a join. engine.Drive saves state (and, mid a push/merge Act,
+		// can still complete it) after a step returns even on a canceled context, so firing
+		// abandonPromotion's own write immediately here — the original shape, popping
+		// optimistically and reporting the outcome through a notice once it lands, the same
+		// way openURLResultMsg already does for a call that must not block Update — could
+		// delete the state file (or close the PR/delete the branch) the instant before the
+		// canceled drive finishes its own last write, leaving the two racing: abandon
+		// believes it is done while the promotion or its state survives, or gets silently
+		// recreated right after (round-2 review, PR #182).
+		//
+		// The fix waits for Busy() to actually clear before doing anything destructive,
+		// bounded by abandonWaitMaxAttempts so a DriveFunc that somehow never notices
+		// cancellation cannot wedge the operator's X keypress forever — abandonPromotion's
+		// own re-observation (ObserveAll plus the direct LandedSHA() check, before it ever
+		// closes a PR or deletes a branch) is what keeps that timeout-and-proceed path safe:
+		// if the raced write did land, abandon still refuses rather than trusting the wait.
 		if top := len(m.stack) - 1; top >= 0 {
 			if fs, ok := m.stack[top].(flightScreen); ok {
 				fs.Cancel()
+				if fs.Busy() {
+					m.notice = "cancelling " + msg.ID + " — waiting for the in-flight step to stop before abandoning"
+					return m, abandonWaitTick(msg.ID, 0)
+				}
 			}
 		}
-		if len(m.stack) > 1 {
-			m.stack = append([]Screen(nil), m.stack[:1]...)
+		return m.doAbandon(msg.ID)
+	case abandonWaitMsg:
+		if top := len(m.stack) - 1; top >= 0 {
+			if fs, ok := m.stack[top].(flightScreen); ok && fs.Busy() {
+				if msg.attempt >= abandonWaitMaxAttempts {
+					m.notice = "the in-flight step for " + msg.id + " did not confirm it stopped in time; abandoning anyway (it re-observes before touching anything)"
+					return m.doAbandon(msg.id)
+				}
+				return m, abandonWaitTick(msg.id, msg.attempt+1)
+			}
 		}
-		nm, relistCmd := m.listInFlight()
-		if nm.abandonFn == nil {
-			// Mirrors startPromotion/openURL's own nil convention — a clear notice instead
-			// of a nil-pointer panic for a launch that never wired this in.
-			nm.notice = fmt.Sprintf("abandon not wired up — run `hoist abandon %s --confirm-abandon=%s` yourself", msg.ID, msg.ID)
-			return nm, relistCmd
-		}
-		fn, id := nm.abandonFn, msg.ID
-		abandonCmd := func() tea.Msg { return abandonResultMsg{id: id, err: fn(context.Background(), id)} }
-		return nm, tea.Batch(relistCmd, abandonCmd)
+		return m.doAbandon(msg.id)
 	case abandonResultMsg:
 		if msg.err != nil {
 			m.notice = fmt.Sprintf("abandon %s failed: %v", msg.id, msg.err)
@@ -1124,6 +1201,20 @@ func (m Model) withMatrix(f func(matrix.Model) matrix.Model) Model {
 		return m
 	}
 	return m
+}
+
+// matrixRepo reads the matrix screen's own current *gitops.Repo back out, wherever it actually
+// sits in the stack — nil only if no matrix screen exists at all, which withMatrix's own
+// no-op-if-absent contract means never happens in practice (the bottom of the stack always is
+// one). Used by the RepoRefreshedMsg case above so the root's own repo snapshot follows F5
+// without re-deriving matrix.Model's staleness/nil guards a second time here.
+func (m Model) matrixRepo() *gitops.Repo {
+	for _, s := range m.stack {
+		if ms, ok := s.(matrixScreen); ok {
+			return ms.Repo()
+		}
+	}
+	return nil
 }
 
 // withMatrixNotice sets notice on the matrix screen, wherever it actually sits in the stack —

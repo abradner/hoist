@@ -167,7 +167,7 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 	// s.ExpectedBlobs and s.Edits are guaranteed populated by the time this runs: Drive runs
 	// steps strictly in order (engine.go) and CommittedStep — which always computes
 	// ExpectedBlobs before reporting Satisfied — precedes this step in DirectSteps' own list.
-	verdict, detail, err := observeLanded(ctx, d.Git, s.CloneDir, remoteSHA, s)
+	verdict, detail, err := observeLanded(ctx, d.Git, s.CloneDir, remoteSHA, s.Edits, s.ExpectedBlobs)
 	if err != nil {
 		return Observation{}, err
 	}

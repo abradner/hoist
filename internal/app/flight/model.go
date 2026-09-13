@@ -214,8 +214,13 @@ type Model struct {
 	buildLog []buildLogLine
 	// progressCh is drained one line at a time by listenCmd, which re-issues itself after
 	// every receive — a raw channel read inside Update would block the whole program, so this
-	// is the standard bubbletea "listen on a channel" shape. nil once the channel's owner
-	// (app.go) closes it, or for a screen built with New, which never has one.
+	// is the standard bubbletea "listen on a channel" shape. nil for a screen built with New,
+	// which never has one — listenCmd's own nil check treats that as "nothing to listen for"
+	// rather than blocking forever. app.go deliberately never closes the channel in
+	// production (see its own buildCmd comment on why: the same channel is reused across the
+	// whole build-then-drive lifetime, and closing it early would panic the next send —
+	// sending on a closed channel panics unconditionally in Go); only test helpers
+	// (building_test.go) close one, to make listenCmd's ok=false path reachable at all.
 	progressCh <-chan string
 
 	styles        ui.Styles
@@ -339,6 +344,14 @@ func NewBuilding(source, target string, direct bool, poll PollDurations, progres
 // here must also cancel an outstanding build (this screen's own m.cancel is nil throughout
 // building — driveFn is nil until AdoptBuilt — so Cancel alone cannot reach it).
 func (m Model) Building() bool { return m.building }
+
+// Busy reports whether a driveCmd call is currently outstanding for this screen — app.go's
+// AbandonMsg handler uses it to know that Cancel alone does not mean the drive has actually
+// stopped: Cancel only signals m.ctx, and the goroutine driveCmd is already running keeps
+// executing until the DriveFunc call it wraps notices ctx.Done() and returns, which can be
+// after engine.Drive has already saved state (or pushed/merged) again — round-2 review, PR
+// #182 (see the AbandonMsg case's own doc comment for the full race and the wait this enables).
+func (m Model) Busy() bool { return m.busy }
 
 // AdoptBuilt transitions this screen from preflight into a real, driving promotion once
 // cmd/hoist's StartPromotionFunc call actually returns one — NewBuilding's counterpart.

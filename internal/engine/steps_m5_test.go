@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -686,6 +687,13 @@ func gitBackedArgoState(t *testing.T) (*PromotionState, fixture) {
 	s.MergeSHA = s.CommitSHA
 	s.ArgoNamespace = testArgoNamespace
 	s.ArgoApps = []string{testApp}
+	// Single-Application fixture: every edit belongs to testApp, matching what
+	// engine.EditApps would compute from a real one-family env — see PromotionState.EditApps'
+	// own doc comment for why revisionCarries needs this to scope its landed-verdict question.
+	s.EditApps = make(map[string]string, len(s.Edits))
+	for _, e := range s.Edits {
+		s.EditApps[e.File] = testApp
+	}
 	s.History = []HistoryEntry{{Step: StepMerged, At: time.Now().Add(-time.Minute)}}
 	return s, fx
 }
@@ -927,6 +935,173 @@ func TestArgoSyncedDoesNotGateOnRolloutOnceThisPromotionWasSuperseded(t *testing
 	}
 	if !obs.Satisfied {
 		t.Fatalf("a promotion superseded by a later deploy has landed and is finished; an unrelated deploy's own failed rollout must not gate it: %+v", obs)
+	}
+}
+
+// twoAppGitBackedState is gitBackedArgoState's two-Application sibling: a real, driven-to-merge
+// promotion touching TWO families ("app" and "web"), each its own Argo Application, so a test
+// can supersede one family's occurrence on origin while leaving the other's untouched — the
+// scenario ArgoSyncedStep's per-Application loop actually needs to be exercised by, and which
+// the single-Application gitBackedArgoState structurally cannot produce (round-2 review, PR
+// #182: the whole-promotion observeLanded verdict this fixture's own predecessor bug applied to
+// every Application in the loop needs at least two Applications with DIFFERING supersede status
+// to catch).
+func twoAppGitBackedState(t *testing.T) (s *PromotionState, originDir string, webApp argo.Application) {
+	t.Helper()
+	home := t.TempDir()
+	gitconfig := filepath.Join(home, ".gitconfig")
+	cfg := "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" + noBackgroundGitConfig
+	if err := os.WriteFile(gitconfig, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", gitconfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg-config"))
+
+	seed := t.TempDir()
+	runHost(t, "", "init", "-q", "-b", "main", seed)
+	write := func(rel, content string) {
+		p := filepath.Join(seed, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrapper := func(env, family string) string {
+		return "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: " + family + "-" + env + "\n  namespace: argocd\n" +
+			"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/" + env + "/" + family + "\n" +
+			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
+	}
+	deployment := func(env, ref string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n  namespace: " + env + "\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: " + ref + "\n"
+	}
+	digestOld := "sha256:" + strings.Repeat("0", 64)
+	digestNew := "sha256:" + strings.Repeat("1", 64)
+	for _, family := range []string{"app", "web"} {
+		write("cluster/apps/app-staging-"+family+".yaml", wrapper("app-staging", family))
+		write("cluster/apps/app-production-"+family+".yaml", wrapper("app-production", family))
+		write("cluster/apps/app-staging/"+family+"/deployment.yaml", deployment("app-staging", "ghcr.io/example/"+family+":v2@"+digestNew))
+		write("cluster/apps/app-production/"+family+"/deployment.yaml", deployment("app-production", "ghcr.io/example/"+family+":v1@"+digestOld))
+	}
+	runHost(t, seed, "add", ".")
+	runHost(t, seed, "commit", "-q", "-m", "seed")
+	originDir = filepath.Join(t.TempDir(), "origin.git")
+	runHost(t, "", "init", "-q", "--bare", "-b", "main", originDir)
+	runHost(t, seed, "remote", "add", "origin", originDir)
+	runHost(t, seed, "push", "-q", "origin", "main")
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	runHost(t, "", "clone", "-q", originDir, clone)
+	repo, err := gitops.Discover(clone, "cluster/apps")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	plan, err := gitops.BuildPlan(repo, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Edits) != 2 {
+		t.Fatalf("fixture plan should have exactly two real edits (app, web), got %+v", plan.Edits)
+	}
+
+	fx := fixture{cloneDir: clone, originDir: originDir, plan: plan}
+	s = newState(fx, filepath.Join(t.TempDir(), "wt"))
+	g := git.Exec{}
+	if _, err := (BranchedStep{Git: g}).Observe(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (CommittedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	mergeToBase(t, s)
+	s.MergeSHA = s.CommitSHA
+	s.ArgoNamespace = testArgoNamespace
+	appApps, err := ArgoAppNames(repo, "app-production", plan.Edits)
+	if err != nil {
+		t.Fatalf("ArgoAppNames: %v", err)
+	}
+	s.ArgoApps = appApps
+	editApps, err := EditApps(repo, "app-production", plan.Edits)
+	if err != nil {
+		t.Fatalf("EditApps: %v", err)
+	}
+	s.EditApps = editApps
+	s.History = []HistoryEntry{{Step: StepMerged, At: time.Now().Add(-time.Minute)}}
+	return s, originDir, argo.Application{Namespace: testArgoNamespace, Name: "web-app-production"}
+}
+
+// TestArgoSyncedScopesSupersedeToItsOwnApplication is the round-2 review finding against an
+// earlier version of the per-Application loop: revisionCarries used to call observeLanded over
+// the WHOLE promotion (s.Edits, every Application's files together), so once ANY one
+// Application's occurrence was superseded by a later deploy, the resulting landedSuperseded
+// verdict applied identically to every OTHER Application in the same loop too — silently taking
+// the "this app needs nothing further" branch for an Application that was never touched by that
+// later deploy and is still genuinely unhealthy. Here "app" is superseded by a later deploy and
+// "web" is still Progressing on its own, unrelated first sync — Observe must still name web
+// rather than reporting the whole promotion satisfied on the strength of app's supersede alone.
+func TestArgoSyncedScopesSupersedeToItsOwnApplication(t *testing.T) {
+	s, originDir, webApp := twoAppGitBackedState(t)
+	g := git.Exec{}
+
+	// A later deploy into app-production supersedes ONLY "app"'s own occurrence — "web"'s file
+	// is untouched, exactly as an ordinary unrelated deploy would leave it.
+	other := filepath.Join(t.TempDir(), "other-clone")
+	runHost(t, "", "clone", "-q", originDir, other)
+	p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRef := "ghcr.io/example/app:v3@sha256:" + strings.Repeat("2", 64)
+	lines := strings.Split(string(b), "\n")
+	replaced := false
+	for i, line := range lines {
+		if strings.Contains(line, "image: ghcr.io/") {
+			lines[i] = "          image: " + newRef
+			replaced = true
+		}
+	}
+	if !replaced {
+		t.Fatalf("fixture precondition: no image line in %s:\n%s", p, b)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, other, "commit", "-q", "-a", "-m", "a later deploy superseding app alone")
+	runHost(t, other, "push", "-q", "origin", "main")
+	tip, ok, err := g.LsRemoteBranch(ctx(), other, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+
+	appApp := argo.Application{Namespace: testArgoNamespace, Name: "app-app-production"}
+	a := &argo.Fake{}
+	a.SetStatus(appApp, argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: argo.HealthStatusHealthy})
+	// web was never touched by the later deploy — its own occurrence still carries exactly
+	// what this promotion planned — but its rollout is still converging.
+	a.SetStatus(webApp, argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing"})
+
+	obs, err := (ArgoSyncedStep{Argo: a, Git: g}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("web-app-production is still Progressing on its own unrelated sync; app's own supersede must not excuse it: %+v", obs)
+	}
+	if !obs.Waiting {
+		t.Errorf("Observe = %+v, want Waiting (still converging), not Blocked", obs)
+	}
+	if !strings.Contains(obs.Detail, "web-app-production") {
+		t.Errorf("Detail = %q, want it to name web-app-production as still not synced/healthy", obs.Detail)
+	}
+	if strings.Contains(obs.Detail, "app-app-production:") {
+		t.Errorf("Detail = %q, must not also fault app-app-production — it was legitimately superseded", obs.Detail)
 	}
 }
 

@@ -445,6 +445,7 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 func TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone(t *testing.T) {
 	s := &engine.PromotionState{
 		ArgoApps: []string{"already-set"},
+		EditApps: map[string]string{"cluster/apps/app-production/app/deployment.yaml": "already-set"},
 		Edits:    []gitops.Edit{{Occurrence: gitops.Occurrence{File: "cluster/apps/app-production/app/deployment.yaml"}}},
 		CloneDir: "/does/not/exist",
 	}
@@ -454,6 +455,38 @@ func TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone(t *testing.T) {
 	}
 	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "already-set" {
 		t.Fatalf("ArgoApps = %v, want left untouched", s.ArgoApps)
+	}
+	if len(s.EditApps) != 1 || s.EditApps["cluster/apps/app-production/app/deployment.yaml"] != "already-set" {
+		t.Fatalf("EditApps = %v, want left untouched", s.EditApps)
+	}
+}
+
+// TestEnsureArgoAppsBackfillsEditAppsWhenArgoAppsAlreadyPopulated proves the round-2 repair
+// path: a state file saved any time between M5 (ArgoApps) and EditApps' own introduction has
+// ArgoApps populated but EditApps nil, and the old "ArgoApps non-empty means fully populated,
+// skip everything" check would leave EditApps nil forever — silently starving
+// ArgoSyncedStep.revisionCarries of the per-Application scoping it now needs (steps_m5.go's
+// editsForApp). Unlike the sibling test above, this drives a real gitops.Discover against
+// newPromoteFixture's own clone, so the mutant this guards against is "ensureArgoApps decides
+// EditApps doesn't need rebuilding", not just "it decides nothing needs rebuilding".
+func TestEnsureArgoAppsBackfillsEditAppsWhenArgoAppsAlreadyPopulated(t *testing.T) {
+	_, clone, _ := newPromoteFixture(t)
+	const file = "cluster/apps/app-production/app/deployment.yaml"
+	s := &engine.PromotionState{
+		TargetEnv: "app-production",
+		CloneDir:  clone,
+		ArgoApps:  []string{"app-app-production"},
+		Edits:     []gitops.Edit{{Occurrence: gitops.Occurrence{File: file}}},
+	}
+	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
+	if err := ensureArgoApps(s, rc); err != nil {
+		t.Fatalf("ensureArgoApps = %v, want nil", err)
+	}
+	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "app-app-production" {
+		t.Fatalf("ArgoApps = %v, want left untouched (only EditApps was missing)", s.ArgoApps)
+	}
+	if len(s.EditApps) != 1 || s.EditApps[file] != "app-app-production" {
+		t.Fatalf("EditApps = %v, want {%q: \"app-app-production\"}", s.EditApps, file)
 	}
 }
 

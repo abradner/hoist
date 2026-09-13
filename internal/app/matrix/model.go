@@ -63,14 +63,24 @@ type DriftMsg struct {
 // WithRefreshRepo.
 type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, error)
 
-// repoRefreshedMsg carries RefreshRepoFunc's answer back to Update. gen ties it to the
+// RepoRefreshedMsg carries RefreshRepoFunc's answer back to Update. Gen ties it to the
 // askRepoRefresh call that issued it, the same way DriftMsg's own gen does for the cluster
 // fan-out — an adversarial review of #PR7 found no such tie existed here, so a slow refresh
 // could in principle land after a newer one and overwrite its answer.
-type repoRefreshedMsg struct {
-	gen  uint64
-	repo *gitops.Repo
-	err  error
+//
+// Exported, like DriftMsg, so the root's own Update can give it the same wherever-it-sits
+// routing DriftMsg's own case already documents (app.go): the default dispatch forwards only
+// to the TOP of the stack, but this message is the result of an async fetch that can land after
+// the operator has navigated away from the matrix onto the plan screen or the tag picker — the
+// exact #110 shape. The root also reads the matrix's own post-Update Repo() back out and adopts
+// it as its own snapshot (round-2 review, PR #182): plan.New and every other reader of the
+// root's *gitops.Repo used to see only the boot-time snapshot forever, even after F5 had moved
+// the matrix's own table on, so a plan opened after F5 could silently omit an occurrence F5 had
+// just revealed.
+type RepoRefreshedMsg struct {
+	Gen  uint64
+	Repo *gitops.Repo
+	Err  error
 }
 
 // nextGen numbers refresh generations across every Model this process builds, so two
@@ -116,7 +126,7 @@ type Model struct {
 	// refreshingRepo guards askRepoRefresh against overlap: two concurrent refreshes against
 	// #PR7's one fixed cache path can corrupt git state (index.lock contention, broken
 	// worktree registrations — found by an adversarial review of #PR7). repoGen is the
-	// generation the outstanding refresh belongs to, checked by repoRefreshedMsg the same way
+	// generation the outstanding refresh belongs to, checked by RepoRefreshedMsg the same way
 	// DriftMsg checks gen.
 	refreshingRepo bool
 	repoGen        uint64
@@ -308,7 +318,7 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 	gen, refresh := m.repoGen, m.refreshRepo
 	return m, func() tea.Msg {
 		repo, err := refresh(context.Background())
-		return repoRefreshedMsg{gen: gen, repo: repo, err: err}
+		return RepoRefreshedMsg{Gen: gen, Repo: repo, Err: err}
 	}
 }
 
@@ -331,20 +341,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.running[msg.env] = msg.running
 		m.matrix = Compute(m.repo, m.promotable, m.running)
 		return m.layout(), nil
-	case repoRefreshedMsg:
-		if msg.gen != m.repoGen {
-			return m, nil // a superseded refresh's answer; see repoRefreshedMsg
+	case RepoRefreshedMsg:
+		if msg.Gen != m.repoGen {
+			return m, nil // a superseded refresh's answer; see RepoRefreshedMsg
 		}
 		m.refreshingRepo = false
-		if msg.err != nil {
+		if msg.Err != nil {
 			// Graceful, never a hard failure: the same reasoning runTUI's own boot-time
 			// fallback applies (repoview.go) — an F5 that can't reach origin (offline, a
 			// transient network blip) leaves the table showing what it already had rather
 			// than blanking or refusing.
-			m.notice = redact.Strings(msg.err.Error())
+			m.notice = redact.Strings(msg.Err.Error())
 			return m.layout(), nil
 		}
-		return m.WithRepo(msg.repo), nil
+		return m.WithRepo(msg.Repo), nil
 	case tea.KeyPressMsg:
 		if m.chooser != nil {
 			return m.updateChooser(msg)
@@ -653,7 +663,7 @@ func (m Model) WithDrift(drift DriftFunc) Model {
 // WithRepo replaces the *gitops.Repo the table is computed from — read from a fresh
 // origin/<base> view the same way boot itself discovers r in the first place, never the
 // operator's own working tree (AGENTS.md §4.6). A nil repo is a no-op, matching
-// repoRefreshedMsg's own error handling above: nothing here goes blank over a transient
+// RepoRefreshedMsg's own error handling above: nothing here goes blank over a transient
 // refresh failure.
 func (m Model) WithRepo(repo *gitops.Repo) Model {
 	if repo == nil {
@@ -663,6 +673,12 @@ func (m Model) WithRepo(repo *gitops.Repo) Model {
 	m.matrix = Compute(m.repo, m.promotable, m.running)
 	return m.layout()
 }
+
+// Repo returns the *gitops.Repo the table is currently computed from — the root's own read-back
+// after routing RepoRefreshedMsg here (app.go), so plan.New and every other reader of the
+// root's own repo snapshot see what F5 just found rather than whatever New was built with at
+// boot (round-2 review, PR #182).
+func (m Model) Repo() *gitops.Repo { return m.repo }
 
 // WithRefreshRepo installs the function F5 calls to re-read the repo (#PR7) — cmd/hoist's own
 // fetch-then-discover, built after New (mirrors WithDrift's own after-construction install).

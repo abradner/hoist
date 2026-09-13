@@ -88,6 +88,34 @@ const (
 // edits from occurrences it read from an env's own families — and is reported as an error
 // naming the file and directory, rather than silently dropped.
 func ArgoAppNames(r *gitops.Repo, targetEnv string, edits []gitops.Edit) ([]string, error) {
+	byFile, err := EditApps(r, targetEnv, edits)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, app := range byFile {
+		if !seen[app] {
+			seen[app] = true
+			names = append(names, app)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// EditApps maps each edit's file to the Argo Application name that owns it — the same
+// Family->Application walk ArgoAppNames dedupes and sorts, kept per-file here so a caller that
+// needs to scope a question to one Application's own share of a promotion (ArgoSyncedStep's
+// revisionCarries, PR #182 round-2 review) doesn't have to re-derive the mapping. The CLI calls
+// this once, from the same gitops.Repo Discover already produced, when building a
+// PromotionState, and carries the result on PromotionState.EditApps (see its own doc comment)
+// rather than recomputing it on every resume — the same "structural fact about the plan,
+// computed once" treatment ArgoApps already gets. An edit whose file matches no family in
+// targetEnv is an internal inconsistency — BuildPlan only ever produces edits from occurrences
+// it read from an env's own families — and is reported as an error naming the file and
+// directory, rather than silently dropped.
+func EditApps(r *gitops.Repo, targetEnv string, edits []gitops.Edit) (map[string]string, error) {
 	env, ok := r.Envs[targetEnv]
 	if !ok {
 		return nil, fmt.Errorf("argo apps: target env %q not found in the discovered repo", targetEnv)
@@ -96,21 +124,16 @@ func ArgoAppNames(r *gitops.Repo, targetEnv string, edits []gitops.Edit) ([]stri
 	for _, f := range env.Families {
 		byDir[f.Dir] = f.App
 	}
-	seen := map[string]bool{}
-	var names []string
+	out := make(map[string]string, len(edits))
 	for _, e := range edits {
 		dir := path.Dir(e.File)
 		app, ok := byDir[dir]
 		if !ok {
 			return nil, fmt.Errorf("argo apps: edit %s: no family in env %q owns directory %s", e.File, targetEnv, dir)
 		}
-		if !seen[app] {
-			seen[app] = true
-			names = append(names, app)
-		}
+		out[e.File] = app
 	}
-	sort.Strings(names)
-	return names, nil
+	return out, nil
 }
 
 // argoApplications resolves s.ArgoApps into the argo.Application values pkg/argo's methods
@@ -125,6 +148,31 @@ func (s *PromotionState) argoApplications() []argo.Application {
 		apps = append(apps, argo.Application{Namespace: s.ArgoNamespace, Name: name})
 	}
 	return apps
+}
+
+// editsForApp returns just the edits (and matching ExpectedBlobs entries) s.EditApps attributes
+// to appName — the scoping a per-Application landed-verdict question needs (revisionCarries,
+// round-2 review, PR #182: see observeLanded's own doc comment for why asking the whole
+// promotion's verdict on behalf of one Application was wrong). Every driver of ArgoSyncedStep
+// (cmd/hoist's driveToCompletion and the TUI's DriveFunc) runs against a state that has already
+// been through ensureArgoApps — a fresh promotion has EditApps set at construction, a resumed
+// one is repaired before Drive ever sees it (cmd/hoist/resume.go) — so an appName EditApps
+// genuinely never names should not arise; if it somehow did, this returns no edits for that
+// app, which drives blobsIntact to its vacuous-true/landedIntact path and reports carries=true,
+// superseded=false — an unverified but harmless default, since the switch above still checks
+// that app's own sync/health status rather than skipping it (only superseded=true skips).
+func (s *PromotionState) editsForApp(appName string) (edits []gitops.Edit, expectedBlobs map[string]string) {
+	expectedBlobs = make(map[string]string)
+	for _, e := range s.Edits {
+		if s.EditApps[e.File] != appName {
+			continue
+		}
+		edits = append(edits, e)
+		if b, ok := s.ExpectedBlobs[e.File]; ok {
+			expectedBlobs[e.File] = b
+		}
+	}
+	return edits, expectedBlobs
 }
 
 // mergedAt is the earliest s.History entry recorded for StepMerged — see this file's own
@@ -280,7 +328,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
-		carries, superseded, why, err := a.revisionCarries(ctx, s, st.SyncRevision, &fetched)
+		carries, superseded, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &fetched)
 		if err != nil {
 			return Observation{}, err
 		}
@@ -342,7 +390,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
-func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, rev string, fetched *bool) (carries, superseded bool, why string, err error) {
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, fetched *bool) (carries, superseded bool, why string, err error) {
 	if rev == s.LandedSHA() {
 		return true, false, "", nil
 	}
@@ -366,7 +414,8 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		// re-observes.
 		return false, false, "", nil
 	}
-	verdict, detail, lerr := observeLanded(ctx, a.Git, s.CloneDir, rev, s)
+	edits, blobs := s.editsForApp(appName)
+	verdict, detail, lerr := observeLanded(ctx, a.Git, s.CloneDir, rev, edits, blobs)
 	if lerr != nil {
 		return false, false, "", lerr
 	}

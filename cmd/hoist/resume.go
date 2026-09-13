@@ -83,20 +83,39 @@ func repoConfigFor(cfg *config.Config, repoFullName string) (config.RepoConfig, 
 // is empty and Edits is not" is exactly as unambiguous a legacy signal for ArgoNamespace as it is
 // for ArgoApps itself — this function's own name stays ensureArgoApps since Applications remain
 // the primary concern, but it now closes both gaps a legacy state can have (Copilot review).
+//
+// s.EditApps gets the same treatment as a third, independent gap (round-2 review, PR #182): a
+// state file saved any time between M5 and EditApps' own introduction has a populated ArgoApps
+// but a nil EditApps, since the two fields were computed together at construction from this PR
+// on but ArgoApps alone before it — so "ArgoApps non-empty" cannot stand in for "EditApps
+// populated" the way it does for ArgoNamespace above, and this checks EditApps on its own
+// terms, discovering the repo only once for whichever of the two repairs this state actually
+// needs.
 func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
-	if len(s.ArgoApps) > 0 || len(s.Edits) == 0 {
+	needsApps := len(s.ArgoApps) == 0 && len(s.Edits) > 0
+	needsEditApps := len(s.EditApps) == 0 && len(s.Edits) > 0
+	if !needsApps && !needsEditApps {
 		return nil
 	}
 	r, err := gitops.Discover(s.CloneDir, rc.AppsRoot)
 	if err != nil {
 		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
 	}
-	apps, err := engine.ArgoAppNames(r, s.TargetEnv, s.Edits)
-	if err != nil {
-		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
+	if needsApps {
+		apps, err := engine.ArgoAppNames(r, s.TargetEnv, s.Edits)
+		if err != nil {
+			return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
+		}
+		s.ArgoApps = apps
+		s.ArgoNamespace = rc.Kube.ArgoNamespace
 	}
-	s.ArgoApps = apps
-	s.ArgoNamespace = rc.Kube.ArgoNamespace
+	if needsEditApps {
+		editApps, err := engine.EditApps(r, s.TargetEnv, s.Edits)
+		if err != nil {
+			return fmt.Errorf("rebuilding per-edit Argo Applications for a state file predating EditApps: %w", err)
+		}
+		s.EditApps = editApps
+	}
 	return nil
 }
 

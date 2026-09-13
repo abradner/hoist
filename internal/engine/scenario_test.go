@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -219,5 +221,54 @@ func TestScenarioSupersededPromotionNeverReachesRolledOutTerminal(t *testing.T) 
 
 	if err := Drive(context.Background(), w.prSteps(), s, nil); err != nil {
 		t.Fatalf("#168 fixed: a superseded promotion now reaches a full terminal pass, got: %v", err)
+	}
+}
+
+// TestScenarioArgoSyncedRolloutCauseComposesWithARealDrive closes a gap an aggregate
+// cross-stack review found: the harness's own argoSyncs verb always reports Synced+Healthy in
+// one shot, so nothing here had ever driven a full sequence through ArgoSyncedStep's own
+// Rollout-enriched Waiting detail (steps_m5.go's rolloutCause) — that path and the scenario
+// harness were each unit/sequence-tested on their own, but never proven to compose. Promotes,
+// merges, then reports Argo as Synced but still Progressing with a partially-rolled-out
+// Deployment — the exact mid-converge shape rolloutCause exists for — and confirms the pipeline
+// both names the cause (not the bare sync/health tuple) and, once the rollout genuinely
+// completes, still converges to done.
+func TestScenarioArgoSyncedRolloutCauseComposesWithARealDrive(t *testing.T) {
+	w := newWorld(t)
+	s := w.promote()
+	w.merge(s)
+
+	tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+	if err != nil || !ok {
+		t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+	}
+	w.argo.SetStatus(argo.Application{Namespace: s.ArgoNamespace, Name: testApp}, argo.Status{
+		SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing",
+		ReconciledAt: time.Now(),
+	})
+	deployments, _ := groupEditsByWorkload(s.Edits)
+	for name, wants := range deployments {
+		imgs := make([]rollout.ContainerImage, len(wants))
+		for i, want := range wants {
+			imgs[i] = rollout.ContainerImage{Name: want.Container, Init: want.Init, Image: want.New}
+		}
+		w.ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name, Images: imgs,
+			Complete: false, Detail: "1 of 2 updated replicas are available",
+		})
+	}
+
+	_, last, err := ObserveAll(context.Background(), w.prSteps(), s)
+	if err != nil {
+		t.Fatalf("ObserveAll: %v", err)
+	}
+	if !strings.Contains(last.Detail, "1 of 2 updated replicas") {
+		t.Errorf("Detail = %q, want the rollout-enriched cause (rolloutCause) reaching this via a real Drive, not the bare sync/health tuple", last.Detail)
+	}
+
+	w.rollsOut(s)
+	w.argoSyncs(s)
+	if err := Drive(context.Background(), w.prSteps(), s, nil); err != nil {
+		t.Fatalf("a fully-converged promotion should report done, got: %v", err)
 	}
 }
