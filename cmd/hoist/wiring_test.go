@@ -109,7 +109,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
@@ -166,8 +166,8 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	}
 }
 
-// TestDriveFuncForProgressSurvivesAClosedChannel is a regression test for a P1 an adversarial
-// review found (and internal/app's own fix corrected — see AdoptBuilt's and app.go's doc
+// TestDriveFuncForCallsProgressThroughoutARealDrive is a regression test for a P1 an
+// adversarial review found (and internal/app's own fix corrected — see AdoptBuilt's and app.go's doc
 // comments): driveFuncFor's own wrapped save reuses the SAME progress callback the preflight
 // used for engine.Drive's per-step history hook (defect B/C: a long single Act streams into
 // the log as it happens, not only once the whole Drive call returns), across the WHOLE
@@ -196,7 +196,7 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 
 	var mu sync.Mutex
 	var lines []string
@@ -280,7 +280,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
@@ -318,7 +318,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
@@ -369,7 +369,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
@@ -416,7 +416,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
@@ -516,7 +516,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
 
 	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true}, nil)
 	if err != nil {
@@ -577,7 +577,7 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	}
 	a, ro, cerr := tuiCluster(t)
 	forgeErr := errors.New("gh: not logged in")
-	start := buildStartPromotion(eff, r, newGit, nil, forgeErr, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, nil, forgeErr, a, ro, cerr)
 	_, _, err = start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)

@@ -990,6 +990,44 @@ func TestRemoveWorktreeIdempotent(t *testing.T) {
 	}
 }
 
+// TestRemoveWorktreeClearsALeftoverNonWorktreeDirectory is a regression test for a P2 an
+// adversarial review of #PR7 found: RemoveWorktree's error branch treated git's "is not a
+// working tree" as success without ever removing the obstructing path — so a plain directory
+// left at a path git never registered as one of its own worktrees (an interrupted checkout,
+// or — the actual trigger — a caller like repoview.go's refreshRepoView reusing one fixed
+// cache path across every call) wedged every subsequent WorktreeAtRef at that identical path
+// with "already exists", permanently: RemoveWorktree kept reporting success while doing
+// nothing, forever. This proves both halves: RemoveWorktree against a plain, non-worktree
+// directory actually clears it, and a WorktreeAtRef immediately after, at the identical path,
+// succeeds rather than colliding with what should already be gone.
+func TestRemoveWorktreeClearsALeftoverNonWorktreeDirectory(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	// A plain directory git has never heard of — never created via g.Worktree/WorktreeAtRef,
+	// so "git worktree remove" reports exactly the "is not a working tree" error this test
+	// exists to prove is now actually cleared, not silently treated as already-done.
+	if err := os.MkdirAll(filepath.Join(wt, "leftover-file-that-should-not-survive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "leftover-file-that-should-not-survive", "x"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var g Exec
+	if err := g.RemoveWorktree(ctx(), cloneDir, wt); err != nil {
+		t.Fatalf("RemoveWorktree on a leftover non-worktree directory: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("leftover directory still exists after RemoveWorktree: stat err = %v", err)
+	}
+
+	// The actual wedge: a second call at the identical path must succeed, not collide with a
+	// directory RemoveWorktree claimed to have already cleared.
+	if err := g.WorktreeAtRef(ctx(), cloneDir, wt, "refs/heads/main"); err != nil {
+		t.Fatalf("WorktreeAtRef at the same path RemoveWorktree just cleared: %v", err)
+	}
+}
+
 // Self-review finding (M3 pre-open): a caller bug that resolved worktreeDir to the clone
 // directory itself — or a directory containing it — would hit RemoveWorktree's unconditional
 // os.RemoveAll with no protection from git itself. guardDisposablePath refuses both shapes

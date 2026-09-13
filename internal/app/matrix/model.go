@@ -55,17 +55,41 @@ type DriftMsg struct {
 	err     error
 }
 
+// RefreshRepoFunc re-reads the repo this matrix shows — cmd/hoist's own fetch-then-discover
+// against a cached origin/<base> view (#PR7), never the operator's own working tree
+// (AGENTS.md §4.6). Mirrors DriftFunc's own shape: a plain function type this screen holds
+// and calls (§4.8 — a screen may call a function type it's handed, just never import the
+// git/network machinery behind it itself), built once by cmd/hoist and installed with
+// WithRefreshRepo.
+type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, error)
+
+// repoRefreshedMsg carries RefreshRepoFunc's answer back to Update. gen ties it to the
+// askRepoRefresh call that issued it, the same way DriftMsg's own gen does for the cluster
+// fan-out — an adversarial review of #PR7 found no such tie existed here, so a slow refresh
+// could in principle land after a newer one and overwrite its answer.
+type repoRefreshedMsg struct {
+	gen  uint64
+	repo *gitops.Repo
+	err  error
+}
+
 // nextGen numbers refresh generations across every Model this process builds, so two
 // matrices (an earlier one popped away) can never confuse each other's answers.
 var nextGen atomic.Uint64
 
+// nextRepoGen numbers repo-refresh generations the same way nextGen numbers drift ones —
+// a separate counter because a repo refresh (#PR7) and a drift refresh are independent
+// fan-outs that happen to both start on F5, not the same generation.
+var nextRepoGen atomic.Uint64
+
 // Model is the matrix screen. It is a value: Update, SetSize and SetStyles return the
 // updated model.
 type Model struct {
-	repo       *gitops.Repo
-	promotable []string
-	envs       config.EnvsConfig
-	drift      DriftFunc
+	repo        *gitops.Repo
+	promotable  []string
+	envs        config.EnvsConfig
+	drift       DriftFunc
+	refreshRepo RefreshRepoFunc
 	// base and kubeContext are the launch's --base/--kube-context (#105), named in the title
 	// when they are not the defaults so a session against another branch or cluster says so.
 	base, kubeContext string
@@ -88,6 +112,14 @@ type Model struct {
 	pending  map[string]bool
 	driftErr map[string]string
 	gen      uint64
+
+	// refreshingRepo guards askRepoRefresh against overlap: two concurrent refreshes against
+	// #PR7's one fixed cache path can corrupt git state (index.lock contention, broken
+	// worktree registrations — found by an adversarial review of #PR7). repoGen is the
+	// generation the outstanding refresh belongs to, checked by repoRefreshedMsg the same way
+	// DriftMsg checks gen.
+	refreshingRepo bool
+	repoGen        uint64
 
 	// chooser is open when d found several first-party images in the cell and the operator
 	// has to say which one to deploy (#85: "d picks the first sorted image, silently").
@@ -261,6 +293,25 @@ func (m Model) askCluster() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// askRepoRefresh re-reads the repo (#PR7's F5, alongside askCluster's own cluster fan-out).
+// nil refreshRepo (no --repo selected yet — the same nil convention DriftFunc's own askCluster
+// guard uses) or a refresh already outstanding means nothing to do: a second concurrent
+// refresh against #PR7's one fixed cache path is not merely wasted work, it can corrupt git
+// state (index.lock contention, broken worktree registrations) — found by an adversarial
+// review of #PR7's first version, which had no guard here at all.
+func (m Model) askRepoRefresh() (Model, tea.Cmd) {
+	if m.refreshRepo == nil || m.refreshingRepo {
+		return m, nil
+	}
+	m.refreshingRepo = true
+	m.repoGen = nextRepoGen.Add(1)
+	gen, refresh := m.repoGen, m.refreshRepo
+	return m, func() tea.Msg {
+		repo, err := refresh(context.Background())
+		return repoRefreshedMsg{gen: gen, repo: repo, err: err}
+	}
+}
+
 // Update handles the screen's keys and forwards the rest to the table. Quit is the root's.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -280,6 +331,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.running[msg.env] = msg.running
 		m.matrix = Compute(m.repo, m.promotable, m.running)
 		return m.layout(), nil
+	case repoRefreshedMsg:
+		if msg.gen != m.repoGen {
+			return m, nil // a superseded refresh's answer; see repoRefreshedMsg
+		}
+		m.refreshingRepo = false
+		if msg.err != nil {
+			// Graceful, never a hard failure: the same reasoning runTUI's own boot-time
+			// fallback applies (repoview.go) — an F5 that can't reach origin (offline, a
+			// transient network blip) leaves the table showing what it already had rather
+			// than blanking or refusing.
+			m.notice = redact.Strings(msg.err.Error())
+			return m.layout(), nil
+		}
+		return m.WithRepo(msg.repo), nil
 	case tea.KeyPressMsg:
 		if m.chooser != nil {
 			return m.updateChooser(msg)
@@ -292,7 +357,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Config):
 			return m, func() tea.Msg { return OpenConfigMsg{} }
 		case key.Matches(msg, m.keys.Refresh):
-			return m.refresh()
+			nm, cmd := m.refresh()
+			nm, repoCmd := nm.askRepoRefresh()
+			return nm, tea.Batch(cmd, repoCmd)
 		case key.Matches(msg, m.keys.Left):
 			if m.col > 0 {
 				m.col--
@@ -583,6 +650,27 @@ func (m Model) WithDrift(drift DriftFunc) Model {
 	return m
 }
 
+// WithRepo replaces the *gitops.Repo the table is computed from — read from a fresh
+// origin/<base> view the same way boot itself discovers r in the first place, never the
+// operator's own working tree (AGENTS.md §4.6). A nil repo is a no-op, matching
+// repoRefreshedMsg's own error handling above: nothing here goes blank over a transient
+// refresh failure.
+func (m Model) WithRepo(repo *gitops.Repo) Model {
+	if repo == nil {
+		return m
+	}
+	m.repo = repo
+	m.matrix = Compute(m.repo, m.promotable, m.running)
+	return m.layout()
+}
+
+// WithRefreshRepo installs the function F5 calls to re-read the repo (#PR7) — cmd/hoist's own
+// fetch-then-discover, built after New (mirrors WithDrift's own after-construction install).
+func (m Model) WithRefreshRepo(refresh RefreshRepoFunc) Model {
+	m.refreshRepo = refresh
+	return m
+}
+
 // WithRun names the base branch and kube context this session runs against (#105). The
 // title names the base only when it is not "main", and the context whenever one is in use —
 // from the flag or the repo's kube.context alike, since which cluster a session talks to is
@@ -736,8 +824,27 @@ func (m Model) layout() Model {
 	// box reaches the footer (or the pane does).
 	rows := ui.BodyHeight(m.height, sections) - lipgloss.Height(notes)*boolInt(notes != "") - m.paneRows(m.paneBudget())
 	cols := fit(m.columns(), m.width-2)
+	// Rows cleared before the column count can change, not after: bubbles' own SetColumns
+	// re-renders synchronously against whatever rows the table already holds (table.go's own
+	// UpdateViewport, called from inside SetColumns itself), so setting columns first can hand
+	// that re-render a stale row shaped for the PREVIOUS column count. Never reachable before
+	// WithRepo (#PR7): every earlier caller of layout — a drift answer, a resize — only ever
+	// changes cell CONTENT or width, never how many columns the matrix has, so the row shape
+	// and the column count could never disagree. A live repo refresh can, and going from a
+	// populated repo to one with fewer (in the limit, zero) envs panicked bubbles' own
+	// renderRow on exactly that mismatch.
+	//
+	// Cursor saved and restored around the clear: table.SetRows's own clamp only ever
+	// decreases the cursor to fit a SHRINKING row count, never restores it once the real rows
+	// come back — an unconditional SetRows(nil) here drove it to -1 and left it there forever,
+	// which is what TestDeployNewWithSeveralImagesOpensAChooser and its sibling caught (the
+	// operator's own row selection silently reset on every layout, not only the rare
+	// column-count change this exists to guard).
+	cursor := m.tbl.Cursor()
+	m.tbl.SetRows(nil)
 	m.tbl.SetColumns(cols)
 	m.tbl.SetRows(m.rows(cols))
+	m.tbl.SetCursor(cursor)
 	m.tbl.SetWidth(m.width - 2)
 	m.tbl.SetHeight(max(rows, 2))
 	m.help.SetWidth(m.width - 2)

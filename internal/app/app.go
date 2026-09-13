@@ -322,6 +322,12 @@ func (m Model) WithDrift(drift matrix.DriftFunc) Model {
 	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithDrift(drift) })
 }
 
+// WithRefreshRepo hands the matrix cmd/hoist's own re-read-origin function (#PR7) — F5 asks
+// the cluster (WithDrift's own DriftFunc) and re-reads the repo alike.
+func (m Model) WithRefreshRepo(refresh matrix.RefreshRepoFunc) Model {
+	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithRefreshRepo(refresh) })
+}
+
 // WithRun tells the matrix which base branch and kube context this session runs against
 // (the launch's --base/--kube-context, #105), so its title can say so.
 func (m Model) WithRun(base, kubeContext string) Model {
