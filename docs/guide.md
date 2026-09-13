@@ -345,14 +345,24 @@ resuming from any point is safe and never duplicates a branch or a PR.
 
 ```bash
 hoist promotions              # every state file, its phase re-observed right now
+hoist promotions --repo owner/name    # scope the listing to one repo
+hoist promotions --archived           # also list what's already been archived (below)
 hoist resume <id>             # continue one from wherever it actually is
 hoist resume --env <target>   # the same, for the one non-terminal promotion targeting that env
 hoist abandon <id> --confirm-abandon=<id>   # retire one that never landed — not a rollback
 ```
 
+`hoist promotions` also retires what it finds: a promotion it re-observes as terminal — done —
+and older than `state.retain` (default 30 days, measured from when anything last happened to it)
+moves from the live promotions dir to a sibling `archive/` subdirectory — still a plain, readable,
+deletable JSON file, just out of the default listing. This never happens on age alone: a promotion
+has to be re-observed as done first, every time, so a genuinely stuck one (however old) is never
+touched — `--repo`/`--archived` only change what's *listed*, never what gets archived.
+
 On the matrix, `r` does the same for what the in-flight pane lists. A finished promotion leaves
-the pane; its state file stays until you delete it or run `hoist abandon` (refused outright once
-the promotion has landed).
+the pane; its state file is archived (see above) after `state.retain`, or you can delete it, or
+run `hoist abandon` (refused outright once the promotion has landed — that's what retention's own
+archiving is for instead).
 
 Restarts are the exception: they keep no state, so there is nothing to resume, and re-running
 one is a new restart.

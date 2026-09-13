@@ -170,6 +170,21 @@ func (s *PromotionState) LandedSHA() string {
 	return s.MergeSHA
 }
 
+// LastActivity is the timestamp of s's own most recent History entry, or GeneratedAt when it
+// has none — what `hoist promotions` measures a terminal promotion's age against
+// (StateConfig.Retain) before archiving it. History's own last entry is a closer proxy for
+// "when did anything actually last happen to this promotion" than GeneratedAt (construction
+// time) alone, which never advances again once a promotion starts converging.
+func (s *PromotionState) LastActivity() time.Time {
+	t := s.GeneratedAt
+	for _, h := range s.History {
+		if h.At.After(t) {
+			t = h.At
+		}
+	}
+	return t
+}
+
 // landedStep is the step whose History entry timestamps the landing, for the same reason
 // LandedSHA exists: ArgoRefreshedStep anchors "has Argo reconciled since this promotion
 // landed?" on it, and a direct promotion has no Merged entry to anchor on.
@@ -187,6 +202,52 @@ func StatePath(id string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "promotions", id+".json"), nil
+}
+
+// ArchiveDir is where terminal, aged-out state files are retired to (M-retention) — a
+// subdirectory of the live promotions dir, still a plain JSON file per promotion, still
+// readable and deletable by hand exactly as a live one is. ListStates' own entries.IsDir()
+// check (below) skips this subdirectory, so an archived promotion is invisible to
+// findInFlight — or anything else walking ListStates — by construction, not by a second,
+// separately-maintained exclusion.
+func ArchiveDir() (string, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "promotions", "archive"), nil
+}
+
+// ArchiveState moves id's live state file into ArchiveDir unchanged (a rename, not a rewrite),
+// so the archived copy stays exactly as human-readable as the live one was. Idempotent — an
+// already-archived or already-gone id is success, mirroring DeleteState/DeleteRemoteBranch's
+// own "already gone is the goal already met" convention.
+//
+// This function trusts the caller's decision unconditionally: archiving must never itself
+// decide a promotion is done. The one safe order is re-observe (engine.ObserveAll) first, and
+// archive only once that confirms done — never infer it from age alone, since an old
+// promotion can still be genuinely in flight (blocked for weeks, say). `hoist promotions` is
+// the one caller, and follows exactly that order.
+func ArchiveState(id string) error {
+	src, err := StatePath(id)
+	if err != nil {
+		return err
+	}
+	dir, err := ArchiveDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	dst := filepath.Join(dir, id+".json")
+	if err := os.Rename(src, dst); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // CacheDir is $XDG_CACHE_HOME/hoist, else ~/.cache/hoist — the XDG rule on every platform,
@@ -312,6 +373,37 @@ func ListStates() ([]*PromotionState, error) {
 		}
 		p := filepath.Join(dir, "promotions", e.Name())
 		s, err := LoadState(p)
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// ListArchivedStates mirrors ListStates over ArchiveDir instead of the live promotions dir —
+// `hoist promotions --archived` uses this to include retired promotions in its listing.
+func ListArchivedStates() ([]*PromotionState, error) {
+	dir, err := ArchiveDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []*PromotionState
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		s, err := LoadState(filepath.Join(dir, e.Name()))
 		if err != nil {
 			return nil, err
 		}

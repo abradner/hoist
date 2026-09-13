@@ -86,6 +86,7 @@ func TestLoadFullFile(t *testing.T) {
 			OpenPR:               OpenPRDisplay,
 			BrowserLaunchTimeout: Duration(10 * time.Second),
 		},
+		State: StateConfig{Retain: DefaultStateRetain},
 	}
 	if diff := cmp.Diff(want, *c); diff != "" {
 		t.Errorf("Load mismatch (-want +got):\n%s", diff)
@@ -301,6 +302,7 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"cluster half", "registries:\n  - prefix: ghcr.io/\n    cluster: { namespace: ns }\n", "registries[0].cluster: needs both namespace and secret"},
 		{"op shape", "registries:\n  - prefix: ghcr.io/\n    op: vault/item\n", "registries[0].op: want an op://"},
 		{"poll negative", "poll: { argo: -5s }\n", "poll.argo: must be a positive duration"},
+		{"state.retain negative", "state: { retain: -1h }\n", "state.retain: must be a positive duration"},
 		{"duplicate name", "repos:\n  - path: /x\n    name: a\n  - path: /y\n    name: a\n", "repos[1].name: \"a\" is also repos[0]"},
 		{"duplicate path", "repos:\n  - path: /x\n  - path: /x/\n", "repos[1].path: \"/x/\" is also repos[0]"},
 		{"nameless pathless", "repos:\n  - github: me/x\n", "repos[0]: needs a name or a path"},
