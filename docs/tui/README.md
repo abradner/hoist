@@ -58,3 +58,19 @@ reason found on contact with real widths and data:
   narrow widths rather than truncating the post-merge steps.
 - **Flight screen** (frame 13, added by M10 rather than proposed): the step list degrades to
   the same strip on a short terminal so the blocked reason and the command always fit.
+
+## v2 proposal (2026-09 audit)
+
+The section headed "v2 proposal · 2026-09 audit" at the end of `mockups.html` draws the
+screens that `docs/audit/2026-09-ux-arch-audit.md` asks for. The frames are the matrix in
+pipeline order with a cell cursor and a detail pane, the `enter` action menu, the help overlay,
+flight (waiting and done), both confirm screens, the tag picker, and the empty and error
+states. Each caption names the finding IDs it answers, and the keys follow that doc's proposed
+keymap. Like frames 1–13, it is a **proposal**. The operator approves it and the keymap before
+the UX train (T3) builds anything.
+
+Unlike frames 1–13, which were pasted into the HTML by hand, genframes.py writes this section
+into `mockups.html` itself, between the `v2:begin`/`v2:end` markers. It refuses any line
+wider than its cell, and any frame not exactly its stated height. So
+`python3 docs/tui/genframes.py` regenerates it in full. That run also writes a scratch
+`frames.txt` to the current directory; don't commit it.
