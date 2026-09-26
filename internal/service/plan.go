@@ -49,6 +49,16 @@ type PlannedChange struct {
 	// fixing the fail-open gap where an F5 refresh landing between building the plan and pressing
 	// Enter let a stale plan's edits pass a freshness check run against the NEW view instead of
 	// the one that produced them (t1-review.md P2 #6).
+	//
+	// When s is in origin mode (cur.FromOrigin — LoadRepo(RepoFromOrigin) has run: TUI boot or a
+	// later F5), this field is ALWAYS a real FromOrigin view with a captured SHA: Plan itself
+	// fails closed above rather than ever return a zero or clone-mode View for such a caller.
+	// StartPromotion enforces the other half of that guarantee at its own end (structurally, not
+	// just by convention): a StartRequest.View that reaches it nil, or with FromOrigin false, or
+	// with an empty SHA, while the service's current view is itself origin-mode, is refused
+	// outright — a caller that lost this field on the way there (a screen that forgot to plumb
+	// it) gets an error naming the fix, never a silent downgrade to the CLI's looser
+	// checkCloneCurrentForBase check.
 	View RepoView
 	// Resolution is nil for a deploy (which never resolves a digest — the reference is
 	// caller-supplied) and for a promotion planned with digest sources: none.
@@ -109,7 +119,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 		// looser local-disk check), since FromOrigin would read false. Fail closed instead: the
 		// CLI path below never reaches this branch, because it never calls LoadRepo at all, so
 		// cur.FromOrigin is always false there regardless of what Repo it passes.
-		return PlannedChange{}, fmt.Errorf("service: Plan: the repo view changed while this plan was being built — refresh and try again")
+		return PlannedChange{}, fmt.Errorf("service: Plan: the repo view changed while this plan was being built — go back and reopen the plan")
 	}
 
 	if req.Deploy != nil {
