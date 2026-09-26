@@ -52,7 +52,9 @@ The words:
 
 `←`/`→` move the environment cursor (`▸`), `↑`/`↓` the family; the column under the cursor is
 what `p`, `d` and `R` act on. A production column is marked `⚠` in its header and named under the
-table. `F5` asks the cluster again. When something is promoting, it is listed under the table with
+table. `F5` re-reads origin/`<base>` and asks the cluster again — the same re-read that makes `w`,
+`R` and `d` see a family or a cluster fix moments after it lands, not just after a restart. When
+something is promoting, it is listed under the table with
 its step strip and — when it is waiting on you — the exact command:
 
 ```

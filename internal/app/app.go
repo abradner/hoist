@@ -75,11 +75,15 @@ type Model struct {
 	tagsFn     tags.BuildFunc
 	// restartFn is everything the restart screen needs from the cluster, supplied by the root's
 	// own caller (cmd/hoist) so this package opens no connection of its own (AGENTS.md §4.8).
-	// Zero when no cluster is configured; R then says so rather than opening a screen that
-	// cannot do anything.
+	// cmd/hoist's buildRestartFuncs (Train 2 design PR 7) asks the cluster fresh on every call,
+	// so a boot-time failure is retried the next time R is pressed rather than wedged for the
+	// session; zero here means the caller chose not to wire a cluster at all, and R says so.
 	restartFn apprestart.Funcs
 	// watchFn builds the watch screen's read function for one family in one env (WithWatch;
-	// cmd/hoist's buildWatchFunc). nil means no cluster is configured, and w says so.
+	// cmd/hoist's buildWatchFunc). Never nil once wired: buildWatchFunc itself retries the
+	// cluster per call (PR 7) and reports the real error from whatever failed, rather than this
+	// package ever collapsing it to a generic "none configured". nil means the caller chose not
+	// to wire a cluster at all, and w says so.
 	watchFn watch.BuildFunc
 	// history is what the tag picker and both confirm screens call for commit history and the
 	// migration delta (M10). Set through WithHistory rather than New so the screens that
