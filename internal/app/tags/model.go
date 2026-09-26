@@ -1376,6 +1376,18 @@ func (m Model) tableSection() string {
 	if m.notice != "" {
 		b.WriteString("\n" + m.styles.Notice.Render(m.wrap(m.notice)))
 	}
+	// Fewer tags than the page has room for (or fewer dividers than dividerRows() budgeted
+	// for) must not shrink the box below what pageSize/BodyHeight reserved for it — every
+	// other screen fills its scrolling section to the room it was given so the closing
+	// border always lands directly above the footer (#T1-02); a table with real content
+	// still fits within its budget, so this only ever adds rows, never removes any.
+	want := 1 + m.pageSize() + m.dividerRows() // header + rows + dividers
+	if have := strings.Count(b.String(), "\n") + 1; have < want {
+		// A trailing " " rather than "" on the last padded row: Box's boxLines trims a
+		// section's trailing "\n"s before splitting it into lines, which would otherwise
+		// silently eat every blank row this loop just added right back off the end.
+		b.WriteString(strings.Repeat("\n", want-have-1) + "\n ")
+	}
 	return b.String()
 }
 

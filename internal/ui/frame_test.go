@@ -67,6 +67,56 @@ func TestFrameTallerThanTheTerminalIsCutNotOverflowed(t *testing.T) {
 	}
 }
 
+// The closing border is never cut off the bottom (#T1-02): when content overflows, the box
+// still ends with its own ╰…╯ row, with a dim "…" continuation row directly above it marking
+// the cut.
+func TestFrameOverflowNeverCutsTheClosingBorder(t *testing.T) {
+	st := NewStyles(true)
+	body := strings.Repeat("line\n", 50)
+	lines := shape(t, Frame{Sections: []string{body}, Footer: "f"}.Render(st, 20, 10), 20, 10)
+	if !strings.HasPrefix(lines[8], "╰") || !strings.HasSuffix(lines[8], "╯") {
+		t.Fatalf("line %d (height-2) is not the closing border: %q", 8, lines[8])
+	}
+	if !strings.Contains(lines[7], "…") {
+		t.Fatalf("line %d (height-3) does not carry the … continuation marker: %q", 7, lines[7])
+	}
+}
+
+// TestFrameOverflowDropsTheWholeLastSectionRatherThanEatAnEarlierRow pins t1-review.md P2 #7:
+// when trimming the last section down to its own single "…" continuation row still is not
+// enough to fit the room above the footer, Render must drop that WHOLE section (its rule
+// included) rather than fall back to eating rows out of an earlier section — the defect that
+// let a flight screen's own header ("abcd1234 app-staging → app-production") disappear on a
+// short terminal while a lower-priority trailing section was reduced to a bare, still-too-tall
+// "…" (testdata/golden/flight-approval-80x12.txt, before this fix).
+func TestFrameOverflowDropsTheWholeLastSectionRatherThanEatAnEarlierRow(t *testing.T) {
+	st := NewStyles(true)
+	f := Frame{
+		Title:    "hoist · promotion",
+		Sections: []string{"abcd1234 app-staging → app-production", "fixed row", strings.Repeat("history line\n", 5)},
+		Footer:   "f",
+	}
+	// height=7: room=6. main (title+header+rule+fixed+rule+5 history lines) is 10 rows, plus
+	// the closing border = 11 — trimming the history section to a single marker row (cut=4 of
+	// a possible 5, since at least 1 row must remain before a marker replaces it) only gets
+	// main+border down to 7, still one over room(6): not enough, so the whole history section
+	// (its rule included) must be dropped instead.
+	out := f.Render(st, 60, 7)
+	lines := shape(t, out, 60, 7)
+	if !strings.Contains(lines[1], "abcd1234 app-staging") {
+		t.Fatalf("header row was dropped to make room for a trailing section's own marker:\n%s", out)
+	}
+	if !strings.Contains(out, "fixed row") {
+		t.Fatalf("the fixed-content section was dropped, want only the last (history) section gone:\n%s", out)
+	}
+	if strings.Contains(out, "history line") {
+		t.Fatalf("the history section's own content should be gone entirely, not partially shown:\n%s", out)
+	}
+	if strings.Contains(out, "…") {
+		t.Fatalf("a fully-dropped section must not leave behind a bare \"…\" marker:\n%s", out)
+	}
+}
+
 func TestBodyHeight(t *testing.T) {
 	// 24 rows: footer 1, edges 2, one rule between two sections = 20 content rows.
 	if got := BodyHeight(24, 2); got != 20 {
