@@ -16,11 +16,13 @@ import (
 
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/app/tags"
+	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
@@ -30,6 +32,7 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -986,6 +989,176 @@ func TestPlanEarlierResolveCannotLandOnNewPlan(t *testing.T) {
 	}
 }
 
+// typeIntoRoot presses every rune of s as a real keypress through the root's own Update, the
+// way an operator types into whichever dialog the top screen currently has open — mirrors
+// internal/app/plan's own typeInto, one layer up. Per-key commands are dropped rather than
+// drained: a focused text input answers every keypress with a cursor-blink command that sleeps
+// before reporting.
+func typeIntoRoot(t *testing.T, tm tea.Model, s string) tea.Model {
+	t.Helper()
+	for _, r := range s {
+		tm, _ = tm.Update(uitest.Key(string(r)))
+	}
+	return tm
+}
+
+// TestPopClosesScreenCtx proves the root's own pop calls Close on the screen it removes
+// (AGENTS.md §4.8's scope bullet): esc popping the watch screen cancels an outstanding poll
+// that is still genuinely in flight, not merely one that already finished on its own (a poll
+// that returns instantly would have its own scope.DoCtx-derived per-call ctx cancelled by its
+// own `defer cancel()` regardless of Close ever running — proving nothing about pop itself). The
+// fake Read blocks on ctx.Done(), released only by the outstanding poll's own cancellation or by
+// the test as a last resort, mirroring TestBackingOutNoLongerCancelsOutstandingBuild's own shape.
+func TestPopClosesScreenCtx(t *testing.T) {
+	started := make(chan struct{})
+	sawCancel := make(chan error, 1)
+	release := make(chan struct{})
+	build := func(_, _ string) (watch.Funcs, error) {
+		return watch.Funcs{
+			Read: func(ctx context.Context) (watch.Snapshot, error) {
+				close(started)
+				select {
+				case <-ctx.Done():
+					sawCancel <- ctx.Err()
+					return watch.Snapshot{}, ctx.Err()
+				case <-release:
+					return watch.Snapshot{}, nil
+				}
+			},
+			Now: time.Now,
+		}, nil
+	}
+	var tm tea.Model = sized(t).(Model).WithWatch(build)
+	tm, cmd := tm.Update(matrix.OpenWatchMsg{Family: "counta", Target: "app-production"})
+	if cmd == nil {
+		t.Fatal("OpenWatchMsg produced no command")
+	}
+	pollDone := make(chan tea.Msg, 1)
+	go func() { pollDone <- cmd() }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the fake Read was never called")
+	}
+
+	// esc pops the watch screen while its poll is still genuinely outstanding.
+	tm, cmd = tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("esc on the watch screen produced no command")
+	}
+	tm, _ = tm.Update(cmd())
+	if n := len(tm.(Model).stack); n != 1 {
+		t.Fatalf("esc did not pop back to the matrix: stack has %d screens", n)
+	}
+
+	select {
+	case err := <-sawCancel:
+		if err == nil {
+			t.Fatal("the outstanding read saw ctx.Done() but ctx.Err() was nil")
+		}
+	case <-time.After(2 * time.Second):
+		close(release) // let the goroutine finish so it doesn't leak past the test
+		t.Fatal("popping the watch screen never cancelled its outstanding read")
+	}
+	<-pollDone
+}
+
+// TestFailedStartThenOverrideLoadsHistory proves FB-M3's fix end to end: Enter no longer cancels
+// the plan screen's own scope (internal/app/plan.Model.Update, the StartMsg case), so when the
+// building screen a failed Start leaves behind pops back to this same plan screen, its history
+// can still load. Attacker: the plan screen's own ctx, which the pre-fix code cancelled the
+// instant Enter was pressed — proved by asserting ctx.Err()==nil from INSIDE the fake Delta the
+// operator's own follow-up override triggers, the same live context the screen has held since
+// before Enter (plan's own override path only re-mints the ID, not the ctx — see
+// internal/app/plan/model.go's updateOverride).
+func TestFailedStartThenOverrideLoadsHistory(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
+	planFn := testPlanFunc([]string{"ghcr.io/"}, envs)
+	var gotCtxErr error
+	deltaCalls := 0
+	hist := history.Funcs{
+		Delta: func(ctx context.Context, _, _ image.Ref) (migrate.Delta, error) {
+			deltaCalls++
+			gotCtxErr = ctx.Err()
+			return migrate.Delta{}, nil
+		},
+	}
+	wantErr := errors.New("promotion existing-id targeting app-production is still in flight (at pr-opened: open); run `hoist resume existing-id` instead of starting a second one")
+	svc := &fakeService{startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		return engine.PromotionState{}, nil, wantErr
+	}}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(r, []string{"ghcr.io/"}, envs, planFn, svc, Promotion{}, nil, apprestart.Funcs{}).WithHistory(hist)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	// envs.Pairs only configures app-staging as a source; land the column cursor there so p
+	// goes straight to loading rather than the env-select prompt (a pair configured for the
+	// OTHER direction only, from whichever env the column defaults to).
+	if tm.(Model).stack[0].(matrixScreen).CurrentEnv() != "app-staging" {
+		tm, _ = tm.Update(uitest.Key("l"))
+	}
+
+	// p: open and fully load the plan screen (testPlanFunc/the fake Delta never block).
+	tm, cmd := press(t, tm, uitest.Key("p"))
+	tm = drainRoot(tm.(Model), cmd)
+	if n := len(tm.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after p, want 2 (matrix, plan)", n)
+	}
+	if deltaCalls == 0 {
+		t.Fatal("setup: the initial load never asked for any history")
+	}
+
+	// enter: confirm the plan (emits plan.StartMsg), then feed that to the root, which is what
+	// actually pushes the building screen (m.start). The building screen goes up before the
+	// failure is known.
+	tm, cmd = press(t, tm.(Model), uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter on the confirmed plan produced no command")
+	}
+	tm, cmd = tm.Update(cmd())
+	if cmd == nil {
+		t.Fatal("plan.StartMsg produced no command")
+	}
+	if n := len(tm.(Model).stack); n != 3 {
+		t.Fatalf("stack has %d screens right after enter, want 3 (matrix, plan, the building screen)", n)
+	}
+
+	// The build fails: popBuildFailed pops the building screen back to the plan screen.
+	tm2, _ := tm.(Model).Update(sessionBuildCmd(t, cmd)())
+	m2 := tm2.(Model)
+	if n := len(m2.stack); n != 2 {
+		t.Fatalf("stack has %d screens after the failed build, want 2 (matrix, plan)", n)
+	}
+	if _, ok := m2.stack[1].(planScreen); !ok {
+		t.Fatalf("top screen after the failed build is %T, want the plan screen", m2.stack[1])
+	}
+
+	// o, a valid override, enter: the operator's own follow-up, which re-loads history through
+	// the SAME scope this screen has held since before Enter (only its ID changes).
+	tm = tea.Model(m2)
+	tm, _ = tm.Update(uitest.Key("o"))
+	if !strings.Contains(plain(tm), "override digest") {
+		t.Fatalf("o did not open the override dialog:\n%s", plain(tm))
+	}
+	tm = typeIntoRoot(t, tm, "ghcr.io/example/counta:v9@sha256:"+strings.Repeat("a", 64))
+	deltaCalls = 0
+	tm, cmd = tm.Update(uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter on a valid override produced no command")
+	}
+	_ = drainRoot(tm.(Model), cmd)
+	if deltaCalls == 0 {
+		t.Fatal("the override never re-asked for history")
+	}
+	if gotCtxErr != nil {
+		t.Fatalf("the override's own history fetch ran under a cancelled context: %v — Enter must not have cancelled the plan screen's scope", gotCtxErr)
+	}
+}
+
 // TestSupersedingStartMsgCancelsPreviousBuild is removed: the scenario it guarded (a second
 // StartMsg for the same target env silently superseding an outstanding first one) can no longer
 // occur at all — session.Controller.Start refuses a second Start for a target env it is already
@@ -1911,12 +2084,17 @@ func TestRestartEarlierStartedDropped(t *testing.T) {
 		}
 		return names, nil
 	}
+	// Observe is required alongside Do (restart.Model.New refuses one without the other,
+	// AGENTS.md §4.8's FB-L3 fix) even though this test never lets a drive reach it.
+	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) {
+		return nil, nil
+	}
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
-		apprestart.Funcs{Read: read, Do: do, Interval: time.Minute})
+		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Minute})
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 
 	// R: the first restart screen instance, for the current column's env.

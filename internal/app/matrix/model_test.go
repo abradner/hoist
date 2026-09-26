@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -249,6 +250,27 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 		t.Fatalf("asked = %v after F5", asked)
 	}
 	uitest.Golden(t, "matrix-drift", m.View(), 120, 24)
+}
+
+// TestHungDriftTimesOut proves the per-env cluster read is actually bounded (AGENTS.md §4.8,
+// "every command has a deadline", FB-M7): a DriftFunc that never returns on its own must still
+// leave the cell saying so, per env, rather than "resolving…" forever. driftTimeout is set to a
+// few milliseconds so this proves the real deadline path without a multi-second wait.
+func TestHungDriftTimesOut(t *testing.T) {
+	drift := func(ctx context.Context, _ string) (map[string][]image.Ref, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, drift).SetSize(120, 24)
+	m.driftTimeout = 20 * time.Millisecond
+	m = uitest.Drain(m, m.Init(), update)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "did not answer in 20ms") {
+		t.Fatalf("view should name the timeout, per env:\n%s", v)
+	}
+	if strings.Contains(v, "resolving…") {
+		t.Fatalf("a timed-out env must not still say resolving:\n%s", v)
+	}
 }
 
 // WithDrift installed a second time (the root re-handing its resolver) must not re-mark an env

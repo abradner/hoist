@@ -101,9 +101,11 @@ type Model struct {
 
 	family, env string
 
-	// id is this instance's scope.ID (New): a snapshotMsg/tickMsg stamped by any other value
-	// is Foreign and dropped at the top of Update (AGENTS.md §4.8).
-	id scope.ID
+	// scope is this instance's owned context plus its ID: a snapshotMsg/tickMsg stamped by any
+	// other value is Foreign and dropped at the top of Update (AGENTS.md §4.8), and Close
+	// (called by the root's pop when this screen is actually removed from the stack) cancels
+	// whatever read is outstanding at that moment rather than leaving it to run to completion.
+	scope scope.Scope
 
 	snap       Snapshot
 	err        string
@@ -125,20 +127,28 @@ func New(family, env string, funcs Funcs, styles ui.Styles) Model {
 	if funcs.Now == nil {
 		funcs.Now = time.Now
 	}
-	return Model{styles: styles, funcs: funcs, family: family, env: env, id: scope.New(), body: viewport.New()}
+	return Model{styles: styles, funcs: funcs, family: family, env: env, scope: scope.Open(), body: viewport.New()}
 }
 
 // Init takes the first snapshot — `hoist watch --once` is this screen's first paint.
 func (m Model) Init() tea.Cmd { return m.poll() }
 
+// Close cancels this instance's outstanding poll. Called by the root's own pop when this screen
+// is actually removed from the stack (AGENTS.md §4.8), never by this package on its own — this
+// screen has no early-leave gesture of its own to call it from; esc's own BackMsg is exactly
+// what triggers that pop.
+func (m Model) Close() { m.scope.Close() }
+
 func (m Model) poll() tea.Cmd {
-	read, now, id := m.funcs.Read, m.funcs.Now, m.id
+	read, now, sc := m.funcs.Read, m.funcs.Now, m.scope
 	if read == nil {
-		return scope.Do(id, func() snapshotMsg { return snapshotMsg{err: fmt.Errorf("watching is not wired up"), at: now()} })
+		return scope.DoCtx(sc, scope.Drift, func(context.Context) snapshotMsg {
+			return snapshotMsg{err: fmt.Errorf("watching is not wired up"), at: now()}
+		})
 	}
-	return scope.Do(id, func() snapshotMsg {
+	return scope.DoCtx(sc, scope.Drift, func(ctx context.Context) snapshotMsg {
 		at := now()
-		snap, err := read(context.Background())
+		snap, err := read(ctx)
 		return snapshotMsg{snap: snap, err: err, at: at}
 	})
 }
@@ -147,12 +157,12 @@ func (m Model) poll() tea.Cmd {
 func (m Model) tick() (Model, tea.Cmd) {
 	m.tickGen++
 	gen := m.tickGen
-	return m, scope.After(m.id, m.interval(), tickMsg{gen: gen})
+	return m, scope.After(m.scope.ID, m.interval(), tickMsg{gen: gen})
 }
 
 // Update implements the screen contract.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if scope.Foreign(m.id, msg) {
+	if scope.Foreign(m.scope.ID, msg) {
 		return m, nil
 	}
 	switch msg := msg.(type) {

@@ -169,10 +169,12 @@ type Model struct {
 	planFn     Func
 	histFn     history.Funcs
 	now        func() time.Time
-	// id is this instance's scope.ID: minted here and again on every override rebuild, so a
-	// loadedMsg/historyMsg from a superseded load — a different screen instance, or this same
-	// instance's own earlier request — is Foreign and dropped (AGENTS.md §4.8).
-	id scope.ID
+	// scope is this instance's owned context plus its ID: minted here and again on every
+	// override rebuild (Open), so a loadedMsg/historyMsg from a superseded load — a different
+	// screen instance, or this same instance's own earlier request — is Foreign and dropped
+	// (AGENTS.md §4.8), and Close (called by the root's pop/truncate once this screen is
+	// actually removed from the stack) cancels any request still outstanding at that moment.
+	scope scope.Scope
 
 	source, target string
 
@@ -203,12 +205,6 @@ type Model struct {
 	viewport viewport.Model
 	diff     string
 	showYAML bool
-
-	// ctx scopes every history request this screen issues; cancel runs when the screen is
-	// left (esc, or enter handing off to the flight screen), so a delta still loading does
-	// not keep calling the forge for a screen nobody is looking at.
-	ctx    context.Context
-	cancel context.CancelFunc
 
 	confirming    bool
 	confirmDirect *huh.Confirm
@@ -254,7 +250,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		planFn:     planFn,
 		histFn:     hist,
 		now:        time.Now,
-		id:         scope.New(),
+		scope:      scope.Open(),
 		source:     source,
 		target:     target,
 		keys:       defaultKeyMap(),
@@ -265,7 +261,6 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		overrides:  map[string]image.Ref{},
 		styles:     ui.NewStyles(true),
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
 	if target == "" || forcePrompt {
 		m.state = stateSelectEnv
 		m.buildEnvSelect()
@@ -276,13 +271,13 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 	return m
 }
 
-// leave cancels the screen's outstanding history requests; every path off the screen calls it.
-func (m Model) leave() Model {
-	if m.cancel != nil {
-		m.cancel()
-	}
-	return m
-}
+// Close cancels this screen's outstanding history and load requests. Called by the root's own
+// pop/truncate the moment this screen is actually removed from the stack (AGENTS.md §4.8) —
+// never by this package itself any more: Enter hands off to the building screen without
+// removing this one (m.start's own design, Train 2 design PR 2), and cancelling here on Enter
+// used to strand every not-yet-loaded delta if that build then failed and the building screen
+// popped back to a plan screen whose history could never load again (FB-M3).
+func (m Model) Close() { m.scope.Close() }
 
 // WithNow fixes the clock relative dates are worded against (tests).
 func (m Model) WithNow(now func() time.Time) Model {
@@ -436,9 +431,9 @@ func (m Model) loadCmd() tea.Cmd {
 	for k, v := range m.overrides {
 		overrides[k] = v
 	}
-	id := m.id
-	return scope.Do(id, func() loadedMsg {
-		pc, err := planFn(context.Background(), service.PlanRequest{Repo: repo, Source: source, Target: target, Overrides: overrides})
+	sc := m.scope
+	return scope.DoCtx(sc, scope.Resolve, func(ctx context.Context) loadedMsg {
+		pc, err := planFn(ctx, service.PlanRequest{Repo: repo, Source: source, Target: target, Overrides: overrides})
 		if err != nil {
 			// A Func error means digest resolution was attempted and failed outright —
 			// the cluster was unreachable, or the resolution configuration itself was
@@ -463,10 +458,7 @@ func (m Model) historyCmds() tea.Cmd {
 	if m.histFn.Delta == nil {
 		return nil
 	}
-	delta, id, ctx := m.histFn.Delta, m.id, m.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	delta, sc := m.histFn.Delta, m.scope
 	cmds := make([]tea.Cmd, 0, len(m.rows))
 	for _, r := range m.rows {
 		if r.Disabled {
@@ -474,7 +466,7 @@ func (m Model) historyCmds() tea.Cmd {
 		}
 		from, to, repo := r.Old, r.New, r.Repo
 		m.deltas[repo] = history.State{}
-		cmds = append(cmds, scope.Do(id, func() historyMsg {
+		cmds = append(cmds, scope.DoCtx(sc, scope.History, func(ctx context.Context) historyMsg {
 			d, err := delta(ctx, from, to)
 			return historyMsg{repo: repo, delta: d, err: err}
 		}))
@@ -485,7 +477,7 @@ func (m Model) historyCmds() tea.Cmd {
 // Update handles the screen's own keys, the loading messages, and forwards everything else
 // to whichever huh field or bubbles component owns the current state.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if scope.Foreign(m.id, msg) {
+	if scope.Foreign(m.scope.ID, msg) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
@@ -504,7 +496,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		if key.Matches(msg, m.keys.Back) && !m.confirming && !m.overriding {
-			return m.leave(), func() tea.Msg { return BackMsg{} }
+			// No cancel here any more (FB-M3): the root's own pop, triggered by this BackMsg,
+			// calls Close on this screen the moment it is actually removed from the stack —
+			// see Close's own doc comment.
+			return m, func() tea.Msg { return BackMsg{} }
 		}
 	}
 
@@ -598,7 +593,11 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		ticked := append([]string(nil), m.ticked...)
 		plan, outcome, mode, source, target, view := m.plan, m.outcome, m.mode, m.source, m.target, m.view
-		return m.leave(), func() tea.Msg {
+		// No cancel here (FB-M3): this screen stays under the building screen Enter pushes
+		// (m.start's own design), and if that build fails the building screen pops back to
+		// THIS screen — whose history must still be able to load, not be permanently stuck
+		// from a cancel that fired the instant Enter was pressed.
+		return m, func() tea.Msg {
 			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target, View: view}
 		}
 	case key.Matches(kmsg, m.keys.Mode):
@@ -744,7 +743,11 @@ func (m Model) updateOverride(msg tea.Msg) (Model, tea.Cmd) {
 			m.overriding = false
 			m.overrides[ref.Repo] = ref
 			m.keepTicked = true
-			m.id = scope.New() // a load/delta still outstanding for the old plan must not land on the new rows
+			// Only the ID changes: a load/delta still outstanding for the pre-override plan
+			// must not land on the new rows, but this is one screen instance reloading itself
+			// in place, not a new one — its ctx (and so its Close-on-pop lifetime, owned by
+			// the root, AGENTS.md §4.8) stays exactly what it was for this screen's whole life.
+			m.scope.ID = scope.New()
 			m.state = stateLoading
 			m.status = fmt.Sprintf("re-resolving digests from %s pods with the override…", m.source)
 			m.showYAML = false

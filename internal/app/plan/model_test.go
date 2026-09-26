@@ -642,7 +642,7 @@ func TestViewGoldenCollidingLabels(t *testing.T) {
 		same("ghcr.io/example/web-frontend-service-beta"),
 		same("ghcr.io/example/db"),
 	}}
-	m, _ = m.Update(scope.Result[loadedMsg]{From: m.id, V: loadedMsg{plan: pl}})
+	m, _ = m.Update(scope.Result[loadedMsg]{From: m.scope.ID, V: loadedMsg{plan: pl}})
 	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	v := ansi.Strip(m.View())
 	for _, want := range []string{"…alpha", "…beta"} {
@@ -674,19 +674,21 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 	}
 }
 
-// Leaving the screen — esc, or enter handing off to the flight screen — cancels the context
-// every history request runs under, so a delta still loading stops calling the forge.
-func TestLeavingThePlanScreenCancelsItsHistory(t *testing.T) {
+// TestEnterNoLongerCancelsThePlanScreensHistory replaces the pre-Train-2 assumption that Enter
+// cancelled this screen's own history requests (FB-M3): Enter hands off to the building screen
+// without removing this one (m.start's own design, Train 2 design PR 2) — this screen stays
+// underneath it, and if that build then fails, the building screen pops back to THIS screen,
+// whose history must still be able to load. Cancelling here on Enter used to strand every
+// not-yet-loaded delta for good the moment that happened. Cancellation is the root's job now:
+// internal/app's own pop/truncate call scope.Scope.Close only once a screen is actually removed
+// from the stack (AGENTS.md §4.8's own scope bullet) — proved at the app level
+// (TestFailedStartThenOverrideLoadsHistory, TestPopClosesScreenCtx), not here, since this
+// package no longer decides when to cancel at all.
+func TestEnterNoLongerCancelsThePlanScreensHistory(t *testing.T) {
 	m := readyModel(t, config.EnvsConfig{})
-	if m.ctx.Err() != nil {
+	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fresh screen: context already cancelled")
 	}
-	m, _ = m.Update(uitest.Key("esc"))
-	if !errors.Is(m.ctx.Err(), context.Canceled) {
-		t.Fatalf("after esc: ctx.Err() = %v; want cancelled", m.ctx.Err())
-	}
-
-	m = readyModel(t, config.EnvsConfig{})
 	m, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
 		t.Fatal("enter emitted nothing")
@@ -694,8 +696,22 @@ func TestLeavingThePlanScreenCancelsItsHistory(t *testing.T) {
 	if _, ok := cmd().(StartMsg); !ok {
 		t.Fatalf("enter emitted %T", cmd())
 	}
-	if !errors.Is(m.ctx.Err(), context.Canceled) {
-		t.Fatalf("after enter: ctx.Err() = %v; want cancelled", m.ctx.Err())
+	if err := m.scope.Ctx().Err(); err != nil {
+		t.Fatalf("after enter: ctx.Err() = %v, want nil — this screen is not being removed", err)
+	}
+}
+
+// TestCloseCancelsOutstandingHistory: the exported Close method — called by the root's own
+// pop/truncate when this screen is actually removed — is what stops a delta still loading now,
+// not anything internal to Update.
+func TestCloseCancelsOutstandingHistory(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	if m.scope.Ctx().Err() != nil {
+		t.Fatal("fresh screen: context already cancelled")
+	}
+	m.Close()
+	if !errors.Is(m.scope.Ctx().Err(), context.Canceled) {
+		t.Fatalf("after Close: ctx.Err() = %v, want cancelled", m.scope.Ctx().Err())
 	}
 }
 
@@ -730,7 +746,7 @@ func TestLoadedMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	if b.state != stateLoading {
 		t.Fatalf("setup: state = %v, want stateLoading", b.state)
 	}
-	foreign := scope.Result[loadedMsg]{From: a.id, V: loadedMsg{plan: a.plan}}
+	foreign := scope.Result[loadedMsg]{From: a.scope.ID, V: loadedMsg{plan: a.plan}}
 	got, cmd := b.Update(foreign)
 	if cmd != nil {
 		t.Error("a foreign loadedMsg produced a command")

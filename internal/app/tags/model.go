@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/history"
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/image"
@@ -241,18 +242,18 @@ type Model struct {
 	// regTagsLoadedMsg/metaLoadedMsg's own doc comment.
 	generation int64
 
-	// ctx/cancel scope every listFn/metaFn/history call this instance ever makes (the
-	// commands close over ctx, never context.Background()). cancel is called once the operator
-	// leaves this picker for good — Esc (onKey's Back handling, both in and out of the confirm
-	// dialog), a review selection, or a confirmed direct-mode request (round-N finding, Codex
-	// P2, "cancel tag loads when leaving the picker"): without it, a load already in flight
-	// when the picker closes keeps running to completion in the background even though its
-	// eventual result is already discarded by the generation guard above — for a mapped repo,
-	// ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests, so repeatedly
-	// opening and closing pickers could pile up obsolete crawls consuming the API rate limit,
-	// or leave one hanging behind a slow request, for no operator-visible reason.
-	ctx    context.Context
-	cancel context.CancelFunc
+	// scope owns the ctx every listFn/metaFn/history call this instance ever makes (the
+	// commands close over scope.Ctx(), never context.Background() directly). scope.Close is
+	// called both explicitly — once the operator leaves this picker for good (Esc, a review
+	// selection, a confirmed direct-mode request; round-N finding, Codex P2, "cancel tag loads
+	// when leaving the picker") — and again by the root's own pop when this screen is actually
+	// removed from the stack (AGENTS.md §4.8; safe to call more than once). Without it, a load
+	// already in flight when the picker closes keeps running to completion in the background
+	// even though its eventual result is already discarded by the generation guard above — for
+	// a mapped repo, ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests,
+	// so repeatedly opening and closing pickers could pile up obsolete crawls consuming the API
+	// rate limit, or leave one hanging behind a slow request, for no operator-visible reason.
+	scope scope.Scope
 
 	stagingEnv         string
 	stagingTags        []string // rows.StagingMismatch's own doc comment: 1+ distinct tags, sorted
@@ -331,7 +332,6 @@ type Model struct {
 
 // New builds the tag picker for imageRepo, choosing a tag for target. See Options.
 func New(imageRepo, target string, o Options) Model {
-	ctx, cancel := context.WithCancel(context.Background())
 	now := o.Now
 	if now == nil {
 		now = time.Now
@@ -342,8 +342,7 @@ func New(imageRepo, target string, o Options) Model {
 		mapped:             o.Mapped,
 		production:         o.Production,
 		generation:         nextGeneration.Add(1),
-		ctx:                ctx,
-		cancel:             cancel,
+		scope:              scope.Open(),
 		stagingEnv:         o.StagingEnv,
 		stagingTags:        o.StagingTags,
 		hasStagingMismatch: o.HasStagingMismatch,
@@ -363,6 +362,13 @@ func New(imageRepo, target string, o Options) Model {
 	}
 }
 
+// Close cancels this instance's outstanding list/meta/history calls — the same effect as this
+// screen's own explicit leave-point cancels (onKey's Back handling, a review selection, a
+// confirmed direct-mode request), called instead by the root's own pop the moment this screen is
+// actually removed from the stack (AGENTS.md §4.8). Safe alongside those explicit calls:
+// scope.Scope.Close is idempotent.
+func (m Model) Close() { m.scope.Close() }
+
 // Init starts the spinner, the async tag/git-tag list load and, when the env declares this
 // image already, the blame that dates that declaration. Listing talks to a registry (and,
 // when mapped, a forge), so it is a tea.Cmd here, never run inside Update (AGENTS.md §4.3).
@@ -378,7 +384,7 @@ func (m Model) regTagsCmd() tea.Cmd {
 	regTagsFn := m.regTagsFn
 	imageRepo := m.imageRepo
 	gen := m.generation
-	ctx := m.ctx
+	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		if regTagsFn == nil {
 			// Findings 4/5 (round N): this used to say "no registry configured for this
@@ -404,7 +410,7 @@ func (m Model) gitTagsCmd() tea.Cmd {
 	gitTagsFn := m.gitTagsFn
 	imageRepo := m.imageRepo
 	gen := m.generation
-	ctx := m.ctx
+	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		gitTags, mapped, err := gitTagsFn(ctx)
 		return gitTagsLoadedMsg{imageRepo: imageRepo, gen: gen, gitTags: gitTags, mapped: mapped, err: err}
@@ -415,7 +421,7 @@ func (m Model) fetchCmd(tag string) tea.Cmd {
 	metaFn := m.metaFn
 	imageRepo := m.imageRepo
 	gen := m.generation
-	ctx := m.ctx
+	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		if metaFn == nil {
 			// Same class of fix as loadCmd's listFn==nil case above: name the image repo and
@@ -438,7 +444,7 @@ func (m Model) historyCmd(tag string) tea.Cmd {
 		return nil
 	}
 	m.deltas[tag] = history.State{}
-	delta, gen, ctx := m.histFn.Delta, m.generation, m.ctx
+	delta, gen, ctx := m.histFn.Delta, m.generation, m.scope.Ctx()
 	from := m.declared.Ref
 	to := image.Ref{Repo: m.imageRepo, Tag: tag}
 	return func() tea.Msg {
@@ -452,7 +458,7 @@ func (m Model) ageCmd() tea.Cmd {
 	if m.histFn.LiveAge == nil || m.declared == nil {
 		return nil
 	}
-	liveAge, gen, ctx, occ := m.histFn.LiveAge, m.generation, m.ctx, m.declared.Occurrence
+	liveAge, gen, ctx, occ := m.histFn.LiveAge, m.generation, m.scope.Ctx(), m.declared.Occurrence
 	return func() tea.Msg {
 		age, err := liveAge(ctx, occ)
 		return ageMsg{gen: gen, age: age, err: err}
@@ -630,7 +636,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.confirming {
 		if key.Matches(msg, m.keys.Back) {
 			m.confirming = false
-			m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
+			m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
 			return m, func() tea.Msg { return BackMsg{} }
 		}
 		return m.updateConfirm(msg)
@@ -639,7 +645,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.updateReading(msg)
 	}
 	if key.Matches(msg, m.keys.Back) {
-		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
+		m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
 		return m, func() tea.Msg { return BackMsg{} }
 	}
 	if m.state != stateReady {
@@ -864,7 +870,7 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if !direct {
-		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
+		m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
 		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
 		since, note := m.declaredSince(), m.historyNote()
 		return m, func() tea.Msg {
@@ -898,7 +904,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		r := rows[idx]
-		m.cancel() // leaving the picker for good — see the ctx/cancel field's own doc comment.
+		m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
 		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
 		since, note := m.declaredSince(), m.historyNote()
 		return m, func() tea.Msg {

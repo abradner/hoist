@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/app/watch"
@@ -480,9 +480,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (flight.AbandonMsg's own doc comment) — pop back to the matrix immediately and let
 		// session.Controller.Abandon do the real work: cancel, wait for a busy Step to actually
 		// stop, then the real Backend.Abandon call.
-		if len(m.stack) > 1 {
-			m.stack = append([]Screen(nil), m.stack[:1]...)
-		}
+		m = m.truncate(0)
 		sess, cmd := m.sess.Abandon(msg.ID)
 		m.sess = sess
 		return m, cmd
@@ -912,7 +910,9 @@ func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 // remembering to attach it.
 func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
-	pc, err := m.planFn(context.Background(), service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
+	ctx, cancel := scope.Timeout(scope.Resolve)
+	defer cancel()
+	pc, err := m.planFn(ctx, service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
 	if err != nil {
 		return m.pop().withMatrixNotice(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
@@ -956,7 +956,32 @@ func (m Model) pop() Model {
 	if len(m.stack) <= 1 {
 		return m
 	}
-	m.stack = append([]Screen(nil), m.stack[:len(m.stack)-1]...)
+	return m.truncate(len(m.stack) - 2)
+}
+
+// closer is implemented by a screen adapter whose underlying Model owns a scope.Scope
+// (plan, watch, restart, tags today) — promoted automatically, since every adapter embeds its
+// package's Model by value (internal/app/screen.go). truncate calls Close on every screen it
+// removes, so an outstanding DoCtx call for a screen that no longer exists on the stack is
+// cancelled the moment it stops existing, rather than left to run until its own per-call timeout
+// (AGENTS.md §4.8).
+type closer interface{ Close() }
+
+// truncate drops every screen above index n, closing each one removed. It is the general form
+// both pop (n = len(stack)-2) and truncateToMatrix (n = 0) reduce to, used directly wherever more
+// than one screen must go at once (flight.AbandonMsg's own immediate pop-to-matrix). n outside
+// [0, len(stack)-1) is a no-op — never a slice panic, since nothing this package builds computes
+// n from anything but a stack length it already holds.
+func (m Model) truncate(n int) Model {
+	if n < 0 || n >= len(m.stack)-1 {
+		return m
+	}
+	for _, s := range m.stack[n+1:] {
+		if c, ok := s.(closer); ok {
+			c.Close()
+		}
+	}
+	m.stack = append([]Screen(nil), m.stack[:n+1]...)
 	return m
 }
 
@@ -1000,9 +1025,7 @@ func (m Model) popAndRelist() (Model, tea.Cmd) {
 // it is always safe, even when the stack is already just the matrix. Landing on the matrix always
 // re-lists, mirroring popAndRelist's own reason for doing so.
 func (m Model) truncateToMatrix() (Model, tea.Cmd) {
-	if len(m.stack) > 1 {
-		m.stack = append([]Screen(nil), m.stack[0])
-	}
+	m = m.truncate(0)
 	var cmd tea.Cmd
 	m.sess, cmd = m.sess.Relist()
 	return m, cmd

@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -122,6 +124,11 @@ type Model struct {
 	pending  map[string]bool
 	driftErr map[string]string
 	gen      uint64
+
+	// driftTimeout overrides scope.Drift's per-env deadline; zero means the default. Only ever
+	// set directly by a test proving the deadline actually fires (AGENTS.md §8, "prove a new
+	// test can fail") — cmd/hoist's own wiring never touches it.
+	driftTimeout time.Duration
 
 	// refreshingRepo guards askRepoRefresh against overlap: two concurrent refreshes against
 	// #PR7's one fixed cache path can corrupt git state (index.lock contention, broken
@@ -302,11 +309,20 @@ func (m Model) askCluster() tea.Cmd {
 		return nil
 	}
 	gen, drift := m.gen, m.drift
+	timeout := m.driftTimeout
+	if timeout <= 0 {
+		timeout = scope.Drift
+	}
 	cmds := make([]tea.Cmd, 0, len(m.matrix.Envs))
 	for _, env := range m.matrix.Envs {
 		env := env
 		cmds = append(cmds, func() tea.Msg {
-			running, err := drift(context.Background(), env)
+			ctx, cancel := scope.Timeout(timeout)
+			defer cancel()
+			running, err := drift(ctx, env)
+			if err != nil && errors.Is(err, context.DeadlineExceeded) {
+				err = fmt.Errorf("did not answer in %s", timeout)
+			}
 			return DriftMsg{gen: gen, env: env, running: running, err: err}
 		})
 	}
@@ -334,7 +350,12 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 	m.repoGen = nextRepoGen.Add(1)
 	gen, refresh := m.repoGen, m.refreshRepo
 	return m, func() tea.Msg {
-		repo, err := refresh(context.Background())
+		ctx, cancel := scope.Timeout(scope.RefreshRepo)
+		defer cancel()
+		repo, err := refresh(ctx)
+		if err != nil && errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("did not answer in %s", scope.RefreshRepo)
+		}
 		return RepoRefreshedMsg{Gen: gen, Repo: repo, Err: err}
 	}
 }

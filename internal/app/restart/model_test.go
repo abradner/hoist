@@ -122,7 +122,7 @@ func TestEnterRestartsAndFollowsTheRollout(t *testing.T) {
 	m = drain(t, m, cmd)
 	// Tick through until it settles.
 	for i := 0; i < 10 && m.state != stateDone && m.state != stateFailed; i++ {
-		m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{}})
+		m, cmd = m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{}})
 		m = drain(t, m, cmd)
 	}
 	if m.state != stateDone {
@@ -190,7 +190,7 @@ func TestSupersededRestartIsNotReportedAsSuccess(t *testing.T) {
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = drain(t, m, cmd)
 	for i := 0; i < 5 && m.state == stateRolling; i++ {
-		m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{}})
+		m, cmd = m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{}})
 		m = drain(t, m, cmd)
 	}
 	if m.state != stateFailed {
@@ -257,12 +257,59 @@ func TestStartedMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	if b.state != stateReading {
 		t.Fatalf("setup: state = %v, want stateReading", b.state)
 	}
-	foreign := scope.Result[startedMsg]{From: a.id, V: startedMsg{done: []string{"web"}}}
+	foreign := scope.Result[startedMsg]{From: a.scope.ID, V: startedMsg{done: []string{"web"}}}
 	got, cmd := b.Update(foreign)
 	if cmd != nil {
 		t.Error("a foreign startedMsg produced a command")
 	}
 	if got.state != stateReading {
 		t.Fatalf("a foreign startedMsg was accepted onto a screen that never asked for it: state=%v", got.state)
+	}
+}
+
+// TestRestartObserveTimeout proves Observe is actually bounded (AGENTS.md §4.8, "every command
+// has a deadline", FB-L3): a rollout-progress read that never returns on its own must still let
+// the screen say so, rather than leaving the operator staring at "rolling" forever. ObserveTimeout
+// is set to a few milliseconds — Funcs' own doc comment on why it exists — so this proves the
+// real deadline path without a multi-second wait.
+func TestRestartObserveTimeout(t *testing.T) {
+	f := &fakeFuncs{plan: onePlan()}
+	funcs := f.funcs()
+	funcs.Interval = time.Millisecond
+	funcs.ObserveTimeout = 20 * time.Millisecond
+	funcs.Observe = func(ctx context.Context, _ string, _ []string, _ time.Time) ([]restart.Progress, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m = drain(t, m, m.Init())
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = drain(t, m, cmd)
+	if m.state != stateFailed {
+		t.Fatalf("state = %v, want failed once the observe call timed out (notice: %q)", m.state, m.notice)
+	}
+	if !strings.Contains(m.notice, "deadline exceeded") {
+		t.Fatalf("notice should say the read did not answer: %q", m.notice)
+	}
+}
+
+// TestNewRefusesDoWithoutObserve is FB-L3's construction-time half: Do without Observe would
+// leave a restart stranded in "rolling" forever (observe's own obs==nil guard silently breaks
+// the tick chain), so New refuses outright rather than letting a real restart ever reach that
+// state.
+func TestNewRefusesDoWithoutObserve(t *testing.T) {
+	funcs := Funcs{
+		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+		Do:   func(context.Context, restart.Plan, time.Time) ([]string, error) { return nil, nil },
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	if m.state != stateFailed {
+		t.Fatalf("state = %v, want failed", m.state)
+	}
+	if !strings.Contains(m.notice, "Observe") {
+		t.Fatalf("notice should name the missing Observe: %q", m.notice)
+	}
+	if cmd := m.Init(); cmd != nil {
+		t.Error("Init on a refused screen must do nothing")
 	}
 }

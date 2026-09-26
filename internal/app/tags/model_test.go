@@ -846,7 +846,7 @@ func TestRegTagsCmdUsesModelsCancellableContext(t *testing.T) {
 		return nil, nil
 	}
 	m := New("ghcr.io/example/app", "app-staging", Options{RegTags: regTagsFn})
-	m.cancel()
+	m.scope.Close()
 	m.regTagsCmd()()
 	if gotCtx == nil {
 		t.Fatal("regTagsFn was never called")
@@ -863,7 +863,7 @@ func TestFetchCmdUsesModelsCancellableContext(t *testing.T) {
 		return registry.ImageMeta{}, nil
 	}
 	m := New("ghcr.io/example/app", "app-staging", Options{Meta: metaFn})
-	m.cancel()
+	m.scope.Close()
 	m.fetchCmd("v1")()
 	if gotCtx == nil {
 		t.Fatal("metaFn was never called")
@@ -881,18 +881,18 @@ func TestFetchCmdUsesModelsCancellableContext(t *testing.T) {
 // flight actually stops — for a mapped repo, ListFunc can walk Forge.Tags through up to 301
 // sequential GitHub requests, so an abandoned crawl left running would otherwise keep
 // consuming the API rate limit even though its eventual result is already discarded by the
-// generation guard. Each test calls m.cancel() indirectly, through the real key-handling code
-// path, and reads back m.ctx.Err() on the ORIGINAL model value — cancel's closure operates on
+// generation guard. Each test calls m.scope.Close() indirectly, through the real key-handling code
+// path, and reads back m.scope.Ctx().Err() on the ORIGINAL model value — cancel's closure operates on
 // the shared underlying context regardless of which value-copy invoked it, so this proves the
 // call actually happened rather than merely that some copy's field looks right.
 func TestEscCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
-	if m.ctx.Err() != nil {
+	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
 	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.ctx.Err() != context.Canceled {
-		t.Fatalf("Esc should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	if m.scope.Ctx().Err() != context.Canceled {
+		t.Fatalf("Esc should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
 	}
 }
 
@@ -902,18 +902,18 @@ func TestEscDuringConfirmCancelsPendingLoad(t *testing.T) {
 	if !m.confirming {
 		t.Fatal("fixture precondition: D on a non-production target should open the confirm dialog")
 	}
-	if m.ctx.Err() != nil {
+	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
 	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.ctx.Err() != context.Canceled {
-		t.Fatalf("Esc during the confirm dialog should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	if m.scope.Ctx().Err() != context.Canceled {
+		t.Fatalf("Esc during the confirm dialog should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
 	}
 }
 
 func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
-	if m.ctx.Err() != nil {
+	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
 	_, cmd := m.Update(uitest.Key("space"))
@@ -923,8 +923,8 @@ func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 	if _, ok := cmd().(SelectedMsg); !ok {
 		t.Fatalf("got %T, want SelectedMsg", cmd())
 	}
-	if m.ctx.Err() != context.Canceled {
-		t.Fatalf("selecting a tag should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	if m.scope.Ctx().Err() != context.Canceled {
+		t.Fatalf("selecting a tag should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
 	}
 }
 
@@ -932,7 +932,7 @@ func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	if m.ctx.Err() != nil {
+	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -942,8 +942,8 @@ func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
 	if _, ok := cmd().(DirectRequestedMsg); !ok {
 		t.Fatalf("got %T, want DirectRequestedMsg", cmd())
 	}
-	if m.ctx.Err() != context.Canceled {
-		t.Fatalf("confirming a direct commit should cancel the model's own load context, got Err()=%v", m.ctx.Err())
+	if m.scope.Ctx().Err() != context.Canceled {
+		t.Fatalf("confirming a direct commit should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
 	}
 }
 
