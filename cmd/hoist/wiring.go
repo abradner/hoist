@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -19,7 +18,6 @@ import (
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -37,7 +35,7 @@ import (
 // defect this adaptor used to have (FB-M1): StartPromotion reads svc.Repo() ITSELF, at call
 // time, rather than trusting whatever *gitops.Repo/viewDir this closure was built with back at
 // TUI boot — so an Argo Application renamed since boot, or a repo view F5 has refreshed since,
-// is what ArgoAppNames/EditApps and the freshness check actually see.
+// is what the Argo Application lookup and the freshness check actually see.
 func buildStartPromotion(svc *service.Service) app.StartPromotionFunc {
 	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
 		var onWaiting func()
@@ -58,110 +56,55 @@ func buildStartPromotion(svc *service.Service) app.StartPromotionFunc {
 	}
 }
 
-// buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10): List
-// re-observes every state file the way runPromotions does — the step list the state itself
-// implies, against a forge and Argo/rollout clients built from the repo config it names —
-// and Resume builds the same state and DriveFunc runResume would. A state whose repo is not
-// in the config file, or whose clients cannot be built, is listed with that as its Err rather
-// than dropped: a promotion that cannot be confirmed is not one that is not there.
-// kubeOverride, when non-empty, is the operator's explicit --kube-context (#105) and is what
-// both List's re-observation and Resume's drive open their Argo/rollout adaptors against,
-// instead of each promotion's own repo's kube.context, so one TUI session runs against one
-// cluster throughout and the pane and the flight screen agree. Empty keeps runResume's rule
-// — the promotion's repo's kube.context, which is not necessarily the selected repo's: the
-// list is every state file, whichever repo it belongs to (review of #105).
-func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
-	if cfg == nil {
+// buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10), now a thin
+// adapter over svc.List/svc.Resume (internal/service/promotions.go) — the same re-observation
+// both the CLI's runPromotions/runResume and the matrix's in-flight pane now share, rather than
+// two separately-maintained loops that could (and once did, per the aggregate review of stack
+// #137) disagree about the very same state file. svc's own Settings.KubeOverride is what both
+// List's re-observation and Resume's drive open their Argo/rollout adaptors against — set once
+// at construction (runTUI), the operator's explicit --kube-context (#105) when given, else each
+// promotion's own repo's kube.context, so one TUI session runs against one cluster throughout.
+func buildInFlightFuncs(svc *service.Service) app.InFlight {
+	if svc == nil || svc.Settings().Config == nil {
 		return app.InFlight{}
 	}
 	return app.InFlight{
 		List: func(ctx context.Context) ([]flight.Summary, error) {
-			states, err := engine.ListStates()
+			listed, err := svc.List(ctx, service.ListOpts{})
 			if err != nil {
 				return nil, err
 			}
-			out := make([]flight.Summary, 0, len(states))
-			for _, s := range states {
-				out = append(out, observeForList(ctx, cfg, s, kubeOverride))
+			out := make([]flight.Summary, 0, len(listed))
+			for _, l := range listed {
+				out = append(out, summaryFor(l))
 			}
 			return out, nil
 		},
-		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.Driver, error) {
-			states, err := engine.ListStates()
+		Resume: func(ctx context.Context, id string) (engine.PromotionState, flight.Driver, error) {
+			// No live progress channel wired for a resumed promotion before this PR
+			// (FB-M2) — svc.Resume's own DriverHooks{Progress: ...} now gives the flight
+			// screen the same per-step progress a freshly started promotion already had.
+			d, err := svc.Resume(ctx, id, service.ResumeOpts{})
 			if err != nil {
 				return engine.PromotionState{}, nil, err
 			}
-			var s *engine.PromotionState
-			for _, st := range states {
-				if st.ID == id {
-					s = st
-					break
-				}
-			}
-			if s == nil {
-				return engine.PromotionState{}, nil, fmt.Errorf("no promotion %s found", id)
-			}
-			rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
-			if !ok {
-				return engine.PromotionState{}, nil, fmt.Errorf("%s: repo %s is not in the config file", s.ID, s.RepoFullName)
-			}
-			f, err := newForge(rc.GitHub)
-			if err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-			a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, kubeOverride)
-			if err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-			// The same carry-forward rules runResume applies (see its own comments): policy
-			// fields stay as persisted, ArgoNamespace is re-read, a pre-M5 state is repaired.
-			s.ArgoNamespace = rc.Kube.ArgoNamespace
-			if err := ensureArgoApps(s, rc); err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-			statePath, err := engine.StatePath(s.ID)
-			if err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-			save := func(st *engine.PromotionState) error { return engine.SaveState(statePath, st) }
-			// Drive the mode this promotion actually is (runResume's own reasoning): a direct
-			// promotion through AllSteps would push its branch and open a PR. Confirmed is
-			// true because the state file exists only because the operator already confirmed.
-			steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, nil)
-			// No live progress channel wired for a resumed promotion yet — that is a
-			// scoped-out follow-up (internal/service.StartPromotion's own Hooks.Progress is
-			// what a later PR would thread through here); nil here is unchanged from before
-			// this PR.
-			return *s, service.NewDriver(steps, s, save, pollIntervals(cfg.Poll), service.DriverHooks{}), nil
+			return d.State(), d, nil
 		},
 	}
 }
 
-// observeForList re-observes one state for the in-flight pane: engine.Status over the list
-// the state implies, so the pane can draw every step, not only where it stopped.
-func observeForList(ctx context.Context, cfg *config.Config, s *engine.PromotionState, kubeOverride string) flight.Summary {
-	rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
-	if !ok {
-		return flight.Summarize(*s, false, nil, fmt.Errorf("repo %s is not in the config file", s.RepoFullName))
+// summaryFor turns one service.Listed into the flight.Summary the in-flight pane renders —
+// Unconfigured and Err both become a Summary whose own Err names why re-observation could not
+// happen at all (never dropped), exactly as observeForList's pre-move wording did.
+func summaryFor(l service.Listed) flight.Summary {
+	switch {
+	case l.Unconfigured:
+		return flight.Summarize(l.State, false, nil, fmt.Errorf("repo %s is not in the config file", l.State.RepoFullName))
+	case l.Err != nil:
+		return flight.Summarize(l.State, false, nil, l.Err)
+	default:
+		return flight.Summarize(l.State, l.Done, l.Statuses, nil)
 	}
-	f, err := newForge(rc.GitHub)
-	if err != nil {
-		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build a forge client: %w", err))
-	}
-	a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, kubeOverride)
-	if err != nil {
-		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build an Argo/rollout client: %s", redact.Strings(err.Error())))
-	}
-	if err := ensureArgoApps(s, rc); err != nil {
-		return flight.Summarize(*s, false, nil, errors.New(redact.Strings(err.Error())))
-	}
-	done, statuses, err := engine.Status(ctx, engine.ObserveSteps(s, newGit, f, a, ro, nil), s)
-	if err != nil {
-		// The same rule as the Argo/rollout client error above: every adaptor scrubs its own
-		// output, and the pane still passes what it prints through redact.
-		err = errors.New(redact.Strings(err.Error()))
-	}
-	return flight.Summarize(*s, done, statuses, err)
 }
 
 // buildPollDurations translates config.PollConfig's CI/Approval/Deadline into
