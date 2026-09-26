@@ -200,6 +200,21 @@ func stepOnce(t *testing.T, m Model, cmd tea.Cmd) Model {
 	return tm.(Model)
 }
 
+// drainRoot runs cmd through the root's Update, recursively, via uitest.Drain — for a test that
+// needs a whole async chain (Train 2 design PR 4's completion-triggered refresh/relist, batched
+// together in apply's own returned cmd) to actually run to completion, rather than stopping one
+// level in like stepOnce/attach do for a test that only needs the first result. Never run this on
+// a command that reaches session.Controller.Init's own recurring listTickMsg chain — that uses a
+// real tea.Tick (Config.After's own default) and would block for a real Config.ListEvery (30s
+// default) the one time this is misused on it; every fixture below only ever drains a chain that
+// starts from a stepMsg/builtMsg result, never Init() itself.
+func drainRoot(m Model, cmd tea.Cmd) Model {
+	return uitest.Drain(m, cmd, func(m Model, msg tea.Msg) (Model, tea.Cmd) {
+		tm, cmd := m.Update(msg)
+		return tm.(Model), cmd
+	})
+}
+
 // rootSessionInit runs the root's own Init() down to session.Controller's own boot listing —
 // tea.Batch(tea.RequestBackgroundColor, screenCmd, m.sess.Init()), itself
 // tea.Batch(listCmd, tickCmd) (internal/app/session/controller.go's own Init) — returning the
@@ -2019,6 +2034,140 @@ func TestRepoRefreshedMsgUpdatesTheRootRepoToo(t *testing.T) {
 
 	if m2.repo != fresh {
 		t.Fatalf("root repo = %p, want the RepoRefreshedMsg's own repo (%p) adopted — plan.New and friends must see what F5 just found", m2.repo, fresh)
+	}
+}
+
+// TestDoneShowsNewTagWithoutF5 is Train 2 design PR 4's central promise: a promotion the
+// operator watched finish (session.ChangeDone) refreshes the matrix's own repo read exactly as
+// F5 does, so the new tag shows up without the operator pressing F5 themselves — and the pane
+// re-lists afterward rather than waiting for the next tick. This drives app.Model.apply directly
+// (an unexported method, same package) with a synthetic Change rather than a real driver/Step
+// round trip: apply is exactly the wiring Train 2 design PR 4 adds, and testing it directly
+// avoids a real Driver.Step's own scheduled next-poll command, which uses a real tea.Tick
+// (session.Config.After's default) that would otherwise sleep for a real MinTick/Wait duration
+// the instant a test drained it.
+func TestDoneShowsNewTagWithoutF5(t *testing.T) {
+	var listCalls int
+	svc := &fakeService{
+		ListFn: func(context.Context) ([]service.Listed, error) {
+			listCalls++
+			return nil, nil
+		},
+	}
+	tm := sizedWithService(t, svc, Promotion{})
+	m := tm.(Model)
+
+	fresh, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshCalls int
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) {
+		refreshCalls++
+		return fresh, nil
+	})
+
+	before := listCalls
+	m2, cmd := m.apply([]session.Change{{Kind: session.ChangeDone, Build: 1, ID: "abcd1234"}})
+	m3 := drainRoot(m2, cmd)
+
+	if refreshCalls != 1 {
+		t.Fatalf("RefreshRepoFunc called %d times on Done, want exactly 1", refreshCalls)
+	}
+	if m3.repo != fresh {
+		t.Errorf("root repo = %p, want the completion-triggered refresh's own repo (%p) adopted, matching what F5 already does", m3.repo, fresh)
+	}
+	ms, ok := m3.stack[0].(matrixScreen)
+	if !ok {
+		t.Fatal("stack[0] is not the matrix screen")
+	}
+	if ms.Repo() != fresh {
+		t.Error("the matrix's own repo was not updated by the completion-triggered refresh — the cell would still show the old tag")
+	}
+	if listCalls <= before {
+		t.Errorf("List not called again after the drive finished, calls before=%d after=%d — Done must relist, not just refresh", before, listCalls)
+	}
+}
+
+// TestLandedRefreshesOnce proves apply's refresh/relist fire at MOST ONCE per call, never once
+// per Change item in the batch — the case that matters is session.Controller.Update's own
+// documented shape where a single Step that both lands and finishes produces ChangeLanded AND
+// ChangeDone together for the same build (its own doc comment: "a stepMsg that both lands and
+// finishes" produces two Changes). Refreshing twice for what the operator experiences as one
+// event would not corrupt anything (matrix's own refreshingRepo/refreshAgain coalescing would
+// catch the second one), but it is still a pointless second fetch this test exists to keep out.
+// A bare ChangeStepped (still in flight, nothing landed) is the negative control: it must
+// trigger no refresh at all.
+func TestLandedRefreshesOnce(t *testing.T) {
+	svc := &fakeService{}
+	tm := sizedWithService(t, svc, Promotion{})
+	m := tm.(Model)
+
+	fresh, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshCalls int
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) {
+		refreshCalls++
+		return fresh, nil
+	})
+
+	m2, cmd := m.apply([]session.Change{{Kind: session.ChangeStepped, Build: 1, ID: "abcd1234"}})
+	m2 = drainRoot(m2, cmd)
+	if refreshCalls != 0 {
+		t.Fatalf("refresh called %d times on a mere Stepped change, want 0", refreshCalls)
+	}
+
+	// The real shape ChangeLanded ships in: alongside ChangeDone, in the same batch, for the
+	// same build (a promotion that lands and finishes in its very last Step).
+	m3, cmd3 := m2.apply([]session.Change{
+		{Kind: session.ChangeLanded, Build: 1, ID: "abcd1234"},
+		{Kind: session.ChangeDone, Build: 1, ID: "abcd1234"},
+	})
+	_ = drainRoot(m3, cmd3)
+	if refreshCalls != 1 {
+		t.Fatalf("refresh called %d times for a Landed+Done batch, want exactly 1", refreshCalls)
+	}
+}
+
+// TestEarlierF5AnswerCannotOverwriteCompletionRefresh: the attacker is a slow F5 the operator
+// pressed before a drive landed, whose answer (carrying the OLD repo, at generation 0 — a freshly
+// built matrix.Model's own zero-value repoGen, exactly TestRepoRefreshedMsgUpdatesTheRootRepoToo's
+// own convention for "the F5 that never actually advanced anything") arrives AFTER the
+// completion-triggered refresh already adopted the new one. matrix.RepoRefreshedMsg's own
+// repoGen guard (unchanged by this PR) is what has to catch this: askRepoRefresh bumps repoGen to
+// a nonzero, process-wide-unique generation exactly as F5's own key handler always did, so the
+// earlier F5's answer carries a now-stale generation and must be dropped, never allowed to
+// regress the repo.
+func TestEarlierF5AnswerCannotOverwriteCompletionRefresh(t *testing.T) {
+	svc := &fakeService{}
+	tm := sizedWithService(t, svc, Promotion{})
+	m := tm.(Model)
+
+	oldRepo, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRepo, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) { return newRepo, nil })
+
+	m2, cmd := m.apply([]session.Change{{Kind: session.ChangeDone, Build: 1, ID: "abcd1234"}})
+	m3 := drainRoot(m2, cmd)
+	if m3.repo != newRepo {
+		t.Fatalf("completion refresh did not land: root repo = %p, want %p", m3.repo, newRepo)
+	}
+
+	// The slow F5's own answer finally lands, carrying the OLD repo at generation 0 — necessarily
+	// stale, since askRepoRefresh's nextRepoGen counter only ever counts up from 1 and the
+	// completion refresh above already consumed one such generation.
+	tm4, _ := tea.Model(m3).Update(matrix.RepoRefreshedMsg{Gen: 0, Repo: oldRepo})
+	m4 := tm4.(Model)
+	if m4.repo != newRepo {
+		t.Errorf("an earlier F5 answer overwrote the completion refresh: root repo = %p, want it to stay %p (the earlier answer must be dropped as stale)", m4.repo, newRepo)
 	}
 }
 

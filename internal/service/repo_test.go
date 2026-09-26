@@ -6,7 +6,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/pkg/git"
 )
@@ -200,6 +203,69 @@ func TestCheckRepoViewCurrentRefusesWhenOriginMovesAgain(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "has moved since this plan was built") {
 		t.Errorf("error = %v, want it to name the actual cause", err)
+	}
+}
+
+// countingSlowGit wraps a real git.Exec and, on FetchBranch only (refreshRepoView's own first
+// call, and therefore the first thing two concurrent LoadRepo(RepoFromOrigin) calls would race
+// on), tracks how many calls are inside the method AT ONCE and sleeps briefly before returning —
+// widening the race window so two calls that are allowed to overlap actually would, rather than
+// happening to interleave correctly by luck on a fast machine.
+type countingSlowGit struct {
+	git.Exec
+	inflight int32
+	maxSeen  int32
+}
+
+func (g *countingSlowGit) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
+	n := atomic.AddInt32(&g.inflight, 1)
+	for {
+		prevMax := atomic.LoadInt32(&g.maxSeen)
+		if n <= prevMax || atomic.CompareAndSwapInt32(&g.maxSeen, prevMax, n) {
+			break
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	defer atomic.AddInt32(&g.inflight, -1)
+	return g.Exec.FetchBranch(ctx, dir, remote, branch)
+}
+
+// TestLoadRepoSerialised is Train 2 design PR 4's service-side fix (internal/service/repo.go's
+// own refreshMu doc comment): two LoadRepo(RepoFromOrigin) calls racing against the same clone
+// (a completion-triggered refresh and an F5 the operator happens to press in the same instant,
+// or any other caller reaching Service directly) must never run refreshRepoView concurrently —
+// that function removes and recreates ONE FIXED cached worktree, so overlapping calls can
+// corrupt it (index.lock contention, a worktree registration torn between the two). This proves
+// it at the Service layer, independent of the matrix's own UI-level askRepoRefresh coalescing:
+// two goroutines call LoadRepo at once against a git client engineered to widen the race window,
+// and the max concurrent FetchBranch count it observed must be exactly 1.
+func TestLoadRepoSerialised(t *testing.T) {
+	clone := newRepoFixture(t)
+	g := &countingSlowGit{}
+	set := Settings{RepoDir: clone, Base: "main"}
+	svc := New(set, Deps{
+		Git:   func() git.Git { return g },
+		Store: FileStore{},
+		Now:   time.Now,
+	})
+
+	// The fixture has no `kind: Application` wrappers at all, so gitops.Discover (which
+	// LoadRepo calls after refreshRepoView, still inside the same lock) always errors — beside
+	// the point here: this test proves FetchBranch never overlaps, not that the fixture is a
+	// promotable repo. Every real caller (cmd/hoist, the TUI) points RepoDir at an actual
+	// GitOps repo, exercised elsewhere (TestRefreshRepoViewReadsOrigin and friends).
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = svc.LoadRepo(context.Background(), RepoFromOrigin)
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&g.maxSeen); got != 1 {
+		t.Errorf("max concurrent FetchBranch calls = %d, want 1 (refreshMu must serialize LoadRepo(RepoFromOrigin))", got)
 	}
 }
 

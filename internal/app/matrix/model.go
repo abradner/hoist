@@ -128,7 +128,17 @@ type Model struct {
 	// worktree registrations — found by an adversarial review of #PR7). repoGen is the
 	// generation the outstanding refresh belongs to, checked by RepoRefreshedMsg the same way
 	// DriftMsg checks gen.
+	//
+	// refreshAgain is Train 2 design PR 4's own coalescing fix: askRepoRefresh used to silently
+	// drop a second ask that arrived while refreshingRepo was already true (F5 pressed the
+	// instant a completion-triggered refresh — RequestRefresh, below — had just started one, or
+	// the reverse). A silent drop meant the operator's own F5 keypress, or a promotion landing,
+	// could do nothing at all if it lost that race, with no sign anything was wrong. Instead the
+	// ask that lost the race sets this flag, and RepoRefreshedMsg re-issues exactly one more
+	// askRepoRefresh once the in-flight one lands — never a queue of more than one, since a
+	// second loser while the first is already waiting just leaves the flag it already set.
 	refreshingRepo bool
+	refreshAgain   bool
 	repoGen        uint64
 
 	// chooser is open when d found several first-party images in the cell and the operator
@@ -305,12 +315,19 @@ func (m Model) askCluster() tea.Cmd {
 
 // askRepoRefresh re-reads the repo (#PR7's F5, alongside askCluster's own cluster fan-out).
 // nil refreshRepo (no --repo selected yet — the same nil convention DriftFunc's own askCluster
-// guard uses) or a refresh already outstanding means nothing to do: a second concurrent
-// refresh against #PR7's one fixed cache path is not merely wasted work, it can corrupt git
-// state (index.lock contention, broken worktree registrations) — found by an adversarial
-// review of #PR7's first version, which had no guard here at all.
+// guard uses) means nothing to do, ever. A refresh already outstanding means nothing to do
+// RIGHT NOW — issuing a second one concurrently against #PR7's one fixed cache path is not
+// merely wasted work, it can corrupt git state (index.lock contention, broken worktree
+// registrations, found by an adversarial review of #PR7's first version) — but this ask is not
+// simply dropped the way it used to be: refreshAgain records that something still wants a fresh
+// read, and RepoRefreshedMsg re-issues exactly one more once the in-flight refresh lands (this
+// field's own doc comment).
 func (m Model) askRepoRefresh() (Model, tea.Cmd) {
-	if m.refreshRepo == nil || m.refreshingRepo {
+	if m.refreshRepo == nil {
+		return m, nil
+	}
+	if m.refreshingRepo {
+		m.refreshAgain = true
 		return m, nil
 	}
 	m.refreshingRepo = true
@@ -320,6 +337,17 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 		repo, err := refresh(context.Background())
 		return RepoRefreshedMsg{Gen: gen, Repo: repo, Err: err}
 	}
+}
+
+// RequestRefresh is Train 2 design PR 4's completion-triggered refresh: exactly what F5 already
+// does (refresh() for drift, askRepoRefresh() for the repo, through the existing repoGen guard
+// and its refreshAgain coalescing), exported so the root can call it when a drive lands or
+// finishes (app.go's own case session.Event, ChangeLanded/ChangeDone) without duplicating F5's
+// key handler's own two-call shape or bypassing either guard.
+func (m Model) RequestRefresh() (Model, tea.Cmd) {
+	nm, driftCmd := m.refresh()
+	nm, repoCmd := nm.askRepoRefresh()
+	return nm, tea.Batch(driftCmd, repoCmd)
 }
 
 // Update handles the screen's keys and forwards the rest to the table. Quit is the root's.
@@ -346,6 +374,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil // a superseded refresh's answer; see RepoRefreshedMsg
 		}
 		m.refreshingRepo = false
+		again := m.refreshAgain
+		m.refreshAgain = false
 		if msg.Err != nil {
 			// Graceful, never a hard failure: the same reasoning applies as
 			// internal/service.Service.LoadRepo's own boot-time fallback (RepoFromOrigin
@@ -353,9 +383,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			// transient network blip) leaves the table showing what it already had rather
 			// than blanking or refusing.
 			m.notice = redact.Strings(msg.Err.Error())
-			return m.layout(), nil
+			nm := m.layout()
+			if again {
+				return nm.askRepoRefresh()
+			}
+			return nm, nil
 		}
-		return m.WithRepo(msg.Repo), nil
+		nm := m.WithRepo(msg.Repo)
+		if again {
+			return nm.askRepoRefresh()
+		}
+		return nm, nil
 	case tea.KeyPressMsg:
 		if m.chooser != nil {
 			return m.updateChooser(msg)
@@ -368,9 +406,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Config):
 			return m, func() tea.Msg { return OpenConfigMsg{} }
 		case key.Matches(msg, m.keys.Refresh):
-			nm, cmd := m.refresh()
-			nm, repoCmd := nm.askRepoRefresh()
-			return nm, tea.Batch(cmd, repoCmd)
+			return m.RequestRefresh()
 		case key.Matches(msg, m.keys.Left):
 			if m.col > 0 {
 				m.col--
