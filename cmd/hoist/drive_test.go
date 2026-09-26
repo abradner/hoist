@@ -15,10 +15,10 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 )
 
-// runDriveForTest is driveToCompletion's own successor (service.Driver.Run) wired exactly as
-// promote.go/deploy.go/resume.go now wire it, kept as one helper here so this file's own
-// waiting/heartbeat tests (runHooksForCLI's actual consumers) read the same as before this
-// PR's replacement of the old direct driveToCompletion call.
+// runDriveForTest wires service.Driver.Run exactly as promote.go/deploy.go/resume.go now wire
+// it, kept as one helper here so this file's own waiting/heartbeat tests (runHooksForCLI's
+// actual consumers) read the same as before the PR that replaced the old direct-call CLI drive
+// loop with this Driver.Run call.
 func runDriveForTest(ctx context.Context, steps []engine.Step, s *engine.PromotionState, poll config.PollConfig, stderr io.Writer) error {
 	d := service.NewDriver(steps, s, nil, pollIntervals(poll), service.DriverHooks{})
 	return d.Run(ctx, runHooksForCLI(stderr))

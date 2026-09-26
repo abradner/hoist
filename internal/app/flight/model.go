@@ -202,7 +202,7 @@ type Model struct {
 	building bool
 	// buildLog accumulates progress lines received over progressCh since the last real state
 	// landed — before a PromotionState exists at all (preflight: claim, in-flight check,
-	// fetch, plan, state save, from cmd/hoist's own StartPromotionFunc implementation), and
+	// fetch, plan, state save, from internal/app.svc.StartPromotion), and
 	// again during drive, between driveResultMsg arrivals (defect B/C: engine.Drive's own
 	// save/onWaiting hooks report through the very same callback, so a long single Act — a
 	// push, a commit sitting on signing approval — shows up here before the whole Drive call
@@ -318,7 +318,7 @@ func New(state engine.PromotionState, poll PollDurations, driver Driver) Model {
 func (m Model) ID() string { return m.state.ID }
 
 // NewBuilding starts the flight screen before a PromotionState exists at all — the preflight
-// phase between the operator confirming a plan and cmd/hoist's own StartPromotionFunc
+// phase between the operator confirming a plan and internal/app's own svc.StartPromotion call
 // actually producing one (claim, in-flight check, fetch, plan rebuild, initial state save;
 // direct mode's fresh-base check too). Without this, app.go had nothing to push until that
 // whole call returned, so pressing enter looked like a dead key for however long the
@@ -361,7 +361,7 @@ func (m Model) Building() bool { return m.building }
 func (m Model) Busy() bool { return m.busy }
 
 // AdoptBuilt transitions this screen from preflight into a real, driving promotion once
-// cmd/hoist's StartPromotionFunc call actually returns one — NewBuilding's counterpart.
+// svc.StartPromotion actually returns one — NewBuilding's counterpart.
 // poll/deadlineAt are left exactly as NewBuilding already set them (computed the moment the
 // operator confirmed, not recomputed here): that is what makes the whole build-and-drive
 // share one budget, the same guarantee a single ctx.WithTimeout already gives the CLI path —
@@ -484,13 +484,14 @@ func (m Model) Init() tea.Cmd {
 // network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout) would block
 // this goroutine — and therefore this screen's ability to ever show progress or let the user
 // act — forever, with no way to cancel. m.ctx is built once in New from m.deadlineAt (poll.Deadline
-// is generous, default 4h, the same value cmd/hoist's own driveToCompletion bounds an entire
-// promotion's wait by) and reused by every call this instance ever makes — automatic ticks and
-// manual R retries alike — rather than each deriving its own fresh poll.Deadline-length timeout
-// from "now". A fresh-per-call timeout would let a promotion stuck re-polling CI/approval (each
-// individual wait returns well within the deadline, then schedules another call with a brand new
-// full-length timeout) outlive the configured deadline indefinitely — cmd/hoist/drive.go's own
-// driveToCompletion enforces exactly one deadline for its whole wait (wrapped around ctx once, by
+// is generous, default 4h, the same value the CLI's own internal/service.Driver.Run bounds an
+// entire promotion's wait by) and reused by every call this instance ever makes — automatic
+// ticks and manual R retries alike — rather than each deriving its own fresh poll.Deadline-length
+// timeout from "now". A fresh-per-call timeout would let a promotion stuck re-polling
+// CI/approval (each individual wait returns well within the deadline, then schedules another
+// call with a brand new full-length timeout) outlive the configured deadline indefinitely —
+// internal/service.Driver.Run (wired from cmd/hoist/drive.go) enforces exactly one deadline for
+// its whole wait (wrapped around ctx once, by
 // its caller, before the retry loop starts), and this screen must not silently offer a looser
 // guarantee than the CLI's own (Codex review, PR #50). Reusing one context rather than deriving a
 // fresh one per call is also what makes Cancel (above) actually able to interrupt a call already
@@ -620,7 +621,7 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		m.errNotice = redact.Strings(msg.err.Error())
 		if !msg.retry {
 			// A terminal failure — msg.retry is Tick.Retry, the same engine.Retryable decision
-			// cmd/hoist/drive.go's own driveToCompletion makes, now made once by the Driver
+			// the CLI's own internal/service.Driver.Run makes, now made once by the Driver
 			// itself (service.Driver.Step) rather than recomputed here: only a *engine.StepError
 			// on one of engine.RetryableStep's five steps (Known bug classes: a transient
 			// 404/permissions hiccup on Checks/Comments/an Argo or rollout Get) retries; every
@@ -1257,7 +1258,7 @@ func (m Model) hint() string {
 // minTick is a screen floor, not policy: engine.PollInterval returns a configured knob
 // unchanged, including zero (PollDurations{} is the zero value app.go's stub currently passes),
 // and tea.Tick(0, ...) fires immediately/tightly — a real CPU-spin risk this screen's own tick
-// loop must never hit, unlike cmd/hoist's driveToCompletion, which sleeps in a plain for-loop
+// loop must never hit, unlike internal/service.Driver.Run, which sleeps in a plain for-loop
 // that a zero duration merely skips. Applied to engine.PollInterval's result at this screen's
 // own boundary, never inside engine — a zero interval is a perfectly valid answer everywhere
 // else that reads it.

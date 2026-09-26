@@ -6,10 +6,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/abradner/hoist/internal/app/flight"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
@@ -22,7 +22,7 @@ func TestInitWithoutInFlightDoesNotPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{})
+	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil, apprestart.Funcs{})
 	if cmd := root.listInFlightAt(root.listGen); cmd != nil {
 		t.Fatal("no List wired: the listing command must be nil, not a call on nil")
 	}
@@ -43,16 +43,16 @@ func TestAnOlderListingCannotOverwriteANewerOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	list := func(context.Context) ([]flight.Summary, error) {
+	list := func(context.Context) ([]service.Listed, error) {
 		calls++
 		id := "first00001"
 		if calls > 1 {
 			id = "second0002"
 		}
 		st := engine.PromotionState{ID: id, SourceEnv: "app-staging", TargetEnv: "app-production"}
-		return []flight.Summary{flight.Summarize(st, false, []engine.StepStatus{{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}}}, nil)}, nil
+		return []service.Listed{{State: st, Done: false, Statuses: []engine.StepStatus{{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}}}}}, nil
 	}
-	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{}).WithInFlight(InFlight{List: list})
+	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, svcWithInFlight(fakeInFlight{List: list}), Promotion{}, nil, apprestart.Funcs{})
 	var m tea.Model = root
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 

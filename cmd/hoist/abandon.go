@@ -1,29 +1,15 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 )
-
-// buildAbandonFunc wraps svc.Abandon as the plain function type the TUI's flight screen takes
-// (app.AbandonFunc, AGENTS.md §4.8: the app package never sees pkg/git/pkg/forge or internal/
-// config itself) — installed via app.Model.WithAbandon in runTUI's own launcher wiring. svc is
-// the one, session-lifetime Service runTUI builds — the same one buildStartPromotion and
-// buildInFlightFuncs already close over.
-func buildAbandonFunc(svc *service.Service) app.AbandonFunc {
-	return func(ctx context.Context, id string) error {
-		_, err := svc.Abandon(ctx, id)
-		return err
-	}
-}
 
 // reorderConfirmAbandonFirst moves --confirm-abandon (and its value) ahead of every other
 // argument, so the flag parses regardless of whether the operator types it before or after the

@@ -250,8 +250,8 @@ func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
 // re-derives a brand new deadline-length window each poll, so a promotion stuck re-polling
 // CI/approval (each individual wait returns well within the deadline, then schedules another
 // call with a full-length timeout again) never actually hits poll.Deadline no matter how long
-// it runs — unlike cmd/hoist/drive.go's own driveToCompletion, which bounds its ENTIRE wait by
-// one deadline its caller wraps around ctx once. This proves the fix: a driveFn that blocks
+// it runs — unlike internal/service.Driver.Run (wired from cmd/hoist/drive.go), which bounds
+// its ENTIRE wait by one deadline its caller wraps around ctx once. This proves the fix: a driveFn that blocks
 // until its own ctx expires, called twice with the SAME Model (so it shares the SAME
 // m.deadlineAt, computed once in New), must have its second call's ctx already expired at
 // creation — returning near-instantly — rather than getting its own fresh window and blocking
@@ -512,7 +512,7 @@ func TestLogToggle(t *testing.T) {
 // TestDriveErrorShowsNoticeAndKeepsPolling: a plumbing error from DriveFunc on a retryable step
 // (StepCIGreen/StepApproved — Known bug classes: a transient 404/permissions hiccup on
 // Checks/Comments) must not stop the screen from scheduling another attempt (mirrors
-// cmd/hoist/drive.go's own driveToCompletion retry behaviour, via retryableErr/retryableStep).
+// internal/service.Driver.Run's own retry behaviour, via engine.Retryable).
 // The error is a properly-shaped *engine.StepError on StepCIGreen, matching what engine.Drive
 // itself actually returns for this scenario (Drive wraps an Observe/Act error in *StepError
 // before ever handing it back) — see TestDriveErrorOnNonRetryableStepStopsPolling below for the
@@ -584,7 +584,7 @@ func TestRetryScheduleUsesTheDriversWait(t *testing.T) {
 }
 
 // TestDriveErrorOnNonRetryableStepStopsPolling is PR #50 review finding #7 (Codex):
-// cmd/hoist/drive.go's own driveToCompletion retries a *engine.StepError only on
+// internal/service.Driver.Run retries a *engine.StepError only on
 // StepCIGreen/StepApproved; every other step's error — a rejected push, a failed signing
 // commit — is terminal there and returned immediately, never retried. Before this fix,
 // onDriveResult scheduled another poll for literally any non-nil err regardless of which step

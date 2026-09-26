@@ -16,6 +16,9 @@ import (
 // value engine.PollInterval actually reads — internal/engine must not import internal/config
 // (it is shared with internal/app/flight, which has its own, differently-shaped config view),
 // so this conversion happens once, here, at the one place allowed to know both sides.
+// settingsFor (main.go) and buildPollDurations (wiring.go, which layers Deadline on top for
+// flight.PollDurations' own shape) both call this rather than each hand-copying the same four
+// fields a third and fourth time (t1-review.md P3).
 func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 	return engine.PollIntervals{
 		CI:       time.Duration(poll.CI),
@@ -26,7 +29,7 @@ func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 }
 
 // runHooksForCLI builds the service.RunHooks a CLI drive command runs a *service.Driver's Run
-// through — the same waitingReporter/heartbeatEvery reporting cmd/hoist's own driveToCompletion
+// through — the same waitingReporter/heartbeatEvery reporting cmd/hoist's own Driver.Run
 // gave every promotion before this PR, now wired as hooks Run itself calls rather than logic
 // duplicated in a loop this package no longer owns (AGENTS.md invariant 4: the actual waiting
 // still lives in Run's own loop, not here — this is only what gets printed while it waits).

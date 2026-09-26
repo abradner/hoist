@@ -96,10 +96,20 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	set := settingsFor(cfg, eff)
 	set.KubeContext = *kubeContext
 	svc := service.New(set, serviceDeps())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deadline)
+		defer cancel()
+	}
+
 	// service.Plan attaches WarnDeployIntoProduction itself for every deploy it builds, so the
 	// dry-run output, the confirm screen and the PR body all carry it by construction — the CLI
 	// and the TUI's own deploy path (internal/app's openDeploy) no longer attach it separately.
-	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Target: *env, Deploy: &ref})
+	// It runs under the same signal/deadline ctx as everything after it (harmless for the
+	// dry-run return below, which does nothing more with ctx).
+	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Target: *env, Deploy: &ref})
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
@@ -119,14 +129,6 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			return exitFailure
 		}
 		return 0
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
 	}
 
 	waited := false

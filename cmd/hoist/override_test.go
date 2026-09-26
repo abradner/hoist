@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
 // TestTUIOverrideCINoneReachesTheEngineStepPerPromotion is the wiring test for #103: the
-// TUI's confirm path (buildStartPromotion) starts a promotion with CINoneOverride false, so
+// TUI's confirm path (svc.StartPromotion, called directly by internal/app/app.go since the
+// service-design train's PR F) starts a promotion with CINoneOverride false, so
 // under ci.none: prompt the drive blocks at CI with the reason the flight screen recognises
 // (engine.IsCINonePromptBlock); setting the override on that promotion's state — what
 // flight.Model.ApplyCINoneOverride does in answer to flight.OverrideCINoneMsg — is carried by
@@ -43,8 +43,7 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := buildStartPromotion(svc)
-	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	state, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}

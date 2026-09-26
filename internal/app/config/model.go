@@ -2,7 +2,7 @@
 // `hoist config path` print, on the TUI. It takes the already-marshalled, already-redacted
 // YAML and the path it came from as plain strings — never internal/config itself — so the
 // screen can show nothing the CLI would not, and cmd/hoist stays the one place that knows
-// both the loader and the screen (AGENTS.md §4.8, the buildResolveFunc rule). Nothing here
+// both the loader and the screen (AGENTS.md §4.8's service-layer convention). Nothing here
 // is editable: the file is the operator's, and a screen that wrote it would be a second
 // loader to keep in step with the first.
 package config

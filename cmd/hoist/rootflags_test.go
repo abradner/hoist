@@ -96,15 +96,14 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 		var argoCtx string
 		newArgo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
 		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
-		funcs := buildInFlightFuncs(svc)
-		_, _, err := funcs.Resume(context.Background(), "resume01")
+		_, err := svc.Resume(context.Background(), "resume01", service.ResumeOpts{})
 		if err == nil || argoCtx != tc.want {
 			t.Fatalf("override %q: Resume's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
 		}
 		// List re-observes against the same cluster Resume drives, or the pane and the
 		// flight screen disagree about one state file (aggregate review of stack #137).
 		argoCtx = ""
-		if _, err := funcs.List(context.Background()); err != nil || argoCtx != tc.want {
+		if _, err := svc.List(context.Background(), service.ListOpts{}); err != nil || argoCtx != tc.want {
 			t.Fatalf("override %q: List's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
 		}
 		// And the CLI faces of the same two operations honour the root flag the same way.

@@ -241,7 +241,7 @@ const defaultBase = "main"
 // kubeContext is the flag when given, else the selected repo's kube.context, else "" (the
 // kubeconfig's current context, resolved by whoever opens the cluster); kubeOverride is the
 // flag alone — "" unless --kube-context was given — for the one consumer that must tell an
-// operator's override from the selected repo's own default (buildInFlightFuncs, whose
+// operator's override from the selected repo's own default (svc.List/svc.Resume, whose
 // promotions may belong to another repo with another context). A subcommand copies its own
 // --base/--kube-context into selection before selectRepo, so both fields hold that
 // subcommand's answer, not only the root's. resolve carries the digest-resolution flags
@@ -313,12 +313,7 @@ func settingsFor(cfg *config.Config, eff effective) service.Settings {
 		Config:       cfg,
 	}
 	if cfg != nil {
-		s.Poll = engine.PollIntervals{
-			CI:       time.Duration(cfg.Poll.CI),
-			Approval: time.Duration(cfg.Poll.Approval),
-			Argo:     time.Duration(cfg.Poll.Argo),
-			Rollout:  time.Duration(cfg.Poll.Rollout),
-		}
+		s.Poll = pollIntervals(cfg.Poll)
 		s.Deadline = time.Duration(cfg.Poll.Deadline)
 		s.Retain = time.Duration(cfg.State.Retain)
 	}
@@ -570,7 +565,7 @@ func splitList(s string) []string {
 var tuiRunner = runTUI
 
 // runTUI discovers the repo and runs the matrix (and, from it, the plan) screen until the
-// user quits. cfg is the whole loaded config file (buildResolveFunc needs it to find the
+// user quits. cfg is the whole loaded config file (service.NewResolveOptions needs it to find the
 // matching registries[] entry); eff.cfg is the selected repo's own entry, nil on flags
 // alone — the plan screen then runs in "digest sources: none" mode with default resolution
 // options and an empty envs config, matching what M1 offered before this milestone.
@@ -614,13 +609,15 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	// subcommand's own flag would carry. The drift column (buildDriftFunc) asks the pods
 	// alone and takes none of the digest-resolution overrides above.
 
-	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
-	// reused for every promotion the operator confirms in this TUI session, mirroring
-	// newGit/newForge's own package-level reuse across a single runPromote call. newForge is
-	// called even when eff.cfg is nil or has no GitHub configured (github.New("") fails fast
-	// on the owner/name parse alone, before ever touching gh's own auth or the network) so
-	// buildStartPromotion always has a forge value to close over; its own eff.cfg check runs
-	// first and reports the missing-config case before this error would ever matter.
+	// git.Exec{} and the forge adaptor are pure, stateless clients. f/forgeErr here are for
+	// buildHistoryFuncs below (svc's own StartPromotion/List/Resume build and memoize their own
+	// forge client through serviceDeps' Forge closure instead, never this one) — built once and
+	// reused for every history lookup in this TUI session, mirroring newGit/newForge's own
+	// package-level reuse across a single runPromote call. newForge is called even when eff.cfg
+	// is nil or has no GitHub configured (github.New("") fails fast on the owner/name parse
+	// alone, before ever touching gh's own auth or the network) so buildHistoryFuncs always has
+	// a forge value to close over; its own eff.cfg check runs first and reports the
+	// missing-config case before this error would ever matter.
 	githubRepo := ""
 	if eff.cfg != nil {
 		githubRepo = eff.cfg.GitHub
@@ -633,7 +630,6 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	a, _, argoErr := newArgo(eff.kubeContext)
 	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(svc),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
@@ -653,11 +649,9 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
-	root := app.New(r, eff.promotable, envs, svc.Plan, promo, tagsFn, restartFn).
+	root := app.New(r, eff.promotable, envs, svc.Plan, svc, promo, tagsFn, restartFn).
 		WithConfigView(cfg.File, cfg.Found, configText).
 		WithHistory(historyFn).
-		WithInFlight(buildInFlightFuncs(svc)).
-		WithAbandon(buildAbandonFunc(svc)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).

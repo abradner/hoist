@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
@@ -38,8 +37,9 @@ func loadCfgAndEffForFixture(t *testing.T, cfgPath string) (*config.Config, effe
 }
 
 // buildSvcForFixture builds the same *service.Service runTUI itself would build for cfgPath — the
-// long-lived, session-wide Service buildStartPromotion (wiring.go) is now a thin adapter over —
-// and loads its current repo view (RepoFromClone: a pure local disk read, exactly what runTUI's
+// long-lived, session-wide Service internal/app/app.go calls StartPromotion/List/Resume/Abandon
+// on directly (no cmd/hoist adapter in between since the service-design train's PR F) — and
+// loads its current repo view (RepoFromClone: a pure local disk read, exactly what runTUI's
 // own RepoFromOrigin falls back to when there is nothing to fetch from, and what every test
 // fixture's origin already agrees with anyway) so StartRequest's own nil-Repo/nil-View defaults
 // resolve to something, mirroring runTUI's own svc.LoadRepo call at boot. Returns the Service
@@ -56,18 +56,49 @@ func buildSvcForFixture(t *testing.T, cfgPath string) (*service.Service, effecti
 	return svc, eff
 }
 
+// startOpts is this test file's own stand-in for the mode a screen would confirm with — the TUI
+// no longer has an options struct of its own for this (PR F retired it in favor of service.Mode
+// directly: internal/app calls svc.StartPromotion itself now, with no adapter in between), so these
+// wiring-level integration tests build the identical service.StartRequest/Hooks shape app.go's
+// plan.StartMsg/deploy.StartMsg cases do (see internal/app/app.go's startHooks) directly against
+// svc, still proving the exact seam the TUI drives a real promotion through.
+type startOpts struct {
+	Direct    bool
+	Confirmed bool
+}
+
+// startForTest issues one svc.StartPromotion call the same shape internal/app/app.go's own
+// plan.StartMsg/deploy.StartMsg cases do (Mode, Hooks with progress doubling as onWaiting),
+// collapsing the (Drive, error) pair back to the (state, driveFn, err) shape these tests were
+// originally written against, back when a cmd/hoist TUI start adapter (removed in the
+// service-design train's PR F) produced exactly that shape.
+func startForTest(ctx context.Context, svc *service.Service, p gitops.Plan, opts startOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
+	var onWaiting func()
+	if progress != nil {
+		onWaiting = func() { progress("waiting for signing approval") }
+	}
+	d, err := svc.StartPromotion(ctx, service.StartRequest{
+		Plan: p,
+		Mode: service.Mode{Direct: opts.Direct, Confirmed: opts.Confirmed},
+	}, service.Hooks{Progress: progress, OnWaiting: onWaiting})
+	if err != nil {
+		return engine.PromotionState{}, nil, err
+	}
+	return d.State(), d, nil
+}
+
 // driveToDone runs driveFn repeatedly (mirroring what the flight screen's own tick loop does,
 // minus the real terminal) until done or it errors terminally, bounded by maxIters so a bug that
 // never converges fails the test instead of hanging it. A transient err (a plumbing hiccup on a
 // retryable step, or MergedStep's own Blocked "not yet caught up" reading before the base-push
-// simulation below lands) is tolerated and retried, exactly like driveToCompletion's own retry
-// loop — this test only fails on an error that persists past the iteration cap.
+// simulation below lands) is tolerated and retried, exactly like internal/service.Driver.Run's
+// own retry loop — this test only fails on an error that persists past the iteration cap.
 //
 // clone stands in for what a real GitHub squash-merge does to the base branch the instant a
 // commit sha exists on this promotion: forge.Fake's own MergePR never touches real git (it only
 // flips an in-memory Merged flag), so MergedStep's own Observe — re-run by this driveFn's own
-// engine.Status call every tick, per flight.DriveFunc's contract, not only once like
-// driveToCompletion's own loop — would otherwise see origin's base branch never caught up and
+// engine.DriveStatus walk every tick, per flight.Driver's contract, not only once like
+// internal/service.Driver.Run's own loop — would otherwise see origin's base branch never caught up and
 // misreport a genuine revert (M4 hardening finding #1; internal/engine/fixture_test.go's own
 // mergeToBase helper does the identical push for that package's tests). Doing the push as soon
 // as CommitSHA is known, rather than waiting for MergeSHA, covers the case where CIGreenStep's
@@ -97,10 +128,9 @@ func driveToDone(t *testing.T, clone string, driveFn flight.Driver, start engine
 }
 
 // TestTUIStartPromotionDrivesRealPromotionEndToEnd is the TUI-path sibling of
-// promote_test.go's TestPromoteEndToEndThenResumeIsIdempotent: it proves that
-// buildStartPromotion's app.StartPromotionFunc — the adaptor cmd/hoist/main.go's runTUI wires
-// into internal/app.New, which internal/app/app.go calls from its plan.StartMsg case — drives a
-// real engine.PromotionState through engine.Drive for real, against the same local git remote +
+// promote_test.go's TestPromoteEndToEndThenResumeIsIdempotent: it proves that svc.StartPromotion
+// — called directly by internal/app/app.go's plan.StartMsg case since the service-design train's
+// PR F — drives a real engine.PromotionState through engine.Drive for real, against the same local git remote +
 // fake forge fixture the CLI test uses, ending in an actual branch/commit/PR/merge rather than
 // the M4-wiring-brief's pre-fix nil DriveFunc stub.
 func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
@@ -116,8 +146,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	state, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -180,7 +209,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 // the log as it happens, not only once the whole Drive call returns), across the WHOLE
 // promotion, not only its first step. This test is the wiring-level half of that coverage: it
 // proves progress is actually called from real drive steps — branch, commit, push, PR-open,
-// merge — reached through a REAL buildStartPromotion-produced DriveFunc driving a full,
+// merge — reached through a REAL svc.StartPromotion-produced Drive driving a full,
 // real promotion (the same fixture and driveToDone helper
 // TestTUIStartPromotionDrivesRealPromotionEndToEnd uses), not a stub that never touches
 // progress at all. The other half — that internal/app/app.go's own channel, reused across
@@ -202,8 +231,6 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-
 	var mu sync.Mutex
 	var lines []string
 	progress := func(line string) {
@@ -211,7 +238,7 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 		lines = append(lines, line)
 		mu.Unlock()
 	}
-	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, progress)
+	state, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, progress)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -235,9 +262,9 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 }
 
 // TestTUIStartPromotionRefusesConflictingInFlight is the TUI-path sibling of
-// promote_test.go's TestPromoteRefusesConflictAcquiredAfterTheFirstScan: buildStartPromotion
+// promote_test.go's TestPromoteRefusesConflictAcquiredAfterTheFirstScan: svc.StartPromotion
 // must refuse exactly the way runPromote does — via the same shared
-// buildPromotionForConfirm — when another promotion targeting the same env is already in
+// claim-then-rescan check — when another promotion targeting the same env is already in
 // flight, rather than silently opening a second branch/PR for it.
 func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
@@ -285,8 +312,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	_, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
 	}
@@ -322,8 +348,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	_, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
 	}
@@ -337,10 +362,10 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 
 // TestTUIStartPromotionSkipsAllNoOpPlan is the TUI-path sibling of
 // promote_test.go's TestPromoteNothingToDoIsANoOp (PR #50 review finding #9): the all-NoOp
-// fast-path guard (anyRealEdit, checkNoOpAgainstBase) has only ever lived in runPromote's own
-// caller-side body, never inside buildPromotionForConfirm itself, so buildStartPromotion must
-// apply the identical guard before ever calling buildPromotionForConfirm — otherwise confirming
-// an already-current plan would still claim, build a worktree and save a real state file before
+// fast-path guard (service.AnyRealEdit and its own no-op-against-base check) lives inside
+// svc.StartPromotion itself now (internal/service/start.go), applied before ever claiming or
+// building a worktree — otherwise confirming an already-current plan would still claim, build a
+// worktree and save a real state file before
 // the commit step ever rejected the empty change, potentially blocking a real future promotion
 // to the same target env. This mirrors TestPromoteNothingToDoIsANoOp's own fixture mutation
 // (simulate the PR having already merged) and confirms startPromotion reports "already current"
@@ -372,8 +397,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	_, driveFn, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
 	}
@@ -418,8 +442,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := buildStartPromotion(svc)
-	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	state1, driveFn1, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
 	}
@@ -428,7 +451,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 	_ = driveFn1 // deliberately never called — see the test's own doc comment
 
-	state2, driveFn2, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	state2, driveFn2, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err != nil {
 		t.Fatalf("second startPromotion call failed — the first call's claim was not released before it ever returned driveFn: %v", err)
 	}
@@ -517,9 +540,8 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := buildStartPromotion(svc)
 
-	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true}, nil)
+	state, _, err := startForTest(context.Background(), svc, plan, startOpts{Direct: true, Confirmed: true}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
 	}
@@ -538,7 +560,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 
 	// The asymmetry: a PR-mode start must not set it, or the assertion above passes on a
 	// field that is simply always true.
-	prState, _, err := start(context.Background(), plan, app.StartOpts{}, nil)
+	prState, _, err := startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil && prState.Direct {
 		t.Error("a PR-mode start must not record Direct")
 	}
@@ -580,8 +602,7 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	prevForge := newForge
 	newForge = func(string) (forge.Forge, error) { return nil, forgeErr }
 	t.Cleanup(func() { newForge = prevForge })
-	start := buildStartPromotion(svc)
-	_, _, err = start(context.Background(), plan, app.StartOpts{}, nil)
+	_, _, err = startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)
 	}
