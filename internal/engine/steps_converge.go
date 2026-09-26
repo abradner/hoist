@@ -94,10 +94,11 @@ func (s *PromotionState) argoApplications() []argo.Application {
 // to appName — the scoping a per-Application landed-verdict question needs (revisionCarries,
 // round-2 review, PR #182: see observeLanded's own doc comment for why asking the whole
 // promotion's verdict on behalf of one Application was wrong). Every driver of ArgoSyncedStep
-// (cmd/hoist's driveToCompletion and the TUI's DriveFunc) runs against a state that has already
-// been through ensureArgoApps — a fresh promotion has EditApps set at construction, a resumed
-// one is repaired before Drive ever sees it (cmd/hoist/resume.go) — so an appName EditApps
-// genuinely never names should not arise; if it somehow did, this returns no edits for that
+// (internal/service.Driver, shared by the CLI and the flight screen) runs against a state that
+// has already been through EnsureArgoApps — a fresh promotion has EditApps set at construction,
+// a resumed one is repaired before Drive ever sees it (internal/service.Service.Resume) — so an
+// appName EditApps genuinely never names should not arise; if it somehow did, this returns no
+// edits for that
 // app, which drives blobsIntact to its vacuous-true/landedIntact path and reports carries=true,
 // superseded=false — an unverified but harmless default, since the switch above still checks
 // that app's own sync/health status rather than skipping it (only superseded=true skips).

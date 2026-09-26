@@ -407,7 +407,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	// than an id derived from a checkout directory name that would drift.
 	if eff.cfg != nil && eff.cfg.GitHub != "" {
 		id := engine.DeriveID(eff.cfg.GitHub, plan)
-		if anyRealEdit(plan.Edits) {
+		if service.AnyRealEdit(plan.Edits) {
 			fmt.Fprintf(stdout, "\nPromotion id: %s (branch %s)\n", id, engine.BranchName(plan.TargetEnv, id))
 		} else {
 			// promote stops at "already current" before it creates anything for an all-no-op
@@ -604,7 +604,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if view.Fallback != nil {
 		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, view.Fallback, eff.repo)
 	}
-	r, viewDir := view.Repo, view.Dir
+	r := view.Repo
 	var envs config.EnvsConfig
 	if eff.cfg != nil {
 		envs = eff.cfg.Envs
@@ -633,7 +633,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	a, _, argoErr := newArgo(eff.kubeContext)
 	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, viewDir, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr), cfg.Poll),
+		Start:      buildStartPromotion(svc),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,

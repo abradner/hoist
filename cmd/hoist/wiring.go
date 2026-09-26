@@ -18,245 +18,44 @@ import (
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
-	"github.com/abradner/hoist/pkg/forge"
-	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// buildStartPromotion adapts buildPromotionForConfirm (promote.go) and the engine's own drive
-// primitives (engine.AllSteps, engine.Drive, engine.Status) into an app.StartPromotionFunc the
-// TUI can call without importing pkg/git, pkg/forge or internal/config itself (AGENTS.md
-// §4.8) — the same shape buildResolveFunc already gives the plan screen. g and f are built
-// once by runTUI and reused for every confirm, since they are pure adaptors with no
-// per-promotion state (mirroring newGit/newForge's own package-level reuse across runPromote's
-// whole run); forgeErr is newForge's own error building f, deferred to here (rather than
-// failing runTUI outright) since a repo with no github configured never needs f at all — see
-// the eff.cfg check below, which reports that more specific case first.
-// viewDir is what the plan was actually discovered from — the TUI's own cached view of
-// origin/<base> (internal/service's repo view, runTUI), not eff.repo's working tree. service.CheckRepoViewCurrent below
-// replaces checkCloneCurrentForBase's old job here: since r (and therefore every plan built
-// from it) already comes from origin's own committed content, there is no local-disk-vs-origin
-// gap left to reconcile the way checkCloneCurrentForBase exists to catch (its own comparison
-// against refs/heads/<base>, the LOCAL branch, would misfire here — viewDir is deliberately
-// checked out from origin, never the local branch, so the two are expected to differ whenever
-// local is behind, which is exactly the case #PR7 exists to stop refusing). What's left to
-// check is narrower and simpler: has origin/<base> moved again since viewDir was last
-// refreshed. Every OTHER read in this function still goes through eff.repo unchanged:
-// buildPromotionForConfirm's worktree is built from the operator's own clone (that is what
-// makes a signed commit possible at all), and checkNoMissingOccurrenceAtFreshBase's own
-// fresh-base check is a separate, later-timed freshness check unrelated to which content the
-// plan itself was built from.
-func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error, poll config.PollConfig) app.StartPromotionFunc {
+// buildStartPromotion adapts internal/service.StartPromotion into an app.StartPromotionFunc the
+// TUI can call without importing pkg/git, pkg/forge, pkg/argo, pkg/rollout or internal/config
+// itself (AGENTS.md §4.8) — the same shape buildResolveFunc already gives the plan screen. svc is
+// the one, session-lifetime Service runTUI builds; StartPromotion itself now does everything this
+// adaptor used to assemble by hand (the freshness check, the forge/Argo/rollout adaptors, the
+// claim-then-rescan, the state save and its release, and — new in this PR, the fix
+// AGENTS.md's own design doc for this train calls out as its trust-boundary reason for existing
+// — the production direct-commit gate, called BEFORE any of that rather than only inside the
+// first Drive step that happened to run after the claim and the initial save).
+//
+// Repo and View are left nil on the request below, which is what fixes the boot-frozen-repo
+// defect this adaptor used to have (FB-M1): StartPromotion reads svc.Repo() ITSELF, at call
+// time, rather than trusting whatever *gitops.Repo/viewDir this closure was built with back at
+// TUI boot — so an Argo Application renamed since boot, or a repo view F5 has refreshed since,
+// is what ArgoAppNames/EditApps and the freshness check actually see.
+func buildStartPromotion(svc *service.Service) app.StartPromotionFunc {
 	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
-		// report is progress with the nil check made once, here, rather than at every call
-		// site below — mirrors onWaiting's own nil-safety convention throughout
-		// internal/engine (a nil hook is exactly as valid as a real one, never a special
-		// case a caller has to guard against itself).
-		report := func(string) {}
-		if progress != nil {
-			report = progress
-		}
-		if eff.cfg == nil || eff.cfg.GitHub == "" {
-			// The same check runPromote itself makes before ever calling
-			// buildPromotionForConfirm (which assumes eff.cfg.GitHub is non-empty: it's
-			// used verbatim as the forge repo id and DeriveID's own hash input) — worded
-			// identically so the TUI and the CLI never disagree about what's missing.
-			return engine.PromotionState{}, nil, errors.New("the selected repo has no github: owner/name configured; add repos[].github to the config file")
-		}
-
-		// The same all-NoOp fast path runPromote's own body applies (promote.go, "changed"
-		// loop plus checkNoOpAgainstBase) before ever calling buildPromotionForConfirm —
-		// mirrored here rather than inherited from it, since buildPromotionForConfirm itself
-		// has never carried this guard (only runPromote's caller-side body does). Without it,
-		// confirming a plan whose ticked edits are all no-ops (every source ref already
-		// matches the target — invisible in the confirm screen's own diff, which already
-		// skips NoOp edits) would still claim, build a worktree and save a non-terminal state
-		// before the commit step ever rejected or blocked the empty change — a state file
-		// that could then block a real future promotion to the same target env (Codex review,
-		// PR #50).
-		// M6 replaced checkNoOpAgainstBase (all-no-op path only) with checkCloneCurrentForBase,
-		// which is strictly stronger and runs unconditionally: gitops.Discover read this plan's
-		// occurrences off eff.repo's own disk, so it is worth confirming that disk is still
-		// current against --base's freshly fetched origin tip before trusting ANY plan built
-		// from it, not only one that happens to come out all-no-op. runPromote does exactly
-		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
-		// disagree about when a plan is trustworthy.
-		report("checking your checkout against origin/" + eff.base)
-		if err := service.CheckRepoViewCurrent(ctx, g, eff.repo, eff.base, viewDir); err != nil {
-			return engine.PromotionState{}, nil, err
-		}
-		if !anyRealEdit(p.Edits) {
-			if p.SourceEnv == "" {
-				return engine.PromotionState{}, nil, fmt.Errorf("%s is already current; nothing to deploy", p.TargetEnv)
-			}
-			return engine.PromotionState{}, nil, fmt.Errorf("%s -> %s is already current; nothing to promote", p.SourceEnv, p.TargetEnv)
-		}
-		// The forge, like the cluster adaptors below, is checked only once a plan has proven
-		// to need one: runPromote and runDeploy both build newForge after their own all-no-op
-		// fast path, so confirming an already-current plan on a machine whose `gh` login has
-		// lapsed says "already current" from every entry point rather than a GitHub auth
-		// failure from this one (issue #55).
-		if forgeErr != nil {
-			return engine.PromotionState{}, nil, forgeErr
-		}
-
-		// The Argo/Deployment adaptors every promotion needs, deferred to here exactly like
-		// forgeErr: a session that only browses the matrix never opens a cluster connection
-		// and should not fail to start because one could not be built. Checked AFTER the
-		// no-op fast path above, so confirming an already-current tag on a machine with a
-		// broken kubeconfig says "nothing to deploy" rather than blaming the cluster for a
-		// promotion that was never going to touch it — the order the CLI already uses
-		// (Copilot, PR #72).
-		if clusterErr != nil {
-			return engine.PromotionState{}, nil, clusterErr
-		}
-
-		// checkCloneCurrentForBase above only validates the files THIS plan already knows
-		// about, which is enough for the PR path: a PR is reviewed against origin's own tree
-		// before it merges. A direct push has no such second look, so if origin/Base has since
-		// gained an occurrence of this image repo in a file the local checkout cannot see, the
-		// push would silently update a subset of the family and leave the rest behind. The CLI
-		// runs this for --direct on both promote and deploy; the TUI's D gesture is the same
-		// write with the same blind spot, so it runs the same check (Copilot, PR #72).
-		if opts.Direct {
-			buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
-				if p.IsDeploy() {
-					return gitops.BuildDeployPlan(fresh, p.TargetEnv, deployRefOf(p), eff.promotable)
-				}
-				// The digest overrides are recovered from the confirmed plan's own edits
-				// rather than re-resolved: the point of this check is whether origin's tree
-				// has an occurrence THIS plan cannot see, so the two plans must differ only
-				// in the tree they were built from — re-running resolution here could also
-				// move the refs and turn a resolution change into a phantom missing
-				// occurrence. Edit.New is the resolved ref for its repo by construction.
-				digests := make(map[string]image.Ref, len(p.Edits))
-				reasons := make(map[string]string, len(p.Edits))
-				for _, e := range p.Edits {
-					digests[e.New.Repo] = e.New
-					reasons[e.New.Repo] = "the confirmed plan's own edit"
-				}
-				return gitops.BuildPlanWith(fresh, p.SourceEnv, p.TargetEnv, eff.promotable, digests, reasons)
-			}
-			report("checking origin/" + eff.base + " for occurrences your checkout hasn't seen")
-			if err := checkNoMissingOccurrenceAtFreshBase(ctx, g, eff.repo, eff.base, eff.appsRoot, p, buildFresh); err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-		}
-
-		// Recomputed per confirm rather than once in runTUI: it is derived from p.TargetEnv,
-		// which is whatever plan the operator just confirmed.
-		argoApps, err := engine.ArgoAppNames(r, p.TargetEnv, p.Edits)
-		if err != nil {
-			return engine.PromotionState{}, nil, err
-		}
-		editApps, err := engine.EditApps(r, p.TargetEnv, p.Edits)
-		if err != nil {
-			return engine.PromotionState{}, nil, err
-		}
-
-		// overrideCINone is false here and has no TUI launch flag or config knob on purpose:
-		// the confirm path never treats a PR with no checks as green (AGENTS.md §4.5 — a
-		// default may not weaken a gate). The TUI's override is per promotion and after the
-		// fact: `c` on the flight screen, behind a huh.Confirm, sets CINoneOverride on that
-		// one promotion's state (flight.Model.ApplyCINoneOverride, answering
-		// flight.OverrideCINoneMsg in internal/app), which the DriveFunc below carries into
-		// engine.Drive and CIGreenStep.Observe — the same field `hoist resume
-		// --override-ci-none` sets (#103). A re-confirm of the same id keeps a prior run's
-		// override, as buildPromotionForConfirm's own prev-state merge already does for the CLI.
-		report("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
-		s, release, err := buildPromotionForConfirm(ctx, eff, p, eff.base, false, g, f, argoApps, editApps)
-		if err != nil {
-			return engine.PromotionState{}, nil, err
-		}
-		statePath, err := engine.StatePath(s.ID)
-		if err != nil {
-			release()
-			return engine.PromotionState{}, nil, err
-		}
-
-		// buildPromotionForConfirm's own doc comment: release must be called once the
-		// returned state's first successful save lands, never held for the whole promotion.
-		// runPromote's own body satisfies that with a defer spanning its single function call
-		// (promote.go) — a scope that also happens to release the claim even if
-		// engine.Drive's very first Observe fails before its own save is ever reached
-		// (engine.Drive returns a *StepError immediately on an Observe error, without calling
-		// save at all: see engine.Drive's own code, the Observe-error branch has no
-		// saveIfSet). The TUI has no equivalent enclosing scope — driving happens across many
-		// independent tea.Cmd calls over the flight screen's whole lifetime — so without this,
-		// an operator backing out (Esc, abort, quit) before engine.Drive's own first per-step
-		// save ever landed would leak the claim file forever (Copilot + Codex, PR #50: "release
-		// claim can leak if first engine.Drive Observe fails before any save"). Saving the
-		// initial state and releasing right here, before driveFn is ever returned to the
-		// flight screen, closes that gap the same way runPromote's defer does, just earlier —
-		// the claim's job (letting a future findInFlight scan see this promotion) is already
-		// done the moment this state file exists on disk.
-		// Before the first save, not after: flight.OrderFor and `hoist resume` both read the
-		// mode off the state, so a state saved without it renders the PR path's ten steps for
-		// a direct run, and a quit before DirectPushedStep ever ran would leave a state file
-		// resume drives as a PR promotion — opening a branch and a PR for a change the
-		// operator asked to push straight to base. The CLI's own callers set it here too;
-		// DirectPushedStep still sets it independently, because the step that does the
-		// landing is what makes it true (Copilot, PR #72).
-		s.Direct = opts.Direct
-		report("saving promotion state")
-		if err := engine.SaveState(statePath, s); err != nil {
-			release()
-			return engine.PromotionState{}, nil, fmt.Errorf("writing initial promotion state: %w", err)
-		}
-		release()
-		save := func(st *engine.PromotionState) error {
-			return engine.SaveState(statePath, st)
-		}
-		report("preflight complete, driving")
-
-		// onWaiting used to be nil unconditionally here: the interactive "waiting for signing
-		// approval" text runPromote prints to stderr had no analogue wired into flight.Model
-		// (it would need a way to deliver a message mid-driveCmd) — the flight screen's own
-		// spinner kept animating for the whole Act call regardless, so the operator still saw
-		// the screen was busy, just without that specific wording. progress is that way now
-		// (defect B): the same callback this preflight reported through carries the wait into
-		// the drive too.
 		var onWaiting func()
 		if progress != nil {
+			// onWaiting carries the "waiting for signing approval" wait into the drive, the
+			// same callback preflight reports progress through — so preflight and drive read
+			// as one log (defect B).
 			onWaiting = func() { progress("waiting for signing approval") }
 		}
-		// The full ten either way, now that direct mode converges too (issue #66). The TUI drove
-		// only CoreSteps while three things were missing: DirectSteps stopped at the push, the
-		// flight screen's retry check (now engine.RetryableStep) classified only CIGreen/Approved
-		// so a transient Kubernetes Get stopped the flight dead, and buildPollDurations carried
-		// neither poll.argo nor poll.rollout so engine.PollInterval fell back to 2s. All three are
-		// addressed, so the screen now drives what it has always rendered (issue #64).
-		// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
-		// caller narrowing it. Confirmed comes from the screen that ran the gesture.
-		steps := engine.StepsFor(s, g, f, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)
-
-		return *s, newDriverFor(steps, s, save, poll, progress), nil
+		d, err := svc.StartPromotion(ctx, service.StartRequest{
+			Plan: p,
+			Mode: service.Mode{Direct: opts.Direct, Confirmed: opts.Confirmed},
+		}, service.Hooks{Progress: progress, OnWaiting: onWaiting})
+		if err != nil {
+			return engine.PromotionState{}, nil, err
+		}
+		return d.State(), d, nil
 	}
-}
-
-// newDriverFor is the service.Driver both a confirmed plan and a resumed promotion drive
-// through — one engine.DriveStatus walk per Step call (service.Driver's own doc comment), in
-// place of the old driveFuncFor pair (engine.Drive then always engine.Status). It satisfies
-// flight.Driver directly: Step, State and OverrideCINone are exactly what that screen's own
-// interface needs, and cmd/hoist's own driving commands call Run for the rest.
-//
-// progress, when non-nil, turns every step DriveStatus actually saves into a live line the
-// flight screen shows as it happens (defect C: previously the screen only learned anything
-// once a WHOLE Drive call returned — and Drive can walk through several already-satisfied or
-// newly-acted steps in one call before it stops, so a first drive that branches, commits,
-// pushes and opens a PR before hitting CI's own Waiting could render nothing at all for the
-// whole time that took). save's own persistence still happens on every call; progress is
-// layered on top of it, never instead of it (service.NewDriver's own DriverHooks.Progress).
-// buildStartPromotion passes the operator's preflight progress callback through unchanged so
-// preflight and drive read as one log; the TUI's resumed-promotion path
-// (buildInFlightFuncs.Resume) has no progress channel wired yet and passes nil here, same as
-// before this change — its own live streaming is a natural, separately-scoped followup once
-// this lands.
-func newDriverFor(steps []engine.Step, s *engine.PromotionState, save func(*engine.PromotionState) error, poll config.PollConfig, progress func(string)) *service.Driver {
-	return service.NewDriver(steps, s, save, pollIntervals(poll), service.DriverHooks{Progress: progress})
 }
 
 // buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10): List
@@ -329,10 +128,11 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			// promotion through AllSteps would push its branch and open a PR. Confirmed is
 			// true because the state file exists only because the operator already confirmed.
 			steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, nil)
-			// No live progress channel wired for a resumed promotion yet — newDriverFor's own
-			// doc comment names this as the scoped-out follow-up; nil here is unchanged from
-			// before this PR.
-			return *s, newDriverFor(steps, s, save, cfg.Poll, nil), nil
+			// No live progress channel wired for a resumed promotion yet — that is a
+			// scoped-out follow-up (internal/service.StartPromotion's own Hooks.Progress is
+			// what a later PR would thread through here); nil here is unchanged from before
+			// this PR.
+			return *s, service.NewDriver(steps, s, save, pollIntervals(cfg.Poll), service.DriverHooks{}), nil
 		},
 	}
 }
@@ -460,19 +260,6 @@ func runLauncher(timeout time.Duration, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Run()
-}
-
-// deployRefOf recovers the single image reference a deploy plan writes. Exact, not a guess:
-// gitops.BuildDeployPlan sets Edit.New to the one caller-named ref on every edit it produces,
-// and refuses to produce a plan with no edits at all — so the first edit's New is that ref
-// whenever p.IsDeploy() holds. Recovered from the plan rather than threaded through
-// app.StartOpts because the plan is what actually crosses this boundary; a second copy of the
-// ref could disagree with the edits it is supposed to describe.
-func deployRefOf(p gitops.Plan) image.Ref {
-	if len(p.Edits) == 0 {
-		return image.Ref{}
-	}
-	return p.Edits[0].New
 }
 
 // buildWatchFunc is the watch screen's adapter (AGENTS.md §4.8: cmd/hoist owns the adapter

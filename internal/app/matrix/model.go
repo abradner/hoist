@@ -347,8 +347,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		m.refreshingRepo = false
 		if msg.Err != nil {
-			// Graceful, never a hard failure: the same reasoning runTUI's own boot-time
-			// fallback applies (repoview.go) — an F5 that can't reach origin (offline, a
+			// Graceful, never a hard failure: the same reasoning applies as
+			// internal/service.Service.LoadRepo's own boot-time fallback (RepoFromOrigin
+			// falling back to RepoFromClone) — an F5 that can't reach origin (offline, a
 			// transient network blip) leaves the table showing what it already had rather
 			// than blanking or refusing.
 			m.notice = redact.Strings(msg.Err.Error())

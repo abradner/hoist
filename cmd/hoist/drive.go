@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -10,8 +9,6 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/forge"
-	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -98,47 +95,7 @@ func (r *waitingReporter) report(s *engine.PromotionState) {
 	}
 }
 
-// findInFlight looks for a promotion state other than skipID targeting repoFullName/targetEnv
-// that engine.ObserveAll reports as not yet done — AGENTS.md §4.1's own re-observe rule, applied
-// to "is there already a promotion running for this env" rather than trusted from the state
-// file's own Phase or presence alone (invariant 5: one in-flight promotion per target env).
-// found is nil when no conflicting in-flight promotion exists. An error re-observing a
-// candidate is treated conservatively — reported rather than silently skipped — since a
-// promotion this call can't verify is done must not be treated as safely finished.
-//
-// Deliberately observes only the git/forge core (through Merged for the PR path, through the
-// push for a direct one — engine.ObserveSteps picks by the state's own mode, since a direct
-// state can never satisfy the PR path's steps and would otherwise be in flight forever), not
-// the full engine.AllSteps —
-// this is a considered call, not an oversight. Invariant 5 exists to prevent exactly one thing:
-// two promotions racing to create separate branches/PRs/merges for the same target env (a real
-// git/forge conflict). That risk is fully retired the moment a merge lands — a second promotion
-// for the same env gets its own id, its own branch and its own PR (§4.1's deterministic id is
-// keyed on the image set, so a later promotion for the same env necessarily differs), so nothing
-// about this promotion's own Argo refresh/sync or rollout convergence can still collide with it.
-// Blocking a brand-new promotion until a prior one's rollout finishes converging would be a
-// tightening with no matching risk to justify it — Argo/rollout convergence can run long (a slow
-// or stuck Deployment), and there is no reason a legitimate follow-up promotion for the same env
-// (e.g. a hotfix) should have to wait on it. `hoist promote`/`hoist resume` still drive every
-// promotion through the full ten steps via AllSteps (below) — only this in-flight check stops
-// short. See TestFindInFlightDoesNotBlockAfterMergeWithRolloutPending in inflight_test.go for the
-// scenario this guards.
-func findInFlight(ctx context.Context, g git.Git, f forge.Forge, repoFullName, targetEnv, skipID string) (found *engine.PromotionState, status engine.StepStatus, err error) {
-	states, err := engine.ListStates()
-	if err != nil {
-		return nil, engine.StepStatus{}, err
-	}
-	for _, prev := range states {
-		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
-			continue
-		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(prev, g, f, nil, nil, nil), prev)
-		if oerr != nil {
-			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
-		}
-		if !done {
-			return prev, last, nil
-		}
-	}
-	return nil, engine.StepStatus{}, nil
-}
+// findInFlight (AGENTS.md invariant 5: one in-flight promotion per target env) moved to
+// internal/service.FindInFlight — see its own doc comment there. The regression tests that used
+// to live in this package's findinflight_test.go moved with it, to
+// internal/service/inflight_test.go.

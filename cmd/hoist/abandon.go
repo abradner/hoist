@@ -83,7 +83,7 @@ func abandonPromotion(ctx context.Context, cfg *config.Config, id string) ([]str
 	// (AGENTS.md §8 "layered checks" — deleting either must only ever change politeness, never
 	// possibility, not that either one alone is known sufficient forever).
 	if done || s.LandedSHA() != "" {
-		return nil, fmt.Errorf("%s has already landed (%s); abandoning is not a rollback — use `hoist deploy` or a fresh promotion to undo it", id, statusDetail(status.Observation))
+		return nil, fmt.Errorf("%s has already landed (%s); abandoning is not a rollback — use `hoist deploy` or a fresh promotion to undo it", id, service.Detail(status.Observation))
 	}
 
 	var lines []string

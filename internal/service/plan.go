@@ -40,9 +40,39 @@ type PlanRequest struct {
 type PlannedChange struct {
 	Plan gitops.Plan
 	Repo *gitops.Repo
+	// View is the RepoView Plan actually planned against — s.Repo() at the moment Plan ran, when
+	// req.Repo pointed at that same *gitops.Repo (nil, or an explicit pointer that happens to be
+	// the service's own current view); a zero RepoView{Repo: r} otherwise (a caller-supplied repo
+	// Plan never fetched itself, e.g. the CLI's own gitops.Discover). Request below carries this
+	// into StartRequest.View so StartPromotion's freshness check runs against the view THIS plan
+	// was built from, never whatever s.Repo() happens to hold when the operator later confirms —
+	// fixing the fail-open gap where an F5 refresh landing between building the plan and pressing
+	// Enter let a stale plan's edits pass a freshness check run against the NEW view instead of
+	// the one that produced them (t1-review.md P2 #6).
+	View RepoView
 	// Resolution is nil for a deploy (which never resolves a digest — the reference is
 	// caller-supplied) and for a promotion planned with digest sources: none.
 	Resolution *Resolution
+	// fresh carries this promotion's own resolved digests/reasons, for StartPromotion's
+	// checkFreshBase (fresh.go) — direct mode's own cross-check against origin's fresh tree,
+	// which must reuse THIS resolution's answers rather than run a second, independent one. nil
+	// for a deploy (checkFreshBase never consults it there) and cleared by Request when it is
+	// built for a Mode that was never handed this exact, unfiltered Plan (see Request's own doc
+	// comment) — a caller with a filtered, ticked-down plan has no single resolution behind it
+	// any more, and StartRequest.Fresh being nil is exactly what tells StartPromotion to recover
+	// digests from the plan's own edits instead (Divergence 8, unchanged).
+	fresh *freshInputs
+}
+
+// Request builds this PlannedChange's own StartRequest for StartPromotion: the plan and repo
+// exactly as Plan built them, plus this promotion's own resolved digests (fresh) so direct mode's
+// fresh-base check reuses them rather than re-resolving. Only valid for the UNFILTERED plan Plan
+// itself returned — a caller that ticks a subset of edits (the TUI's own confirm) builds its own
+// gitops.Plan with those edits and its own StartRequest directly, passing Fresh: nil, since the
+// resolution behind THIS PlannedChange no longer describes only what was kept.
+func (p PlannedChange) Request(m Mode) StartRequest {
+	view := p.View
+	return StartRequest{Plan: p.Plan, Mode: m, Repo: p.Repo, View: &view, Fresh: p.fresh}
 }
 
 // Plan builds one gitops.Plan: BuildDeployPlan for req.Deploy, else digest resolution (when
@@ -52,12 +82,22 @@ type PlannedChange struct {
 // resolve.Resolution that failed to resolve, never an error return, so there is nothing left
 // here to plan from without a resolution attempt that could not even run at all.
 func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, error) {
+	cur := s.Repo()
 	r := req.Repo
 	if r == nil {
-		r = s.Repo().Repo
+		r = cur.Repo
 	}
 	if r == nil {
 		return PlannedChange{}, fmt.Errorf("service: Plan: no repo loaded (LoadRepo was never called, and PlanRequest.Repo was nil)")
+	}
+	// view is s's own current RepoView when r came from it (nil req.Repo, or an explicit pointer
+	// that happens to match it) — the case that needs a frozen snapshot, since s.view can move
+	// under a later F5 — else a bare RepoView wrapping the caller-supplied r (Dir/FromOrigin left
+	// zero, exactly the CLI's own never-called-LoadRepo shape), never s's live view, which may
+	// describe a completely different repo than the one this plan actually used.
+	view := RepoView{Repo: r}
+	if r == cur.Repo {
+		view = cur
 	}
 
 	if req.Deploy != nil {
@@ -66,7 +106,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 			return PlannedChange{}, err
 		}
 		WarnDeployIntoProduction(&pl, s.envsConfig())
-		return PlannedChange{Plan: pl, Repo: r}, nil
+		return PlannedChange{Plan: pl, Repo: r, View: view}, nil
 	}
 
 	opts := s.settings.Resolve
@@ -109,7 +149,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 		// rather than by every caller remembering to (AGENTS.md §4's Divergences, item 10).
 		pl.Warnings = append(resolve.Warnings(res.Res), pl.Warnings...)
 	}
-	return PlannedChange{Plan: pl, Repo: r, Resolution: res}, nil
+	return PlannedChange{Plan: pl, Repo: r, View: view, Resolution: res, fresh: &freshInputs{digests: planDigests, reasons: reasons}}, nil
 }
 
 func (s *Service) envsConfig() config.EnvsConfig {

@@ -11,11 +11,9 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
-	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runDeploy is `hoist deploy`: write one named image reference into one env, then drive the
@@ -27,10 +25,10 @@ import (
 // reference comes from. A promotion reads a source env and resolves what it runs (pods, then
 // the manifest, then the registry); a deploy is handed the reference outright, so none of that
 // resolution machinery applies and neither do --from, --digest or the digest-source flags.
-// Everything after "which ref" is shared: the same freshness checks (including direct
-// mode's own fresh-base cross-check), the same claim-then-rescan,
-// the same steps, the same drive loop, and artifacts rendered from the same templates (which
-// know to describe a deploy rather than a promotion — see gitops.Plan.Variant).
+// Everything after "which ref" is shared through svc.StartPromotion: the same freshness checks
+// (including direct mode's own fresh-base cross-check), the same claim-then-rescan, the same
+// steps, the same drive loop, and artifacts rendered from the same templates (which know to
+// describe a deploy rather than a promotion — see gitops.Plan.Variant).
 //
 // --image must be fully pinned (repo:tag@sha256:...). hoist never writes a bare tag
 // (invariant 1), and unlike a promotion there is no source env to resolve a digest from, so
@@ -123,90 +121,12 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		return 0
 	}
 
-	if err := checkCloneCurrentForBase(context.Background(), newGit, eff.repo, *base, plan.Edits); err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
-	}
-	if *direct {
-		// Direct mode's own additional gap, identical to runPromote's: checkCloneCurrentForBase
-		// only validates files this plan already names, so it cannot see an occurrence
-		// origin/<base> has gained that the local checkout never had — gitops.Discover never
-		// read that file. Only direct mode can put origin ahead of the local clone that way
-		// (its own prior pushes), and only direct mode writes with no PR to catch it.
-		buildFresh := func(fresh *gitops.Repo) (gitops.Plan, error) {
-			return gitops.BuildDeployPlan(fresh, *env, ref, eff.promotable)
-		}
-		if err := checkNoMissingOccurrenceAtFreshBase(context.Background(), newGit, eff.repo, *base, eff.appsRoot, plan, buildFresh); err != nil {
-			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-			return exitFailure
-		}
-	}
-	if !anyRealEdit(plan.Edits) {
-		fmt.Fprintf(stdout, "hoist deploy: %s already runs %s; nothing to deploy.\n", *env, ref)
-		return 0
-	}
-
-	f, err := newForge(eff.cfg.GitHub)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
-	}
-	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo)
-	// — the one resolved value every cluster-touching call in this command reads.
-	kctx := eff.kubeContext
-	// Both modes reach the Argo/rollout steps now that DirectSteps converges too (issue #66),
-	// so these are unconditional. An earlier revision built them only for the PR path, because
-	// direct mode stopped at the push and would otherwise have demanded a cluster for work it
-	// never did; converging is the real fix, and it retires that gate.
-	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
-	}
-	editApps, err := engine.EditApps(r, plan.TargetEnv, plan.Edits)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
-	}
-	a, _, err := newArgo(kctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
-		return exitFailure
-	}
-	ro, _, err := newRollout(kctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
-		return exitFailure
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
-	}
-
-	s, release, err := buildPromotionForConfirm(ctx, eff, plan, *base, *overrideCINone, newGit, f, argoApps, editApps)
-	if s != nil {
-		s.Direct = *direct
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %s\n", redact.Strings(err.Error()))
-		return exitFailure
-	}
-	released := false
-	defer func() {
-		if !released {
-			released = true
-			release()
-		}
-	}()
-
-	statePath, err := engine.StatePath(s.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
 	}
 
 	waited := false
@@ -216,19 +136,13 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			fmt.Fprintln(stderr, "hoist deploy: waiting for signing approval...")
 		}
 	}
-	steps := engine.StepsFor(s, newGit, f, a, ro, eff.cfg.Envs.Production, true, onWaiting)
-	save := func(st *engine.PromotionState) error {
-		if err := engine.SaveState(statePath, st); err != nil {
-			return err
-		}
-		if !released {
-			released = true
-			release()
-		}
-		return nil
+	req := pc.Request(service.Mode{Direct: *direct, Confirmed: true, OverrideCINone: *overrideCINone})
+	d, err := svc.StartPromotion(ctx, req, service.Hooks{OnWaiting: onWaiting})
+	if code, done := renderStartError(stdout, stderr, "hoist deploy", err); done {
+		return code
 	}
 
-	d := service.NewDriver(steps, s, save, pollIntervals(cfg.Poll), service.DriverHooks{})
 	err = d.Run(ctx, runHooksForCLI(stderr))
-	return reportDriveResult(stdout, stderr, "hoist deploy", s.SourceEnv, s.TargetEnv, s, err)
+	s := d.State()
+	return reportDriveResult(stdout, stderr, "hoist deploy", s.SourceEnv, s.TargetEnv, &s, err)
 }
