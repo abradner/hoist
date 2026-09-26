@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -26,6 +25,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/history"
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
@@ -117,7 +117,11 @@ type StartMsg struct {
 	View service.RepoView
 }
 
-// loadedMsg is delivered once the async discovery+resolution+BuildPlan cmd finishes.
+// loadedMsg is delivered once the async discovery+resolution+BuildPlan cmd finishes. Returned
+// wrapped as scope.Result[loadedMsg] (loadCmd), so a load an earlier plan screen instance kicked
+// off — still running when the operator backed out and opened a new one — cannot land on rows
+// this instance never asked for (audit FB-H3; the scope.Foreign guard at the top of Update drops
+// it before this type is ever switched on).
 type loadedMsg struct {
 	plan    gitops.Plan
 	outcome service.Resolution
@@ -132,15 +136,14 @@ type loadedMsg struct {
 }
 
 // historyMsg is one repo's delta (what the target declares → what the source resolved to).
-// gen drops an answer from a plan screen since popped and reopened.
+// Returned wrapped as scope.Result[historyMsg] (historyCmds), so a delta requested by a plan
+// screen since popped and reopened, or superseded by an override rebuild, is dropped by the
+// scope.Foreign guard at the top of Update rather than landing on rows it was never asked about.
 type historyMsg struct {
-	gen   uint64
 	repo  string
 	delta migrate.Delta
 	err   error
 }
-
-var nextGen atomic.Uint64
 
 type keyMap struct {
 	SwitchPane, Mode, Override, YAML, Enter, Back key.Binding
@@ -166,7 +169,10 @@ type Model struct {
 	planFn     Func
 	histFn     history.Funcs
 	now        func() time.Time
-	gen        uint64
+	// id is this instance's scope.ID: minted here and again on every override rebuild, so a
+	// loadedMsg/historyMsg from a superseded load — a different screen instance, or this same
+	// instance's own earlier request — is Foreign and dropped (AGENTS.md §4.8).
+	id scope.ID
 
 	source, target string
 
@@ -248,7 +254,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		planFn:     planFn,
 		histFn:     hist,
 		now:        time.Now,
-		gen:        nextGen.Add(1),
+		id:         scope.New(),
 		source:     source,
 		target:     target,
 		keys:       defaultKeyMap(),
@@ -430,7 +436,8 @@ func (m Model) loadCmd() tea.Cmd {
 	for k, v := range m.overrides {
 		overrides[k] = v
 	}
-	return func() tea.Msg {
+	id := m.id
+	return scope.Do(id, func() loadedMsg {
 		pc, err := planFn(context.Background(), service.PlanRequest{Repo: repo, Source: source, Target: target, Overrides: overrides})
 		if err != nil {
 			// A Func error means digest resolution was attempted and failed outright —
@@ -447,7 +454,7 @@ func (m Model) loadCmd() tea.Cmd {
 			outcome = *pc.Resolution
 		}
 		return loadedMsg{plan: pc.Plan, outcome: outcome, view: pc.View}
-	}
+	})
 }
 
 // historyCmds asks for every selectable row's delta at once (the adaptor caches, and the
@@ -456,7 +463,7 @@ func (m Model) historyCmds() tea.Cmd {
 	if m.histFn.Delta == nil {
 		return nil
 	}
-	delta, gen, ctx := m.histFn.Delta, m.gen, m.ctx
+	delta, id, ctx := m.histFn.Delta, m.id, m.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -467,10 +474,10 @@ func (m Model) historyCmds() tea.Cmd {
 		}
 		from, to, repo := r.Old, r.New, r.Repo
 		m.deltas[repo] = history.State{}
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, scope.Do(id, func() historyMsg {
 			d, err := delta(ctx, from, to)
-			return historyMsg{gen: gen, repo: repo, delta: d, err: err}
-		})
+			return historyMsg{repo: repo, delta: d, err: err}
+		}))
 	}
 	return tea.Batch(cmds...)
 }
@@ -478,14 +485,15 @@ func (m Model) historyCmds() tea.Cmd {
 // Update handles the screen's own keys, the loading messages, and forwards everything else
 // to whichever huh field or bubbles component owns the current state.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if scope.Foreign(m.id, msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
-	case loadedMsg:
-		return m.onLoaded(msg)
-	case historyMsg:
-		if msg.gen != m.gen {
-			return m, nil
-		}
-		m.deltas[msg.repo] = history.State{Loaded: true, Delta: msg.delta, Err: msg.err}
+	case scope.Result[loadedMsg]:
+		return m.onLoaded(msg.V)
+	case scope.Result[historyMsg]:
+		hm := msg.V
+		m.deltas[hm.repo] = history.State{Loaded: true, Delta: hm.delta, Err: hm.err}
 		return m.refreshRight(), nil
 	case spinner.TickMsg:
 		if m.state == stateLoading {
@@ -736,7 +744,7 @@ func (m Model) updateOverride(msg tea.Msg) (Model, tea.Cmd) {
 			m.overriding = false
 			m.overrides[ref.Repo] = ref
 			m.keepTicked = true
-			m.gen = nextGen.Add(1) // a delta still loading for the old plan must not land on the new rows
+			m.id = scope.New() // a load/delta still outstanding for the old plan must not land on the new rows
 			m.state = stateLoading
 			m.status = fmt.Sprintf("re-resolving digests from %s pods with the override…", m.source)
 			m.showYAML = false

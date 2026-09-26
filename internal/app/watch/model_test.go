@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 )
@@ -124,7 +125,7 @@ func TestTickRereadsAndMovesLastPolled(t *testing.T) {
 	if got := ansi.Strip(m.headerSection()); !strings.Contains(got, "polled 3m ago") {
 		t.Fatalf("header before the tick: %q, want 'polled 3m ago'", got)
 	}
-	m, cmd := m.Update(tickMsg{gen: m.tickGen})
+	m, cmd := m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: m.tickGen}})
 	if cmd == nil {
 		t.Fatal("tick produced no read")
 	}
@@ -154,7 +155,7 @@ func TestRPollsNow(t *testing.T) {
 	if _, cmd := m.Update(uitest.Key("r")); cmd != nil {
 		t.Error("r during an outstanding read started a second one")
 	}
-	if _, ok := cmd().(snapshotMsg); !ok {
+	if _, ok := cmd().(scope.Result[snapshotMsg]); !ok {
 		t.Fatal("r's command did not yield a snapshot")
 	}
 	if r.calls != 2 {
@@ -188,14 +189,14 @@ func TestRRetiresThePendingTick(t *testing.T) {
 	if live == pending {
 		t.Fatalf("the manual snapshot's tick shares generation %d with the pending one", live)
 	}
-	m, cmd = m.Update(tickMsg{gen: pending})
+	m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: pending}})
 	if cmd != nil || m.polling || r.calls != 2 {
 		t.Fatalf("the stale tick was not ignored: cmd=%v polling=%v calls=%d — r left a second chain", cmd != nil, m.polling, r.calls)
 	}
 	if m.tickGen != live {
 		t.Fatalf("the stale tick rescheduled: generation %d, want %d", m.tickGen, live)
 	}
-	m, cmd = m.Update(tickMsg{gen: live})
+	m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: live}})
 	if cmd == nil {
 		t.Fatal("the live tick produced no read")
 	}
@@ -220,7 +221,7 @@ func TestReadErrorKeepsLastSnapshot(t *testing.T) {
 	r := &reader{snaps: []Snapshot{healthy()}}
 	m := ready(t, r, &clock{t0}, 80, 24)
 	r.err = errors.New("dial tcp my-cluster:6443: i/o timeout")
-	m, cmd := m.Update(tickMsg{gen: m.tickGen})
+	m, cmd := m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: m.tickGen}})
 	m, _ = m.Update(cmd())
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "Deployment web") || !strings.Contains(v, "i/o timeout") {
@@ -263,5 +264,25 @@ func TestNeverImportsClusterPackages(t *testing.T) {
 	}
 	if seen == 0 {
 		t.Fatal("no imports parsed — the probe is broken")
+	}
+}
+
+// TestSnapshotMsgFromAnotherInstanceIsForeign is the package-local half of app's own
+// TestWatchEarlierSnapshotDropped: scope.Foreign drops a snapshotMsg stamped by an instance
+// other than this one before it can touch m.snap, without needing a whole root Model to prove
+// it.
+func TestSnapshotMsgFromAnotherInstanceIsForeign(t *testing.T) {
+	a := ready(t, &reader{snaps: []Snapshot{healthy()}}, &clock{t0}, 80, 24)
+	b := New("web", "app-staging", Funcs{Now: (&clock{t0}).now}, ui.NewStyles(true)).SetSize(80, 24)
+	if b.polls != 0 {
+		t.Fatalf("setup: polls = %d, want 0", b.polls)
+	}
+	foreign := scope.Result[snapshotMsg]{From: a.id, V: snapshotMsg{snap: a.snap, at: t0}}
+	got, cmd := b.Update(foreign)
+	if cmd != nil {
+		t.Error("a foreign snapshotMsg produced a command")
+	}
+	if got.polls != 0 || got.snap.App != "" {
+		t.Fatalf("a foreign snapshotMsg was accepted onto a screen that never asked for it: polls=%d app=%q", got.polls, got.snap.App)
 	}
 }

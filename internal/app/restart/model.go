@@ -18,6 +18,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
@@ -50,6 +51,12 @@ type state int
 const (
 	stateReading state = iota
 	stateConfirm
+	// stateStarting is between the operator confirming and the DoFunc call actually returning
+	// — startedMsg is only ever acted on while in this state (see Update's own case), so a
+	// startedMsg from an earlier instance of this screen that raced a new one is refused even
+	// on top of the scope.Foreign guard already dropping it by id (AGENTS.md §8, layered
+	// checks: this is politeness, not the enforcement).
+	stateStarting
 	stateRolling
 	stateDone
 	stateFailed
@@ -58,6 +65,9 @@ const (
 // BackMsg asks whatever composes screens to pop this one.
 type BackMsg struct{}
 
+// Every message below is returned wrapped as scope.Result[T] (Init/start/tick/observe), so a
+// result an earlier instance of this screen asked for — a different family's plan, an already
+// superseded restart — cannot land on this one (AGENTS.md §4.8).
 type planMsg struct {
 	plan restart.Plan
 	err  error
@@ -82,6 +92,10 @@ type Model struct {
 	family     string
 	names      []string
 	production bool
+
+	// id is this instance's scope.ID (New): a planMsg/startedMsg/progressMsg/tickMsg stamped
+	// by any other value is Foreign and dropped at the top of Update (AGENTS.md §4.8).
+	id scope.ID
 
 	state  state
 	plan   restart.Plan
@@ -108,6 +122,7 @@ func New(env, family string, names []string, production bool, funcs Funcs, style
 	return Model{
 		styles: styles, funcs: funcs,
 		env: env, family: family, names: names, production: production,
+		id:    scope.New(),
 		state: stateReading,
 		body:  viewport.New(),
 	}
@@ -115,48 +130,57 @@ func New(env, family string, names []string, production bool, funcs Funcs, style
 
 // Init reads the cluster.
 func (m Model) Init() tea.Cmd {
-	read, env, names := m.funcs.Read, m.env, m.names
+	read, env, names, id := m.funcs.Read, m.env, m.names, m.id
 	if read == nil {
-		return func() tea.Msg { return planMsg{err: fmt.Errorf("restarting is not wired up")} }
+		return scope.Do(id, func() planMsg { return planMsg{err: fmt.Errorf("restarting is not wired up")} })
 	}
-	return func() tea.Msg {
+	return scope.Do(id, func() planMsg {
 		p, err := read(context.Background(), env, names)
 		return planMsg{plan: p, err: err}
-	}
+	})
 }
 
 // Update implements the screen contract.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if scope.Foreign(m.id, msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
-	case planMsg:
-		if msg.err != nil {
-			m.state, m.notice = stateFailed, redact.Strings(msg.err.Error())
+	case scope.Result[planMsg]:
+		pm := msg.V
+		if pm.err != nil {
+			m.state, m.notice = stateFailed, redact.Strings(pm.err.Error())
 			return m, nil
 		}
-		m.plan = msg.plan
+		m.plan = pm.plan
 		m.state = stateConfirm
 		if len(m.plan.Targets) == 0 {
 			m.state, m.notice = stateFailed, fmt.Sprintf("none of %s's Deployments exist in the cluster", m.env)
 		}
 		return m.render(), nil
-	case startedMsg:
-		m.at = msg.at
-		if msg.err != nil {
-			m.state, m.notice = stateFailed, redact.Strings(msg.err.Error())
-			if len(msg.done) > 0 {
-				m.notice += fmt.Sprintf(" — already restarted: %s", strings.Join(msg.done, ", "))
+	case scope.Result[startedMsg]:
+		if m.state != stateStarting {
+			return m, nil // superseded — see stateStarting's own doc comment
+		}
+		sm := msg.V
+		m.at = sm.at
+		if sm.err != nil {
+			m.state, m.notice = stateFailed, redact.Strings(sm.err.Error())
+			if len(sm.done) > 0 {
+				m.notice += fmt.Sprintf(" — already restarted: %s", strings.Join(sm.done, ", "))
 			}
 			return m.render(), nil
 		}
 		m.state = stateRolling
 		return m.render(), m.tick()
-	case progressMsg:
-		if msg.err != nil {
-			m.state, m.notice = stateFailed, redact.Strings(msg.err.Error())
+	case scope.Result[progressMsg]:
+		pm := msg.V
+		if pm.err != nil {
+			m.state, m.notice = stateFailed, redact.Strings(pm.err.Error())
 			return m.render(), nil
 		}
-		return m.onProgress(msg.progress)
-	case tickMsg:
+		return m.onProgress(pm.progress)
+	case scope.Result[tickMsg]:
 		return m, m.observe()
 	case tea.KeyPressMsg:
 		return m.onKey(msg)
@@ -252,18 +276,18 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) start() (Model, tea.Cmd) {
-	do, pl := m.funcs.Do, m.plan
+	do, pl, id := m.funcs.Do, m.plan, m.id
 	if do == nil {
 		m.state, m.notice = stateFailed, "restarting is not wired up"
 		return m.render(), nil
 	}
 	at := time.Now().UTC()
-	m.state = stateRolling
+	m.state = stateStarting
 	m.notice = ""
-	return m.render(), func() tea.Msg {
+	return m.render(), scope.Do(id, func() startedMsg {
 		done, err := do(context.Background(), pl, at)
 		return startedMsg{at: at, done: done, err: err}
-	}
+	})
 }
 
 func (m Model) tick() tea.Cmd {
@@ -271,19 +295,19 @@ func (m Model) tick() tea.Cmd {
 	if d <= 0 {
 		d = 3 * time.Second
 	}
-	return tea.Tick(d, func(time.Time) tea.Msg { return tickMsg{} })
+	return scope.After(m.id, d, tickMsg{})
 }
 
 func (m Model) observe() tea.Cmd {
-	obs, env, at := m.funcs.Observe, m.env, m.at
+	obs, env, at, id := m.funcs.Observe, m.env, m.at, m.id
 	names := m.pending()
 	if obs == nil || len(names) == 0 {
 		return nil
 	}
-	return func() tea.Msg {
+	return scope.Do(id, func() progressMsg {
 		pr, err := obs(context.Background(), env, names, at)
 		return progressMsg{progress: pr, err: err}
-	}
+	})
 }
 
 func (m Model) pending() []string {
@@ -375,6 +399,8 @@ func (m Model) stateWord() string {
 		return "reading"
 	case stateConfirm:
 		return "not yet restarted"
+	case stateStarting:
+		return "starting"
 	case stateRolling:
 		return "rolling"
 	case stateDone:
@@ -390,6 +416,8 @@ func (m Model) hint() string {
 		return "reading… · esc back"
 	case stateConfirm:
 		return "enter restart · esc back"
+	case stateStarting:
+		return "starting… · esc back"
 	case stateRolling:
 		return "rolling… · esc back"
 	case stateDone:

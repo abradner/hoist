@@ -328,6 +328,25 @@ no rule stated for any of them:
   deliberately not named with a `Msg` suffix and stays out of `internal/parity`'s navigation
   registry (its own doc comment): it is internal plumbing between the controller and the root,
   never something the operator triggers directly the way a screen's own `*Msg` is.
+- **An async result is `scope.Do`/`scope.After`, and `Update` drops a `Foreign` one.** Codified
+  from the feedback-wiring train's PR 5 (`internal/app/scope`): a screen is a value, so esc then
+  reopening the same key builds a brand-new `Model` rather than mutating the old one — but that
+  does not cancel whatever `tea.Cmd` the old instance had outstanding (that needs an owned
+  `context.Context`, PR 6's job, not this one's), and the old instance's answer still arrives and
+  is still routed to whichever screen is now on top by concrete type. `plan.Model`'s `loadedMsg`
+  landing on a plan screen for a different env after a second `p`, and `watch.Model`'s
+  `snapshotMsg` landing on a `w` for a different family, are the same shape (audit FB-H3/FB-M4).
+  Every screen that issues its own async command builds it with `scope.Do`/`scope.After` instead
+  of a bare `func() tea.Msg`, stamping the result with `scope.New()`'s ID at construction (and
+  again on any in-place reload, `plan.Model`'s override rebuild being the one example today), and
+  its `Update` starts with `if scope.Foreign(m.id, msg) { return m, nil }` before switching on
+  anything else. Never stamp a spinner or cursor-blink tick — `internal/ui/uitest`'s own `Drain`
+  already drops those unconditionally. Not universal yet (P3 #8, t2-review.md): `internal/app/tags`
+  and `internal/app/matrix` predate `scope` and still guard the identical race with their own
+  process-unique `gen`/`generation` counters, checked by hand in each handler rather than through
+  `scope.Foreign` — correct, but a second shape for the same problem. Porting them to `scope` is
+  unticketed cleanup, not a defect; a new screen still uses `scope.Do`/`scope.Foreign` from the
+  start rather than adding a third counter-based instance of this pattern.
 
 ### 4.9 Configuration
 
