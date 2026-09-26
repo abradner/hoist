@@ -233,8 +233,11 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
 
 ### Rules
 
-1. **One meaning per key, on every screen.** A key that does not apply on a screen is unbound
-   there, never reused for something else.
+1. **One semantic class per key, across every screen.** `enter` is always the screen's primary
+   action, `esc` is always back, and the arrow keys are always spatial movement — what "primary"
+   or "back" resolves to on a given screen varies (rules 2 and 3 say how), but the key's *class*
+   never does. A letter key carries one meaning on every screen it is bound on. A key that does
+   not apply on a screen is unbound there, never reused for something else.
 2. **`enter` is the screen's primary action.** On a confirm screen that is the write, and it
    stays unshifted because the confirm screen *is* the deliberate step (the diff is on it). A
    screen whose job is watching (flight, watch, config) has no primary action, so `enter` is
@@ -250,7 +253,10 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
    back, so one key for one meaning. `ctrl+c` always quits at once as the escape hatch. On the
    way out it prints the ids still in flight and `hoist resume <id>`.
 5. **Writes use the shift modifier, and only writes do.** `shift+r` restart, `shift+x` abandon,
-   `shift+d` direct-mode toggle, `shift+c` treat "no checks" as green. Displayed as `shift+<key>`
+   `shift+d` direct-mode toggle, `shift+c` treat "no checks" as green. `shift+d` does not itself
+   commit anything — it flips which mode the confirm screen's own `enter` will write in — but the
+   write it gates is real, so it carries the modifier along with the keys that write directly.
+   Displayed as `shift+<key>`
    everywhere a key is shown — footers, the help overlay, docs — never as the bare capital letter,
    because a capital in a footer reads as "press this letter" and invites the caps-lock press
    that a legacy terminal cannot tell apart from shift (see "Modifier" below). Every write is
@@ -353,6 +359,7 @@ Decisions the rules left open:
 | matrix | `P` promote to… | retired → action menu "promote into <env> from…" | rule 5 |
 | matrix | `d` deploy a tag | `t` deploy a tag | UX-H4 |
 | matrix | `C` config | `c` config | rule 5 |
+| matrix | `R` restart the cell's family → restart screen | `shift+r` restart the cell's family → restart screen | rule 5 |
 | matrix | `h/l` column aliases | retired (`←/→` only) | rule 7 |
 | matrix | — | `tab` focus the in-flight pane; `shift+x` abandon from the pane | — |
 | plan | `x` toggle repo | `space` toggle repo | UX-H4 |
@@ -366,15 +373,17 @@ Decisions the rules left open:
 | tags | `enter` read commit | `→` read commit (`←` back) | UX-M5, FB-L8 |
 | tags | `D` + confirm → direct deploy | retired; `shift+d` on the deploy confirm | UX-M6 |
 | tags | `esc` in the D dialog leaves the picker | retired with `D`; every dialog closes on esc | UX-M8 |
-| tags | `g/G` top/bottom | `home/end` | rule 5 |
+| tags | `g/G` top/bottom | `home/end` | rule 7 |
 | tags | — | `r` reload, `o` open commit | — |
 | flight | `esc` back to the confirm screen + **cancel drive** | `esc` → matrix, drive keeps running (T2) | UX-H6, FB-H2 |
 | flight | `x` abort (stop watching) | retired: esc already leaves without stopping | FB-L2 |
+| flight | `X` + confirm → abandon | `shift+x` abandon (confirm) | rule 5 |
 | flight | `R` re-observe | `r` re-observe | UX-H4 |
 | flight | `c` ci.none override | `shift+c` ci.none override | rule 5 |
 | flight | `G` log bottom | `end` | rule 5 |
 | flight | — | `w` watch | UX keypress table |
 | watch | `r` poll now | `r` (same key, "refresh" wording); footer shows `next poll in Ns` | UX-H9 |
+| config | `g/G` top/bottom | `home/end` (`internal/app/config/model.go:30-31`) | rule 7 |
 | restart | `esc` pops silently mid-rollout | `esc` pops; notice "rollout continues" | FB-L3 |
 
 ### `internal/parity` impact
@@ -392,8 +401,10 @@ switches on. The T3 keymap PR updates these rows in the same change:
 - **New navigation messages** that need rows: flight → watch (`w`), the matrix action menu if
   it is a root-handled message, and the help overlay if the root owns it. Keeping the menu and
   the overlay inside the matrix and `internal/ui` avoids new root cases.
-- **Keymap test (T3):** the `internal/ui/keys` registry asserts no key has two meanings across
-  screens, so rule 1 is enforced by a test rather than by review (AGENTS.md §10 meta-rule 5).
+- **Keymap test (T3):** the `internal/ui/keys` registry asserts every key resolves to at most one
+  semantic class (primary / back / spatial) across screens, and that a letter key means the same
+  thing on every screen it is bound on, so rule 1 is enforced by a test rather than by review
+  (AGENTS.md §10 meta-rule 5).
 - **One write-binding helper (T3):** `internal/ui/keys` builds every write binding through one
   constructor that takes keys `"shift+c"` and, on the legacy input path, `"C"` (see "Modifier"
   above — the uppercase letter is what a legacy terminal actually sends for both shift and caps

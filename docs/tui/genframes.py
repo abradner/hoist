@@ -176,11 +176,6 @@ plan = colour(b.render(), [
 ])
 plan += '\n<span class="c-dim">  tab pane · x toggle · m mode · d full digests · enter confirm · esc back</span>'
 
-open("frames.txt", "w", encoding="utf-8").write(
-    "===MATRIX===\n" + matrix +
-    "\n===TAGS===\n" + tags +
-    "\n===CONFIRM===\n" + confirm +
-    "\n===PLAN===\n" + plan + "\n")
 print("generated")
 
 # ─────────────────────────── 5. IN FLIGHT (expanded) ───────────────────────────
@@ -224,8 +219,6 @@ compact = colour(b.render(), [
 ])
 compact += '\n<span class="c-dim">  enter details</span>'
 
-open("frames.txt", "a", encoding="utf-8").write(
-    "===INFLIGHT===\n" + inflight + "\n===COMPACT===\n" + compact + "\n")
 print("appended")
 
 # ─────────────────── 7. TAG PICKER WITH COMMIT PANE ───────────────────
@@ -304,9 +297,6 @@ degraded = colour(b.render(), [
 ])
 degraded += '\n<span class="c-dim">  ↑/↓ tag · space review the change · esc back</span>'
 
-open("frames.txt", "a", encoding="utf-8").write(
-    "===PICKER2===\n" + picker2 + "\n===COMMIT===\n" + commit +
-    "\n===DEGRADED===\n" + degraded + "\n")
 print("appended")
 
 # ─────────────────── 10. DEPLOY CONFIRM, COMMITS-LED ───────────────────
@@ -380,8 +370,6 @@ yamlpane = colour(b.render(), [
 ])
 yamlpane += '\n<span class="c-dim">  enter deploy · d back to commits · m mode · esc back</span>'
 
-open("frames.txt", "a", encoding="utf-8").write(
-    "===CONFIRM2===\n" + confirm2 + "\n===YAMLPANE===\n" + yamlpane + "\n")
 print("appended")
 
 # ─────────────────── 12. PLAN CONFIRM, IMPACT-LED ───────────────────
@@ -424,7 +412,6 @@ plan2 = colour(b.render(), [
 ])
 plan2 += '\n<span class="c-dim">  enter confirm · x toggle repo · tab expand commits · d yaml · m mode · esc back</span>'
 
-open("frames.txt", "a", encoding="utf-8").write("===PLAN2===\n" + plan2 + "\n")
 print("appended")
 
 # ─────────────────── 13. FLIGHT (M10: built, not proposed) ───────────────────
@@ -458,7 +445,6 @@ flightframe = colour(b.render(), [
 ])
 flightframe += '\n<span class="c-dim">  o open PR · R re-observe · x abort · l log · esc back</span>'
 
-open("frames.txt", "a", encoding="utf-8").write("===FLIGHT===\n" + flightframe + "\n")
 print("appended")
 
 # ═══════════════════ v2 PROPOSAL (2026-09 audit) ═══════════════════
@@ -954,7 +940,7 @@ def tags_error():
         ("read:packages", "c-accent"), ("GHCR_TOKEN", "c-accent"),
         ("registries[].cluster", "c-accent"),
     ])
-    h += footer("r retry · c config · esc back · ? help", 80)
+    h += footer("r retry · esc back · ? help", 80)
     return h
 
 # ── HTML ──

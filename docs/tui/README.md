@@ -72,5 +72,5 @@ the UX train (T3) builds anything.
 Unlike frames 1–13, which were pasted into the HTML by hand, genframes.py writes this section
 into `mockups.html` itself, between the `v2:begin`/`v2:end` markers. It refuses any line
 wider than its cell, and any frame not exactly its stated height. So
-`python3 docs/tui/genframes.py` regenerates it in full. That run also writes a scratch
-`frames.txt` to the current directory; don't commit it.
+`python3 docs/tui/genframes.py` regenerates it in full, and only `mockups.html` changes — the
+script writes nothing else to disk, so a second run leaves `git status` clean.
