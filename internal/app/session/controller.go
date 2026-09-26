@@ -183,6 +183,15 @@ type Change struct {
 	Err   error
 	List  []service.Listed
 	Lines []string
+	// Snap is the entry's own last snapshot, populated only for a Change whose entry Update
+	// removes from Controller in the very same call (ChangeDone, ChangeAbandoned) — every other
+	// kind leaves the entry live, so a caller can always get a fresher one straight from
+	// Controller.Snapshot/BuildSnapshot instead. Without this, a mirroring screen (the wiring PR
+	// that follows this one, D3) would have nothing left to mirror the instant a promotion
+	// finishes: BuildSnapshot(build) already returns false by the time the Change reaches it,
+	// since withoutEntry has already run, and the screen would be frozen one step short of the
+	// true final state forever.
+	Snap Snapshot
 }
 
 // Errors Start/Resume/Poke/OverrideCINone can refuse with — never panics, mirroring every other
@@ -764,7 +773,10 @@ func (c Controller) onStep(msg stepMsg) (Controller, tea.Cmd, []Change) {
 
 	switch {
 	case e.done:
-		changes = append(changes, Change{Kind: ChangeDone, Build: e.build, ID: e.id})
+		// Snap carries the final tick's own state/statuses (already applied to e above) out
+		// past withoutEntry, which is about to make BuildSnapshot/Snapshot forget them —
+		// see Change.Snap's own doc comment.
+		changes = append(changes, Change{Kind: ChangeDone, Build: e.build, ID: e.id, Snap: snapshotOf(e)})
 		c = c.withoutEntry(e.build)
 		return c, nil, changes
 	case e.blocked != nil:
@@ -836,8 +848,9 @@ func (c Controller) onAbandoned(msg abandonedMsg) (Controller, tea.Cmd, []Change
 		c = c.withEntry(e)
 		return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err}}
 	}
+	snap := snapshotOf(e)
 	c = c.withoutEntry(e.build)
-	return c, nil, []Change{{Kind: ChangeAbandoned, Build: msg.build, ID: msg.id, Lines: msg.lines}}
+	return c, nil, []Change{{Kind: ChangeAbandoned, Build: msg.build, ID: msg.id, Lines: msg.lines, Snap: snap}}
 }
 
 func (c Controller) onList(msg listMsg) (Controller, tea.Cmd, []Change) {

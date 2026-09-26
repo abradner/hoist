@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
@@ -12,17 +13,18 @@ import (
 
 // The flight screen at both harness sizes, in the three states an operator stares at:
 // parked on approval (the command to type is on screen), blocked, and done — and the
-// direct-mode shape, which renders only the steps a direct promotion runs (#85 claimed
-// four never-run steps still rendered; this pins that they do not).
+// direct-mode shape, which renders only the steps a direct promotion runs.
 func TestFlightGolden(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC) }
-	base := func() Model {
+	base := func(statuses []engine.StepStatus) Model {
 		s := fixtureState()
 		s.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
-		return New(s, PollDurations{}, nil).WithNow(now).SetStyles(ui.NewStyles(true))
+		snap := stepping(s, false, statuses)
+		snap.Phase = session.Waiting
+		snap.Busy = false
+		return NewAttached(snap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
 	}
-	parked := base()
-	parked.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
+	parked := base([]engine.StepStatus{
 		st(engine.StepBranched, engine.Observation{Satisfied: true}),
 		st(engine.StepCommitted, engine.Observation{Satisfied: true}),
 		st(engine.StepPushed, engine.Observation{Satisfied: true}),
@@ -36,28 +38,39 @@ func TestFlightGolden(t *testing.T) {
 	// The short terminal: the list degrades to the strip and the command survives.
 	uitest.Golden(t, "flight-approval", parked.SetSize(80, 12).View(), 80, 12)
 
-	blocked := base()
-	blocked.stopped = true
-	blocked.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
-		st(engine.StepBranched, engine.Observation{Satisfied: true}),
-		st(engine.StepCommitted, engine.Observation{Blocked: "branch hoist/app-production/abcd1234 already exists with different content"}),
-	})
-	uitest.Golden(t, "flight-blocked", blocked.SetSize(80, 24).View(), 80, 24)
+	blockedSnap := func() Model {
+		s := fixtureState()
+		s.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
+		snap := stepping(s, false, []engine.StepStatus{
+			st(engine.StepBranched, engine.Observation{Satisfied: true}),
+			st(engine.StepCommitted, engine.Observation{Blocked: "branch hoist/app-production/abcd1234 already exists with different content"}),
+		})
+		snap.Phase = session.Stopped
+		snap.Busy = false
+		return NewAttached(snap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
+	}
+	uitest.Golden(t, "flight-blocked", blockedSnap().SetSize(80, 24).View(), 80, 24)
 
-	done := base()
-	done.done = true
-	done.rows = DeriveRows(StepOrder, true, []engine.StepStatus{st(engine.StepRolledOut, engine.Observation{Satisfied: true, Detail: "2 deployments rolled out"})})
-	uitest.Golden(t, "flight-done", done.SetSize(80, 24).View(), 80, 24)
+	doneSnap := func() Model {
+		s := fixtureState()
+		s.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
+		snap := stepping(s, true, []engine.StepStatus{st(engine.StepRolledOut, engine.Observation{Satisfied: true, Detail: "2 deployments rolled out"})})
+		snap.Busy = false
+		return NewAttached(snap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
+	}
+	uitest.Golden(t, "flight-done", doneSnap().SetSize(80, 24).View(), 80, 24)
 
 	s := fixtureState()
 	s.Direct, s.SourceEnv = true, ""
-	direct := New(s, PollDurations{}, nil).WithNow(now).SetStyles(ui.NewStyles(true))
-	direct.rows = DeriveRows(DirectStepOrder, false, []engine.StepStatus{
+	directSnap := stepping(s, false, []engine.StepStatus{
 		st(engine.StepDirectGate, engine.Observation{Satisfied: true}),
 		st(engine.StepBranched, engine.Observation{Satisfied: true}),
 		st(engine.StepCommitted, engine.Observation{Satisfied: true}),
 		st(engine.StepDirectPushed, engine.Observation{Waiting: true, Detail: "pushing to main"}),
 	})
+	directSnap.Phase = session.Waiting
+	directSnap.Busy = false
+	direct := NewAttached(directSnap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
 	v := direct.SetSize(80, 24).View()
 	for _, never := range []string{"· PR", "· CI", "· approval", "· merge"} {
 		if contains(v, never) {

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -29,10 +30,10 @@ type startOpts struct {
 }
 
 // startFn is the old (now-deleted) start-a-promotion function's shape.
-type startFn func(ctx context.Context, p gitops.Plan, opts startOpts, progress func(string)) (engine.PromotionState, flight.Driver, error)
+type startFn func(ctx context.Context, p gitops.Plan, opts startOpts, progress func(string)) (engine.PromotionState, session.Driver, error)
 
 // resumeFn is the old in-flight pane's Resume function shape.
-type resumeFn func(ctx context.Context, id string) (engine.PromotionState, flight.Driver, error)
+type resumeFn func(ctx context.Context, id string) (engine.PromotionState, session.Driver, error)
 
 // fakeInFlight is the test-only stand-in for the old (now-deleted) in-flight List/Resume pair,
 // bundled the same way the old Model's fluent in-flight setter took them. svcWithInFlight below
@@ -62,16 +63,16 @@ type testPromo struct {
 	OpenPRMode string
 }
 
-// stateDrive adapts a (state, flight.Driver) pair — everything a fake Start/Resume closure
+// stateDrive adapts a (state, session.Driver) pair — everything a fake Start/Resume closure
 // returns, exactly like the old start-a-promotion/in-flight-resume function signatures — into
-// the fuller service.Drive interface app.Model now requires (ID/Run on top of flight.Driver's own
+// the fuller service.Drive interface app.Model now requires (ID/Run on top of session.Driver's own
 // Step/State/OverrideCINone). inner is nil whenever the fake's own closure deliberately returned
 // a nil driveFn (several fixtures do, to exercise app.go's own nil-driveFn guard,
 // TestPromotionBuiltMsgNilDriveFnShowsNotice) — every method below falls back to the fixed state
 // captured at construction in that case, mirroring app_test.go's own pre-existing fixedDriver.
 type stateDrive struct {
 	state engine.PromotionState
-	inner flight.Driver
+	inner session.Driver
 }
 
 func (d *stateDrive) ID() string { return d.state.ID }

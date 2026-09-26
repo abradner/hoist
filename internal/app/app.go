@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/abradner/hoist/internal/app/matrix"
 	"github.com/abradner/hoist/internal/app/plan"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
@@ -39,34 +41,12 @@ import (
 // shape); empty behaves like "launch", so a caller that never sets it (a test, in particular)
 // gets today's original launch-only behavior rather than a silently different one.
 //
-// Starting and driving a promotion itself goes through Service (New's own svc parameter), not
-// through this struct — see Service's own doc comment (internal/app/service.go).
+// Starting and driving a promotion itself goes through session.Controller (New's own m.sess,
+// built from svc and Poll — Train 2 design), not through this struct.
 type Promotion struct {
 	Poll       flight.PollDurations
 	OpenURL    func(url string) error
 	OpenPRMode string
-}
-
-// promotionBuiltMsg is delivered once the tea.Cmd wrapping a svc.StartPromotion call finishes
-// (see the plan.StartMsg case below) — an app.go-private message, never exported, since
-// nothing outside the root ever needs to construct or match it. gen is stamped with the
-// issuing Model's own m.buildGen at the moment the request was launched, so Update can drop a
-// stale result the same way flight.Model.onDriveResult already drops a stale driveResultMsg —
-// see Model.buildGen's own doc comment for what "stale" means at this layer.
-type promotionBuiltMsg struct {
-	gen     uint64
-	state   engine.PromotionState
-	driveFn flight.Driver
-	err     error
-	// deadlineAt is the one absolute instant m.poll.Deadline named at plan.StartMsg time — zero
-	// when there is no configured deadline at all. Carried through so the flight screen's own
-	// budget (Model.deadlineAt, driveCmd's own bound) shares this SAME instant rather than
-	// starting a fresh poll.Deadline-length window of its own once the build finishes: without
-	// this, the time this build step itself took (a real git/forge round trip, AGENTS.md §4.3)
-	// went uncounted against the operator's configured deadline, so the TUI's total wait could
-	// exceed poll.deadline even though the CLI path wraps build+drive under one ctx timeout
-	// (Copilot review).
-	deadlineAt time.Time
 }
 
 // openURLResultMsg is the browser launcher's answer for one URL, delivered by the command
@@ -75,17 +55,6 @@ type openURLResultMsg struct {
 	url string
 	err error
 }
-
-// inFlightMsg carries one listing back; gen drops a listing from before the matrix was
-// replaced (it never is today, but the guard costs nothing) or one that raced a newer one.
-type inFlightMsg struct {
-	gen  uint64
-	list []flight.Summary
-	err  error
-}
-
-// inFlightTickMsg is the poll: re-list, but only when the matrix is on top.
-type inFlightTickMsg struct{}
 
 // Model is the root tea.Model: a stack of screens, the window size, and the theme, plus
 // what a screen needs to open the plan screen (internal/app/plan) or the tag picker
@@ -116,15 +85,16 @@ type Model struct {
 	// consume it can land one at a time; zero means "no history available" and each screen
 	// degrades to a named gap.
 	history history.Funcs
-	// listGen stamps each in-flight listing (svc.List), guarding against a slow one landing
-	// after a faster later one.
-	listGen uint64
 
-	// svc is the root's one seam onto internal/service (Service, internal/app/service.go) —
-	// Plan/StartPromotion/List/Resume/Abandon/RefreshRepo/Repo, all of it. A nil svc means the
-	// feature is not wired (a flags-only run, a test): the relevant gesture degrades to a
-	// notice rather than a panic, exactly as the old per-func nil checks did.
-	svc Service
+	// sess is the one place a build, resume, step, abandon or listing actually happens
+	// (internal/app/session, Train 2 design). It is a value: every state change happens inside
+	// Update or one of its own methods, each returning a new Controller (AGENTS.md §4.8's
+	// value-model convention, D1 of the design). Every background command it issues reaches the
+	// root as a session.Event, handled by exactly one case in Update below (D2); a flightScreen
+	// only ever mirrors a Snapshot from it and drives nothing itself (D3, internal/app/flight's
+	// own package doc).
+	sess session.Controller
+
 	// poll, openURL and openPRMode are Promotion's remaining fields, unpacked here — see
 	// Promotion's own doc comment for what each one is and why a nil OpenURL degrades to a
 	// notice rather than a panic.
@@ -133,44 +103,11 @@ type Model struct {
 	openPRMode string
 
 	// notice is a transient, root-level message shown below the top screen — used for
-	// plan.StartMsg's own construction failure (a real in-flight conflict, missing config) and
-	// for flight.OpenPRMsg/AbortMsg when no real handler is wired in (nil svc/OpenURL).
-	// Cleared on the next keypress, mirroring every screen's own per-keypress notice
-	// convention (matrix.Model, plan.Model, flight.Model all clear theirs the same way).
+	// a real in-flight conflict, missing config, and for flight.OpenPRMsg/AbortMsg when no
+	// real handler is wired in (nil svc/OpenURL). Cleared on the next keypress, mirroring
+	// every screen's own per-keypress notice convention (matrix.Model, plan.Model, flight.Model
+	// all clear theirs the same way).
 	notice string
-
-	// buildGen is the generation of the current (or most recently abandoned)
-	// startPromotion request. The plan screen stays fully interactive while its StartMsg's
-	// svc.StartPromotion call runs in the background (a real round trip to git/the forge) — so
-	// before that call's promotionBuiltMsg ever arrives, the
-	// operator can press Esc (abandoning it, plan.BackMsg below) or Enter again (a second,
-	// overlapping StartMsg for the same or a different plan). Without this guard, whichever
-	// promotionBuiltMsg happened to arrive later was adopted unconditionally regardless of
-	// which request — or none at all — the operator still cared about: a plan already backed
-	// out of could still get its flight screen pushed and start driving (creating a real
-	// branch/PR) the moment its result landed, and two staggered confirmations could each push
-	// their own flight screen for the same promotion, driving it from two independent
-	// goroutines at once (Codex review, PR #50 round 4). Every StartMsg increments buildGen and
-	// stamps the new value into the promotionBuiltMsg its own command will eventually produce;
-	// popping the plan screen away before that arrives (plan.BackMsg) increments it again with
-	// nothing to stamp, so any request still outstanding is orphaned. The promotionBuiltMsg
-	// case checks msg.gen against the current value before acting on the result at all — the
-	// same shape as flight.Model.gen/onDriveResult, one layer up the stack, guarding the
-	// analogous build step instead of the drive step.
-	buildGen uint64
-	// buildCancel cancels whichever startPromotion call buildGen currently names, or nil when
-	// none is outstanding. buildGen alone (above) only ever stops an abandoned/superseded
-	// build's RESULT from being acted on once it eventually arrives — it does nothing to the
-	// goroutine itself, which was bounded only by poll.Deadline (often hours) and so kept
-	// running its real network work (the claim-then-rescan one-in-flight scan in particular)
-	// to completion regardless of whether the operator had already moved on. Backing out
-	// (plan.BackMsg) or superseding (a second plan.StartMsg before the first's result lands)
-	// now calls this to interrupt that work promptly instead of leaving it to run unwatched
-	// (Copilot review, PR #50). It cannot undo a claim/state-save that had already completed
-	// before cancellation reached it — that narrow residual case leaves a real, resumable
-	// state file behind, the same as any other process-killed-mid-flight promotion already
-	// recovers from via `hoist resume`.
-	buildCancel context.CancelFunc
 
 	// configPath, configFound and configText are what the config screen shows (C, #104):
 	// where the file was read from or looked for, whether it existed, and the effective
@@ -189,9 +126,11 @@ type Model struct {
 // promotion's gitops.Plan, and what openDeploy below calls directly to build a deploy's. svc is
 // the root's one seam for starting, listing, resuming and abandoning a promotion, and for
 // refreshing the repo — see Service's own doc comment (internal/app/service.go); nil degrades
-// every gesture it would serve to a notice, exactly as the old per-func nil checks did. promo
-// carries what's left for driving the flight screen (poll cadence, the browser opener) — see
-// Promotion's own doc comment. tagsFn is what the tag-picker screen calls to list and fetch
+// every gesture it would serve to a notice, exactly as the old per-func nil checks did (now
+// via session.Controller's own ErrNoBackend, session.New(svc, ...) below — Service's method
+// set is a strict superset of session.Backend's, so a nil svc converts to a nil Backend too).
+// promo carries what's left for driving the flight screen (poll cadence, the browser opener) —
+// see Promotion's own doc comment. tagsFn is what the tag-picker screen calls to list and fetch
 // registry/forge data for one image repo; nil opens the picker with no data source (it reports
 // the resulting error itself). The theme starts dark and is replaced when the terminal reports
 // its background.
@@ -202,7 +141,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, planFn 
 		promotable: promotable,
 		envs:       envs,
 		planFn:     planFn,
-		svc:        svc,
+		sess:       session.New(svc, session.Config{Deadline: promo.Poll.Deadline, ListEvery: promo.Poll.Approval}),
 		poll:       promo.Poll,
 		openURL:    promo.OpenURL,
 		openPRMode: promo.OpenPRMode,
@@ -224,128 +163,6 @@ func (m Model) WithHistory(h history.Funcs) Model {
 // History returns what WithHistory set — for the screen constructors in later M10 PRs and
 // for cmd/hoist's own wiring test.
 func (m Model) History() history.Funcs { return m.history }
-
-// abandonResultMsg is svc.Abandon's answer for one promotion id, delivered by the command
-// flight.AbandonMsg's handler issues — mirrors openURLResultMsg's own shape one field up.
-type abandonResultMsg struct {
-	id  string
-	err error
-}
-
-// abandonWaitMsg re-checks whether the flight screen's driveCmd has actually stopped after an
-// AbandonMsg canceled it — see that case's own doc comment for the race this closes. attempt
-// counts retries so abandonWaitTick can give up after abandonWaitMaxAttempts rather than poll
-// forever.
-type abandonWaitMsg struct {
-	id      string
-	attempt int
-}
-
-// abandonWaitInterval and abandonWaitMaxAttempts bound the AbandonMsg wait at exactly the same
-// order of magnitude as the network/git call it is waiting on to notice ctx cancellation and
-// return — long enough for an ordinary cancellation to land, short enough that the operator's X
-// keypress is never left hanging for more than about a second before abandonPromotion's own
-// re-observation is trusted to catch anything the wait didn't.
-const (
-	abandonWaitInterval    = 100 * time.Millisecond
-	abandonWaitMaxAttempts = 10
-)
-
-// abandonWaitTick schedules the next abandonWaitMsg re-check.
-func abandonWaitTick(id string, attempt int) tea.Cmd {
-	return tea.Tick(abandonWaitInterval, func(time.Time) tea.Msg {
-		return abandonWaitMsg{id: id, attempt: attempt}
-	})
-}
-
-// doAbandon is flight.AbandonMsg's real dispatch, run once the driving screen (if any) has
-// either confirmed it is no longer Busy() or the wait above gave up — the pop-then-fire shape
-// the AbandonMsg case originally ran unconditionally, now gated on that wait.
-func (m Model) doAbandon(id string) (Model, tea.Cmd) {
-	if len(m.stack) > 1 {
-		m.stack = append([]Screen(nil), m.stack[:1]...)
-	}
-	nm, relistCmd := m.listInFlight()
-	if nm.svc == nil {
-		// Mirrors startPromotion/openURL's own nil convention — a clear notice instead of a
-		// nil-pointer panic for a launch that never wired this in.
-		nm.notice = fmt.Sprintf("abandon not wired up — run `hoist abandon %s --confirm-abandon=%s` yourself", id, id)
-		return nm, relistCmd
-	}
-	svc := nm.svc
-	abandonCmd := func() tea.Msg {
-		_, err := svc.Abandon(context.Background(), id)
-		return abandonResultMsg{id: id, err: err}
-	}
-	return nm, tea.Batch(relistCmd, abandonCmd)
-}
-
-// listInFlight issues one listing for the current generation, or nil when svc is not wired.
-func (m Model) listInFlight() (Model, tea.Cmd) {
-	if m.svc == nil {
-		return m, nil
-	}
-	// Each listing gets a new generation, so a slow earlier one that lands after a faster
-	// later one is dropped rather than painting an older snapshot over a newer pane.
-	m.listGen++
-	return m, m.listInFlightAt(m.listGen)
-}
-
-// listInFlightAt is the listing command for one generation; Init uses the current one, since
-// its model copy is discarded and the root must still recognise the answer.
-func (m Model) listInFlightAt(gen uint64) tea.Cmd {
-	if m.svc == nil {
-		return nil // svc is optional (a flags-only run, a test); nothing to list
-	}
-	svc, deadline := m.svc, m.poll.Deadline
-	return func() tea.Msg {
-		ctx := context.Background()
-		if deadline > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, deadline)
-			defer cancel()
-		}
-		listed, err := svc.List(ctx, service.ListOpts{})
-		if err != nil {
-			return inFlightMsg{gen: gen, err: err}
-		}
-		summaries := make([]flight.Summary, 0, len(listed))
-		for _, l := range listed {
-			summaries = append(summaries, summaryFor(l))
-		}
-		return inFlightMsg{gen: gen, list: summaries}
-	}
-}
-
-// summaryFor turns one service.Listed into the flight.Summary the in-flight pane renders —
-// Unconfigured and Err both become a Summary whose own Err names why re-observation could not
-// happen at all (never dropped), exactly as cmd/hoist's old observeForList wording did.
-func summaryFor(l service.Listed) flight.Summary {
-	switch {
-	case l.Unconfigured:
-		return flight.Summarize(l.State, false, nil, fmt.Errorf("repo %s is not in the config file", l.State.RepoFullName))
-	case l.Err != nil:
-		return flight.Summarize(l.State, false, nil, l.Err)
-	default:
-		return flight.Summarize(l.State, l.Done, l.Statuses, nil)
-	}
-}
-
-// startHooks builds the service.Hooks a StartPromotion/deploy.StartMsg call drives with: progress
-// reports one short line per preflight stage (claiming the target env, checking for a
-// conflicting promotion, the freshness check, direct mode's fresh-base check, saving the
-// initial state) as svc.StartPromotion reaches it, and the identical callback is reused for
-// onWaiting so preflight and the drive that follows it read as one continuous log, not two — the
-// same reasoning the pre-PR-F cmd/hoist TUI start adapter documented for this exact shape,
-// before the root started calling svc.StartPromotion directly. Both are nil-safe on the
-// service.Hooks side; progress itself is never nil here (see the
-// plan.StartMsg/deploy.StartMsg cases' own progressCh closures).
-func startHooks(progress func(string)) service.Hooks {
-	return service.Hooks{
-		Progress:  progress,
-		OnWaiting: func() { progress("waiting for signing approval") },
-	}
-}
 
 // WithWatch supplies the watch screen's builder — cmd/hoist's buildWatchFunc, the read-only
 // Get/Deployment/JobLike adapter `hoist watch` also uses. See Model.watchFn.
@@ -382,19 +199,6 @@ func (m Model) WithConfigView(path string, found bool, text string) Model {
 	return m
 }
 
-// inFlightTick schedules the next listing at Poll.Approval — the cadence the engine itself
-// re-observes an approval at — with a floor so a zero config never spins.
-func (m Model) inFlightTick() tea.Cmd {
-	if m.svc == nil {
-		return nil
-	}
-	every := m.poll.Approval
-	if every < 5*time.Second {
-		every = 30 * time.Second
-	}
-	return tea.Tick(every, func(time.Time) tea.Msg { return inFlightTickMsg{} })
-}
-
 // matrixOnTop reports whether the matrix is the screen being shown — the only time a
 // listing is worth the forge calls, since only the matrix draws the pane.
 func (m Model) matrixOnTop() bool {
@@ -405,16 +209,49 @@ func (m Model) matrixOnTop() bool {
 	return ok
 }
 
-// Init asks the terminal for its background colour so the palette can follow it, and starts
-// whatever the top (only, at boot) screen's own Init needs.
+// Init asks the terminal for its background colour so the palette can follow it, starts
+// whatever the top (only, at boot) screen's own Init needs, and starts the controller's own
+// listing loop (session.Controller.Init: an immediate listing plus its recurring tick chain).
 func (m Model) Init() tea.Cmd {
 	var screenCmd tea.Cmd
 	if len(m.stack) > 0 {
 		screenCmd = m.stack[len(m.stack)-1].Init()
 	}
-	// Init's model copy is discarded, so the boot listing carries the current generation;
-	// every later one (a tick, a pop) increments through listInFlight's returned model.
-	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.listInFlightAt(m.listGen), m.inFlightTick())
+	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.sess.Init())
+}
+
+// start is plan.StartMsg and deploy.StartMsg's one shared dispatch (Train 2 design PR 2: the
+// two near-identical StartMsg blocks the pre-session-controller app.go carried collapse into
+// this): ask session.Controller to Start req for (source, target), push a flightScreen already
+// mirroring whatever Snapshot exists the instant it agrees to track it (Building, with nothing
+// real yet — NewAttached's own doc comment), and let the resulting session.Event stream carry
+// it the rest of the way. A refusal (no backend wired, or another promotion already targets this
+// env) shows as a notice and pushes nothing, mirroring every other nil-adaptor convention in this
+// package.
+func (m Model) start(req service.StartRequest, source, target string) (Model, tea.Cmd) {
+	sess, build, cmd, err := m.sess.Start(req, source, target)
+	m.sess = sess
+	if err != nil {
+		m.notice = startErrorNotice(err)
+		return m, nil
+	}
+	m = m.popIfBuilding()
+	snap, _ := m.sess.BuildSnapshot(build)
+	fs := flightScreen{flight.NewAttached(snap, m.poll)}
+	m = m.push(fs)
+	return m, tea.Batch(fs.Init(), cmd)
+}
+
+// startErrorNotice turns a session.Controller.Start/Resume refusal into the operator-facing
+// notice — ErrNoBackend keeps the exact wording every other unwired-adaptor gesture in this
+// package already used ("not wired up"), so existing callers/tests keep reading the same words;
+// anything else (today, only ErrTargetBusy — a promotion already in flight for this target env,
+// AGENTS.md invariant 5) is shown verbatim.
+func startErrorNotice(err error) string {
+	if errors.Is(err, session.ErrNoBackend) {
+		return "starting a promotion is not wired up"
+	}
+	return fmt.Sprintf("could not start promotion: %v", err)
 }
 
 // Update handles window size, theme and the global keys, and forwards everything else to
@@ -463,55 +300,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repo = r
 		}
 		return m, nil
-	case inFlightMsg:
-		if msg.gen != m.listGen {
-			return m, nil
-		}
-		return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.SetInFlight(msg.list, msg.err) }), nil
-	case inFlightTickMsg:
-		if !m.matrixOnTop() {
-			return m, m.inFlightTick()
-		}
-		m, list := m.listInFlight()
-		return m, tea.Batch(list, m.inFlightTick())
+	case session.Event:
+		// D2 of the design: every controller-issued command reaches the root through exactly
+		// this one case, and everything it means for the screens on the stack is decided in
+		// apply(). session.Event is deliberately not named *Msg (internal/app/session's own
+		// doc comment) so internal/parity's own parser — which only ever collects `case
+		// pkg.XMsg` from this file — never mistakes this internal plumbing for a navigation
+		// message the operator can trigger directly.
+		var sessCmd tea.Cmd
+		var changes []session.Change
+		m.sess, sessCmd, changes = m.sess.Update(msg)
+		m, applyCmd := m.apply(changes)
+		return m, tea.Batch(sessCmd, applyCmd)
 	case matrix.ResumeMsg:
-		if m.svc == nil {
+		sess, build, cmd, err := m.sess.Resume(msg.ID)
+		m.sess = sess
+		if err != nil {
 			m.notice = "resuming a promotion is not wired up"
 			return m, nil
 		}
-		svc, deadline := m.svc, m.poll.Deadline
-		m.buildGen++
-		gen := m.buildGen
-		if m.buildCancel != nil {
-			m.buildCancel()
-		}
-		var deadlineAt time.Time
-		if deadline > 0 {
-			deadlineAt = time.Now().Add(deadline)
-		}
-		ctx := context.Background()
-		var cancelDeadline context.CancelFunc
-		if !deadlineAt.IsZero() {
-			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
-		}
-		ctx, cancel := context.WithCancel(ctx)
-		m.buildCancel = cancel
-		id := msg.ID
-		return m, func() tea.Msg {
-			defer cancel()
-			if cancelDeadline != nil {
-				defer cancelDeadline()
-			}
-			// The same promotionBuiltMsg path a confirmed plan takes: the flight screen is
-			// pushed with the resumed state and drives it from wherever Observe finds it.
-			d, err := svc.Resume(ctx, id, service.ResumeOpts{})
-			var state engine.PromotionState
-			var driveFn flight.Driver
-			if err == nil {
-				state, driveFn = d.State(), d
-			}
-			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
-		}
+		m = m.popIfBuilding()
+		snap, _ := m.sess.BuildSnapshot(build)
+		fs := flightScreen{flight.NewAttached(snap, m.poll)}
+		m = m.push(fs)
+		return m, tea.Batch(fs.Init(), cmd)
 	case matrix.OpenPlanMsg:
 		target := ""
 		if m.envs.Pairs != nil {
@@ -524,265 +336,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
 		// here the message was forwarded to the top screen — the deploy screen itself — which
 		// fed it to its own viewport, so Esc did nothing and the screen could not be left
-		// (Copilot, PR #72). The same build-generation invalidation applies: a deploy confirm
-		// can have a startPromotion request outstanding just as a plan confirm can.
-		m.buildGen++
-		if m.buildCancel != nil {
-			m.buildCancel()
-			m.buildCancel = nil
-		}
+		// (Copilot, PR #72).
 		return m.pop(), nil
 	case plan.BackMsg:
-		// Abandon any startPromotion request this plan screen has outstanding — see
-		// Model.buildGen's own doc comment. Bumping unconditionally (whether or not a request
-		// is actually in flight) costs nothing: it only ever prevents an already-resolved or
-		// never-issued gen from matching again, never a live one. buildCancel actually
-		// interrupts it, rather than merely disowning its eventual result — see its own doc
-		// comment.
-		m.buildGen++
-		if m.buildCancel != nil {
-			m.buildCancel()
-			m.buildCancel = nil
-		}
 		return m.popAndRelist()
 	case plan.StartMsg:
-		if m.svc == nil {
-			// Mirrors ResolveFunc's own nil convention: a caller that hasn't wired
-			// cmd/hoist's adaptor in gets a clear notice instead of a nil-pointer panic,
-			// and the plan screen stays on top so the operator can see it.
-			m.notice = "starting a promotion is not wired up"
-			return m, nil
-		}
-		svc, p, deadline := m.svc, filterTicked(msg.Plan, msg.Ticked), m.poll.Deadline
-		view := msg.View
+		p := filterTicked(msg.Plan, msg.Ticked)
 		direct := msg.Mode == plan.ModeDirect
-		m.buildGen++
-		gen := m.buildGen
-		if m.buildCancel != nil {
-			// Superseding a build still outstanding from an earlier StartMsg — see
-			// Model.buildCancel's own doc comment: buildGen alone only disowns its eventual
-			// result, this actually interrupts the work.
-			m.buildCancel()
+		view := msg.View
+		req := service.StartRequest{
+			Plan: p,
+			Mode: service.Mode{Direct: direct, Confirmed: direct},
+			View: &view,
 		}
-		// deadlineAt is the one absolute instant this whole promotion's budget names, stamped
-		// here — before the build even starts — so the flight screen constructed below (once
-		// this build succeeds) can share it rather than starting a fresh poll.Deadline-length
-		// window of its own once the build finishes (promotionBuiltMsg's own doc comment).
-		var deadlineAt time.Time
-		if deadline > 0 {
-			deadlineAt = time.Now().Add(deadline)
-		}
-		// Bounded by deadlineAt, not left on context.Background() — the same reasoning as
-		// flight.Model.driveCmd's own bound: a single hung network call must not stall the
-		// plan screen forever with no way to cancel. Wrapped again with WithCancel so
-		// plan.BackMsg/a superseding StartMsg (above) can also interrupt it promptly, rather
-		// than leaving it to run unwatched for however long is left of poll.Deadline (Copilot
-		// review, PR #50) — cancel is stored on the model, not just deferred below, precisely
-		// so Update can reach it from a later message.
-		ctx := context.Background()
-		var cancelDeadline context.CancelFunc
-		if !deadlineAt.IsZero() {
-			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
-		}
-		ctx, cancel := context.WithCancel(ctx)
-		m.buildCancel = cancel
-		// Pushed on the keypress, not once the build finishes: without this, nothing on
-		// screen changed for however long the preflight work (a real git fetch, the
-		// claim-then-rescan in-flight check, a state save) took, the plan screen stayed on
-		// top and kept receiving keys, and a second enter — the natural response to a key
-		// that looks dead — cancelled the first attempt and started it over (defect A). The
-		// building screen renders with what's already known (source/target/direct) and a
-		// spinner; AdoptBuilt below turns this SAME instance into a normal driving one once
-		// the build actually returns, so there is no flicker and no second screen.
-		//
-		// popIfBuilding first: a superseding StartMsg (this same case, reached again before
-		// the previous one resolved) must not stack a second building screen on top of the
-		// first — the buildCancel() call above already orphans that earlier attempt's
-		// eventual result (buildGen no longer matches it), but without also removing its
-		// screen, the abandoned one stays buried in the stack forever: invisible, its own
-		// progressCh still open (deliberately never closed — see buildCmd's own comment
-		// below) but nothing left writing to it once its goroutine has returned via the
-		// cancelled context, surfacing only if the operator ever pops back far enough to
-		// reach it.
-		m = m.popIfBuilding()
-		progressCh := make(chan string, 32)
-		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})
-		fs := m.stack[len(m.stack)-1]
-		buildCmd := func() tea.Msg {
-			// svc.StartPromotion can talk to a real git remote and forge — the
-			// claim-then-rescan one-in-flight check re-observes any conflicting promotion
-			// for this target env — so this runs off the Update call stack (AGENTS.md
-			// §4.3), exactly like plan.Func's own loadCmd.
-			defer cancel()
-			if cancelDeadline != nil {
-				defer cancelDeadline()
-			}
-			// progressCh is deliberately never closed here. The same channel — captured by
-			// this same progress closure — is reused for the whole drive that follows a
-			// successful build (AdoptBuilt keeps listening; the Driver's own progress hook
-			// reports through the identical callback), so this build call finishing is not
-			// this channel's end of life; closing it here would panic the very next send from
-			// engine.Drive's own history hook once driving actually starts — sending on a
-			// closed channel panics unconditionally in Go, select/default only guards a full
-			// buffer, never a closed one. An unclosed, undrained channel is harmless (every
-			// send already goes through the same select/default below, so a channel nobody is
-			// reading from just silently drops); the one cost is that listenCmd's goroutine, if
-			// this screen is ever abandoned (backed out of, or the promotion finishes) with no
-			// one left to close or read it, blocks forever rather than exiting — one leaked
-			// goroutine per screen's whole lifetime, not per line, and not per poll tick;
-			// accepted for now rather than adding a second signal whose own lifecycle would
-			// have to be gotten right just as carefully as this one.
-			// The plan screen's mode toggle (m) is gated on IsProduction and sits behind its own
-			// huh.Confirm, so reaching ModeDirect here IS the keypress-then-confirm gesture
-			// engine.DirectCommitGateStep asks Confirmed to attest — which the gate then
-			// re-checks against envs.production independently anyway.
-			progress := func(line string) {
-				// Never blocks the build goroutine on a slow-draining UI: the channel is
-				// generously buffered for the handful of preflight lines this ever carries,
-				// and a genuinely full buffer means dropping a line, not stalling a real
-				// git/forge call on rendering.
-				select {
-				case progressCh <- line:
-				default:
-				}
-			}
-			d, err := svc.StartPromotion(ctx, service.StartRequest{
-				Plan: p,
-				Mode: service.Mode{Direct: direct, Confirmed: direct},
-				View: &view,
-			}, startHooks(progress))
-			var state engine.PromotionState
-			var driveFn flight.Driver
-			if err == nil {
-				state, driveFn = d.State(), d
-			}
-			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
-		}
-		return m, tea.Batch(fs.Init(), buildCmd)
-	case promotionBuiltMsg:
-		if msg.gen != m.buildGen {
-			// Stale: superseded by a later StartMsg (a second confirmation before this
-			// one's result arrived), or the plan screen that issued it has since been
-			// popped away (plan.BackMsg above). Dropped outright, before either the
-			// error or the success branch below ever runs — see Model.buildGen's own
-			// doc comment. m.buildCancel is left untouched: it belongs to whichever
-			// newer build actually superseded this one (or is already nil if this was
-			// abandoned via BackMsg instead), never to this stale result.
-			return m, nil
-		}
-		// This result belongs to the build m.buildCancel was guarding — it has finished
-		// (successfully or not), so there is nothing left for that cancel to interrupt.
-		m.buildCancel = nil
-		if msg.err != nil {
-			// A real in-flight conflict, missing github config, or a claim failure. popIfBuilding
-			// removes the preflight flight screen plan.StartMsg/deploy.StartMsg pushed on the
-			// keypress (matrix.ResumeMsg never pushes one, so this is a no-op for that path,
-			// unchanged from before this PR) — reverting to whatever was underneath restores
-			// exactly the pre-existing, #164-tested behavior: the notice on the now-visible
-			// confirm screen, never crashing or silently leaving a dead building screen up.
-			m = m.popIfBuilding()
-			m.notice = fmt.Sprintf("could not start promotion: %v", msg.err)
-			return m, nil
-		}
-		if msg.driveFn == nil {
-			// A non-nil error is the only signal that a plan cannot start (see the
-			// plan.StartMsg/deploy.StartMsg cases above, which build this msg from
-			// svc.StartPromotion's own (Drive, error) pair); a nil error together with a
-			// nil driveFn is a contract violation by whatever built this msg, not a state
-			// this screen should silently paper over by pushing a
-			// read-only flight screen — that would reintroduce exactly the pre-wiring stub
-			// behavior this PR exists to remove, with no visible sign anything is wrong.
-			m = m.popIfBuilding()
-			m.notice = "promotion built with no error but no way to drive it (internal bug) — refusing to open a read-only flight screen"
-			return m, nil
-		}
-		// The common case: plan.StartMsg/deploy.StartMsg already pushed a building flight
-		// screen on the keypress (flight.NewBuilding), and its own poll/deadlineAt were fixed
-		// at that moment — the same instant msg.deadlineAt names, since both were computed
-		// from m.poll.Deadline within the same Update call. AdoptBuilt turns this SAME
-		// instance into a real, driving screen without recomputing either, which is what
-		// keeps build+drive sharing one budget (its own doc comment) — no "remaining time"
-		// recompute needed here at all once the screen already exists.
-		if top := len(m.stack) - 1; top >= 0 {
-			if fs, ok := m.stack[top].(flightScreen); ok && fs.Building() {
-				adopted, cmd := fs.AdoptBuilt(msg.state, msg.driveFn)
-				stack := append([]Screen(nil), m.stack...)
-				stack[top] = flightScreen{adopted}
-				m.stack = stack
-				return m, cmd
-			}
-		}
-		// Fallback: no building screen was pre-pushed — matrix.ResumeMsg's own path
-		// (re-observing an already-existing promotion, not starting a fresh one, so there is
-		// no preflight phase to show). pollForFlight recomputes the remaining budget exactly
-		// as this whole handler always has, since flight.New is only now constructing this
-		// screen's own deadlineAt, unlike the adopt path above.
-		pollForFlight := m.poll
-		if !msg.deadlineAt.IsZero() {
-			if remaining := time.Until(msg.deadlineAt); remaining > 0 {
-				pollForFlight.Deadline = remaining
-			} else {
-				// The build itself already consumed the whole budget (or overran it) —
-				// flight.New treats poll.Deadline <= 0 as "no deadline at all" (its own
-				// doc comment), which would be exactly backwards here: budget exhausted
-				// must fail fast, not grant a fresh unbounded window. A minimal positive
-				// duration keeps flight.New's own deadlineAt in the past (or effectively
-				// now), so the very first poll reports context.DeadlineExceeded instead.
-				pollForFlight.Deadline = time.Nanosecond
-			}
-		}
-		fs := flightScreen{flight.New(msg.state, pollForFlight, msg.driveFn)}
-		m = m.push(fs)
-		return m, fs.Init()
+		return m.start(req, p.SourceEnv, p.TargetEnv)
 	case flight.OverrideCINoneMsg:
 		// The TUI's `hoist resume <id> --override-ci-none` (#103): the flight screen showing
 		// promotion msg.ID asked, behind its own huh.Confirm, to treat a PR with no reported
-		// checks as green under ci.none: prompt. The root decides what that means — set the
-		// override on THAT promotion's state and re-drive it — and the screen's own state is
-		// where the override lives (flight.Model.ApplyCINoneOverride): every driveCmd hands
-		// that state to the DriveFunc, so cmd/hoist's engine.Drive sees CINoneOverride on the
-		// next CIGreenStep.Observe and its save persists it. Nothing here is a default: a
-		// promotion whose screen never confirmed keeps false, and the confirm path
-		// (svc.StartPromotion) never sets it (AGENTS.md §4.5).
-		top := len(m.stack) - 1
-		var fs flightScreen
-		ok := top >= 0
-		if ok {
-			fs, ok = m.stack[top].(flightScreen)
-		}
-		if !ok || fs.ID() != msg.ID {
-			m.notice = "override ignored: promotion " + msg.ID + " is not the flight screen on top"
+		// checks as green under ci.none: prompt. session.Controller.OverrideCINone decides what
+		// that means and re-drives it; the resulting session.Event stream mirrors the outcome
+		// back onto whichever screen is attached to it (AGENTS.md §4.5 — the operator's own,
+		// per-promotion decision, never a default).
+		sess, cmd, err := m.sess.OverrideCINone(msg.ID)
+		if err != nil {
+			m.notice = fmt.Sprintf("override ignored for %s: %v", msg.ID, err)
 			return m, nil
 		}
-		next, cmd := fs.ApplyCINoneOverride()
-		m.stack[top] = flightScreen{next}
+		m.sess = sess
+		return m, cmd
+	case flight.ReobserveMsg:
+		// R: the flight screen only asks (session.ReobserveMsg's own doc comment); Poke is the
+		// one place that decides whether it can actually happen (busy, not found).
+		sess, cmd, err := m.sess.Poke(msg.ID)
+		if err != nil {
+			return m, nil
+		}
+		m.sess = sess
 		return m, cmd
 	case flight.BackMsg:
-		// Cancel the flight screen's shared drive context before popping it — see
-		// flight.Model.Cancel's own doc comment. Without this, a driveCmd already in flight
-		// for the popped screen kept running to completion (committing, pushing, opening a
-		// PR, merging) even though nothing was watching it anymore.
+		// esc: stop watching this promotion from the TUI — the drive itself keeps running
+		// (Train 2 design PR 2's own stated scope: behaviour unchanged here, PR 3 changes it).
+		// Whichever entry the top flight screen was attached to is told to stop: Stop(id) once
+		// a real id exists, CancelBuild(build) for a still-Building one that has none yet.
 		if top := len(m.stack) - 1; top >= 0 {
 			if fs, ok := m.stack[top].(flightScreen); ok {
-				fs.Cancel()
-				if fs.Building() {
-					// fs.Cancel() is a no-op here — a building screen's own m.cancel is nil
-					// until AdoptBuilt (driveCmd has nothing to run yet). The build this
-					// screen is watching is m.buildCancel's, not this screen's own, so
-					// backing out has to reach that instead: bump buildGen and cancel it the
-					// same way a superseding StartMsg already does (plan.StartMsg's own
-					// comment on buildGen). Without this, the build goroutine keeps running
-					// after the operator has already backed out, and its eventual
-					// promotionBuiltMsg — still carrying the gen this popped screen was
-					// built under — would resurrect a screen the operator explicitly left:
-					// the success branch would push (or, with a second building screen
-					// already up from a fresh attempt, wrongly adopt into) a flight screen
-					// nobody asked to see again.
-					m.buildGen++
-					if m.buildCancel != nil {
-						m.buildCancel()
-						m.buildCancel = nil
-					}
+				id, build := fs.Attached()
+				if id != "" {
+					m.sess = m.sess.Stop(id)
+				} else {
+					m.sess = m.sess.CancelBuild(build)
 				}
 			}
 		}
@@ -830,80 +432,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// claim-then-rescan dance) elsewhere. The one narrow, safe interpretation
 		// implemented instead: stop watching this promotion from the TUI and return to
 		// the matrix, leaving the real branch/PR/state file exactly as they are — the
-		// operator drives it further via `hoist resume <id>` or the forge directly, and a
-		// re-opened plan screen can always confirm the same digests again (the same
-		// deterministic id, per AGENTS.md §4.1) to pick the flight screen back up. No
-		// engine call happens here at all: flight.Model itself now refuses to emit
-		// AbortMsg for an empty/read-only promotion (PR #39 review finding #2), so
-		// msg.ID is always a real id, but this handler does not even need it.
-		//
-		// Cancel the flight screen's shared drive context before popping it — see
-		// flight.Model.Cancel's own doc comment. A driveCmd already in flight for the popped
-		// screen is NOT harmless left running: it can keep committing, pushing, opening a PR
-		// or merging after the operator has walked away, and — since the claim was already
-		// released once the initial state saved — a later reconfirmation of the same
-		// deterministic promotion id could start a second driver racing the first (Copilot
-		// review, PR #50 round 11; this corrects an earlier version of this comment that
-		// called the same lingering call harmless).
-		if top := len(m.stack) - 1; top >= 0 {
-			if fs, ok := m.stack[top].(flightScreen); ok {
-				fs.Cancel()
-			}
-		}
+		// operator drives it further via `hoist resume <id>` or the forge directly.
+		m.sess = m.sess.Stop(msg.ID)
 		if len(m.stack) > 1 {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
-		return m.listInFlight()
+		sess, cmd := m.sess.Relist()
+		m.sess = sess
+		return m, cmd
 	case flight.AbandonMsg:
-		// Cancel signals this screen's shared ctx, but does not wait for the goroutine a
-		// driveCmd already in flight is running in to actually notice and return — a plain
-		// context cancel is not a join. engine.Drive saves state (and, mid a push/merge Act,
-		// can still complete it) after a step returns even on a canceled context, so firing
-		// abandonPromotion's own write immediately here — the original shape, popping
-		// optimistically and reporting the outcome through a notice once it lands, the same
-		// way openURLResultMsg already does for a call that must not block Update — could
-		// delete the state file (or close the PR/delete the branch) the instant before the
-		// canceled drive finishes its own last write, leaving the two racing: abandon
-		// believes it is done while the promotion or its state survives, or gets silently
-		// recreated right after (round-2 review, PR #182).
-		//
-		// The fix waits for Busy() to actually clear before doing anything destructive,
-		// bounded by abandonWaitMaxAttempts so a DriveFunc that somehow never notices
-		// cancellation cannot wedge the operator's X keypress forever — abandonPromotion's
-		// own re-observation (ObserveAll plus the direct LandedSHA() check, before it ever
-		// closes a PR or deletes a branch) is what keeps that timeout-and-proceed path safe:
-		// if the raced write did land, abandon still refuses rather than trusting the wait.
-		if top := len(m.stack) - 1; top >= 0 {
-			if fs, ok := m.stack[top].(flightScreen); ok {
-				fs.Cancel()
-				if fs.Busy() {
-					m.notice = "cancelling " + msg.ID + " — waiting for the in-flight step to stop before abandoning"
-					return m, abandonWaitTick(msg.ID, 0)
-				}
-			}
+		// The flight screen's own X gesture already confirmed the operator wants this
+		// (flight.AbandonMsg's own doc comment) — pop back to the matrix immediately (mirroring
+		// AbortMsg's own shape above) and let session.Controller.Abandon do the real work: cancel,
+		// wait for a busy Step to actually stop, then the real Backend.Abandon call.
+		if len(m.stack) > 1 {
+			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
-		return m.doAbandon(msg.ID)
-	case abandonWaitMsg:
-		if top := len(m.stack) - 1; top >= 0 {
-			if fs, ok := m.stack[top].(flightScreen); ok && fs.Busy() {
-				if msg.attempt >= abandonWaitMaxAttempts {
-					m.notice = "the in-flight step for " + msg.id + " did not confirm it stopped in time; abandoning anyway (it re-observes before touching anything)"
-					return m.doAbandon(msg.id)
-				}
-				return m, abandonWaitTick(msg.id, msg.attempt+1)
-			}
-		}
-		return m.doAbandon(msg.id)
-	case abandonResultMsg:
-		if msg.err != nil {
-			m.notice = fmt.Sprintf("abandon %s failed: %v", msg.id, msg.err)
-			return m, nil
-		}
-		m.notice = "abandoned " + msg.id
-		// Re-list now that the state file is actually gone — the earlier relist (fired
-		// alongside this command) ran before the abandon itself completed and would still
-		// have found it.
-		return m, m.listInFlightAt(m.listGen)
+		sess, cmd := m.sess.Abandon(msg.ID)
+		m.sess = sess
+		return m, cmd
 	case matrix.OpenConfigMsg:
 		if m.configText == "" {
 			m.notice = "no config to show: the launcher supplied none"
@@ -955,65 +502,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the diff first: the gesture chose a mode, not a change.
 		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, true, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
 	case deploy.StartMsg:
-		if m.svc == nil {
-			m.notice = "starting a deploy is not wired up"
-			return m, nil
-		}
-		svc, deadline := m.svc, m.poll.Deadline
 		direct := msg.Mode == deploy.ModeDirect
-		m.buildGen++
-		gen := m.buildGen
-		if m.buildCancel != nil {
-			m.buildCancel()
-		}
-		var deadlineAt time.Time
-		if deadline > 0 {
-			deadlineAt = time.Now().Add(deadline)
-		}
-		ctx := context.Background()
-		var cancelDeadline context.CancelFunc
-		if !deadlineAt.IsZero() {
-			ctx, cancelDeadline = context.WithDeadline(ctx, deadlineAt)
-		}
-		ctx, cancel := context.WithCancel(ctx)
-		m.buildCancel = cancel
-		p := msg.Plan
 		view := msg.View
-		// Same preflight-phase push as plan.StartMsg above — see its own comment for why,
-		// and its popIfBuilding comment for why a superseding StartMsg must not stack a
-		// second building screen on top of the first.
-		m = m.popIfBuilding()
-		progressCh := make(chan string, 32)
-		m = m.push(flightScreen{flight.NewBuilding(p.SourceEnv, p.TargetEnv, direct, m.poll, progressCh)})
-		fs := m.stack[len(m.stack)-1]
-		buildCmd := func() tea.Msg {
-			defer cancel()
-			if cancelDeadline != nil {
-				defer cancelDeadline()
-			}
-			// progressCh is deliberately never closed here — see plan.StartMsg's own comment
-			// on this same pattern above for why: this channel is reused for the whole drive
-			// that follows, and closing it here would panic the first send engine.Drive's own
-			// history hook makes once driving starts.
-			progress := func(line string) {
-				select {
-				case progressCh <- line:
-				default:
-				}
-			}
-			d, err := svc.StartPromotion(ctx, service.StartRequest{
-				Plan: p,
-				Mode: service.Mode{Direct: direct, Confirmed: msg.Confirmed},
-				View: &view,
-			}, startHooks(progress))
-			var state engine.PromotionState
-			var driveFn flight.Driver
-			if err == nil {
-				state, driveFn = d.State(), d
-			}
-			return promotionBuiltMsg{gen: gen, state: state, driveFn: driveFn, err: err, deadlineAt: deadlineAt}
+		req := service.StartRequest{
+			Plan: msg.Plan,
+			Mode: service.Mode{Direct: direct, Confirmed: msg.Confirmed},
+			View: &view,
 		}
-		return m, tea.Batch(fs.Init(), buildCmd)
+		return m.start(req, msg.Plan.SourceEnv, msg.Plan.TargetEnv)
 	}
 	if len(m.stack) == 0 {
 		return m, nil
@@ -1024,6 +520,135 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	stack[top] = s
 	m.stack = stack
 	return m, cmd
+}
+
+// apply reacts to every session.Change one Update(session.Event) call produced (D2/D3 of the
+// Train 2 design): most changes mean "mirror the fresher Snapshot onto whichever flightScreen is
+// attached to this Build" — the default case, handled once by mirrorAttached below — with three
+// exceptions this root itself has to act on: a failed build has no Snapshot left to mirror onto
+// (the entry was never fully created) and instead pops the preflight screen with a notice; a
+// fresh listing goes to the matrix's in-flight pane, merged with whatever this session's own
+// controller still has live (a Building/Stepping entry with no state file on disk yet, which the
+// listing alone would never show); and an abandon's own outcome adds a notice and, on success,
+// asks for a fresh listing right away rather than waiting for the next tick.
+func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	for _, ch := range changes {
+		switch ch.Kind {
+		case session.ChangeBuildFailed:
+			m = m.popBuildFailed(ch.Build, ch.Err)
+		case session.ChangeListed:
+			list := ch.List
+			live := m.sess.Live()
+			m = m.withMatrix(func(ms matrix.Model) matrix.Model {
+				return ms.SetInFlight(mergeInFlight(list, live), nil)
+			})
+		case session.ChangeRefused:
+			// A whole-listing failure (the forge/state directory unreachable) — left for a
+			// later train PR to surface; the pane simply keeps its last good listing.
+		case session.ChangeAbandoned:
+			m.notice = "abandoned " + ch.ID
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			var relistCmd tea.Cmd
+			m.sess, relistCmd = m.sess.Relist()
+			cmds = append(cmds, relistCmd)
+		case session.ChangeAbandonFailed:
+			m.notice = fmt.Sprintf("abandon %s failed: %v", ch.ID, ch.Err)
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+		default:
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+		}
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// mirrorAttached finds the flightScreen (wherever it sits in the stack) attached to build and
+// calls its Mirror with the freshest Snapshot the controller still has — or, when the entry has
+// already been removed (Done/Abandoned, whose own Change carries fallback in ch.Snap — see
+// session.Change.Snap's own doc comment), that fallback instead.
+func (m Model) mirrorAttached(build session.BuildID, fallback session.Snapshot) Model {
+	for i, s := range m.stack {
+		fs, ok := s.(flightScreen)
+		if !ok {
+			continue
+		}
+		if _, b := fs.Attached(); b != build {
+			continue
+		}
+		snap, ok := m.sess.BuildSnapshot(build)
+		if !ok {
+			snap = fallback
+		}
+		stack := append([]Screen(nil), m.stack...)
+		stack[i] = flightScreen{fs.Mirror(snap)}
+		m.stack = stack
+		return m
+	}
+	return m
+}
+
+// popBuildFailed removes the preflight flightScreen a Start/Resume call's own failure leaves
+// with nothing to mirror onto, and shows why.
+func (m Model) popBuildFailed(build session.BuildID, err error) Model {
+	if top := len(m.stack) - 1; top >= 0 {
+		if fs, ok := m.stack[top].(flightScreen); ok {
+			if _, b := fs.Attached(); b == build {
+				m = m.pop()
+			}
+		}
+	}
+	m.notice = fmt.Sprintf("could not start promotion: %v", err)
+	return m
+}
+
+// mergeInFlight combines a fresh listing (state files on disk, each re-observed) with this
+// session's own live entries (session.Controller.Live) — a promotion still in its Building or
+// early Stepping window has no state file yet and so never appears in list, and the freshest
+// data for one that does is the controller's own in-memory copy, not whatever the listing found
+// a moment earlier. Live entries win by id; a listed entry with no live counterpart is kept as
+// re-observed. An id-less (still Building) live entry has nothing to collide with and is always
+// kept.
+func mergeInFlight(list []service.Listed, live []session.Snapshot) []flight.Summary {
+	out := make([]flight.Summary, 0, len(list)+len(live))
+	seen := make(map[string]bool, len(live))
+	for _, s := range live {
+		if s.ID != "" {
+			seen[s.ID] = true
+		}
+		out = append(out, summaryForSnapshot(s))
+	}
+	for _, l := range list {
+		if seen[l.State.ID] {
+			continue
+		}
+		out = append(out, summaryFor(l))
+	}
+	return out
+}
+
+// summaryFor turns one service.Listed into the flight.Summary the in-flight pane renders —
+// Unconfigured and Err both become a Summary whose own Err names why re-observation could not
+// happen at all (never dropped), exactly as cmd/hoist's old observeForList wording did.
+func summaryFor(l service.Listed) flight.Summary {
+	switch {
+	case l.Unconfigured:
+		return flight.Summarize(l.State, false, nil, fmt.Errorf("repo %s is not in the config file", l.State.RepoFullName))
+	case l.Err != nil:
+		return flight.Summarize(l.State, false, nil, l.Err)
+	default:
+		return flight.Summarize(l.State, l.Done, l.Statuses, nil)
+	}
+}
+
+// summaryForSnapshot is summaryFor's twin for a session.Controller entry still tracked in
+// memory — the same conversion NewAttached/Mirror use to render a flight screen, reused here so
+// the pane and the screen never disagree about what one entry looks like.
+func summaryForSnapshot(s session.Snapshot) flight.Summary {
+	state := s.State
+	if s.Phase == session.Building {
+		state = engine.PromotionState{SourceEnv: s.Source, TargetEnv: s.Target, Direct: s.Direct}
+	}
+	return flight.Summarize(state, s.Done, s.Statuses, s.Err)
 }
 
 // View renders the top screen in the alternate screen buffer, with the root's own transient
@@ -1164,16 +789,17 @@ func (m Model) pop() Model {
 	return m
 }
 
-// popIfBuilding pops the top screen only when it is a flight screen still in its preflight
-// phase (flight.NewBuilding, flight.Model.Building) — promotionBuiltMsg's own error branches
-// use it to undo the screen plan.StartMsg/deploy.StartMsg pushed on the keypress, reverting to
-// whatever was underneath (the confirm screen, #164-tested to show the notice correctly)
-// exactly as if that screen had never been pushed. A no-op for any other top screen, in
-// particular matrix.ResumeMsg's own path, which never pushes a building screen at all.
+// popIfBuilding pops the top screen only when it is a flight screen still attached to a
+// Building entry (flight.Model's own building field, mirrored from session.Building) — a
+// superseding start()/matrix.ResumeMsg call uses it to undo the preflight screen a previous one
+// left, reverting to whatever was underneath (the confirm screen, #164-tested to show the
+// notice correctly) exactly as if that screen had never been pushed.
 func (m Model) popIfBuilding() Model {
 	if top := len(m.stack) - 1; top >= 0 {
-		if fs, ok := m.stack[top].(flightScreen); ok && fs.Building() {
-			return m.pop()
+		if fs, ok := m.stack[top].(flightScreen); ok {
+			if id, _ := fs.Attached(); id == "" {
+				return m.pop()
+			}
 		}
 	}
 	return m
@@ -1185,7 +811,9 @@ func (m Model) popIfBuilding() Model {
 func (m Model) popAndRelist() (Model, tea.Cmd) {
 	m = m.pop()
 	if m.matrixOnTop() {
-		return m.listInFlight()
+		var cmd tea.Cmd
+		m.sess, cmd = m.sess.Relist()
+		return m, cmd
 	}
 	return m, nil
 }
@@ -1224,16 +852,6 @@ func (m Model) matrixRepo() *gitops.Repo {
 // today always the bottom, and (after tags.SelectedMsg/DirectRequestedMsg's own pop above)
 // always the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
 // screen, always directly onto the matrix. A no-op if the matrix isn't on the stack at all.
-//
-// Round-N finding (Copilot): an earlier revision of this function only ever checked
-// m.stack[top], so the doc comment's "wherever it sits in the stack" was true only by the
-// current stack shape's own invariant (matrix is always at the position this checked), not
-// because the code actually searched for it — a claim the mechanism didn't itself deliver
-// (AGENTS.md principle 1). Searching the whole stack, rather than the top slot alone, makes
-// the claim true unconditionally: it costs one more loop over a stack that is never more than
-// a few screens deep, and it means a future screen shape (a third screen pushed between the
-// matrix and a tags screen, say) degrades to "notice still lands on the matrix" instead of
-// "notice silently vanishes".
 func (m Model) withMatrixNotice(notice string) Model {
 	for i, s := range m.stack {
 		ms, ok := s.(matrixScreen)

@@ -297,8 +297,9 @@ no rule stated for any of them:
   (`serviceDeps`, `settingsFor`) and still adapts what has no service-layer home yet — history,
   tags, watch, restart, drift remain plain function types built in `cmd/hoist/wiring.go`, per this
   same rule, until they migrate too. A screen may import `internal/service` for its plain value
-  types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) — this keeps `flight.Driver`
-  and `plan.Func` small, local, and fakeable without pulling in the whole client-cache type — but
+  types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) — this keeps
+  `session.Driver` (`internal/app/session`, the controller every drive now goes through — Train 2
+  design) and `plan.Func` small, local, and fakeable without pulling in the whole client-cache type — but
   never `internal/app` itself, keeping "a screen never imports `app`" intact. Correcting an
   adjacent claim this bullet's old wording relied on: "a screen never imports `config`" was
   already false before this change and stays false — `internal/app/plan`, `internal/app/matrix`,
@@ -312,6 +313,21 @@ no rule stated for any of them:
   no func value, no `Init` fetch. `WithHistory`/`WithDrift`/`WithWatch` pass funcs because
   those screens *observe* something that changes; a func for static text would be a claim of
   liveness the screen cannot keep (principle 1).
+- **A drive is owned by the session controller, never by the screen that watches it.** Codified
+  from the feedback-wiring train's PR 2 (`internal/app/session.Controller`, a value type held on
+  the root): starting, resuming, stepping, abandoning and listing a promotion or deploy all
+  happen in exactly one place, off the screen stack entirely. The flight screen is built already
+  attached (`flight.NewAttached`) to one controller entry and is a pure mirror of it from there —
+  `Mirror(snapshot)` replaces its displayed state, and it issues no `tea.Cmd` that talks to a
+  `Driver` or a channel itself (`internal/app/flight`'s own package doc). A screen that wants
+  something to happen to its own drive asks for it with a message of its own concrete type
+  (`ReobserveMsg`, `OverrideCINoneMsg`, `AbandonMsg` — the existing "a screen requests navigation
+  by emitting its own type" convention, extended to drive requests) and the root answers by
+  calling the controller and routing the resulting `session.Change` values back onto whichever
+  screen is attached to that build (`app.go`'s own `apply`/`mirrorAttached`). `session.Event` is
+  deliberately not named with a `Msg` suffix and stays out of `internal/parity`'s navigation
+  registry (its own doc comment): it is internal plumbing between the controller and the root,
+  never something the operator triggers directly the way a screen's own `*Msg` is.
 
 ### 4.9 Configuration
 

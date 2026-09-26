@@ -56,7 +56,7 @@ var registry = []op{
 	{
 		Name: "promote: drive the pipeline to rollout",
 		CLI:  "promote --from --to --repo --apps-root --promotable",
-		TUI:  "plan.StartMsg enter on the plan screen; the flight screen is the CLI's progress output, R re-observes",
+		TUI:  "plan.StartMsg enter on the plan screen; the flight screen is the CLI's progress output, flight.ReobserveMsg R re-observes",
 	},
 	{
 		Name: "direct mode: commit to the base branch, no PR (non-production only)",

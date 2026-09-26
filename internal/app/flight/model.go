@@ -1,10 +1,8 @@
 package flight
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -15,8 +13,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -24,35 +22,13 @@ import (
 // PollDurations is the plain-value slice of internal/config.PollConfig this screen actually
 // needs, in place of importing internal/config itself. AGENTS.md §4.8: a screen never imports
 // config/registry policy, only the plain values or function types cmd/hoist (the one place
-// allowed to know both sides) translates for it. Zero values are valid — minTick, applied to
-// engine.PollInterval's result, falls back to a fixed default for anything left unset.
+// allowed to know both sides) translates for it. The root maps these same values into
+// session.Config (Train 2 design, D3) for the controller that actually drives; this screen keeps
+// its own copy only for anything it still renders directly (today: nothing computed from it, but
+// NewAttached's signature keeps the type so a later PR — the visible-wait countdown, #106's
+// design doc PR 8 — has somewhere to put a poll-driven display timer without a signature change).
 type PollDurations struct {
 	CI, Approval, Argo, Rollout, Deadline time.Duration
-}
-
-// Driver is what this screen drives a promotion through, one poll (Step) at a time —
-// internal/service.Drive's own consumer-side interface, kept small and local rather than
-// imported wholesale so a test fakes it without building a real service.Driver. Step advances
-// the promotion by one engine.DriveStatus walk (see service.Driver.Step's own doc comment: one
-// walk against the world per call, not engine.Drive followed by a separate engine.Status) and
-// returns the resulting service.Tick; err is non-nil only for a genuine plumbing failure — never
-// ErrWaiting, never a *engine.BlockedError, both of which arrive as Tick.Waiting/Tick.Blocked
-// instead, exactly as this screen's own DriveFunc predecessor described. State returns the
-// Driver's own current state (used by cmd/hoist wiring, not by this screen, which keeps its own
-// state cache updated from each Tick); OverrideCINone sets CINoneOverride on the Driver's state
-// for the next Step call — see ApplyCINoneOverride below.
-//
-// cmd/hoist supplies the concrete implementation (service.Driver), closing over the real
-// git.Git/forge.Forge adaptors and whatever state-save path the CLI's own promote/resume
-// commands already use — the same shape plan.PlanFunc uses to keep the plan screen ignorant of
-// cluster/registry adaptors (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule). This package
-// therefore never imports pkg/git or pkg/forge; it imports internal/service only for the plain
-// Tick value type Step returns (AGENTS.md §4.8, the service-design train's own decision: a
-// screen may import service for its value types, kept fakeable through this small interface).
-type Driver interface {
-	Step(ctx context.Context) (service.Tick, error)
-	State() engine.PromotionState
-	OverrideCINone()
 }
 
 // keyMap is this screen's own key vocabulary, on top of the root's global quit keys.
@@ -111,129 +87,58 @@ type BackMsg struct{}
 // the keypress alone, and only for the promotion this screen is showing: the override is a
 // per-promotion, one-shot operator instruction, never a launch default and never config
 // (AGENTS.md §4.5 — a default may not weaken a gate). The root answers it by calling
-// ApplyCINoneOverride on the flight screen whose state carries ID.
+// session.Controller.OverrideCINone for this promotion's own entry.
 type OverrideCINoneMsg struct{ ID string }
 
-// tickMsg fires the next poll iteration.
-type tickMsg struct{}
+// ReobserveMsg is R's own request: re-observe promotion ID now, rather than waiting for the
+// next scheduled poll. Train 2 design, D3: the flight screen no longer drives anything itself —
+// it only asks, and the root answers by calling session.Controller.Poke, whose own busy/not-found
+// refusal is authoritative regardless of what this screen's own guard already believed.
+type ReobserveMsg struct{ ID string }
 
-// driveResultMsg is delivered once a driveCmd finishes. gen is stamped with the issuing
-// Model's own generation (see nextGen and Model.gen) so onDriveResult can tell a result
-// belonging to THIS model instance apart from a stale one left over from another — see
-// onDriveResult's own doc comment for why that distinction matters.
-type driveResultMsg struct {
-	gen      uint64
-	state    engine.PromotionState
-	done     bool
-	statuses []engine.StepStatus
-	err      error
-	// retry and wait are Tick.Retry/Tick.Wait, carried through from the Step call that produced
-	// this result — the same retry classification and poll-interval computation
-	// engine.Retryable/engine.PollInterval already gave this screen, now made by the Driver
-	// itself (service.Driver.Step) rather than recomputed here from msg.err/m.rows (see
-	// onDriveResult and tickDelay's own doc comments).
-	retry bool
-	wait  time.Duration
-}
-
-// nextGen hands out a unique generation number to every flight.Model constructed by New,
-// process-wide — see Model.gen's own doc comment for what it guards against. A plain atomic
-// counter is enough: it only ever needs to distinguish Model instances within one running
-// process (TUI state is never persisted or shared across processes, AGENTS.md §4.1), never to
-// be stable, meaningful, or unique across a restart.
-var nextGen atomic.Uint64
-
-// Model is the flight screen. It is a value: Update, SetSize and SetStyles return the
-// updated model, matching internal/app/plan and internal/app/matrix's convention.
+// Model is the flight screen: a mirror of one session.Controller entry, never a driver of its
+// own (Train 2 design, D3). It keeps no ctx, no Driver, no tick chain — session.Controller owns
+// every background command; this package's own doc comment on Update covers why. Update handles
+// only this screen's own keys, its spinner, and the two confirm dialogs (c/X); the state it
+// renders is set exclusively by NewAttached and Mirror.
 type Model struct {
-	state engine.PromotionState
-	order []engine.StepName
-	rows  []Row
-	done  bool
-	// stopped is true once a driveFn call returned a non-retryable error (see engine.Retryable):
-	// scheduleTick is not called again automatically, though R still lets the operator retry
-	// by hand (mirroring hoist resume's own "re-run to retry" convention for a terminal
-	// failure — see onDriveResult's own doc comment for why this must not be done regardless
-	// of which step or error shape failed).
-	stopped bool
+	// id/build identify which session.Controller entry this screen mirrors — Attached() hands
+	// these back to the root so apply() can route a Change to the right screen. id is empty
+	// during Building (the entry's own real promotion id isn't known yet); build never changes
+	// across the whole life of one attachment.
+	id    string
+	build session.BuildID
 
-	driver Driver
-	poll   PollDurations
-	// deadlineAt is the one absolute instant poll.Deadline names for this flight screen's
-	// entire drive, computed once here rather than re-derived per poll — see driveCmd's own
-	// doc comment for why a fresh per-call timeout would let the wait outlive the deadline
-	// entirely. Zero when poll.Deadline <= 0 ("no bound at all", the existing convention).
-	deadlineAt time.Time
-	// ctx and cancel are this screen's one shared drive context, built once in New (nil when
-	// driveFn is nil — a read-only screen never calls driveCmd at all) and reused by every
-	// driveCmd call this instance ever makes, automatic ticks and manual R retries alike — see
-	// driveCmd's own doc comment for why one shared context, not a fresh one per call. cancel is
-	// also this screen's external interrupt handle: app.go calls Cancel (below) before popping
-	// this screen for AbortMsg or BackMsg, so a driveCmd already in flight is stopped rather than
-	// left to keep running — see Cancel's own doc comment.
-	ctx    context.Context
-	cancel context.CancelFunc
-	// busy is true while a driveCmd is in flight, so a tick landing mid-call and a manual R
-	// press can't both fire a second, overlapping DriveFunc call.
+	state    engine.PromotionState
+	order    []engine.StepName
+	rows     []Row
+	done     bool
+	building bool
+	// stopped mirrors session.Stopped: a Blocked step or a terminal (non-retryable) error —
+	// R (ReobserveMsg) still lets the operator retry by hand.
+	stopped bool
+	// busy mirrors the entry's own Busy: a Step call (or the initial Start/Resume) is currently
+	// outstanding, so the spinner animates and R/X/c are refused until it clears.
 	busy bool
-	// gen is this Model instance's own generation, stamped into every driveResultMsg its own
-	// driveCmd calls produce (see nextGen and onDriveResult) — the guard against a driveCmd
-	// issued by a DIFFERENT flight.Model instance (one the operator has since aborted, popped
-	// off the stack) still landing here and being silently adopted as this instance's own
-	// result once it eventually completes.
-	gen uint64
+	// deadlineAt mirrors the entry's own DeadlineAt — the one absolute instant this drive's
+	// whole budget names, owned and renewed by session.Controller now (Poke/OverrideCINone's own
+	// rearm), never recomputed here. Zero when the controller was configured with no deadline.
+	deadlineAt time.Time
 
 	spinner spinner.Model
 	showLog bool
 	notice  string
-	// errNotice is the last DriveFunc plumbing error (redacted), shown until the next
-	// successful poll clears it.
+	// errNotice is the last Snapshot.Err (redacted), shown until a later Mirror clears it.
 	errNotice string
-
-	// building is true from NewBuilding until AdoptBuilt lands this screen's first real
-	// PromotionState — see NewBuilding's own doc comment for why this screen exists at all
-	// before one does. While true, the existing rendering already does most of the work
-	// unmodified: m.rows (derived from m.order, which NewBuilding sets from state.Direct the
-	// same way a real promotion's would be) render every step pending, exactly the "screenful
-	// of not-yet-reached dots" New's own doc comment already describes for the gap before a
-	// real promotion's first poll lands — building is only checked where that reuse isn't
-	// enough: the spinner's tick chain (Update's spinner.TickMsg case), and actionSection,
-	// which has nothing else to say yet.
-	building bool
-	// buildLog accumulates progress lines received over progressCh since the last real state
-	// landed — before a PromotionState exists at all (preflight: claim, in-flight check,
-	// fetch, plan, state save, from internal/app.svc.StartPromotion), and
-	// again during drive, between driveResultMsg arrivals (defect B/C: engine.Drive's own
-	// save/onWaiting hooks report through the very same callback, so a long single Act — a
-	// push, a commit sitting on signing approval — shows up here before the whole Drive call
-	// that contains it ever returns). Cleared by onDriveResult the instant a real state
-	// lands — from there m.state.History is the authoritative record of everything buildLog
-	// was covering for, and repeating those lines would duplicate them. AdoptBuilt
-	// deliberately does NOT clear this (its own doc comment): the preflight lines it was
-	// showing stay visible until the first drive result actually supersedes them, and the
-	// listener that feeds it keeps running past AdoptBuilt for exactly that reason. logView
-	// renders state.History first, buildLog after — oldest to newest. Each entry keeps its
-	// own arrival time separate from its text (buildLogLine, below) rather than one
-	// pre-formatted string: logView needs the "<timestamp>  <text>" shape, but
-	// actionSection's own live-status label needs the bare text alone — the timestamp
-	// belongs on a log line, not folded into a one-line "still working" indicator next to a
-	// spinner.
-	buildLog []buildLogLine
-	// progressCh is drained one line at a time by listenCmd, which re-issues itself after
-	// every receive — a raw channel read inside Update would block the whole program, so this
-	// is the standard bubbletea "listen on a channel" shape. nil for a screen built with New,
-	// which never has one — listenCmd's own nil check treats that as "nothing to listen for"
-	// rather than blocking forever. app.go deliberately never closes the channel in
-	// production (see its own buildCmd comment on why: the same channel is reused across the
-	// whole build-then-drive lifetime, and closing it early would panic the next send —
-	// sending on a closed channel panics unconditionally in Go); only test helpers
-	// (building_test.go) close one, to make listenCmd's ok=false path reachable at all.
-	progressCh <-chan string
+	// buildLog is the Snapshot's own progress log — one entry per line Hooks.Progress reported,
+	// oldest first (session.LogLine, owned by the controller; this screen never accumulates its
+	// own copy — Train 2 design, D3's own note on session.LogLine).
+	buildLog []session.LogLine
 
 	styles        ui.Styles
 	keys          keyMap
 	width, height int
-	// now is the clock the header's elapsed and deadline are worded against; a test pins it.
+	// now is the clock the header's elapsed/deadline are worded against; a test pins it.
 	now func() time.Time
 	// log is the History scrollback when l toggles it on.
 	log viewport.Model
@@ -249,10 +154,7 @@ type Model struct {
 
 	// confirmingAbandon/confirmAbandon/confirmAbandonValue are the X gesture's own instance of
 	// the identical pattern — a second, independent dialog, never sharing confirming/
-	// confirmOverride with the c gesture above (two screens in this codebase already carry two
-	// independent huh.Confirm gestures this way; sharing one widget's fields between two
-	// distinct questions would have the second gesture's answer silently reset whichever
-	// dialog opens first).
+	// confirmOverride with the c gesture above.
 	confirmingAbandon   bool
 	confirmAbandon      *huh.Confirm
 	confirmAbandonValue bool
@@ -264,300 +166,99 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
-// New builds the flight screen for a promotion already at least identified (state.ID,
-// SourceEnv, TargetEnv — whatever the caller already has, typically fresh off the plan
-// screen's "start" flow or engine.LoadState on hoist resume). driver is nil in a read-only
-// context with nothing to drive: the screen still renders state and never ticks or
-// schedules a poll, and R shows a notice instead of calling nil.
-func New(state engine.PromotionState, poll PollDurations, driver Driver) Model {
+// NewAttached builds the flight screen already attached to one session.Controller entry — the
+// TUI's only way to construct this screen (Train 2 design, D3): the root calls it once, right
+// after session.Controller.Start/Resume hands back a BuildID, and every later change reaches this
+// same instance through Mirror rather than a fresh construction. It replaces New/NewBuilding/
+// AdoptBuilt: whichever phase s names (Building included — s.State is zero then, and s.Source/
+// Target/Direct carry what the confirmed plan already knew, mirrored the same way the old
+// NewBuilding's own stub state did) is rendered directly, with nothing left to "adopt" later —
+// mirroring a fresher snapshot onto the same instance already does that.
+func NewAttached(s session.Snapshot, poll PollDurations) Model {
 	m := Model{
-		state:   state,
-		order:   OrderFor(state),
-		poll:    poll,
-		driver:  driver,
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
 		keys:    defaultKeyMap(),
-		gen:     nextGen.Add(1),
 		now:     time.Now,
 		log:     viewport.New(),
 		styles:  ui.NewStyles(true),
-		// Visible by default (no stated convention before now — §4.8 proposal, this PR):
-		// "what is hoist actually doing" is the operator's question every time a promotion
-		// runs, not a fact to go looking for behind a key. layout's own sizing already
-		// treats the log as the first thing to shrink on a short terminal (it is handed
-		// whatever's left after the fixed sections, clamped to a 3-line minimum, never the
-		// other way around), so this does not reopen the §4.8/#164 "blocked reason always
-		// visible" guarantee — l still hides it for an operator who wants the room back.
+		// Visible by default (§4.8 proposal from the M10 train): "what is hoist actually doing"
+		// is the operator's question every time a promotion runs, not a fact to go looking for
+		// behind a key. l still hides it for an operator who wants the room back.
 		showLog: true,
 	}
-	if poll.Deadline > 0 {
-		// One absolute deadline for this screen's whole drive, from the moment it starts —
-		// see driveCmd's own doc comment for why deriving a fresh timeout per poll instead
-		// would let the total wait outlive poll.Deadline indefinitely.
-		m.deadlineAt = time.Now().Add(poll.Deadline)
-	}
-	if driver != nil {
-		// Built once, here, and reused by every driveCmd call this instance ever makes — see
-		// Model.ctx's own doc comment. A read-only screen (driver nil) never calls driveCmd
-		// and so never needs a cancelable context at all.
-		ctx := context.Background()
-		if m.deadlineAt.IsZero() {
-			m.ctx, m.cancel = context.WithCancel(ctx)
-		} else {
-			m.ctx, m.cancel = context.WithDeadline(ctx, m.deadlineAt)
-		}
-	}
-	m.rows = DeriveRows(m.order, false, nil) // every step "not yet reached" until the first poll lands
-	if driver != nil {
-		m.busy = true
-	}
-	return m
+	_ = poll // kept for signature stability (see PollDurations' own doc comment)
+	return m.Mirror(s)
 }
 
-// ID is the promotion this screen shows — what the root matches an OverrideCINoneMsg against.
-func (m Model) ID() string { return m.state.ID }
+// ID is the promotion this screen shows — "" during Building, before session.Controller's own
+// backend has produced a real deterministic id.
+func (m Model) ID() string { return m.id }
 
-// NewBuilding starts the flight screen before a PromotionState exists at all — the preflight
-// phase between the operator confirming a plan and internal/app's own svc.StartPromotion call
-// actually producing one (claim, in-flight check, fetch, plan rebuild, initial state save;
-// direct mode's fresh-base check too). Without this, app.go had nothing to push until that
-// whole call returned, so pressing enter looked like a dead key for however long the
-// preflight took — the confirm screen re-rendered unchanged, and a second enter (the natural
-// response to a key that looks dead) cancelled the first attempt and started it over, since
-// the confirm screen stayed on top and kept receiving keys. Pushing this screen on the
-// keypress instead means something visibly changes at once, the confirm screen is no longer
-// on top to receive that second enter, and the same screen instance carries through into the
-// real drive once AdoptBuilt lands it — no flicker, no second screen.
-//
-// source/target/direct are already known from the confirmed plan (gitops.Plan, translated by
-// app.go — this package still never imports it, AGENTS.md §4.8) and are enough to render a
-// sensible header and pick the right step order (OrderFor only needs Direct) before anything
-// else exists; every other field of state stays zero-valued, which New already renders
-// correctly with a nil driveFn — this constructor is built on top of New for exactly that
-// reuse, not a parallel rendering path. progressCh is drained by listenCmd; its lines are
-// shown via buildLog until AdoptBuilt clears it.
-func NewBuilding(source, target string, direct bool, poll PollDurations, progressCh <-chan string) Model {
-	m := New(engine.PromotionState{SourceEnv: source, TargetEnv: target, Direct: direct}, poll, nil)
-	m.building = true
-	m.busy = true
-	m.progressCh = progressCh
-	return m
-}
+// Attached reports which session.Controller entry this screen mirrors — the root's apply() uses
+// Build (stable across the whole attachment, including the id-less Building window) to decide
+// which on-stack flightScreen a Change belongs to; id is handed back too since some callers (a
+// notice naming "this promotion") want it directly.
+func (m Model) Attached() (id string, build session.BuildID) { return m.id, m.build }
 
-// Building reports whether this screen is still in its preflight phase — app.go's
-// promotionBuiltMsg handler uses it to decide whether to adopt this screen (AdoptBuilt) or
-// fall back to pushing a fresh one (the matrix.ResumeMsg path, which has no building screen
-// pre-pushed to adopt into); its flight.BackMsg handler uses it to know whether backing out
-// here must also cancel an outstanding build (this screen's own m.cancel is nil throughout
-// building — driveFn is nil until AdoptBuilt — so Cancel alone cannot reach it).
-func (m Model) Building() bool { return m.building }
+// Mirror replaces this screen's displayed state with s — the root calls it after every
+// session.Controller change whose Build matches Attached()'s own (D3). A snapshot for a
+// different build is a caller bug (mirrorAttached in app.go only ever mirrors a matching one) and
+// is applied as-is rather than defended against here a second time (AGENTS.md §8, the deletion
+// test: the one real guard belongs where the routing decision is made).
+func (m Model) Mirror(s session.Snapshot) Model {
+	m.id = s.ID
+	m.build = s.Build
+	m.building = s.Phase == session.Building
+	m.busy = s.Busy
+	m.done = s.Done
+	m.stopped = s.Phase == session.Stopped
+	m.deadlineAt = s.DeadlineAt
 
-// Busy reports whether a driveCmd call is currently outstanding for this screen — app.go's
-// AbandonMsg handler uses it to know that Cancel alone does not mean the drive has actually
-// stopped: Cancel only signals m.ctx, and the goroutine driveCmd is already running keeps
-// executing until the DriveFunc call it wraps notices ctx.Done() and returns, which can be
-// after engine.Drive has already saved state (or pushed/merged) again — round-2 review, PR
-// #182 (see the AbandonMsg case's own doc comment for the full race and the wait this enables).
-func (m Model) Busy() bool { return m.busy }
-
-// AdoptBuilt transitions this screen from preflight into a real, driving promotion once
-// svc.StartPromotion actually returns one — NewBuilding's counterpart.
-// poll/deadlineAt are left exactly as NewBuilding already set them (computed the moment the
-// operator confirmed, not recomputed here): that is what makes the whole build-and-drive
-// share one budget, the same guarantee a single ctx.WithTimeout already gives the CLI path —
-// recomputing a fresh window at this point would let the time the build itself took go
-// uncounted against it.
-//
-// building clears (the view stops rendering the preflight spinner/label), but progressCh and
-// buildLog do NOT — cmd/hoist's DriveFunc (driveFuncFor) closes over the exact same progress
-// callback this screen's preflight lines arrived through, and reuses it for engine.Drive's own
-// per-step save/onWaiting hooks (defect B/C): a long single Act — a git push, a commit sitting
-// on signing approval — still needs somewhere live to show up before the whole Drive call that
-// contains it returns and replaces m.state wholesale. Nil-ing progressCh here (an earlier
-// version of this method did) stopped listenCmd's own re-issue chain the moment building went
-// false, which silently dropped every drive-phase progress line from that point on — the
-// channel stayed open (nothing here ever closes it) but nothing was left reading from it, so
-// each send hit the select's own default case and vanished. buildLog itself is cleared by
-// onDriveResult instead, the moment a real state lands and m.state.History becomes the
-// authoritative record of everything buildLog was covering for — never here, before the first
-// one has landed at all.
-func (m Model) AdoptBuilt(state engine.PromotionState, driver Driver) (Model, tea.Cmd) {
-	m.building = false
+	state := s.State
+	if m.building {
+		// Nothing real exists yet — render what the confirmed plan already told the controller
+		// (NewBuilding's old shape), so the header/order are correct from the very first paint.
+		state = engine.PromotionState{SourceEnv: s.Source, TargetEnv: s.Target, Direct: s.Direct}
+	}
 	m.state = state
 	m.order = OrderFor(state)
-	m.rows = DeriveRows(m.order, false, nil)
-	m.driver = driver
-	if driver == nil {
-		m.busy = false
-		return m, m.listenCmd()
-	}
-	ctx := context.Background()
-	if m.deadlineAt.IsZero() {
-		m.ctx, m.cancel = context.WithCancel(ctx)
-	} else {
-		m.ctx, m.cancel = context.WithDeadline(ctx, m.deadlineAt)
-	}
-	m.busy = true
-	// listenCmd appended, index 2: driveCmd stays at index 1, matching this batch's shape
-	// before this field was added — a test or caller that already knows "index 1 is the
-	// drive call" (the shape flight.Model's own doc comments have described since New) does
-	// not need to change alongside this.
-	return m, tea.Batch(m.spinner.Tick, m.driveCmd(), m.listenCmd())
-}
-
-// progressMsg carries one line off progressCh, or reports it closed (ok=false) — a distinct,
-// explicit case in Update rather than folding "closed" into "nothing more to do", so the
-// listen loop stops cleanly instead of spinning on a channel that will only ever return the
-// zero value from here on.
-type progressMsg struct {
-	line string
-	ok   bool
-}
-
-// buildLogLine is one entry in Model.buildLog: at is stamped once, at arrival (the
-// progressMsg handler in Update), never recomputed at render time — logView runs on every
-// layout, including a spinner tick, and formatting m.now() there would print a fresh
-// timestamp on every frame for a line that already happened.
-type buildLogLine struct {
-	at   time.Time
-	text string
-}
-
-// listenCmd reads one value off m.progressCh and returns it as a progressMsg; Update
-// re-issues this after every receive, for as long as the channel stays open — the standard
-// bubbletea shape for draining a channel without blocking Update itself (a raw <-ch inside
-// Update would stall the whole program until a line arrived). Returns nil once progressCh is
-// nil, whether because this screen was built with New (no build phase at all) or because a
-// prior progressMsg already observed the channel closed and cleared it — bubbletea treats a
-// nil tea.Cmd as a no-op, so re-issuing this at the end of that branch is safe.
-func (m Model) listenCmd() tea.Cmd {
-	ch := m.progressCh
-	if ch == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		line, ok := <-ch
-		return progressMsg{line: line, ok: ok}
-	}
-}
-
-// Cancel interrupts this screen's shared drive context immediately, rather than waiting for
-// m.deadlineAt or for driveFn to notice at its own next Observe/Act that nobody is watching
-// anymore. app.go calls this on the current flight screen before popping it for AbortMsg or
-// BackMsg (see their own doc comments in app.go): without it, a driveCmd already in flight kept
-// running to completion after the operator had already stopped watching it — free to keep
-// committing, pushing, opening a PR, or merging, and a later reconfirmation of the same
-// deterministic promotion id could then start a second driver racing the first, since the
-// original's claim was already released (Copilot review, PR #50 round 11). A nil cancel — a
-// read-only screen, driveFn nil, New never builds one — makes this a no-op.
-func (m Model) Cancel() {
-	if m.cancel != nil {
-		m.cancel()
-	}
-}
-
-// Init starts the spinner and the first poll, but only when there is something to drive —
-// a read-only screen (driveFn nil) has nothing to animate or observe, so Init returns nil
-// rather than starting a spinner tick chain that would otherwise run forever with nothing
-// ever rendering it (PR #39 review finding #5). The first poll runs immediately rather than
-// waiting a full pollInterval, so the screen shows real status as soon as it opens instead
-// of a screenful of "not yet reached" dots.
-//
-// A building screen (NewBuilding, driveFn still nil by construction) is the one other case
-// that starts the spinner: there is nothing to drive yet, but there is something to animate
-// and something to listen for — listenCmd, draining progressCh as preflight lines arrive.
-func (m Model) Init() tea.Cmd {
 	if m.building {
-		return tea.Batch(m.spinner.Tick, m.listenCmd())
+		m.rows = DeriveRows(m.order, false, nil)
+	} else {
+		m.rows = DeriveRows(m.order, s.Done, s.Statuses)
 	}
-	if m.driver == nil {
-		return nil
+
+	m.buildLog = s.Log
+	if s.Err != nil {
+		m.errNotice = redact.Strings(s.Err.Error())
+	} else {
+		m.errNotice = ""
 	}
-	return tea.Batch(m.spinner.Tick, m.driveCmd())
+	return m
 }
 
-// driveCmd runs one DriveFunc call off the Update call stack (AGENTS.md §4.3: it talks to
-// git/the forge). state is captured by value at call time, so a concurrent Update never
-// races the copy this goroutine reads.
-//
-// The call is bounded by m.ctx, never context.Background(): without this, a single hung
-// network call (a stalled TCP connection to GitHub/Argo with no OS-level timeout) would block
-// this goroutine — and therefore this screen's ability to ever show progress or let the user
-// act — forever, with no way to cancel. m.ctx is built once in New from m.deadlineAt (poll.Deadline
-// is generous, default 4h, the same value the CLI's own internal/service.Driver.Run bounds an
-// entire promotion's wait by) and reused by every call this instance ever makes — automatic
-// ticks and manual R retries alike — rather than each deriving its own fresh poll.Deadline-length
-// timeout from "now". A fresh-per-call timeout would let a promotion stuck re-polling
-// CI/approval (each individual wait returns well within the deadline, then schedules another
-// call with a brand new full-length timeout) outlive the configured deadline indefinitely —
-// internal/service.Driver.Run (wired from cmd/hoist/drive.go) enforces exactly one deadline for
-// its whole wait (wrapped around ctx once, by
-// its caller, before the retry loop starts), and this screen must not silently offer a looser
-// guarantee than the CLI's own (Codex review, PR #50). Reusing one context rather than deriving a
-// fresh one per call is also what makes Cancel (above) actually able to interrupt a call already
-// in flight, not just whichever one happens to be constructed next.
-func (m Model) driveCmd() tea.Cmd {
-	return m.stepCmd(false)
+// Init starts the spinner's tick chain whenever there is something to animate (Building, or a
+// Step outstanding) — a mirrored screen with nothing in flight has nothing to animate, so this
+// returns nil rather than a permanent, invisible tick loop (PR #39 review finding #5, still true
+// here: the loop this guards is the spinner's own reschedule in Update, not a poll this screen no
+// longer drives).
+func (m Model) Init() tea.Cmd {
+	if m.building || m.busy {
+		return m.spinner.Tick
+	}
+	return nil
 }
 
-// stepCmd is driveCmd's own shared shape, parameterized on whether to call the Driver's
-// OverrideCINone first — ApplyCINoneOverride's own re-drive (below) needs exactly one Step call
-// with the override already set before it runs, and building that as its own goroutine (rather
-// than setting the override synchronously on the Update call stack, then calling driveCmd) keeps
-// the set-then-step sequence atomic under the Driver's own mutex, with nothing else able to
-// interleave a concurrent Step between the two.
-func (m Model) stepCmd(overrideCINoneFirst bool) tea.Cmd {
-	driver, ctx := m.driver, m.ctx
-	gen := m.gen
-	if driver == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		if overrideCINoneFirst {
-			driver.OverrideCINone()
-		}
-		tick, err := driver.Step(ctx)
-		return driveResultMsg{
-			gen: gen, state: tick.State, done: tick.Done, statuses: tick.Statuses, err: err,
-			retry: tick.Retry, wait: tick.Wait,
-		}
-	}
-}
-
-// Update handles the screen's own keys, the spinner, and the drive/tick loop.
+// Update handles the screen's own keys and the spinner's tick chain. Every async result this
+// screen used to process directly (a drive's own Tick, a progress line) now arrives only as a
+// fresher Mirror call from the root — this package issues no tea.Cmd that talks to a Driver or a
+// channel at all (Train 2 design, D3; TestFlightNeverCallsDriver pins it).
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case driveResultMsg:
-		return m.onDriveResult(msg)
-	case progressMsg:
-		if !msg.ok {
-			// The channel closed — app.go's build goroutine returned (successfully or not)
-			// and drained nothing more into it. Stop listening; AdoptBuilt (success) or the
-			// root popping this screen (failure) is what happens next, neither of which this
-			// screen drives itself.
-			m.progressCh = nil
-			return m, nil
-		}
-		m.buildLog = append(m.buildLog, buildLogLine{at: m.now(), text: msg.line})
-		return m, m.listenCmd()
-	case tickMsg:
-		if m.busy || m.done || m.stopped || m.driver == nil {
-			return m, nil
-		}
-		m.busy = true
-		return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
 	case spinner.TickMsg:
-		// Only keep the spinner's own tick chain alive while it is actually animating
-		// something: busy (a driveCmd is in flight, or Init just kicked one off) and not
-		// done and not read-only. Rescheduling unconditionally here ran a permanent,
-		// invisible tick loop for as long as the screen stayed open, done or read-only
-		// included (PR #39 review finding #5) — busy already implies driveFn != nil and
-		// !done (see onDriveResult and the tickMsg/Reobserve guards above), but the extra
-		// checks are cheap and keep this case as defensive as the tickMsg case it mirrors.
-		// building is the one case busy alone doesn't already cover: NewBuilding sets busy
-		// true with driveFn still nil (nothing to drive yet), so the plain guard below would
-		// stop the spinner on its very first tick — building keeps it alive until AdoptBuilt.
-		if !m.building && (!m.busy || m.done || m.driver == nil) {
+		// Keep the chain alive only while something is actually animating; stop it the moment
+		// nothing is, rather than rescheduling unconditionally (PR #39 review finding #5).
+		if !m.building && !m.busy {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -567,153 +268,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 	return m, nil
-}
-
-// onDriveResult processes a driveCmd's result — but only if it actually belongs to this Model
-// instance. The root's message dispatch (internal/app/app.go's Update, the "forward everything
-// else to the top screen" default case) delivers a message to whichever screen is currently on
-// top by its concrete Go type alone; it has no notion of which screen instance actually issued
-// the tea.Cmd that produced it. A driveCmd already in flight for a flight.Model the operator has
-// since aborted (popped off the stack, see AbortMsg's own handling in app.go) can still complete
-// later and deliver one more driveResultMsg — which, without the msg.gen check below, a
-// different flight.Model now on top (driving a different promotion) would silently adopt as its
-// own: the wrong state and step statuses, while continuing to poll and save under THIS model's
-// own driveFn/state-file closure (PR #50 review finding #4). msg.gen (stamped by driveCmd from
-// m.gen at the point New constructed this instance) is the guard: a result whose gen doesn't
-// match is dropped outright, leaving every field — including busy — untouched, since it says
-// nothing about whether THIS instance's own driveCmd is still in flight.
-func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
-	if msg.gen != m.gen {
-		return m, nil
-	}
-	m.busy = false
-	// msg.state is adopted unconditionally, before msg.err is ever classified below — PR #50
-	// round-4 review finding #7 (Codex). driveFn (cmd/hoist/wiring.go) always returns however
-	// far one drive iteration actually got, even when it ends in error: engine.Drive can
-	// create the branch, commit, push and open a PR — each a real, already-persisted change —
-	// before a later step's Act then fails (an auto-approved promotion whose merge or branch
-	// cleanup errors on its very first iteration, say). Before this fix, the error branch below
-	// returned without ever touching m.state, so the screen kept showing whatever it was
-	// constructed with (typically empty: no History, no PR) — o reported no PR to open despite
-	// one having actually been created, and R re-drove from that same stale copy instead of the
-	// real, further-along state driveFn had just handed back and persisted. The success path
-	// already did this unconditionally for itself; this just moves it earlier so the error path
-	// gets it too, matching how far the underlying promotion has actually progressed regardless
-	// of whether this particular poll ended cleanly.
-	m.state = msg.state
-	// buildLog is cleared HERE, not in AdoptBuilt (see that method's own doc comment): a real
-	// state has just landed, so m.state.History is now the authoritative record of everything
-	// buildLog was covering for since the last one. Unconditional, error included, for the same
-	// reason m.state itself is adopted unconditionally just above — engine.Drive still appends
-	// to History (and this screen's own progress callback still reports it) right up to the
-	// step whose Act actually failed.
-	m.buildLog = nil
-	// m.done/m.rows are derived unconditionally too, before msg.err is classified — the same
-	// reasoning as m.state just above, extended: cmd/hoist/wiring.go's DriveFunc always calls
-	// engine.Status after engine.Drive regardless of whether Drive itself errored, so
-	// msg.statuses reflects the real, current step-by-step standing even on a failed poll.
-	// Before this fix, a failing poll left m.rows showing whatever the PREVIOUS successful
-	// poll (or the screen's own construction) had rendered — e.g. a PR already opened before a
-	// later step's Act failed would still show "PR: not yet opened" (PR #50 review, round 5).
-	m.done = msg.done
-	m.rows = DeriveRows(m.order, m.done, msg.statuses)
-	if msg.err != nil {
-		m.errNotice = redact.Strings(msg.err.Error())
-		if !msg.retry {
-			// A terminal failure — msg.retry is Tick.Retry, the same engine.Retryable decision
-			// the CLI's own internal/service.Driver.Run makes, now made once by the Driver
-			// itself (service.Driver.Step) rather than recomputed here: only a *engine.StepError
-			// on one of engine.RetryableStep's five steps (Known bug classes: a transient
-			// 404/permissions hiccup on Checks/Comments/an Argo or rollout Get) retries; every
-			// other shape — a rejected push, a failed signing commit, ctx.DeadlineExceeded/
-			// Canceled included — is terminal and returned immediately, never retried. Before
-			// this fix, onDriveResult scheduled another poll for literally any non-nil err, so
-			// this screen would silently repeat a terminal Act failure every ~2s until
-			// poll.Deadline elapsed instead of stopping and surfacing it as a real failure
-			// (Codex review, PR #50). R still lets the operator retry by hand (handleKey's own
-			// Reobserve case only gates on busy/done, not stopped) — mirroring hoist resume's
-			// "re-run to retry" convention for a promotion a killed process left mid-flight.
-			m.stopped = true
-			return m, nil
-		}
-		// A retryable error (the transient-hiccup case on one of engine.RetryableStep's steps)
-		// must clear m.stopped,
-		// not merely leave scheduleTick to fire: if this poll came from a manual R retry after
-		// an EARLIER, unrelated terminal stop (R bypasses the stopped gate — see its own
-		// comment above), m.stopped was still true from that prior stop, and the automatic
-		// tick this call schedules would immediately be suppressed by the same m.stopped gate
-		// (line ~229's busy||done||stopped||driver==nil check) the moment it fires — silently
-		// breaking automatic re-polling from here on, even though this particular error is
-		// exactly the transient kind that's supposed to keep retrying on its own (Copilot
-		// review, PR #50 round 5).
-		m.stopped = false
-		return m, m.scheduleTickIn(msg.wait)
-	}
-	m.errNotice = ""
-	m.stopped = false
-	if m.done {
-		return m, nil
-	}
-	if _, blocked := BlockedStep(m.rows); blocked {
-		// Blocked is terminal until an operator resolves the underlying conflict out-of-band
-		// (a same-name branch already on origin with different content, a CI check that
-		// reported failed rather than pending, a rejected approval) — engine.BlockedError's
-		// own doc comment: "retrying will not help". service.Driver.Step deliberately never
-		// surfaces this as msg.err (Blocked is read from Tick.Blocked/the statuses it carries,
-		// the same way Waiting already is — see the Driver interface's own comment), so
-		// msg.err == nil here and the terminal branch above never runs for it. Without this
-		// check, this screen would otherwise silently repeat the identical blocked observation
-		// and state save every ~2s until poll.Deadline elapsed, exactly
-		// the "stuck polling a promotion nothing will unstick" failure the msg.err-driven
-		// terminal check above already exists to prevent for a StepError — Blocked just
-		// never goes through that path (Codex review, PR #50 round 4). R still lets the
-		// operator retry by hand once the conflict is resolved, same as the msg.err terminal
-		// case above.
-		m.stopped = true
-		return m, nil
-	}
-	return m, m.scheduleTickIn(msg.wait)
-}
-
-// renewDeadline rebuilds the drive context for another poll.Deadline from now (or an
-// uncancelled one when no deadline is configured), cancelling the exhausted one.
-func (m Model) renewDeadline() Model {
-	if m.cancel != nil {
-		m.cancel()
-	}
-	if m.poll.Deadline > 0 {
-		m.deadlineAt = m.now().Add(m.poll.Deadline)
-		m.ctx, m.cancel = context.WithDeadline(context.Background(), m.deadlineAt)
-	} else {
-		m.deadlineAt = time.Time{}
-		m.ctx, m.cancel = context.WithCancel(context.Background())
-	}
-	return m
-}
-
-// scheduleTickIn waits wait — Tick.Wait, the service.Driver's own engine.PollInterval
-// computation for whichever step it just stopped at (AGENTS.md invariant 4: the actual waiting
-// lives in the caller's own loop, never inside a Step's Act — this is that loop's TUI-driven
-// twin) — before firing the next poll. minTick's floor and the deadline cap are applied here,
-// at this screen's own boundary, exactly as tickDelay applied them before wait was computed by
-// the Driver: engine.PollInterval's raw answer (including a configured zero) is a screen-level
-// concern the Driver has no reason to know about, and a screen must never spin-tick on it (#59,
-// #61, minTick's own doc comment).
-func (m Model) scheduleTickIn(wait time.Duration) tea.Cmd {
-	return tea.Tick(m.capToDeadline(minTick(wait)), func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-// capToDeadline is the deadline half of scheduleTickIn's own doc comment, split out so a test
-// can drive it directly on a duration rather than only indirectly through a tea.Tick's own
-// opaque delay: never below zero, and never longer than what is left of m.deadlineAt (#59) — a
-// 1s deadline with a 20s wait used to sleep the full 20s and report the deadline 19s late.
-func (m Model) capToDeadline(d time.Duration) time.Duration {
-	if !m.deadlineAt.IsZero() {
-		if left := m.deadlineAt.Sub(m.now()); left < d {
-			return max(left, 0)
-		}
-	}
-	return d
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -752,40 +306,30 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.notice = "no PR to open yet"
 		return m, nil
 	case key.Matches(msg, m.keys.Reobserve):
-		if m.driver == nil {
-			m.notice = "nothing to re-observe (read-only)"
+		if m.id == "" {
+			m.notice = "nothing to re-observe yet — still starting"
 			return m, nil
 		}
 		if m.busy || m.done {
 			return m, nil
 		}
-		if m.ctx != nil && m.ctx.Err() != nil {
-			// The shared drive context was built once from the screen's deadline; once that
-			// has passed, a retry on it fails before it starts. R is the operator asking for
-			// another go, so it gets another window of poll.Deadline — the decision #57
-			// asked for, taken this way because "R does nothing" was the other option.
-			m = m.renewDeadline()
-			m.notice = "deadline had passed — a fresh window for this retry"
-		}
-		m.busy = true
-		return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
+		id := m.id
+		return m, func() tea.Msg { return ReobserveMsg{ID: id} }
 	case key.Matches(msg, m.keys.Abort):
-		// Nothing to abort when there is no real DriveFunc wired (read-only, the shape
-		// app.go's plan.StartMsg handler currently pushes) or the promotion has no real ID
-		// (the same stub state) — emitting AbortMsg here would hand a future handler
-		// nothing it could safely act on (PR #39 review finding #2: abort fired
-		// unconditionally, risking an empty-ID abort being mishandled downstream).
-		if m.driver == nil || m.state.ID == "" {
+		// Nothing to abort when the promotion has no real ID yet (Building — the same guard
+		// PR #39 review finding #2 asked for: emitting AbortMsg here would hand the root nothing
+		// it could safely act on).
+		if m.id == "" {
 			m.notice = "nothing to abort — this promotion isn't being driven yet"
 			return m, nil
 		}
-		id := m.state.ID
+		id := m.id
 		return m, func() tea.Msg { return AbortMsg{ID: id} }
 	case key.Matches(msg, m.keys.Abandon):
 		// Same emptiness guard as Abort above — a UI politeness check only, since the root's
 		// real handler re-observes and refuses authoritatively regardless (AbandonMsg's own
 		// doc comment).
-		if m.driver == nil || m.state.ID == "" {
+		if m.id == "" {
 			m.notice = "nothing to abandon — this promotion isn't being driven yet"
 			return m, nil
 		}
@@ -804,7 +348,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// The log is a viewport: unmatched keys (↑/↓, PageUp/PageDown, g/G) scroll it. Without
 		// this, l showed the first page of a long history and nothing moved it. Laid out on
 		// this copy first — View lays out its own copy, so the retained viewport would
-		// otherwise be the zero-sized one New built (Copilot, #124).
+		// otherwise be the zero-sized one NewAttached built (Copilot, #124).
 		m = m.layout()
 		var cmd tea.Cmd
 		m.log, cmd = m.log.Update(msg)
@@ -834,7 +378,7 @@ func (m Model) offersCINoneOverride() bool {
 func (m Model) openConfirm() (Model, tea.Cmd) {
 	m.confirming = true
 	m.confirmValue = false
-	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.state.ID)
+	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.id)
 	m.confirmOverride = huh.NewConfirm().Title(title).Value(&m.confirmValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
 	// (AGENTS.md §9 entry 6).
@@ -850,7 +394,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		if !m.confirmAgreed() {
 			return m, nil
 		}
-		id := m.state.ID
+		id := m.id
 		return m, func() tea.Msg { return OverrideCINoneMsg{ID: id} }
 	}
 	f, cmd := m.confirmOverride.Update(msg)
@@ -877,7 +421,7 @@ func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 func (m Model) openConfirmAbandon() (Model, tea.Cmd) {
 	m.confirmingAbandon = true
 	m.confirmAbandonValue = false
-	title := fmt.Sprintf("Abandon promotion %s? This retires its state and, if it opened a PR, closes it and deletes the branch. This is not a rollback.", m.state.ID)
+	title := fmt.Sprintf("Abandon promotion %s? This retires its state and, if it opened a PR, closes it and deletes the branch. This is not a rollback.", m.id)
 	m.confirmAbandon = huh.NewConfirm().Title(title).Value(&m.confirmAbandonValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
 	// (AGENTS.md §9 entry 6).
@@ -893,7 +437,7 @@ func (m Model) updateConfirmAbandon(msg tea.Msg) (Model, tea.Cmd) {
 		if !m.confirmAbandonAgreed() {
 			return m, nil
 		}
-		id := m.state.ID
+		id := m.id
 		return m, func() tea.Msg { return AbandonMsg{ID: id} }
 	}
 	f, cmd := m.confirmAbandon.Update(msg)
@@ -911,41 +455,6 @@ func (m Model) confirmAbandonAgreed() bool {
 	}
 	v, _ := m.confirmAbandon.GetValue().(bool)
 	return v
-}
-
-// ApplyCINoneOverride is what the root calls in answer to OverrideCINoneMsg: it re-drives at
-// once, the way R does, but with the Driver's OverrideCINone called first — off the Update call
-// stack, inside the same goroutine as the re-drive's own Step call (stepCmd(true)), so the
-// set-then-step sequence is atomic under the Driver's own mutex and nothing running on Update
-// ever blocks waiting for it. The next engine.DriveStatus walk's CIGreenStep.Observe reads the
-// flag once set (and its own save persists it, exactly as `hoist resume --override-ci-none`
-// does). Only this screen's promotion is touched: no other state, file or screen sees the flag.
-// A read-only screen (driver nil) has no Driver to record the wish on, so it records it on this
-// screen's own display copy instead and says it cannot act on it. A busy or finished screen
-// refuses before it does anything: the flag is only ever acted on by the re-drive this method
-// schedules, so recording it on a screen that schedules none would carry an override no engine
-// step ever reads — and the next R would then apply it silently, without the c gesture that is
-// meant to be the operator's decision.
-func (m Model) ApplyCINoneOverride() (Model, tea.Cmd) {
-	if m.driver == nil {
-		m.state.CINoneOverride = true
-		m.notice = "override recorded, but nothing is driving this promotion here (read-only) — run `hoist resume " + m.state.ID + " --override-ci-none`"
-		return m, nil
-	}
-	if m.busy || m.done {
-		m.notice = "override not applied: this promotion is still being driven"
-		if m.done {
-			m.notice = "override not applied: this promotion is finished"
-		}
-		return m, nil
-	}
-	m.stopped = false
-	if m.ctx != nil && m.ctx.Err() != nil {
-		m = m.renewDeadline()
-	}
-	m.notice = "treating no checks as green for this promotion — re-observing"
-	m.busy = true
-	return m, tea.Batch(m.stepCmd(true), m.spinner.Tick)
 }
 
 // SetSize records the terminal size. The log is a viewport sized to what the frame leaves
@@ -987,10 +496,9 @@ func (m Model) layout() Model {
 	return m
 }
 
-// CapturesText reports whether the c gesture's dialog is up: while it is, the root must
+// CapturesText reports whether the c/X gesture's dialog is up: while it is, the root must
 // hand every key to this screen rather than treat q as quit, or an operator deciding
-// whether to treat no checks as green can quit the program mid-decision (Arc 2 review,
-// the same gap the tag picker's D dialog closes through tags.Model.CapturesText).
+// whether to treat no checks as green (or to abandon) can quit the program mid-decision.
 func (m Model) CapturesText() bool { return m.confirming || m.confirmingAbandon }
 
 // SetStyles applies the palette (and re-themes whichever dialog is up).
@@ -1008,10 +516,7 @@ func (m Model) SetStyles(s ui.Styles) Model {
 // View renders the frame: the header (what and how long), the step list, what it is waiting
 // for and what to type, the log when toggled, notices, and the footer. The whole assembled
 // string passes through redact.Strings once here at the final boundary, matching
-// plan.Model's own belt-and-suspenders convention. This is not defense in depth on top of an
-// earlier redaction: engine.Status hands Row.Detail over unredacted (see rows.go's Row.Detail
-// comment for why appendHistory's redaction does not apply to this path) — this call is the
-// one place that text is actually scrubbed before reaching the terminal.
+// plan.Model's own belt-and-suspenders convention.
 func (m Model) View() string {
 	m = m.layout()
 	sections := []string{m.headerSection(), m.stepsSection()}
@@ -1020,13 +525,7 @@ func (m Model) View() string {
 	}
 	// notes (the transient notice, the last plumbing error) comes BEFORE the log, not after —
 	// ui.Frame.Render crops from the bottom when a short terminal can't hold everything
-	// (#164's own lesson, AGENTS.md §9 entry 10: a notice appended after a full-height frame
-	// is a notice nobody reads). layout's own log-height floor of 3 lines is unconditional —
-	// it does not shrink to 0 even when there is no room at all — so on a terminal short
-	// enough that header+steps+action+notes alone nearly fill it, the log's floor can still
-	// push the total past height. Ordering the log last means THAT is what gets cropped, never
-	// the notice — the log already accepts being shrunk to its floor; the notice never should
-	// be.
+	// (AGENTS.md §9 entry 10).
 	if n := m.notes(); n != "" {
 		sections = append(sections, n)
 	}
@@ -1059,7 +558,11 @@ func (m Model) headerSection() string {
 	if m.state.SourceEnv != "" {
 		pair = m.styles.Title.Render(m.state.SourceEnv + " → " + m.state.TargetEnv)
 	}
-	left := m.styles.Accent.Render(m.state.ID) + "   " + pair
+	id := m.id
+	if id == "" {
+		id = "…"
+	}
+	left := m.styles.Accent.Render(id) + "   " + pair
 	if m.state.Direct {
 		left += "   " + m.styles.Warn.Render("direct")
 	}
@@ -1114,7 +617,7 @@ func (m Model) stepsSection() string {
 	if lipgloss.Height(list)+other <= m.height {
 		return list
 	}
-	sum := Summary{ID: m.state.ID, PR: m.state.PR, Rows: m.rows, Done: m.done}
+	sum := Summary{ID: m.id, PR: m.state.PR, Rows: m.rows, Done: m.done}
 	strip := sum.StepStrip()
 	if ansi.StringWidth(strip) > m.width-2 {
 		// Pack whole steps onto lines no wider than the frame's interior: a fixed break
@@ -1151,15 +654,15 @@ func (m Model) actionSection() string {
 	if m.building {
 		// The one thing this section says during preflight: it's alive, and — via the same
 		// spinner.View() the step list uses for an Active row — what it's doing right now,
-		// the last line buildLog received. Before the first line arrives there is nothing
+		// the last line the log received. Before the first line arrives there is nothing
 		// truer to say than "starting".
 		label := "starting"
 		if n := len(m.buildLog); n > 0 {
-			label = m.buildLog[n-1].text
+			label = m.buildLog[n-1].Text
 		}
 		return m.styles.Warn.Render(m.spinner.View() + " " + label)
 	}
-	sum := Summary{ID: m.state.ID, Source: m.state.SourceEnv, Target: m.state.TargetEnv, Direct: m.state.Direct, PR: m.state.PR, Rows: m.rows, Done: m.done}
+	sum := Summary{ID: m.id, Source: m.state.SourceEnv, Target: m.state.TargetEnv, Direct: m.state.Direct, PR: m.state.PR, Rows: m.rows, Done: m.done}
 	text, command := sum.Action()
 	switch {
 	case m.done:
@@ -1187,12 +690,10 @@ func (m Model) actionSection() string {
 }
 
 // logView renders state.History first, then buildLog — chronological order, oldest to
-// newest: state.History is the settled record up to the last driveResultMsg (or, before the
-// first one has landed at all, empty); buildLog is whatever has arrived since — preflight
-// lines before a PromotionState exists, or a step mid-Act during drive that hasn't reached its
-// own appendHistory yet — so it always describes what's NEWER than state.History, never what's
-// already in it (onDriveResult's own doc comment: buildLog is cleared the instant a real state
-// lands, precisely so the two never describe the same line twice).
+// newest: state.History is the settled record up to the last landed Tick (or, before the first
+// one has landed at all, empty); buildLog is the controller's own progress log for this build —
+// preflight lines before a PromotionState exists, or a step mid-Act during drive that hasn't
+// reached its own appendHistory yet.
 func (m Model) logView() string {
 	if len(m.buildLog) == 0 && len(m.state.History) == 0 {
 		return m.styles.Dim.Render("(no history yet)")
@@ -1202,7 +703,7 @@ func (m Model) logView() string {
 		fmt.Fprintf(&b, "%s  %-12s  %s\n", h.At.Format(time.RFC3339), h.Step, h.Detail)
 	}
 	for _, line := range m.buildLog {
-		fmt.Fprintf(&b, "%s  %s\n", line.at.Format(time.RFC3339), line.text)
+		fmt.Fprintf(&b, "%s  %s\n", line.At.Format(time.RFC3339), line.Text)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -1224,9 +725,9 @@ func (m Model) statusLeft() string {
 		return "promotion complete"
 	}
 	if m.stopped {
-		// A Blocked step (BlockedStep's own doc comment) stops polling via m.stopped too, but
-		// never sets m.errNotice — its own reason is already shown as the blocked row's
-		// Detail, in the step list above, not as a separate notice below.
+		// A Blocked step (BlockedStep's own doc comment) stops polling too, but never sets
+		// m.errNotice — its own reason is already shown as the blocked row's Detail, in the
+		// step list above, not as a separate notice below.
 		if _, blocked := BlockedStep(m.rows); blocked {
 			if m.offersCINoneOverride() {
 				return "blocked: no checks reported; c treats them as green"
@@ -1253,19 +754,4 @@ func (m Model) hint() string {
 		h = "o open PR · " + h
 	}
 	return h
-}
-
-// minTick is a screen floor, not policy: engine.PollInterval returns a configured knob
-// unchanged, including zero (PollDurations{} is the zero value app.go's stub currently passes),
-// and tea.Tick(0, ...) fires immediately/tightly — a real CPU-spin risk this screen's own tick
-// loop must never hit, unlike internal/service.Driver.Run, which sleeps in a plain for-loop
-// that a zero duration merely skips. Applied to engine.PollInterval's result at this screen's
-// own boundary, never inside engine — a zero interval is a perfectly valid answer everywhere
-// else that reads it.
-func minTick(d time.Duration) time.Duration {
-	const floor = 2 * time.Second
-	if d <= 0 {
-		return floor
-	}
-	return d
 }

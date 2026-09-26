@@ -30,4 +30,25 @@
 // those types in its own Update switch, since app is the one package that already imports
 // every screen. New navigation should follow the same shape rather than growing a second
 // one: define the message where the emitting screen lives, handle it in app.go.
+//
+// # A background drive belongs to the session, not to the screen watching it
+//
+// internal/app/session.Controller — a value type, held as one field on the root Model — is
+// the one place a promotion or deploy is actually started, resumed, stepped, abandoned or
+// listed. Every background command it issues (a Start/Resume round trip, one Driver.Step
+// poll, a listing) reaches the root as a session.Event, and the root's own Update has
+// exactly one case for it (kept out of internal/parity's navigation registry on purpose —
+// session.Event is deliberately not named *Msg, since it plumbs nowhere the operator can
+// trigger directly; see internal/app/session's own doc comment). The flight screen that
+// shows a drive's progress owns none of it: it is built already attached
+// (flight.NewAttached) to one Controller entry, and every later change reaches that same
+// instance through Mirror, driven by the root's own apply(app.go) routing session.Change
+// values by BuildID. A screen requests a step (flight.ReobserveMsg, OverrideCINoneMsg,
+// AbandonMsg) rather than taking one, so nothing about driving a promotion is owned by
+// whichever screen instance happens to be showing it. Today (Train 2's wiring PR) the root
+// still stops that entry's drive when its screen is popped (Esc calls session.Controller.Stop
+// or CancelBuild, x calls Stop) — deliberately unchanged behaviour, so this PR is wiring only.
+// A later PR in the same train lets a drive outlive its screen and re-attach on demand,
+// which this shape is what makes possible: the Controller, not the screen, already owns the
+// ctx and the goroutine.
 package app

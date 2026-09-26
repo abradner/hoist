@@ -82,11 +82,12 @@ func (s planScreen) SetStyles(st ui.Styles) Screen {
 func (s planScreen) CapturesText() bool { return s.Model.CapturesText() }
 
 // flightScreen adapts flight.Model the same way. It is pushed on top of the plan screen
-// when the operator confirms a plan (plan.StartMsg, handled in app.go). app.go currently
-// pushes it with a nil DriveFunc — read-only, not yet actually driving anything — since
-// internal/app has no repoFullName, CI/approval policy, or git/forge adaptor to build a real
-// engine.PromotionState from (cmd/hoist owns wiring that in, still a pending follow-up; see
-// app.go's own comment on its plan.StartMsg handler for the full reasoning).
+// when the operator confirms a plan (plan.StartMsg, handled in app.go's own start()), and on
+// top of the matrix when resuming one already on disk (matrix.ResumeMsg). It is a pure mirror
+// of one internal/app/session.Controller entry (Train 2 design, D3): app.go's start()
+// constructs it once, already attached, via flight.NewAttached, and every later change reaches
+// this same instance through Mirror as the root's apply() routes session.Change values to it —
+// the screen itself drives nothing and calls no Driver.
 type flightScreen struct{ flight.Model }
 
 func (s flightScreen) Init() tea.Cmd { return s.Model.Init() }

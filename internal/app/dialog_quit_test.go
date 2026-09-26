@@ -7,7 +7,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
@@ -37,11 +36,8 @@ func pressRoot(m tea.Model, k string) (tea.Model, tea.Cmd) {
 // treated as the global quit — an operator mid-decision cannot quit the program by
 // mistake. Positive control: the same q, with no dialog up, quits.
 func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
-	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234")}
-	root := sized(t).(Model)
-	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, drv.fn())}
-	root = root.push(fs)
-	tm := landFirstDrive(t, root, fs.Init())
+	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234"), state: engine.PromotionState{ID: "abcd1234"}}
+	tm := blockedOnCINoneAtRoot(t, drv)
 	if !strings.Contains(plain(tm), "c treat as green") {
 		t.Fatalf("setup: the flight screen should offer c:\n%s", plain(tm))
 	}
