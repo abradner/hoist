@@ -2100,3 +2100,80 @@ func TestDeployStartMsgCarriesItsOwnPlannedView(t *testing.T) {
 		t.Errorf("StartRequest.View = %+v, want the deploy.StartMsg's own View %+v", *got, wantView)
 	}
 }
+
+// TestOpenDeployPlumbsPlannedViewToStartRequest closes the gap
+// TestDeployStartMsgCarriesItsOwnPlannedView leaves open: that test builds deploy.StartMsg BY
+// HAND, with its View already populated, so it never exercises openDeploy (app.go) itself —
+// it would stay green even if openDeploy's own `.WithView(pc.View)` call were deleted. This test
+// drives the real flow instead: tags.SelectedMsg (a picker selection) into openDeploy, which
+// calls m.planFn and must carry the returned PlannedChange.View into deploy.New(...).WithView(...);
+// pressing Enter on the resulting deploy confirm screen must then carry that same view, unbroken,
+// through deploy.StartMsg into service.StartRequest.View.
+//
+// Mutation check: deleting the `.WithView(pc.View)` call in openDeploy (app.go, ~line 1124) makes
+// this test fail with the zero RepoView instead of wantView.
+func TestOpenDeployPlumbsPlannedViewToStartRequest(t *testing.T) {
+	wantView := service.RepoView{Dir: "/open-deploy-view", FromOrigin: true, SHA: "open-deploy-view-sha"}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{})
+	planFn := func(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pc, err := inner(ctx, req)
+		if err != nil {
+			return pc, err
+		}
+		pc.View = wantView
+		return pc, nil
+	}
+	var got *service.RepoView
+	svc := &fakeService{
+		onStart: func(req service.StartRequest) { got = req.View },
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+			return engine.PromotionState{}, driverAlways(engine.PromotionState{}), nil
+		},
+	}
+
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, planFn, svc, Promotion{}, nil, apprestart.Funcs{})
+	_ = tm.Init()
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+
+	// The real flow: a picker selection reaches the root as tags.SelectedMsg, which openDeploy
+	// (app.go) turns into a plan (via planFn) and a pushed deploy confirm screen.
+	tm, _ = tm.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/web",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
+	stack := tm.(Model).stack
+	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
+		t.Fatalf("top screen is %T, want the deploy confirm", stack[len(stack)-1])
+	}
+
+	// Enter on the confirm screen: the screen itself emits deploy.StartMsg (unpacked one level,
+	// the same shape TestSelectedMsgOpensTheDeployConfirmScreen and friends drive by hand — the
+	// real tea runtime would do this same re-dispatch).
+	var cmd tea.Cmd
+	tm, cmd = tm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on the deploy confirm screen produced no command")
+	}
+	startMsg := cmd()
+	if _, ok := startMsg.(deploy.StartMsg); !ok {
+		t.Fatalf("enter yields %T, want deploy.StartMsg", startMsg)
+	}
+	_, cmd = tm.Update(startMsg)
+	if cmd == nil {
+		t.Fatal("deploy.StartMsg produced no command")
+	}
+	buildResultFrom(t, cmd)
+
+	if got == nil {
+		t.Fatal("StartRequest.View = <nil>, want a pointer to the plan's own PlannedChange.View")
+	}
+	if *got != wantView {
+		t.Errorf("StartRequest.View = %+v, want openDeploy's planned view %+v", *got, wantView)
+	}
+}
