@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -380,7 +381,17 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
+	// Signal/deadline-aware, exactly like runPromote/runDeploy's own ctx (promote.go's own
+	// comment on this same call): resolution can talk to the cluster and the registry, so ^C
+	// or the poll deadline must be able to interrupt it here too, not just the write path.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deadline)
+		defer cancel()
+	}
+	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
 	if err != nil {
 		// The CLI printer's own guard (R-002): a cluster or registry error is already
 		// redacted at its adaptor, but this is the last stop before stderr, so a value
