@@ -15,6 +15,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/forge/github"
 	"github.com/abradner/hoist/pkg/git"
@@ -381,7 +382,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	prefixes := eff.promotable
 
-	opts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
+	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitUsage
@@ -391,32 +392,36 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
-	if err := checkOverrides(r, *from, prefixes, digests); err != nil {
+	set := settingsFor(cfg, eff)
+	set.Resolve = opts
+	svc := service.New(set, serviceDeps())
+	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
+	// Plan prepends resolve.Warnings itself now (service.Plan's own doc comment) — runPlan and
+	// the TUI plan screen go through the identical call, so a pods/manifest digest disagreement
+	// can never reach one and not the other again (AGENTS.md §4's Divergences, item 10).
+	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	plan := pc.Plan
+	// planDigests/planReasons feed checkNoMissingOccurrenceAtFreshBase's own buildFresh closure
+	// below (direct mode only): fresh.go's own move to internal/service is PR D's job (the
+	// design's own mapping table), and re-deriving them here — rather than routing buildFresh
+	// through svc.Plan too — avoids a second, independent resolution attempt (a real
+	// cluster/registry call) against the fresh snapshot; the fresh-base check's whole point is
+	// reusing the digests THIS resolution already settled, never re-asking the source env.
 	planDigests := map[string]image.Ref(digests)
 	var planReasons map[string]string
-	var rep *resolutionReport
-	if len(opts.order) > 0 {
-		rep, err = runResolution(context.Background(), r, *from, prefixes, opts, digests)
-		if err != nil {
-			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
-			return exitFailure
+	if pc.Resolution != nil {
+		planDigests = resolve.Digests(pc.Resolution.Res)
+		for repo, ref := range digests {
+			planDigests[repo] = ref
 		}
-		planDigests, planReasons = rep.digests(digests), rep.reasons()
-	}
-	plan, err := gitops.BuildPlanWith(r, *from, *to, prefixes, planDigests, planReasons)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
-	}
-	if rep != nil {
-		// runPlan (main.go) and the TUI plan screen (internal/app/plan/model.go) both prepend
-		// resolve.Warnings here so a pods/manifest digest disagreement reaches the operator;
-		// promote must match, since its plan is what gets rendered into the PR body
-		// (internal/engine/template.go's plan.Warnings) with no other chance to surface it.
-		plan.Warnings = append(resolve.Warnings(rep.res), plan.Warnings...)
+		planReasons = resolve.Reasons(pc.Resolution.Res)
 	}
 
 	// gitops.Discover, above, read every occurrence's position and content from eff.repo's own
@@ -475,12 +480,12 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
-	a, _, err := newArgo(opts.kubeContext)
+	a, _, err := newArgo(opts.KubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
 	}
-	ro, _, err := newRollout(opts.kubeContext)
+	ro, _, err := newRollout(opts.KubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure

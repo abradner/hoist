@@ -11,12 +11,21 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/registry"
 )
 
 const fixture = "../../testdata/repo"
+
+// svcFor builds a *service.Service over cfg with no repos[] entry selected — the shape several
+// cmd/hoist tests need to call a moved-to-service function (buildHistoryFuncs, buildTagsFunc,
+// svc.Plan) directly, wired through serviceDeps() so a test's own newCluster/newRegistry/
+// newForge/newArgo/newRollout swap still reaches it.
+func svcFor(cfg *config.Config) *service.Service {
+	return service.New(service.Settings{Config: cfg}, serviceDeps())
+}
 
 func TestRunVersion(t *testing.T) {
 	var out bytes.Buffer

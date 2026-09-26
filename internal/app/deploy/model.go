@@ -134,7 +134,7 @@ func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.S
 		root:       root,
 		target:     pl.TargetEnv,
 		image:      image,
-		production: plan.IsProduction(pl.TargetEnv, envs),
+		production: envs.IsProduction(pl.TargetEnv),
 		mode:       ModePR,
 		ticked:     ticked,
 		diff:       viewport.New(),
@@ -540,8 +540,8 @@ func (m Model) migrationsSection() string {
 
 // warningsSection is the plan's own warnings — above the fold, on the one surface where the
 // operator is about to press enter. A warning the CLI's dry run and the PR body both carry
-// (plan.WarnDeployIntoProduction) has no business being invisible here. Informational, never
-// blocking (AGENTS.md §4.5): enter still works.
+// (service.WarnDeployIntoProduction, attached inside service.Plan itself) has no business being
+// invisible here. Informational, never blocking (AGENTS.md §4.5): enter still works.
 func (m Model) warningsSection() string {
 	var lines []string
 	for _, w := range m.pl.Warnings {

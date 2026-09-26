@@ -12,11 +12,6 @@ import (
 // selectRepo already computes; the TUI shares the exact same struct rather than rebuilding an
 // equivalent one, which is what let the two faces' kube-context fallback drift into five
 // separate copies (AGENTS.md's Divergences).
-//
-// Resolve (the digest-resolution chain: order, registry auth, cluster secret, op ref) stays
-// out of this train on purpose — it moves in PR B alongside the rest of resolveOptions, so
-// this PR's diff stays a pure lift of settings/deps/providers/repo-view rather than also
-// relocating the resolution machinery.
 type Settings struct {
 	RepoDir, AppsRoot string
 	Base              string
@@ -41,6 +36,11 @@ type Settings struct {
 	// when observing some other promotion's state.
 	Repo   *config.RepoConfig
 	Config *config.Config
+
+	// Resolve is the digest-resolution chain for THIS run: order, registry auth, cluster
+	// secret, op ref (NewResolveOptions, resolve.go). Added in PR B, alongside the rest of
+	// the resolution machinery it was deferred with in PR A's own doc comment.
+	Resolve ResolveOptions
 
 	Poll     engine.PollIntervals
 	Deadline time.Duration

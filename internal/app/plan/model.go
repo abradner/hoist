@@ -27,12 +27,12 @@ import (
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // Mode is the write path this plan would use.
@@ -41,39 +41,18 @@ const (
 	ModeDirect = "direct"
 )
 
-// ResolveOutcome is what one ResolveFunc call returns: the resolution per repo plus which
-// kube context and registry auth source were actually consulted, by name only (AGENTS.md
-// §4.4) — the same facts `hoist plan --dry-run` prints in its Resolution section. A zero
-// value is "digest sources: none": BuildPlan then plans from the manifests alone, exactly
-// as M1 did.
-type ResolveOutcome struct {
-	Resolutions map[string]resolve.Resolution
-	KubeContext string
-	// RegistryAuth names the credential source that authenticated, "" when none did.
-	RegistryAuth string
-	// RegistryConsulted is true when the registry was asked at all (win or lose) —
-	// distinct from RegistryAuth == "", which is also true when the registry was never
-	// consulted in the first place. Summary uses the two together so "not consulted" and
-	// "consulted, every source failed" are never confused, the same distinction
-	// cmd/hoist's own resolutionReport.print makes (AGENTS.md §4.10).
-	RegistryConsulted bool
-	// RegistryAuthTried names the configured credential chain, for the "all failed"
-	// wording when RegistryConsulted is true and RegistryAuth is "".
-	RegistryAuthTried []string
-}
-
-// ResolveFunc resolves the source env's promotable occurrences to digests. cmd/hoist
-// supplies it, wrapping whichever cluster and registry adaptors the CLI's own plan command
-// builds (kube context, registry credential chain) — so this package never opens a
-// cluster or registry connection itself (AGENTS.md §4.3) and never imports cmd (AGENTS.md
-// §4.8). It always talks to a cluster/registry when called, so model.go calls it only from
-// inside a tea.Cmd, never from Update directly. A nil ResolveFunc means "digest sources:
-// none" from the start (no config, or resolution deliberately turned off); an error from a
-// non-nil one degrades the same way, with a warning, rather than failing the screen.
-// overrides are the operator's per-repo digest overrides (the o dialog, #102 — the TUI's
-// `--digest`): the adaptor hands them to pkg/resolve exactly as the CLI does, so each one
-// wins outright and is reported as [override] with the same alternatives and warnings.
-type ResolveFunc func(ctx context.Context, repo *gitops.Repo, source string, overrides map[string]image.Ref) (ResolveOutcome, error)
+// Func builds one gitops.Plan through internal/service's own Plan — the identical builder
+// `hoist plan`/`hoist promote`/`hoist deploy` use, so a plan built for this screen and one built
+// for the CLI's dry run can never silently diverge again (AGENTS.md §4's "Divergences", item
+// 10). cmd/hoist supplies it as svc.Plan, wrapping whichever cluster and registry adaptors the
+// selected repo's config calls for — so this package never opens a cluster or registry
+// connection itself (AGENTS.md §4.3) and never imports cmd (AGENTS.md §4.8). It always talks to
+// a cluster/registry when resolution is configured, so model.go calls it only from inside a
+// tea.Cmd, never from Update directly. req.Overrides are the operator's per-repo digest
+// overrides (the o dialog, #102 — the TUI's `--digest`): Plan hands them to pkg/resolve exactly
+// as the CLI does, so each one wins outright and is reported as [override] with the same
+// alternatives and warnings.
+type Func func(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error)
 
 // ValidateOverride is what the o dialog applies to the text on enter: image.ParseOverride —
 // the one predicate `--digest` applies too (AGENTS.md §8, layered checks: the CLI and the
@@ -123,7 +102,7 @@ type BackMsg struct{}
 // (AGENTS.md §4.8) and pushes internal/app/flight.
 type StartMsg struct {
 	Plan    gitops.Plan
-	Outcome ResolveOutcome
+	Outcome service.Resolution
 	Mode    string
 	// Ticked is the repo set the operator selected in the multiSelect, unmodified — the
 	// same set recomputeDiff already filters Plan.Edits by.
@@ -134,7 +113,7 @@ type StartMsg struct {
 // loadedMsg is delivered once the async discovery+resolution+BuildPlan cmd finishes.
 type loadedMsg struct {
 	plan    gitops.Plan
-	outcome ResolveOutcome
+	outcome service.Resolution
 	// err is fatal for this screen (rendered, never panics): either resolveFn failed —
 	// which AGENTS.md §4.10 states is a whole-operation failure whenever resolution was
 	// attempted at all, the same asymmetry cmd/hoist's runPlan enforces for the CLI — or
@@ -176,7 +155,7 @@ type Model struct {
 	repo       *gitops.Repo
 	promotable []string
 	envs       config.EnvsConfig
-	resolveFn  ResolveFunc
+	planFn     Func
 	histFn     history.Funcs
 	now        func() time.Time
 	gen        uint64
@@ -192,7 +171,7 @@ type Model struct {
 	status  string
 
 	plan    gitops.Plan
-	outcome ResolveOutcome
+	outcome service.Resolution
 	rows    []Row
 	prefix  string // the image-repo prefix every row shares, shown once in the header
 	deltas  map[string]history.State
@@ -246,14 +225,15 @@ type Model struct {
 // New builds the plan screen for one source env. target is the configured pair for source
 // (envs.pairs[source]), or "" when there is none; forcePrompt is true when the matrix
 // screen's P (rather than p) opened it, which always prompts even when a pair is
-// configured. resolveFn is nil in "digest sources: none" mode. hist is the commit-history
-// bundle (M10); a zero value degrades every repo to a named gap.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source, target string, forcePrompt bool, resolveFn ResolveFunc, hist history.Funcs) Model {
+// configured. planFn is nil in tests that never load a plan through the real service (a fixture
+// builds gitops.Plan directly via loadedMsg instead). hist is the commit-history bundle (M10); a
+// zero value degrades every repo to a named gap.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source, target string, forcePrompt bool, planFn Func, hist history.Funcs) Model {
 	m := Model{
 		repo:       repo,
 		promotable: promotable,
 		envs:       envs,
-		resolveFn:  resolveFn,
+		planFn:     planFn,
 		histFn:     hist,
 		now:        time.Now,
 		gen:        nextGen.Add(1),
@@ -428,53 +408,33 @@ func (m Model) Init() tea.Cmd {
 	}
 }
 
-// loadCmd runs discovery-derived data already in repo, resolution and BuildPlan off the
-// Update call stack (AGENTS.md §4.3: resolution opens a cluster/registry connection).
+// loadCmd runs Plan (internal/service) off the Update call stack (AGENTS.md §4.3: resolution
+// opens a cluster/registry connection) — the screen no longer builds the gitops.Plan itself
+// (service:Plan, PR B): planFn is svc.Plan, so this screen's plan and the CLI's dry run can
+// never silently diverge again.
 func (m Model) loadCmd() tea.Cmd {
-	repo, source, target, promotable, resolveFn := m.repo, m.source, m.target, m.promotable, m.resolveFn
+	repo, source, target, planFn := m.repo, m.source, m.target, m.planFn
 	overrides := make(map[string]image.Ref, len(m.overrides))
 	for k, v := range m.overrides {
 		overrides[k] = v
 	}
 	return func() tea.Msg {
-		var outcome ResolveOutcome
-		if resolveFn != nil {
-			out, err := resolveFn(context.Background(), repo, source, overrides)
-			if err != nil {
-				// A resolveFn error means digest resolution was attempted and failed
-				// outright — the cluster was unreachable, or the resolution
-				// configuration itself was invalid. It is never a per-repo registry
-				// miss (pkg/resolve handles that as an unresolved Resolution, not an
-				// error return), so there is nothing safe left to plan from: fail the
-				// screen exactly as cmd/hoist's plan command fails the whole run,
-				// rather than building a selectable plan from manifest values nobody
-				// has confirmed against the running environment.
-				return loadedMsg{err: fmt.Errorf("digest resolution: %w", err)}
-			}
-			outcome = out
+		pc, err := planFn(context.Background(), service.PlanRequest{Repo: repo, Source: source, Target: target, Overrides: overrides})
+		if err != nil {
+			// A Func error means digest resolution was attempted and failed outright —
+			// the cluster was unreachable, or the resolution configuration itself was
+			// invalid. It is never a per-repo registry miss (pkg/resolve handles that as an
+			// unresolved Resolution, not an error return), so there is nothing safe left to
+			// plan from: fail the screen exactly as cmd/hoist's plan command fails the whole
+			// run, rather than building a selectable plan from manifest values nobody has
+			// confirmed against the running environment.
+			return loadedMsg{err: fmt.Errorf("digest resolution: %w", err)}
 		}
-		// The overrides win over whatever the resolver answered, exactly as cmd/hoist's
-		// resolutionReport.digests applies the --digest map over resolve.Digests; and in
-		// "digest sources: none" mode, where no resolver ran at all, each override still
-		// gets a Resolution so its row names [override] as its source rather than reading
-		// as a manifest pin.
-		if len(overrides) > 0 && outcome.Resolutions == nil {
-			outcome.Resolutions = map[string]resolve.Resolution{}
+		var outcome service.Resolution
+		if pc.Resolution != nil {
+			outcome = *pc.Resolution
 		}
-		for r, ov := range overrides {
-			if res, ok := outcome.Resolutions[r]; !ok || res.Source != resolve.SourceOverride {
-				outcome.Resolutions[r] = resolve.Resolution{Repo: r, Ref: ov, Source: resolve.SourceOverride, Detail: "caller-supplied digest"}
-			}
-		}
-		digests := resolve.Digests(outcome.Resolutions)
-		for r, ov := range overrides {
-			digests[r] = ov
-		}
-		pl, err := gitops.BuildPlanWith(repo, source, target, promotable, digests, resolve.Reasons(outcome.Resolutions))
-		if err == nil {
-			pl.Warnings = append(resolve.Warnings(outcome.Resolutions), pl.Warnings...)
-		}
-		return loadedMsg{plan: pl, outcome: outcome, err: err}
+		return loadedMsg{plan: pc.Plan, outcome: outcome}
 	}
 }
 
@@ -549,7 +509,7 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 	}
 	m.plan = msg.plan
 	m.outcome = msg.outcome
-	m.rows = DeriveRows(m.plan, m.outcome.Resolutions)
+	m.rows = DeriveRows(m.plan, m.outcome.Res)
 	m.prefix = CommonPrefix(m.rows)
 	if keep {
 		// An override rebuild keeps what the operator unticked: rebuilding from scratch
@@ -621,7 +581,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target}
 		}
 	case key.Matches(kmsg, m.keys.Mode):
-		if IsProduction(m.target, m.envs) {
+		if m.envs.IsProduction(m.target) {
 			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
 			return m, nil
 		}
@@ -994,7 +954,7 @@ func (m Model) headerSection() string {
 
 func (m Model) modeChip() string {
 	switch {
-	case IsProduction(m.target, m.envs):
+	case m.envs.IsProduction(m.target):
 		return m.styles.Production.Render("mode: PR · production")
 	case m.mode == ModeDirect:
 		return m.styles.Warn.Render("mode: DIRECT")
@@ -1005,7 +965,7 @@ func (m Model) modeChip() string {
 
 // modeLabel is the long form of the mode, for the production refusal's own wording.
 func (m Model) modeLabel() string {
-	if IsProduction(m.target, m.envs) {
+	if m.envs.IsProduction(m.target) {
 		return fmt.Sprintf("direct mode unavailable: %s is production, so every change goes through a PR", m.target)
 	}
 	if m.mode == ModeDirect {
@@ -1111,7 +1071,7 @@ func (m Model) hints() string {
 		help = "esc back"
 	case m.overriding:
 		help = "enter apply · esc cancel"
-	case IsProduction(m.target, m.envs):
+	case m.envs.IsProduction(m.target):
 		help = "tab pane · x toggle · d yaml · o override · enter confirm · esc back"
 	default:
 		help = "tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back"

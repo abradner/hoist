@@ -9,9 +9,9 @@ import (
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
-	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -26,13 +26,13 @@ func overrideFixture(t *testing.T) (Model, *[]map[string]image.Ref) {
 	t.Helper()
 	r := discoverFixture(t)
 	var seen []map[string]image.Ref
-	fake := ResolveFunc(func(_ context.Context, _ *gitops.Repo, _ string, overrides map[string]image.Ref) (ResolveOutcome, error) {
-		seen = append(seen, overrides)
+	fake := fakePlanFunc([]string{"ghcr.io/"}, func(_ context.Context, req service.PlanRequest) (service.Resolution, bool, error) {
+		seen = append(seen, req.Overrides)
 		res := map[string]resolve.Resolution{}
-		for repo, ov := range overrides {
+		for repo, ov := range req.Overrides {
 			res[repo] = resolve.Resolution{Repo: repo, Ref: ov, Source: resolve.SourceOverride, Detail: "caller-supplied digest"}
 		}
-		return ResolveOutcome{KubeContext: "test-context", Resolutions: res}, nil
+		return service.Resolution{KubeContext: "test-context", Res: res}, true, nil
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = uitest.Drain(m, m.Init(), updateFn)

@@ -23,6 +23,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
@@ -38,6 +39,29 @@ const (
 	width       = 80
 	height      = 24
 )
+
+// testPlanFunc stands in for svc.Plan (internal/service, service:Plan PR B) in tests that never
+// wire cmd/hoist's own adaptors: BuildDeployPlan/WarnDeployIntoProduction for a deploy,
+// BuildPlanWith with no resolution for a promotion — this package must never import
+// internal/service's own resolution machinery (AGENTS.md §4.8: cmd/hoist owns that adapter), so
+// a fake stands in for it here exactly as it would for any other cmd/hoist-built function value.
+func testPlanFunc(promotable []string, envs config.EnvsConfig) plan.Func {
+	return func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		if req.Deploy != nil {
+			pl, err := gitops.BuildDeployPlan(req.Repo, req.Target, *req.Deploy, promotable)
+			if err != nil {
+				return service.PlannedChange{}, err
+			}
+			service.WarnDeployIntoProduction(&pl, envs)
+			return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+		}
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, promotable, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	}
+}
 
 // sized returns the root model after Init and the first WindowSizeMsg, as a running
 // program would deliver them — no terminal involved. Promotion is the zero value: Start and
@@ -57,7 +81,7 @@ func sizedWithPromotion(t *testing.T, promo Promotion) tea.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, promo, nil, apprestart.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{}), promo, nil, apprestart.Funcs{})
 	_ = m.Init()
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -1286,7 +1310,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, nil, apprestart.Funcs{})
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, testPlanFunc([]string{"ghcr.io/"}, envs), Promotion{}, nil, apprestart.Funcs{})
 		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 		tm, _ = tm.Update(tags.SelectedMsg{
 			ImageRepo: "ghcr.io/example/web",

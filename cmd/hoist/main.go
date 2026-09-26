@@ -22,7 +22,6 @@ import (
 
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/matrix"
-	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
@@ -33,7 +32,6 @@ import (
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/registry"
-	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // version is overwritten at build time by -ldflags "-X main.version=…" (goreleaser sets it to
@@ -248,7 +246,7 @@ const defaultBase = "main"
 // --base/--kube-context into selection before selectRepo, so both fields hold that
 // subcommand's answer, not only the root's. resolve carries the digest-resolution flags
 // (#132) the same way — the flags as given, "" meaning "the config decides", exactly what
-// resolutionOptions takes; resolveFlags() is the value to hand it.
+// service.NewResolveOptions takes as its own trailing string arguments.
 type effective struct {
 	repo, appsRoot    string
 	promotable        []string
@@ -256,14 +254,6 @@ type effective struct {
 	kubeOverride      string
 	resolve           resolveFlags
 	cfg               *config.RepoConfig
-}
-
-// resolveFlags is what resolutionOptions and buildResolveFuncWith take for this run: the
-// reconciled kube context beside the digest-resolution overrides as given.
-func (e effective) resolveFlags() resolveFlags {
-	rf := e.resolve
-	rf.kubeContext = e.kubeContext
-	return rf
 }
 
 // selectRepo applies the precedence: a flag given on the command line wins; otherwise the
@@ -377,7 +367,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		fmt.Fprintf(stderr, "hoist plan: %s\n", msg)
 		return exitUsage
 	}
-	opts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
+	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitUsage
@@ -388,31 +378,22 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	if err := checkOverrides(r, *from, prefixes, digests); err != nil {
+	set := settingsFor(cfg, eff)
+	set.Resolve = opts
+	svc := service.New(set, serviceDeps())
+	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitFailure
 	}
-	planDigests := map[string]image.Ref(digests)
-	var rep *resolutionReport
-	if len(opts.order) > 0 {
-		rep, err = runResolution(context.Background(), r, *from, prefixes, opts, digests)
-		if err != nil {
-			// The CLI printer's own guard (R-002): a cluster or registry error is already
-			// redacted at its adaptor, but this is the last stop before stderr, so a value
-			// registered anywhere in the process is scrubbed here too.
-			fmt.Fprintf(stderr, "hoist plan: %s\n", redact.Strings(err.Error()))
-			return exitFailure
-		}
-		planDigests = rep.digests(digests)
-	}
-	plan, err := gitops.BuildPlanWith(r, *from, *to, prefixes, planDigests, rep.reasons())
+	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
+		// The CLI printer's own guard (R-002): a cluster or registry error is already
+		// redacted at its adaptor, but this is the last stop before stderr, so a value
+		// registered anywhere in the process is scrubbed here too.
+		fmt.Fprintf(stderr, "hoist plan: %s\n", redact.Strings(err.Error()))
 		return exitFailure
 	}
-	if rep != nil {
-		plan.Warnings = append(resolve.Warnings(rep.res), plan.Warnings...)
-	}
+	plan, rep := pc.Plan, pc.Resolution
 	var configured []string
 	if eff.cfg != nil {
 		configured = eff.cfg.Promotable
@@ -473,59 +454,10 @@ func runConfig(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 	}
 }
 
-// checkOverrides refuses a --digest override BuildPlan would never consult: one for a repo
-// outside the promotable prefixes (BuildPlan iterates promotable repos only, so an override
-// for a third-party image would be accepted and change nothing), or one for a repo that has
-// no occurrence in the source env (a typo in the repo name would plan the source env's ref
-// instead of the caller's). Either way -h promises the override is planned, so silence is
-// wrong. An unknown source env and an empty prefix list are left for BuildPlan to report.
-func checkOverrides(r *gitops.Repo, from string, prefixes []string, digests digestFlag) error {
-	if len(digests) == 0 {
-		return nil
-	}
-	if len(prefixes) > 0 {
-		var outside []string
-		for repo := range digests {
-			if !gitops.IsPromotable(repo, prefixes) {
-				outside = append(outside, repo)
-			}
-		}
-		if len(outside) > 0 {
-			sort.Strings(outside)
-			return fmt.Errorf("override for %s is not a promotable repo; prefixes: %s", strings.Join(outside, ", "), strings.Join(prefixes, ", "))
-		}
-	}
-	env, ok := r.Envs[from]
-	if !ok {
-		return nil
-	}
-	present := map[string]bool{}
-	for _, f := range env.Families {
-		for _, o := range f.Occurrences {
-			present[o.Ref.Repo] = true
-		}
-	}
-	var missing, repos []string
-	for repo := range digests {
-		if !present[repo] {
-			missing = append(missing, repo)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	sort.Strings(missing)
-	for repo := range present {
-		repos = append(repos, repo)
-	}
-	sort.Strings(repos)
-	return fmt.Errorf("override for %s matches no image in %s; images there: %s", strings.Join(missing, ", "), from, strings.Join(repos, ", "))
-}
-
 // printPlan renders the plan read-only: files are read from disk, edits applied in memory,
 // verified, and diffed. Nothing is written. rep, when non-nil, adds the resolution section
 // before the warnings; with nil the output is M1's, byte for byte.
-func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes, configured []string, rep *resolutionReport) error {
+func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes, configured []string, rep *service.Resolution) error {
 	byFile := map[string][]gitops.Edit{}
 	var files []string
 	var noops []gitops.Edit
@@ -579,7 +511,7 @@ func printPlan(w io.Writer, r *gitops.Repo, plan *gitops.Plan, prefixes, configu
 	}
 	fmt.Fprintln(w)
 	if rep != nil {
-		rep.print(w)
+		printResolution(w, rep)
 	}
 	fmt.Fprintf(w, "Warnings (%d):\n", len(plan.Warnings))
 	for _, wn := range plan.Warnings {
@@ -643,7 +575,19 @@ var tuiRunner = runTUI
 // alone — the plan screen then runs in "digest sources: none" mode with default resolution
 // options and an empty envs config, matching what M1 offered before this milestone.
 func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
-	svc := service.New(settingsFor(cfg, eff), serviceDeps())
+	// The root --digest-sources/--registry-auth/--cluster-secret/--op-ref (#132) are resolved
+	// once, here, before the Service exists at all: the plan screen resolves with them, and the
+	// credential-chain overrides reach the tag picker's and the history's registry clients too
+	// (svc.RegistryFor). A malformed one is refused here, before the screen opens, exactly as
+	// `hoist plan` refuses it.
+	regOpts, err := service.NewResolveOptions(cfg, eff.cfg, eff.resolve.digestSources, eff.resolve.registryAuth, eff.resolve.clusterSecret, eff.resolve.opRef, eff.kubeContext)
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist: %v\n", err)
+		return exitUsage
+	}
+	set := settingsFor(cfg, eff)
+	set.Resolve = regOpts
+	svc := service.New(set, serviceDeps())
 
 	// The repo view is a cached worktree at origin/<base> (internal/service's repo.go),
 	// fetched fresh here and on every F5 — never eff.repo's own working tree directly, and
@@ -667,18 +611,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	// The root --kube-context (#105), already reconciled with the repo's kube.context by
 	// selectRepo, reaches every cluster-touching adaptor the TUI builds — the same value a
-	// subcommand's own flag would carry. The root --digest-sources/--registry-auth/
-	// --cluster-secret/--op-ref (#132) ride along the same way: the plan screen resolves
-	// with them, and the credential-chain overrides reach the tag picker's and the
-	// history's registry clients too. A malformed one is refused here, before the screen
-	// opens, exactly as `hoist plan` refuses it. The drift column (buildDriftFunc) asks the
-	// pods alone and takes none of them.
-	regOpts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitUsage
-	}
-	resolveFn := buildResolveFuncWith(cfg, eff.cfg, eff.promotable, eff.resolveFlags())
+	// subcommand's own flag would carry. The drift column (buildDriftFunc) asks the pods
+	// alone and takes none of the digest-resolution overrides above.
 
 	// git.Exec{} and the forge adaptor are pure, stateless clients — built once here and
 	// reused for every promotion the operator confirms in this TUI session, mirroring
@@ -704,7 +638,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
-	tagsFn := buildTagsFunc(cfg, eff.cfg, eff.kubeContext, regOpts)
+	tagsFn := buildTagsFunc(eff.cfg, svc)
 	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
 	// The checkout's HEAD is what the plan's line numbers were read from, so it is what the
 	// live-age blame asks the forge about; the default branch is the fallback for a HEAD that
@@ -713,13 +647,13 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if sha, ok, err := newGit.RevParse(context.Background(), r.Root, "HEAD"); err == nil && ok {
 		blameRef = sha
 	}
-	historyFn := buildHistoryFuncs(cfg, eff.cfg, r, f, forgeErr, blameRef, eff.base, eff.kubeContext, regOpts)
+	historyFn := buildHistoryFuncs(eff.cfg, r, f, forgeErr, blameRef, eff.base, svc)
 	configText, err := configViewText(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
-	root := app.New(r, eff.promotable, envs, resolveFn, promo, tagsFn, restartFn).
+	root := app.New(r, eff.promotable, envs, svc.Plan, promo, tagsFn, restartFn).
 		WithConfigView(cfg.File, cfg.Found, configText).
 		WithHistory(historyFn).
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
@@ -744,19 +678,6 @@ func configViewText(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("config view: %w", err)
 	}
 	return string(out), nil
-}
-
-// buildResolveFunc adapts the plan command's own resolution adaptors (resolution.go:
-// resolutionOptions, runResolution — kube context, registry credential chain) into a
-// plan.ResolveFunc the TUI can call without importing cmd itself (AGENTS.md §4.8). Each
-// call builds a fresh cluster/registry connection for the requested source env, exactly as
-// `hoist plan` does; resolutionOptions runs once here since it does not depend on the
-// source env. An unreachable cluster or misconfigured registry is not caught ahead of time —
-// there is no source env to try it against yet — so the plan screen's own tea.Cmd catches
-// the error per call and degrades to "digest sources: none" with a warning line (AGENTS.md
-// principle 5), rather than this function failing to open the TUI at all.
-func buildResolveFunc(cfg *config.Config, rc *config.RepoConfig, prefixes []string) plan.ResolveFunc {
-	return buildResolveFuncWith(cfg, rc, prefixes, resolveFlags{})
 }
 
 // buildDriftFunc is the matrix's cluster question: the raw pod observations for one env
@@ -807,72 +728,16 @@ func runningRefs(imgs []k8s.RunningImage) map[string][]image.Ref {
 	return out
 }
 
-func buildResolveFuncWith(cfg *config.Config, rc *config.RepoConfig, prefixes []string, rf resolveFlags) plan.ResolveFunc {
-	opts, optsErr := resolutionOptions(cfg, rc, rf)
-	return func(ctx context.Context, r *gitops.Repo, source string, overrides map[string]image.Ref) (plan.ResolveOutcome, error) {
-		if optsErr != nil {
-			return plan.ResolveOutcome{}, optsErr
-		}
-		if len(opts.order) == 0 {
-			return plan.ResolveOutcome{}, nil // digest sources: none
-		}
-		// overrides reach resolve.Resolve exactly as runPlan's --digest map does, so an
-		// override from the plan screen's o dialog is reported as [override] with the same
-		// alternatives and disagreement warnings the CLI's Resolution section shows (#102).
-		rep, err := runResolution(ctx, r, source, prefixes, opts, overrides)
-		if err != nil {
-			return plan.ResolveOutcome{}, err
-		}
-		var used string
-		var consulted bool
-		if ar, ok := rep.registry.(registry.AuthReporter); ok && rep.registry != nil {
-			used, consulted = ar.AuthSourceUsed(), ar.Consulted()
-		}
-		authTried := make([]string, 0, len(rep.auth))
-		for _, a := range rep.auth {
-			authTried = append(authTried, string(a))
-		}
-		return plan.ResolveOutcome{
-			Resolutions:       rep.res,
-			KubeContext:       rep.kubeContext,
-			RegistryAuth:      used,
-			RegistryConsulted: consulted,
-			RegistryAuthTried: authTried,
-		}, nil
-	}
-}
-
-// buildTagsFunc adapts the same registries[]-entry credential chain buildResolveFunc uses,
-// plus (when RepoConfig.Apps maps the requested image repo) a pkg/forge/github.Client for
-// that app repo, into a tags.BuildFunc the TUI's tag picker calls per image repo — never
-// importing registry/forge/config policy itself (AGENTS.md §4.8, mirroring buildResolveFunc
-// exactly). Unlike buildResolveFunc, this has no gitops.Repo occurrence to scope credentials
-// by (M6's tag picker is "a direct caller that skips resolve", per resolution.go's own
-// multiRegistry doc comment) — registryEntryFor/entryAuthConfig still pick the one
-// registries[] entry (if any) covering imageRepo, so a repo a different entry covers, or none
-// does, never borrows another entry's credentials (F4's rule, unchanged here). reg carries
-// the root --registry-auth/--cluster-secret/--op-ref (#132): given, they win for every image
-// repo exactly as they do in runResolution; only its auth, clusterSecret and opRef are read.
-func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string, reg resolveOptions) tags.BuildFunc {
-	var registries []config.RegistryConfig
-	if cfg != nil {
-		registries = cfg.Registries
-	}
+// buildTagsFunc adapts svc.RegistryFor's own per-repo credential scoping (F4), plus (when
+// RepoConfig.Apps maps the requested image repo) a pkg/forge/github.Client for that app repo,
+// into a tags.BuildFunc the TUI's tag picker calls per image repo — never importing registry/
+// forge/config policy itself (AGENTS.md §4.8). M6's tag picker has no gitops.Repo occurrence to
+// scope credentials by (it is "a direct caller that skips resolve", per resolve.go's own
+// multiRegistry doc comment) — svc.RegistryFor picks the one registries[] entry (if any)
+// covering imageRepo the identical way Plan's own resolution does.
+func buildTagsFunc(rc *config.RepoConfig, svc *service.Service) tags.BuildFunc {
 	return func(imageRepo string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
-		entry := registryEntryFor(registries, imageRepo)
-		auth, clusterSecret, opRef := entryAuthConfig(entry, reg)
-		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
-		if clusterSecret != "" && has(auth, registry.AuthCluster) {
-			// kubeContext arrives already resolved (eff.kubeContext) — no fallback left to
-			// apply here.
-			if cluster, _, err := newCluster(kubeContext); err == nil {
-				regCfg.ClusterSecret, regCfg.Cluster = clusterSecret, cluster
-			}
-			// An unreachable cluster here just means the cluster credential source will
-			// itself fail and the chain falls through to the next one (pkg/registry's own
-			// documented behavior) — never a reason to fail opening the picker.
-		}
-		reg, err := newRegistry(regCfg)
+		reg, err := svc.RegistryFor(imageRepo)
 		if err != nil {
 			failedRegTags := func(context.Context) ([]string, error) { return nil, err }
 			return false, failedRegTags, nil, nil
