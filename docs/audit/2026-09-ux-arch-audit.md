@@ -225,3 +225,139 @@ Tracked separately and not built by these trains:
 - **#168**: `RolledOutStep` per-occurrence landed verdict (AGENTS.md §4.1 interim state).
 - **#41**, **#53**: engine semantics questions flagged in the tracker.
 - **#170–#173**: coverage gaps.
+
+## Proposed keymap
+
+This is the spec that T3 migrates to. It answers UX-H3, UX-H4, UX-H5, UX-H11, UX-M5, UX-M6,
+UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.**
+
+### Rules
+
+1. **One meaning per key, on every screen.** A key that does not apply on a screen is unbound
+   there, never reused for something else.
+2. **`enter` is the screen's primary action.** On a confirm screen that is the write, and it
+   stays unshifted because the confirm screen *is* the deliberate step (the diff is on it). A
+   screen whose job is watching (flight, watch, config) has no primary action, so `enter` is
+   unbound there. That also means a stray second `enter` from the confirm screen that just
+   pushed the flight screen does nothing (FB-L4).
+3. **`esc` is back.** It never quits, never cancels a drive, and inside a dialog it closes the
+   dialog only. On the matrix it closes the menu or overlay, and otherwise does nothing.
+4. **`q` quits, and only from the matrix.** If a drive is running it asks first ("2 promotions
+   are driving; they stop until resumed — quit?"). On every other screen `q` is **unbound**: it
+   shows the notice "q quits from the matrix · esc goes back", and a text field gets the
+   letter. *Why unbound and not "back":* `q`-as-back gives `q` two meanings, and pressing `q`
+   repeatedly to back out quits the app the moment the matrix is reached. `esc` is already
+   back, so one key for one meaning. `ctrl+c` always quits at once as the escape hatch. On the
+   way out it prints the ids still in flight and `hoist resume <id>`.
+5. **Capitals are writes and only writes.** `R` restart, `X` abandon, `D` direct-mode toggle,
+   `C` treat "no checks" as green. Every capital is followed by a confirmation (a dialog or the
+   confirm screen). So `P`, `C`-for-config, flight's `R` re-observe and the `G`
+   (bottom) navigation key retire.
+6. **One verb per concept.** `r` refresh (the cluster, the repo, or the promotion's remote,
+   whichever the screen shows), with `F5` and `ctrl+r` as aliases wherever `r` is bound. `o`
+   opens in the browser. `d` toggles diff/yaml. `w` watch. `l` activity log. `?` help overlay.
+   `space` toggles a selection. `/` filters. `tab` moves focus between panes.
+7. **Navigation keys are shared.** `↑/↓` (and `j/k`), `←/→`, `pgup/pgdn`, `home/end`. `h/l` retire
+   as aliases because `l` is the log.
+
+### Screen × key
+
+`·` means unbound. "back" means pop to the screen below.
+
+| Key | matrix | action menu | plan confirm | deploy confirm | tag picker | flight | watch | restart | config | help overlay |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `enter` | open the action menu for the cell. On the in-flight pane: open flight | run the highlighted item | **start promotion** | **start deploy** | review this tag → deploy confirm | · | · | **restart** (production: confirm dialog) | · | close |
+| `esc` | close the menu or overlay, else nothing | close | back | back to the **picker** | back (in the reader: back to the list) | back to the matrix, **drive keeps running** | back | back (a rollout in progress continues, and the screen says so) | back | close |
+| `q` | quit (confirm if driving) | · | · | · | · (filter gets the letter) | · | · | · | · | · |
+| `?` | help overlay | help overlay | help overlay | help overlay | help overlay | help overlay | help overlay | help overlay | help overlay | close |
+| `r` `F5` `ctrl+r` | re-read the cluster and the repo | · | rebuild the plan at fresh origin | rebuild the diff at fresh origin | reload tags | re-observe now | poll now | re-read the targets | · (static text, §4.8) | · |
+| `o` | open the PR of the in-flight row (chooser if several) | · | · | · | open the commit under the cursor on the forge | open the PR | · | · | · | · |
+| `d` | · | · | toggle yaml diff | toggle yaml diff | · | · | · | · | · | · |
+| `p` | promote **into** the cursor column (source from the reverse pair, else asks) | promote into | · | · | · | · | · | · | · | · |
+| `t` | deploy a tag (tag picker for the cell) | deploy a tag | · | · | · | · | · | · | · | · |
+| `w` | watch the cell's family | watch | · | · | · | watch this promotion's family and target | · | · | · | · |
+| `R` | restart the cell's family → restart screen | restart | · | · | · | · | · | · | · | · |
+| `X` | abandon the in-flight row (confirm) | · | · | · | · | abandon (confirm) | · | · | · | · |
+| `D` | · | · | toggle direct mode (confirm when turning on; never offered for production) | same | · | · | · | · | · | · |
+| `C` | · | · | · | · | · | treat "no checks" as green (confirm; only when offered) | · | · | · | · |
+| `e` | · | · | override the hovered repo's digest (input dialog) | · | · | · | · | · | · | · |
+| `space` | · | · | tick / untick repo | · | · | · | · | · | · | · |
+| `/` | · | · | filter | · | filter | · | · | · | · | · |
+| `tab` | table ⇄ in-flight pane | · | repos ⇄ impact pane | · | list ⇄ commits | · | · | · | · | · |
+| `→` `←` | move column | · | · | · | → open the commit reader, ← back to the list | · | · | · | · | · |
+| `c` | config view | · | · | · | · | · | · | · | · | · |
+| `l` | activity log | · | activity log | activity log | activity log | activity log (this promotion's lines first) | activity log | activity log | activity log | · |
+| `↑↓` `j/k` | move row | move | move | scroll commits | move (reader: switch commit) | scroll log | scroll | scroll | scroll | · |
+| `pgup/pgdn` `home/end` | page | · | page | page | page (reader: scroll body) | page | page | page | page | · |
+| `ctrl+c` | quit now, printing what is in flight | ← | ← | ← | ← | ← | ← | ← | ← | ← |
+
+Decisions the rules left open:
+
+- **Tag picker: `enter` reviews the tag** (primary, which goes to deploy confirm). Commit
+  reading moves to `→` (or `tab` into the commits pane, then `→`). `space` is no longer bound
+  there. *Why:* `enter` = primary is the rule. Reading commits is secondary and spatial (the
+  pane to the right), so `→` is the key.
+- **Matrix deploy shortcut is `t`** ("tag"), because `d` is now diff everywhere. The action
+  menu lists the shortcut next to each item, so the menu teaches the shortcuts.
+- **Digest override is `e`** ("edit the digest"). It is not a remote write (it rebuilds the
+  plan), so it is lowercase. `o` is open-in-browser everywhere.
+- **Config is `c`**. It is a read, so it is lowercase. `C` is the ci.none override, a write, on flight.
+- **Re-attaching to a drive** is `enter` on the in-flight pane (`tab` focuses it), or the
+  action menu's "resume in-flight" item when the cell's env has one. `r` is refresh only.
+- **`P` retires.** "Promote into this env from a different source" is an action menu item.
+  When the cursor column has no reverse pair, `p` asks for the source.
+
+### Migration checklist (old → new)
+
+| Screen | Old | New | Finding |
+|---|---|---|---|
+| global | `q` quits from any screen | `q` quits from the matrix only (confirm if driving); unbound elsewhere with a notice | UX-H5 |
+| global | `?` one-line help on the matrix only | `?` help overlay on every screen | UX-H11 |
+| global | three refresh verbs (`F5` re-read, `R` re-observe, `r` poll now) | `r` refresh everywhere, `F5`/`ctrl+r` aliases | UX-H4 |
+| global | per-screen notice only | `l` activity log (T2) | FB-L1 |
+| matrix | `enter` resume (silent no-op otherwise) | `enter` action menu; on the in-flight pane, open flight | UX-H3, FB-M2 |
+| matrix | `r` resume | `r` refresh; resume = `enter` on the pane or the menu item | UX-H4 |
+| matrix | `p` promote the cursor column (as the source) into its pair | `p` promote **into** the cursor column | UX-H1 |
+| matrix | `P` promote to… | retired → action menu "promote into <env> from…" | rule 5 |
+| matrix | `d` deploy a tag | `t` deploy a tag | UX-H4 |
+| matrix | `C` config | `c` config | rule 5 |
+| matrix | `h/l` column aliases | retired (`←/→` only) | rule 7 |
+| matrix | — | `tab` focus the in-flight pane; `X` abandon from the pane | — |
+| plan | `x` toggle repo | `space` toggle repo | UX-H4 |
+| plan | `m` direct mode | `D` direct mode | UX-M6 |
+| plan | `o` digest override | `e` digest override | UX-H4 |
+| plan | — | `r` rebuild at fresh origin | FB-H1 |
+| deploy | `m` direct mode | `D` direct mode | UX-M6 |
+| deploy | `space` scroll | `pgdn` / `↓` | UX-H4 |
+| deploy | `esc` → matrix | `esc` → picker (the picker stays on the stack) | UX-M7, FB-L7 |
+| tags | `space` review the change | `enter` review the change | UX-M5 |
+| tags | `enter` read commit | `→` read commit (`←` back) | UX-M5, FB-L8 |
+| tags | `D` + confirm → direct deploy | retired; `D` on the deploy confirm | UX-M6 |
+| tags | `esc` in the D dialog leaves the picker | retired with `D`; every dialog closes on esc | UX-M8 |
+| tags | `g/G` top/bottom | `home/end` | rule 5 |
+| tags | — | `r` reload, `o` open commit | — |
+| flight | `esc` back to the confirm screen + **cancel drive** | `esc` → matrix, drive keeps running (T2) | UX-H6, FB-H2 |
+| flight | `x` abort (stop watching) | retired: esc already leaves without stopping | FB-L2 |
+| flight | `R` re-observe | `r` re-observe | UX-H4 |
+| flight | `c` ci.none override | `C` ci.none override | rule 5 |
+| flight | `G` log bottom | `end` | rule 5 |
+| flight | — | `w` watch | UX keypress table |
+| watch | `r` poll now | `r` (same key, "refresh" wording); footer shows `next poll in Ns` | UX-H9 |
+| restart | `esc` pops silently mid-rollout | `esc` pops; notice "rollout continues" | FB-L3 |
+
+### `internal/parity` impact
+
+The registry cites keys in its `TUI:` strings, and it parses the navigation messages the root
+switches on. The T3 keymap PR updates these rows in the same change:
+
+- **Key text changes:** "promote" (`p`/`P` → `p` + menu), "direct mode" (`m`/`D` → `D`),
+  "deploy" (`d`, `space` → `t`, `enter`), "resume" (`r` → `enter` on the pane), "re-observe"
+  (`R` → `r`), "digest override" (`o` → `e`), "ci.none override" (`c` → `C`), "config" (`C` → `c`).
+- **Rows removed or reshaped:** "stop watching a promotion" (`flight.AbortMsg x`). Its TUI
+  side becomes "esc from flight; the drive keeps running in the session" (T2), still two-sided
+  with the CLI's ctrl-c.
+- **New navigation messages** that need rows: flight → watch (`w`), the matrix action menu if
+  it is a root-handled message, and the help overlay if the root owns it. Keeping the menu and
+  the overlay inside the matrix and `internal/ui` avoids new root cases.
+- **Keymap test (T3):** the `internal/ui/keys` registry asserts no key has two meanings across
+  screens, so rule 1 is enforced by a test rather than by review (AGENTS.md §10 meta-rule 5).
