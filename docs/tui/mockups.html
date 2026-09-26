@@ -746,7 +746,7 @@
   <header class="v2-head">
     <p class="eyebrow">v2 proposal · 2026-09 audit</p>
     <h1>One keymap, and screens that answer back</h1>
-    <p class="standfirst">Frames for <code>docs/audit/2026-09-ux-arch-audit.md</code>. Each caption names the finding IDs it answers. Keys follow that doc's proposed keymap: <code>enter</code> primary, <code>esc</code> back and never a cancel, capitals only for writes. Colour: normal states are muted so only exceptions carry colour; production has its own hue, separate from warnings (UX-M15). Step glyphs, everywhere: <code>✓</code> done · <code>◐</code> active · <code>·</code> pending · <code>✗</code> failed · <code>⏸</code> waiting (UX-M1).</p>
+    <p class="standfirst">Frames for <code>docs/audit/2026-09-ux-arch-audit.md</code>. Each caption names the finding IDs it answers. Keys follow that doc's proposed keymap: <code>enter</code> primary, <code>esc</code> back and never a cancel, <code>shift+</code> only for writes. Colour: normal states are muted so only exceptions carry colour; production has its own hue, separate from warnings (UX-M15). Step glyphs, everywhere: <code>✓</code> done · <code>◐</code> active · <code>·</code> pending · <code>✗</code> failed · <code>⏸</code> waiting (UX-M1).</p>
   </header>
   <section class="screen v2">
     <div class="screen-head">
@@ -832,7 +832,7 @@
 │ <span class="c-good">✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI 4/4</span>  <span class="c-warn">⏸ approval</span>  <span class="c-dim">· merge  · argo refresh  · argo sync  · rollout</span>         │
 │ waiting for an approver to comment <span class="c-accent">`hoist approve 5pr6sd333t`</span> on PR #103 · <span class="c-dim">deadline in 3h 48m</span>                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-<span class="c-dim">     enter actions · p promote into app-staging · t deploy a tag · w watch · R restart · tab in flight · ? help · q quit</span></pre></div>
+<span class="c-dim"> enter actions · p promote into app-staging · t deploy tag · w watch · shift+r restart · tab in flight · ? help · q quit</span></pre></div>
     </div>
     <p class="answers"><b>Answers</b> UX-M10 UX-H1 — the spare height becomes a detail pane for the selected cell (images, digest, drift, what is ahead, last write) instead of 25 blank rows.</p>
     <ul class="notes">
@@ -864,7 +864,7 @@
 <span class="c-dim dimmed">│   temporal </span>│ <span class="sel">▸ p  promote into app-production from app-staging</span>  │<span class="c-dim dimmed">   external │</span>
 <span class="c-dim dimmed">│   web      </span>│   t  deploy a tag to app-production                │<span class="c-dim dimmed">     pinned │</span>
 <span class="c-dim dimmed">│   worker   </span>│   w  watch the rollout                             │<span class="c-dim dimmed">   unpinned │</span>
-<span class="c-dim dimmed">│            </span>│   R  restart orders in app-production              │<span class="c-dim dimmed">            │</span>
+<span class="c-dim dimmed">│            </span>│   shift+r  restart orders in app-production        │<span class="c-dim dimmed">            │</span>
 <span class="c-dim dimmed">│            </span>│      resume in flight 5pr6sd333t (approval)        │<span class="c-dim dimmed">            │</span>
 <span class="c-dim dimmed">│            </span>│      promote into app-production from…             │<span class="c-dim dimmed">            │</span>
 <span class="c-dim dimmed">│            </span>├────────────────────────────────────────────────────┤<span class="c-dim dimmed">            │</span>
@@ -881,7 +881,7 @@
     </div>
     <p class="answers"><b>Answers</b> UX-H3 UX-H1 FB-L8 — the dead key becomes the discoverable one, and production says what a write there will cost before you pick one.</p>
     <ul class="notes">
-      <li><span class="marker m-good">→</span><span><b><code>P</code> is gone.</b> "Promote into this env from another source" is the menu's last item, so no capital letter is spent on a non-write.</span></li>
+      <li><span class="marker m-good">→</span><span><b><code>shift+p</code> is gone.</b> "Promote into this env from another source" is the menu's last item, so no shift+ key is spent on a non-write.</span></li>
       <li><span class="marker m-good">→</span><span><b>Resume lives here and on the in-flight pane.</b> <code>r</code> is refresh only, on every screen.</span></li>
     </ul>
   </section>
@@ -907,15 +907,15 @@
 <span class="c-dim dimmed">│   mar</span>│ tab      table ⇄ in flight    │ p      promote into this env   │<span class="c-dim dimmed">ifted │</span>
 <span class="c-dim dimmed">│   tem</span>│ pgup/dn  page                 │ t      deploy a tag            │<span class="c-dim dimmed">ernal │</span>
 <span class="c-dim dimmed">│   web</span>│ esc      back · close         │ w      watch the rollout       │<span class="c-dim dimmed">inned │</span>
-<span class="c-dim dimmed">│   wor</span>│                               │ R      restart        <span class="c-dim">(asks)</span>   │<span class="c-dim dimmed">inned │</span>
-<span class="c-dim dimmed">│      </span>│ <span class="c-bold">VIEW</span>                          │ X      abandon        <span class="c-dim">(asks)</span>   │<span class="c-dim dimmed">      │</span>
+<span class="c-dim dimmed">│   wor</span>│                               │ shift+r restart        <span class="c-dim">(asks)</span>  │<span class="c-dim dimmed">inned │</span>
+<span class="c-dim dimmed">│      </span>│ <span class="c-bold">VIEW</span>                          │ shift+x abandon        <span class="c-dim">(asks)</span>  │<span class="c-dim dimmed">      │</span>
 <span class="c-dim dimmed">│      </span>│ r F5     refresh              │                                │<span class="c-dim dimmed">      │</span>
 <span class="c-dim dimmed">│      </span>│ o        open PR in browser   │ <span class="c-bold">APP</span>                            │<span class="c-dim dimmed">      │</span>
 <span class="c-dim dimmed">│      </span>│ c        config               │ ?      this help               │<span class="c-dim dimmed">      │</span>
 <span class="c-dim dimmed">│      </span>│ l        activity log         │ q      quit (asks if driving)  │<span class="c-dim dimmed">      │</span>
 <span class="c-dim dimmed">├──────</span>│                               │ ctrl+c quit now                │<span class="c-dim dimmed">──────┤</span>
 <span class="c-dim dimmed">│ marke</span>├───────────────────────────────┴────────────────────────────────┤<span class="c-dim dimmed">      │</span>
-<span class="c-dim dimmed">├──────</span>│ <span class="c-dim">capitals always ask before they write</span>                          │<span class="c-dim dimmed">──────┤</span>
+<span class="c-dim dimmed">├──────</span>│ <span class="c-dim">shift+ keys always ask before they write</span>                       │<span class="c-dim dimmed">──────┤</span>
 <span class="c-dim dimmed">│ in fl</span>╰────────────────────────────────────────────────────────────────╯<span class="c-dim dimmed">n 12s │</span>
 <span class="c-dim dimmed">│ 5pr6sd333t  orders, marketing  app-staging → app-production              12m │</span>
 <span class="c-dim dimmed">│ ✓ branch ✓ commit ✓ push ✓ PR #103 ✓ CI ⏸ approval · merge · argo · rollout  │</span>
@@ -925,7 +925,7 @@
     </div>
     <p class="answers"><b>Answers</b> UX-H11 UX-H4 — one overlay generated from the registry replaces a single help line that was cut off at 80 and 120 columns.</p>
     <ul class="notes">
-      <li><span class="marker m-good">→</span><span><b>Capitals are marked "asks".</b> Every capital letter is a write and every write asks first, so the overlay states it once.</span></li>
+      <li><span class="marker m-good">→</span><span><b><code>shift+</code> keys are marked "asks".</b> Every shift+ key is a write and every write asks first, so the overlay states it once.</span></li>
     </ul>
   </section>
   <section class="screen v2">
@@ -1003,7 +1003,7 @@
       <h2>Confirm screens</h2>
       <span class="verdict new">totals · worded warnings</span>
     </div>
-    <p class="intro"><code>enter</code> writes; <code>d</code> shows the yaml; <code>D</code> toggles direct mode, and is never offered for a production target.</p>
+    <p class="intro"><code>enter</code> writes; <code>d</code> shows the yaml; <code>shift+d</code> toggles direct mode, and is never offered for a production target.</p>
     <p class="frame-label">80×24 · deploy confirm</p>
     <div class="term">
       <div class="term-bar">
@@ -1011,7 +1011,7 @@
         <span class="term-title">hoist — deploy · confirm</span>
       </div>
       <div class="term-body"><pre>╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
-│ <span class="c-bold">ghcr.io/example/app:v3  →  app-staging</span>                   <span class="c-accent">mode: PR</span> · <span class="c-dim">D direct</span> │
+│ <span class="c-bold">ghcr.io/example/app:v3  →  app-staging</span>             <span class="c-accent">mode: PR</span> · <span class="c-dim">shift+d direct</span> │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ <span class="c-bold">rolling out 14 commits</span> · <span class="c-warn">2 migrations · replacing v1, declared 34 days</span>       │
 ├──────────────────────────────────────────────────────────────────────────────┤
@@ -1033,7 +1033,7 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ <span class="c-dim">writes 3 image references in 1 file · verified before commit</span>                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-<span class="c-dim">      enter deploy · d yaml · D direct · ↑/↓ commits · esc back to tags · ? help</span></pre></div>
+<span class="c-dim">enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags · ? help</span></pre></div>
     </div>
     <p class="answers"><b>Answers</b> UX-M13 UX-M6 UX-M7 UX-M12 FB-L7 — the list counts what it hides, the mode sits in the header with its one key, and esc returns to the picker the tag came from.</p>
     <p class="frame-label">80×24 · plan confirm</p>
@@ -1067,7 +1067,7 @@
 ╰──────────────────────────────────────────────────────────────────────────────╯
 <span class="c-dim">         enter promote · space tick · d yaml · e edit digest · esc back · ? help</span></pre></div>
     </div>
-    <p class="answers"><b>Answers</b> UX-M17 UX-M12 UX-M6 UX-H4 — a totals line, warnings as sentences instead of a bare <code>!</code>, a no-op row greyed and explained; no <code>D</code> because the target is production.</p>
+    <p class="answers"><b>Answers</b> UX-M17 UX-M12 UX-M6 UX-H4 — a totals line, warnings as sentences instead of a bare <code>!</code>, a no-op row greyed and explained; no <code>shift+d</code> because the target is production.</p>
     <ul class="notes">
       <li><span class="marker m-good">→</span><span><b>"Image references", not "occurrences".</b> The same count in words an operator uses (terminology sweep, UX-L1).</span></li>
       <li><span class="marker m-good">→</span><span><b>"declared 34 days", never "live".</b> The confirm screens have no cluster read, so they say what the manifest declares (principle 1).</span></li>

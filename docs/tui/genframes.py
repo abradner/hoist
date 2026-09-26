@@ -641,7 +641,7 @@ def matrix_v2_120():
     for w_, c_ in (("pinned", "c-dim"), ("external", "c-dim"), ("drifted", "c-warn"),
                    ("split", "c-warn"), ("unpinned", "c-warn")):
         h = words(h, w_, c_)
-    h += footer("enter actions · p promote into app-staging · t deploy a tag · w watch · R restart · "
+    h += footer("enter actions · p promote into app-staging · t deploy tag · w watch · shift+r restart · "
                 "tab in flight · ? help · q quit", 120)
     return h
 
@@ -654,7 +654,7 @@ def action_menu():
     d.span("▸ p  promote into app-production from app-staging")
     d.span("  t  deploy a tag to app-production")
     d.span("  w  watch the rollout")
-    d.span("  R  restart orders in app-production")
+    d.span("  shift+r  restart orders in app-production")
     d.span("     resume in flight 5pr6sd333t (approval)")
     d.span("     promote into app-production from…")
     d.span_rule()
@@ -682,19 +682,19 @@ def help_overlay():
     d.row("tab      table ⇄ in flight", "p      promote into this env")
     d.row("pgup/dn  page", "t      deploy a tag")
     d.row("esc      back · close", "w      watch the rollout")
-    d.row("", "R      restart        (asks)")
-    d.row("VIEW", "X      abandon        (asks)")
+    d.row("", "shift+r restart        (asks)")
+    d.row("VIEW", "shift+x abandon        (asks)")
     d.row("r F5     refresh", "")
     d.row("o        open PR in browser", "APP")
     d.row("c        config", "?      this help")
     d.row("l        activity log", "q      quit (asks if driving)")
     d.row("", "ctrl+c quit now")
     d.close_cols()
-    d.span("capitals always ask before they write")
+    d.span("shift+ keys always ask before they write")
     d.bot_span()
     dh = [colour(l, [("NAVIGATE", "c-bold"), ("ACT", "c-bold"), ("VIEW", "c-bold"),
                      ("APP", "c-bold"), ("(asks)", "c-dim", -1),
-                     ("capitals always ask before they write", "c-dim")]) for l in d.lines]
+                     ("shift+ keys always ask before they write", "c-dim")]) for l in d.lines]
     top, left = 3, (80 - d.width()) // 2
     h = overlay(base, d.lines, dh, top, left)
     h += footer("esc close", 80)
@@ -787,7 +787,7 @@ def flight_done():
 def deploy_confirm():
     b = StrictBox([76])
     b.top("hoist · deploy · confirm")
-    b.span(lr("ghcr.io/example/app:v3  →  app-staging", "mode: PR · D direct", 76))
+    b.span(lr("ghcr.io/example/app:v3  →  app-staging", "mode: PR · shift+d direct", 76))
     b.span_rule()
     b.span("rolling out 14 commits · 2 migrations · replacing v1, declared 34 days")
     b.span_rule()
@@ -818,7 +818,7 @@ def deploy_confirm():
     check(b, 24, 80)
     h = colour(b.render(), [
         ("ghcr.io/example/app:v3  →  app-staging", "c-bold"),
-        ("mode: PR", "c-accent"), ("D direct", "c-dim"),
+        ("mode: PR", "c-accent"), ("shift+d direct", "c-dim"),
         ("rolling out 14 commits", "c-bold"),
         ("2 migrations · replacing v1, declared 34 days", "c-warn"),
         ("▸ 4a1c2ef  Add rate limiting to the public API", "sel"),
@@ -827,7 +827,7 @@ def deploy_confirm():
         ("writes 3 image references in 1 file · verified before commit", "c-dim"),
     ])
     h = words(h, "migration", "c-warn")
-    h += footer("enter deploy · d yaml · D direct · ↑/↓ commits · esc back to tags · ? help", 80)
+    h += footer("enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags · ? help", 80)
     return h
 
 # ── v2·5b PLAN CONFIRM ──
@@ -1002,7 +1002,7 @@ V2 = [
     '    <h1>One keymap, and screens that answer back</h1>\n'
     '    <p class="standfirst">Frames for <code>docs/audit/2026-09-ux-arch-audit.md</code>. Each '
     'caption names the finding IDs it answers. Keys follow that doc\'s proposed keymap: '
-    '<code>enter</code> primary, <code>esc</code> back and never a cancel, capitals only for '
+    '<code>enter</code> primary, <code>esc</code> back and never a cancel, <code>shift+</code> only for '
     'writes. Colour: normal states are muted so only exceptions carry colour; production has '
     'its own hue, separate from warnings (UX-M15). Step glyphs, everywhere: '
     '<code>✓</code> done · <code>◐</code> active · <code>·</code> pending · <code>✗</code> '
@@ -1032,8 +1032,8 @@ V2 = [
              "the dead key becomes the discoverable one, and production says what a write "
              "there will cost before you pick one.",
              "UX-H3 UX-H1 FB-L8")],
-           ["<b><code>P</code> is gone.</b> \"Promote into this env from another source\" is "
-            "the menu's last item, so no capital letter is spent on a non-write.",
+           ["<b><code>shift+p</code> is gone.</b> \"Promote into this env from another source\" is "
+            "the menu's last item, so no shift+ key is spent on a non-write.",
             "<b>Resume lives here and on the in-flight pane.</b> <code>r</code> is refresh "
             "only, on every screen."]),
     screen("v2·03", "Help overlay", "every screen",
@@ -1043,8 +1043,8 @@ V2 = [
              "one overlay generated from the registry replaces a single help line that was cut "
              "off at 80 and 120 columns.",
              "UX-H11 UX-H4")],
-           ["<b>Capitals are marked \"asks\".</b> Every capital letter is a write and every "
-            "write asks first, so the overlay states it once."]),
+           ["<b><code>shift+</code> keys are marked \"asks\".</b> Every shift+ key is a write and "
+            "every write asks first, so the overlay states it once."]),
     screen("v2·04", "Flight", "one glyph set · reason once",
            "The screen you watch for hours. It says what is moving, what it waits on, who "
            "acts, and when hoist next looks. Leaving it keeps the promotion running.",
@@ -1063,7 +1063,7 @@ V2 = [
             "<b>The footer drops what does not apply</b>, for example abandon on a finished "
             "promotion."]),
     screen("v2·05", "Confirm screens", "totals · worded warnings",
-           "<code>enter</code> writes; <code>d</code> shows the yaml; <code>D</code> toggles "
+           "<code>enter</code> writes; <code>d</code> shows the yaml; <code>shift+d</code> toggles "
            "direct mode, and is never offered for a production target.",
            [("80×24 · deploy confirm", "hoist — deploy · confirm", deploy_confirm(),
              "the list counts what it hides, the mode sits in the header with its one key, and "
@@ -1071,7 +1071,7 @@ V2 = [
              "UX-M13 UX-M6 UX-M7 UX-M12 FB-L7"),
             ("80×24 · plan confirm", "hoist — promotion · confirm", plan_confirm(),
              "a totals line, warnings as sentences instead of a bare <code>!</code>, a no-op "
-             "row greyed and explained; no <code>D</code> because the target is production.",
+             "row greyed and explained; no <code>shift+d</code> because the target is production.",
              "UX-M17 UX-M12 UX-M6 UX-H4")],
            ["<b>\"Image references\", not \"occurrences\".</b> The same count in words an "
             "operator uses (terminology sweep, UX-L1).",
