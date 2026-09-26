@@ -101,7 +101,7 @@ func TestScenarioDirectPathSupersededRetiresInFlight(t *testing.T) {
 // not evidence this promotion's own action never happened. Where a revert DOES have to matter is
 // convergence: once Argo reports synced at a revision that reverted the change,
 // ArgoSyncedStep's own content-based check (observeLanded) must refuse to call the promotion
-// complete, mirroring steps_m5_test.go's own TestArgoSyncedRejectsARevisionThatRevertedTheMerge
+// complete, mirroring steps_converge_test.go's own TestArgoSyncedRejectsARevisionThatRevertedTheMerge
 // but driven as a full sequence through Drive rather than one step's Observe in isolation.
 func TestScenarioPRPathRevertNeverGoesTerminalOnceArgoObservesIt(t *testing.T) {
 	w := newWorld(t)
@@ -227,7 +227,7 @@ func TestScenarioSupersededPromotionNeverReachesRolledOutTerminal(t *testing.T) 
 // TestScenarioArgoSyncedRolloutCauseComposesWithARealDrive closes a gap an aggregate
 // cross-stack review found: the harness's own argoSyncs verb always reports Synced+Healthy in
 // one shot, so nothing here had ever driven a full sequence through ArgoSyncedStep's own
-// Rollout-enriched Waiting detail (steps_m5.go's rolloutCause) — that path and the scenario
+// Rollout-enriched Waiting detail (steps_converge.go's rolloutCause) — that path and the scenario
 // harness were each unit/sequence-tested on their own, but never proven to compose. Promotes,
 // merges, then reports Argo as Synced but still Progressing with a partially-rolled-out
 // Deployment — the exact mid-converge shape rolloutCause exists for — and confirms the pipeline

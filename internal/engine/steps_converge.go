@@ -57,13 +57,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/abradner/hoist/pkg/argo"
-	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -77,64 +75,6 @@ const (
 	StepArgoSynced    StepName = "argo-synced"
 	StepRolledOut     StepName = "rolled-out"
 )
-
-// ArgoAppNames returns the distinct, sorted set of Argo Application names in targetEnv whose
-// family directory contains at least one edit's file. The CLI calls this once, from the same
-// gitops.Repo Discover already produced, when building a PromotionState — mirroring
-// RenderCommitMessage/PRTitle/RenderPRBody: a pure function of the repo's discovered structure
-// and the plan, called once and then carried on PromotionState.ArgoApps (see its own doc
-// comment for why carrying it does not violate "the world is the state"). An edit whose file
-// matches no family in targetEnv is an internal inconsistency — BuildPlan only ever produces
-// edits from occurrences it read from an env's own families — and is reported as an error
-// naming the file and directory, rather than silently dropped.
-func ArgoAppNames(r *gitops.Repo, targetEnv string, edits []gitops.Edit) ([]string, error) {
-	byFile, err := EditApps(r, targetEnv, edits)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var names []string
-	for _, app := range byFile {
-		if !seen[app] {
-			seen[app] = true
-			names = append(names, app)
-		}
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-// EditApps maps each edit's file to the Argo Application name that owns it — the same
-// Family->Application walk ArgoAppNames dedupes and sorts, kept per-file here so a caller that
-// needs to scope a question to one Application's own share of a promotion (ArgoSyncedStep's
-// revisionCarries, PR #182 round-2 review) doesn't have to re-derive the mapping. The CLI calls
-// this once, from the same gitops.Repo Discover already produced, when building a
-// PromotionState, and carries the result on PromotionState.EditApps (see its own doc comment)
-// rather than recomputing it on every resume — the same "structural fact about the plan,
-// computed once" treatment ArgoApps already gets. An edit whose file matches no family in
-// targetEnv is an internal inconsistency — BuildPlan only ever produces edits from occurrences
-// it read from an env's own families — and is reported as an error naming the file and
-// directory, rather than silently dropped.
-func EditApps(r *gitops.Repo, targetEnv string, edits []gitops.Edit) (map[string]string, error) {
-	env, ok := r.Envs[targetEnv]
-	if !ok {
-		return nil, fmt.Errorf("argo apps: target env %q not found in the discovered repo", targetEnv)
-	}
-	byDir := make(map[string]string, len(env.Families))
-	for _, f := range env.Families {
-		byDir[f.Dir] = f.App
-	}
-	out := make(map[string]string, len(edits))
-	for _, e := range edits {
-		dir := path.Dir(e.File)
-		app, ok := byDir[dir]
-		if !ok {
-			return nil, fmt.Errorf("argo apps: edit %s: no family in env %q owns directory %s", e.File, targetEnv, dir)
-		}
-		out[e.File] = app
-	}
-	return out, nil
-}
 
 // argoApplications resolves s.ArgoApps into the argo.Application values pkg/argo's methods
 // take, pairing each name with s.ArgoNamespace (the single control-plane namespace every
@@ -651,67 +591,3 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 // M1-M4's own CIGreen/Approved precedent — "there is nothing for hoist itself to do about CI
 // running", the same shape here for a rollout already in motion).
 func (RolledOutStep) Act(context.Context, *PromotionState) error { return nil }
-
-// CoreSteps returns the seven steps a promotion drives through up to and including the merge:
-// Steps' four (branch, commit, push, PR) plus CIGreen, Approved and Merged. This is exactly the
-// step list (and signature) `AllSteps` had before M5 — see steps_m4.go's own trailing comment —
-// kept alive under a new name because M5 needed the name `AllSteps` for the ten-step list below.
-// It exists for one caller: `findInFlight` in cmd/hoist/drive.go, which deliberately observes
-// only through Merged when deciding whether a promotion still counts as "in flight" for AGENTS.md
-// invariant 5 — see that function's own doc comment for the reasoning. `hoist promote` and
-// `hoist resume` never call this directly; they always drive `AllSteps` to real completion.
-func CoreSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
-	return append(Steps(g, f, onWaiting), CIGreenStep{Forge: f}, ApprovedStep{Forge: f, Git: g}, MergedStep{Forge: f, Git: g})
-}
-
-// ObserveSteps is the step list to observe a PRIOR promotion state by, chosen from the state
-// itself rather than from what the caller happens to be doing now. Three callers ask the same
-// question of a state file they did not create — findInFlight ("is another promotion still
-// running for this env?"), `hoist promotions` and `resume --env`'s candidate scan — and all
-// three used a fixed list, which for a direct state is a list it can never satisfy: a direct
-// promotion pushes to the base branch, so PushedStep's branch on origin, PROpenedStep's PR and
-// MergedStep's merge are all permanently unsatisfied. The consequence was not cosmetic: one
-// completed direct run made findInFlight refuse every later promotion into that env forever,
-// and left the finished run listed as in flight.
-//
-// DirectCommitGateStep is deliberately NOT among the direct list here. The gate decides whether
-// a direct promotion may START; re-running it while observing one that already landed would let
-// a later config edit (an env newly listed under envs.production) turn a finished run into a
-// permanently blocked one — a state file re-interpreted by today's config rather than observed.
-// Refusing a new direct promotion is the gate's job, and it still runs first in DirectSteps
-// where that decision is actually made (AGENTS.md §4.5, R-007).
-//
-// through is where to stop: pass nil for the git-only core (findInFlight's own "the branch/PR
-// collision risk is retired" boundary — see its doc comment), or a non-nil argo/rollout pair
-// for the full list. The PR path's boundary is Merged; the direct path's is the push.
-func ObserveSteps(s *PromotionState, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
-	core := CoreSteps(g, f, onWaiting)
-	if s != nil && s.Direct {
-		core = []Step{BranchedStep{Git: g}, CommittedStep{Git: g, OnWaiting: onWaiting}, DirectPushedStep{Git: g}}
-	}
-	if a == nil && ro == nil {
-		return core
-	}
-	return append(core, ConvergeSteps(g, a, ro)...)
-}
-
-// AllSteps returns every step a promotion drives through, in order: CoreSteps' seven (branch,
-// commit, push, PR, CIGreen, Approved, Merged) then ArgoRefreshed, ArgoSynced and RolledOut
-// (M5). `hoist promote` and `hoist resume` always drive AllSteps to completion.
-func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
-	return append(CoreSteps(g, f, onWaiting), ConvergeSteps(g, a, ro)...)
-}
-
-// ConvergeSteps is the post-landing tail both modes share: ask Argo to refresh, wait for it to
-// agree with what landed, then watch the Deployments roll. Extracted so DirectSteps drives the
-// identical three rather than a copy — the design has always said direct mode converges through
-// Argo too ("Pushed -> ArgoRefreshed -> ..."), and it only ever stopped at the push because
-// every step here used to gate on MergeSHA, which a direct push never produces (issue #66).
-//
-// g reaches ArgoSyncedStep, which needs the clone to tell "Argo has synced past us with later
-// work" from "Argo has synced to a revision that reverted us" (#165). It may be nil only for a
-// caller with no clone at all, which costs that caller the ancestry check — see
-// ArgoSyncedStep.Git.
-func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
-	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}, RolledOutStep{Rollout: ro}}
-}

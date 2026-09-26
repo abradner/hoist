@@ -496,7 +496,7 @@ func TestRolledOutMissingContainerIsAMismatchNotAPanic(t *testing.T) {
 // wires it with a real git + the given fake forge/argo/rollout. Reused for both the initial
 // attempt and every "resume" in TestArgoAndRolloutFullPipelineConverges — a fresh state each
 // time is what a restarted `hoist promote`/`hoist resume` process actually builds (AGENTS.md
-// invariant 4), exactly the pattern steps_m4_test.go's own convergence tests use.
+// invariant 4), exactly the pattern steps_review_test.go's own convergence tests use.
 func driveNewStateThroughMerged(fx fixture, wt string, f forge.Forge, a argo.Argo, ro rollout.Rollout) (*PromotionState, error) {
 	s := newState(fx, wt)
 	s.CINone, s.CIGrace, s.Approval = "green", time.Nanosecond, "auto"
@@ -539,7 +539,7 @@ func TestArgoAndRolloutFullPipelineConverges(t *testing.T) {
 	// deterministic id/branch/marker, it finds the same already-merged PR pr.Merged==true and
 	// revalidates it against s.Base's live tip (M4 hardening, finding #1) before trusting it.
 	// Simulate what a real GitHub squash-merge would have done to the base branch so that
-	// revalidation finds what it expects, exactly like steps_m4_test.go's own convergence tests.
+	// revalidation finds what it expects, exactly like steps_review_test.go's own convergence tests.
 	mergeToBase(t, s)
 	if calls := strings.Join(a.Calls, ","); !strings.Contains(calls, "Refresh "+app.String()) {
 		t.Fatalf("expected ArgoRefreshedStep's Act to have issued a Refresh: %v", a.Calls)

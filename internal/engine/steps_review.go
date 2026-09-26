@@ -612,7 +612,3 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 	}
 	return nil
 }
-
-// AllSteps is defined in steps_m5.go, which extends it with the M5 Argo/rollout steps; kept
-// out of this file only so the M4-era doc comment above doesn't have to describe M5's
-// dependencies too.

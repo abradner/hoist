@@ -218,12 +218,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			fmt.Fprintln(stderr, "hoist deploy: waiting for signing approval...")
 		}
 	}
-	var steps []engine.Step
-	if *direct {
-		steps = engine.AllDirectSteps(newGit, a, ro, eff.cfg.Envs.Production, true, onWaiting)
-	} else {
-		steps = engine.AllSteps(newGit, f, a, ro, onWaiting)
-	}
+	steps := engine.StepsFor(s, newGit, f, a, ro, eff.cfg.Envs.Production, true, onWaiting)
 	save := func(st *engine.PromotionState) error {
 		if err := engine.SaveState(statePath, st); err != nil {
 			return err

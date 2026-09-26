@@ -449,10 +449,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// file only exists because the operator already passed --confirm-direct when they started
 	// it. DirectCommitGateStep still re-derives the production refusal independently of that
 	// (direct.go), so resuming can never reach an env the original run would have been refused.
-	steps := engine.AllSteps(newGit, f, a, ro, onWaiting)
-	if s.Direct {
-		steps = engine.AllDirectSteps(newGit, a, ro, rc.Envs.Production, true, onWaiting)
-	}
+	steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, onWaiting)
 	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
 	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, s, err)
 }

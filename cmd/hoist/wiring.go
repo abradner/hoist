@@ -227,14 +227,9 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 		// stopped the flight dead, and buildPollDurations carried neither poll.argo nor
 		// poll.rollout so pollInterval fell back to 2s. All three are addressed, so the screen
 		// now drives what it has always rendered (issue #64).
-		var steps []engine.Step
-		if opts.Direct {
-			// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
-			// caller narrowing it. Confirmed comes from the screen that ran the gesture.
-			steps = engine.AllDirectSteps(g, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)
-		} else {
-			steps = engine.AllSteps(g, f, a, ro, onWaiting)
-		}
+		// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
+		// caller narrowing it. Confirmed comes from the screen that ran the gesture.
+		steps := engine.StepsFor(s, g, f, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)
 
 		return *s, driveFuncFor(steps, save, progress), nil
 	}
@@ -353,10 +348,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			// Drive the mode this promotion actually is (runResume's own reasoning): a direct
 			// promotion through AllSteps would push its branch and open a PR. Confirmed is
 			// true because the state file exists only because the operator already confirmed.
-			steps := engine.AllSteps(newGit, f, a, ro, nil)
-			if s.Direct {
-				steps = engine.AllDirectSteps(newGit, a, ro, rc.Envs.Production, true, nil)
-			}
+			steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, nil)
 			// No live progress channel wired for a resumed promotion yet — driveFuncFor's
 			// own doc comment names this as the scoped-out follow-up; nil here is unchanged
 			// from before this PR.

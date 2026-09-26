@@ -342,7 +342,7 @@ func TestApprovedIgnoresCommentBeforeHeadCommit(t *testing.T) {
 // TestApprovedAnchorsOnCommitTimeNotPRCreatedAt proves the anchor is the head commit's own
 // committer date (git.Git.CommitTime), not forge.PR.CreatedAt: it manufactures a PR.CreatedAt
 // earlier than the commit's real time (the shape of the bug this repo's other steps happen to
-// make unreachable in production, per steps_m4.go's doc comment, but which ApprovedStep must
+// make unreachable in production, per steps_review.go's doc comment, but which ApprovedStep must
 // not lean on) and shows a comment sitting between the two anchors is ignored, while the same
 // comment posted after the real commit time satisfies.
 func TestApprovedAnchorsOnCommitTimeNotPRCreatedAt(t *testing.T) {
