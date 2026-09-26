@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
 
 	appconfig "github.com/abradner/hoist/internal/app/config"
 	"github.com/abradner/hoist/internal/app/deploy"
@@ -103,8 +104,8 @@ type Model struct {
 	openPRMode string
 
 	// notice is a transient, root-level message shown below the top screen — used for
-	// a real in-flight conflict, missing config, and for flight.OpenPRMsg/AbortMsg when no
-	// real handler is wired in (nil svc/OpenURL). Cleared on the next keypress, mirroring
+	// a real in-flight conflict, missing config, and for flight.OpenPRMsg when no real handler
+	// is wired in (nil svc/OpenURL). Cleared on the next keypress, mirroring
 	// every screen's own per-keypress notice convention (matrix.Model, plan.Model, flight.Model
 	// all clear theirs the same way).
 	notice string
@@ -117,6 +118,19 @@ type Model struct {
 	configPath  string
 	configFound bool
 	configText  string
+
+	// quitConfirming/quitConfirm/quitConfirmValue are q's own dialog, raised only when
+	// session.Controller.AnyRunning is true (Train 2 design PR 3: leaving flight never cancels a
+	// drive, so quitting the whole program is the one gesture that still needs a confirm before
+	// every running drive is actually stopped watching at once) — the same keypress-then-
+	// huh.Confirm shape every other destructive gesture in this package uses, read back with
+	// GetValue, never confirmValue itself (AGENTS.md §9 entry 6). ctrl+c is deliberately NOT
+	// gated by this: promotion state is durable (§4.1) and `hoist resume` recovers whatever
+	// either quit path interrupts (the design doc's own open question #2, confirmed by the
+	// operator).
+	quitConfirming   bool
+	quitConfirm      *huh.Confirm
+	quitConfirmValue bool
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -260,14 +274,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.quitConfirm != nil {
+			m.quitConfirm.WithWidth(m.dialogWidth())
+		}
 		return m.each(func(s Screen) Screen { return s.SetSize(msg.Width, msg.Height) }), nil
 	case tea.BackgroundColorMsg:
 		m.styles = ui.NewStyles(msg.IsDark())
+		if m.quitConfirm != nil {
+			m.quitConfirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+		}
 		return m.each(func(s Screen) Screen { return s.SetStyles(m.styles) }), nil
 	case tea.KeyPressMsg:
+		if m.quitConfirming {
+			// Every key while the dialog is up goes to it, including q and ctrl+c's own letter
+			// forms — an operator deciding whether to stop every running drive cannot quit past
+			// the question by mistake (mirrors flight.Model's own CapturesText-gated confirms
+			// one layer down, TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit's own shape).
+			return m.updateQuitConfirm(msg)
+		}
 		m.notice = ""
 		switch msg.String() {
 		case "ctrl+c":
+			// Immediate, no confirm, regardless of what is running: promotion state is durable
+			// (AGENTS.md §4.1) and `hoist resume` recovers whatever this interrupts (Train 2
+			// design's own operator decision).
 			return m, tea.Quit
 		case "q":
 			// Round 5, finding 3: this used to quit unconditionally, before the top screen's
@@ -277,6 +307,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// whenever the top screen reports it's mid-text-entry; ctrl+c above is unaffected
 			// and always quits.
 			if !m.capturesText() {
+				if m.sess.AnyRunning() {
+					return m.openQuitConfirm()
+				}
 				return m, tea.Quit
 			}
 		}
@@ -366,29 +399,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case flight.ReobserveMsg:
 		// R: the flight screen only asks (session.ReobserveMsg's own doc comment); Poke is the
-		// one place that decides whether it can actually happen (busy, not found).
+		// one place that decides whether it can actually happen (busy, not found, or —
+		// AGENTS.md invariant 5's own no-races-with-Abandon rule — abandoning). The refusal
+		// reaches the operator as a notice, mirroring OverrideCINoneMsg's own convention just
+		// above, rather than a silent no-op: this reaches the root even with no flight screen
+		// left on the stack to show a notice of its own (matrix.ResumeMsg re-attaches to it
+		// still Abandoning, otherwise, with nothing on screen ever explaining why).
 		sess, cmd, err := m.sess.Poke(msg.ID)
 		if err != nil {
+			m.notice = fmt.Sprintf("cannot re-observe %s: %v", msg.ID, err)
 			return m, nil
 		}
 		m.sess = sess
 		return m, cmd
 	case flight.BackMsg:
-		// esc: stop watching this promotion from the TUI — the drive itself keeps running
-		// (Train 2 design PR 2's own stated scope: behaviour unchanged here, PR 3 changes it).
-		// Whichever entry the top flight screen was attached to is told to stop: Stop(id) once
-		// a real id exists, CancelBuild(build) for a still-Building one that has none yet.
-		if top := len(m.stack) - 1; top >= 0 {
-			if fs, ok := m.stack[top].(flightScreen); ok {
-				id, build := fs.Attached()
-				if id != "" {
-					m.sess = m.sess.Stop(id)
-				} else {
-					m.sess = m.sess.CancelBuild(build)
-				}
-			}
-		}
-		return m.popAndRelist()
+		// esc: stop watching this promotion from the TUI only — the drive itself keeps running,
+		// Building included (Train 2 design PR 3, the operator's own decision: leaving flight
+		// never cancels anything). Nothing here touches session.Controller at all any more;
+		// enter/r on the matrix's in-flight pane (matrix.ResumeMsg below) re-attaches a fresh
+		// flightScreen to the exact same BuildID/id later, and session.Controller.Start/Resume's
+		// own dedup (already in place before this PR) is what keeps that from ever starting a
+		// second driver for it.
+		//
+		// This always returns all the way to the matrix, closing every screen above it — not just
+		// the flight screen itself. A flight screen is pushed directly on top of whatever screen
+		// asked for it (the plan or deploy confirm screen, m.start's own doc comment), so a single
+		// pop used to land back on that confirm screen with the exact same plan still ticked and
+		// ready — Enter there would start the very drive esc just left watching (audit UX-H6/FB-H2,
+		// the operator's own decision, follow-up to PR 3). truncateToMatrix's own doc comment has
+		// the mechanics.
+		return m.truncateToMatrix()
 	case flight.OpenPRMsg:
 		// openPRMode's three shapes (see Promotion.OpenPRMode's own doc comment): "display"
 		// never attempts a launch at all — nothing here needs m.openURL, so a headless/SSH
@@ -424,27 +464,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = fmt.Sprintf("could not open %s: %v", msg.url, msg.err)
 		}
 		return m, nil
-	case flight.AbortMsg:
-		// Real abort semantics at the engine level (close the PR? delete the branch?) are
-		// deliberately out of scope here: no milestone has ever defined what "abort" means
-		// for a promotion, and inventing one now risks a rushed, unreviewed design in an
-		// area that has already been hardened hard for safety (invariant 5, the
-		// claim-then-rescan dance) elsewhere. The one narrow, safe interpretation
-		// implemented instead: stop watching this promotion from the TUI and return to
-		// the matrix, leaving the real branch/PR/state file exactly as they are — the
-		// operator drives it further via `hoist resume <id>` or the forge directly.
-		m.sess = m.sess.Stop(msg.ID)
-		if len(m.stack) > 1 {
-			m.stack = append([]Screen(nil), m.stack[:1]...)
-		}
-		sess, cmd := m.sess.Relist()
-		m.sess = sess
-		return m, cmd
 	case flight.AbandonMsg:
 		// The flight screen's own X gesture already confirmed the operator wants this
-		// (flight.AbandonMsg's own doc comment) — pop back to the matrix immediately (mirroring
-		// AbortMsg's own shape above) and let session.Controller.Abandon do the real work: cancel,
-		// wait for a busy Step to actually stop, then the real Backend.Abandon call.
+		// (flight.AbandonMsg's own doc comment) — pop back to the matrix immediately and let
+		// session.Controller.Abandon do the real work: cancel, wait for a busy Step to actually
+		// stop, then the real Backend.Abandon call.
 		if len(m.stack) > 1 {
 			m.stack = append([]Screen(nil), m.stack[:1]...)
 		}
@@ -648,7 +672,12 @@ func summaryForSnapshot(s session.Snapshot) flight.Summary {
 	if s.Phase == session.Building {
 		state = engine.PromotionState{SourceEnv: s.Source, TargetEnv: s.Target, Direct: s.Direct}
 	}
-	return flight.Summarize(state, s.Done, s.Statuses, s.Err)
+	sum := flight.Summarize(state, s.Done, s.Statuses, s.Err)
+	// This entry is being driven by THIS session, right now — never merely re-observed from a
+	// listing (summaryFor's own path never sets this) — so the pane can say so (Train 2 design
+	// PR 3, matrix.compactLine/expandedSections).
+	sum.Live = true
+	return sum
 }
 
 // View renders the top screen in the alternate screen buffer, with the root's own transient
@@ -683,10 +712,72 @@ func (m Model) View() tea.View {
 	if len(notice) > 0 {
 		content += "\n" + strings.Join(notice, "\n")
 	}
+	if m.quitConfirming && m.quitConfirm != nil {
+		content = ui.Dialog(m.styles, content, "quit hoist?", m.quitConfirm.View(), m.width, m.height)
+	}
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
 }
+
+// openQuitConfirm raises q's own dialog, reached only when session.Controller.AnyRunning is true
+// — the tag picker's D shape, one layer up: keypress, then a huh.Confirm, and only a yes actually
+// stops anything.
+func (m Model) openQuitConfirm() (Model, tea.Cmd) {
+	m.quitConfirming = true
+	m.quitConfirmValue = false
+	title := "Quit hoist? Every drive still running here will stop being watched — nothing is rolled back, and `hoist resume` picks each one back up later."
+	m.quitConfirm = huh.NewConfirm().Title(title).Value(&m.quitConfirmValue)
+	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
+	// (AGENTS.md §9 entry 6).
+	m.quitConfirm.WithKeyMap(huh.NewDefaultKeyMap())
+	m.quitConfirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.quitConfirm.WithWidth(m.dialogWidth())
+	return m, tea.Batch(m.quitConfirm.Init(), m.quitConfirm.Focus())
+}
+
+func (m Model) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if kmsg, ok := msg.(tea.KeyPressMsg); ok {
+		switch kmsg.String() {
+		case "esc":
+			// Leave the dialog without answering it — huh's own Update swallows Esc, the same
+			// trap the tag picker's round-3 finding caught one layer down.
+			m.quitConfirming = false
+			return m, nil
+		case "enter":
+			m.quitConfirming = false
+			if !m.quitConfirmAgreed() {
+				return m, nil
+			}
+			// StopAll cancels every tracked entry's ctx and drops it from this process — the
+			// real branch/PR/state file are untouched, and `hoist resume` re-observes each one
+			// from the top exactly as if the operator had quit before ever starting the TUI
+			// (AGENTS.md §4.1).
+			m.sess = m.sess.StopAll()
+			return m, tea.Quit
+		}
+	}
+	f, cmd := m.quitConfirm.Update(msg)
+	if c, ok := f.(*huh.Confirm); ok {
+		m.quitConfirm = c
+	}
+	return m, cmd
+}
+
+// quitConfirmAgreed reads the operator's answer from the widget, never from quitConfirmValue —
+// Value binds a pointer into the copy of this value-typed model that built the widget, so a later
+// Update can never see a write through it (AGENTS.md §9 entry 6).
+func (m Model) quitConfirmAgreed() bool {
+	if m.quitConfirm == nil {
+		return false
+	}
+	v, _ := m.quitConfirm.GetValue().(bool)
+	return v
+}
+
+// dialogWidth sizes a root-level huh dialog the same way flight.Model and tags.Model already
+// size theirs.
+func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 
 // openRestart pushes the restart screen for one family in one env. The Deployment names come
 // from the repo here, in the root, for the same reason openDeploy builds its plan here: the
@@ -816,6 +907,25 @@ func (m Model) popAndRelist() (Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// truncateToMatrix drops every screen above the matrix at once, unlike pop (and popAndRelist),
+// which remove exactly one. It is for esc gestures the operator expects to close out of
+// entirely, regardless of how many screens happen to be stacked above the matrix right now —
+// flight.BackMsg's own case is the motivating one: a flight screen is pushed directly on top of
+// the plan or deploy confirm screen that started it (m.start's doc comment), so popping only the
+// flight screen used to land back on that confirm screen, still ticked and ready to start the
+// very same drive again on Enter (audit UX-H6/FB-H2). The matrix always sits at stack index 0
+// (push never inserts below it, pop refuses to remove it — pop's own doc comment), so slicing to
+// it is always safe, even when the stack is already just the matrix. Landing on the matrix always
+// re-lists, mirroring popAndRelist's own reason for doing so.
+func (m Model) truncateToMatrix() (Model, tea.Cmd) {
+	if len(m.stack) > 1 {
+		m.stack = append([]Screen(nil), m.stack[0])
+	}
+	var cmd tea.Cmd
+	m.sess, cmd = m.sess.Relist()
+	return m, cmd
 }
 
 // withMatrix applies f to the matrix screen wherever it sits in the stack (see

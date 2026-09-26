@@ -66,8 +66,11 @@ its step strip and — when it is waiting on you — the exact command:
 ```
 
 That list is re-observed against GitHub and the cluster at boot and on every poll, never read
-from a log; `r` reopens one on its flight screen, `o` opens its PR, and each asks which when
-several are in flight.
+from a log; `r` (or `enter` on it) reopens one on its flight screen, `o` opens its PR, and each
+asks which when several are in flight. A promotion this session itself started or resumed is
+marked "driving" — it is still running here, in this process, whether or not any screen is
+currently watching it; `r`/`enter` on one of those re-attaches the flight screen to it without
+starting anything new.
 
 ## Promote a pair
 
@@ -138,16 +141,22 @@ one is waiting for:
 │                                                                              │
 │    hoist approve abcd1234                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-              o open PR · X abandon · R re-observe · x abort · l log · esc back
+                        o open PR · X abandon · R re-observe · l log · esc back
 ```
 
-`R` re-observes now instead of at the next poll. `x` stops *watching* — the branch, the PR and
-the state file stay exactly as they are; nothing is closed or deleted. `X` (shift, like `R` on the
-matrix — a write, kept out of reach of a mistyped `x`) *abandons* it instead: behind a confirm, it
-retires the state file and, if it opened a PR, closes it and deletes the branch. It refuses
-outright if the promotion has already landed — abandoning is not a rollback, so a landed one needs
-`hoist deploy` or a fresh promotion to undo, not a state-file delete — and it is never offered at
-all once the promotion is done. `l` shows the log. The CLI prints the same steps as lines, with
+`R` re-observes now instead of at the next poll. `esc` leaves this screen — it stops *watching*
+only; the drive itself keeps running exactly as it was (branch, commit, push, PR, merge, Argo,
+rollout — whatever step is next still happens), and `enter`/`r` on the matrix's in-flight pane
+below re-attaches to the exact same running drive later, never starting a second one. `X` (shift,
+like `R` on the matrix — a write, kept out of reach of a mistyped key) *abandons* it instead:
+behind a confirm, it retires the state file and, if it opened a PR, closes it and deletes the
+branch. It refuses outright if the promotion has already landed — abandoning is not a rollback, so
+a landed one needs `hoist deploy` or a fresh promotion to undo, not a state-file delete — and it is
+never offered at all once the promotion is done. `l` shows the log. `q` quits hoist itself; with
+any drive still running (here or anywhere else in the matrix) it asks first, behind a confirm —
+nothing is rolled back, `hoist resume` picks every one back up later, but it is a deliberate step
+rather than a silent one. `ctrl+c` is the one always-immediate quit, with no confirm — state is
+durable either way. The CLI prints the same steps as lines, with
 `waiting: …` naming what it is waiting for; `hoist abandon <id> --confirm-abandon=<id>` is `X`'s
 own CLI form (the repeated id is the confirmation, same shape as `--confirm-direct`).
 

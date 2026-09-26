@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │…                                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-o open PR · c treat as green · X abandon · R re-observe · x abort · l log · esc…
+bloc… o open PR · c treat as green · X abandon · R re-observe · l log · esc back

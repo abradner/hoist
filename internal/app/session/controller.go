@@ -110,11 +110,24 @@ type Config struct {
 	// AbandonWait is the interval between abandon-wait rechecks (mirrors app.go's own
 	// abandonWaitInterval).
 	AbandonWait time.Duration
-	// AbandonTimeout bounds the whole abandon wait (mirrors app.go's own
-	// abandonWaitMaxAttempts, expressed as a duration since Config carries durations, not
-	// attempt counts) and, separately, one Backend.Abandon call itself.
+	// AbandonTimeout bounds the whole abandon wait for a busy Step to notice its ctx was
+	// cancelled (mirrors app.go's own abandonWaitMaxAttempts, expressed as a duration since
+	// Config carries durations, not attempt counts) — it does NOT bound Backend.Abandon itself;
+	// see AbandonCallTimeout for that. A short value here just means the wait gives up sooner
+	// and calls Backend.Abandon anyway (re-observation makes that safe — see Abandon's own doc
+	// comment), it never shortens the call itself.
 	AbandonTimeout time.Duration
-	// ListTimeout bounds one Backend.List call.
+	// AbandonCallTimeout bounds one Backend.Abandon call — a real re-observation (ObserveAll:
+	// git ls-remote plus forge PR/check lookups) followed by ClosePR and a DeleteRemoteBranch
+	// push, none of which is instant. This is deliberately generous and independent of
+	// AbandonTimeout/AbandonWait, which only bound the short busy-Step wait that precedes the
+	// call: conflating the two meant a real abandon inherited a 1s deadline and routinely failed
+	// with "context deadline exceeded", sometimes after ClosePR had already run but before
+	// DeleteRemoteBranch had a chance to (found in review of ceaccb2).
+	AbandonCallTimeout time.Duration
+	// ListTimeout bounds one Backend.List call. Kept equal to internal/app/scope.List (60s, P3
+	// #14 t2-review.md) — that constant's own doc comment is what actually documents the value;
+	// this default exists so a caller that builds a Config directly (every test) still gets it.
 	ListTimeout time.Duration
 	// Now is the clock. Defaults to time.Now; every test injects a fixed one.
 	Now func() time.Time
@@ -139,8 +152,11 @@ func (c Config) normalize() Config {
 	if c.AbandonTimeout <= 0 {
 		c.AbandonTimeout = time.Second
 	}
+	if c.AbandonCallTimeout <= 0 {
+		c.AbandonCallTimeout = 60 * time.Second
+	}
 	if c.ListTimeout <= 0 {
-		c.ListTimeout = 30 * time.Second
+		c.ListTimeout = 60 * time.Second
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -295,9 +311,20 @@ func (c Controller) withEntry(e entry) Controller {
 	return c
 }
 
-// withoutEntry returns a Controller with build removed from both maps.
+// withoutEntry returns a Controller with build removed from both maps. It also cancels build's
+// own ctx — the one place a finished/failed/abandoned entry's listener goroutine (listenCmd) and
+// its context.WithDeadline timer are actually stopped, rather than left running (and blocked on
+// a channel nobody will ever read again) until the entry's own 4h deadline. Every caller used to
+// have to remember to cancel before removing an entry; two call sites (onStep's Done case,
+// onBuilt's build-failed case) didn't, which is exactly the goroutine leak listenCmd's own doc
+// comment claims is fixed (found in review of ceaccb2) — cancelling here instead makes it true
+// unconditionally. Safe to call on an entry whose ctx was already cancelled (CancelBuild/Stop do
+// so themselves first): context.CancelFunc is idempotent.
 func (c Controller) withoutEntry(build BuildID) Controller {
 	e, ok := c.entries[build]
+	if ok && e.cancel != nil {
+		e.cancel()
+	}
 	c.entries = maps.Clone(c.entries)
 	delete(c.entries, build)
 	if ok && e.id != "" {
@@ -310,8 +337,18 @@ func (c Controller) withoutEntry(build BuildID) Controller {
 // runningForTarget reports the entry, if any, already tracked for target — Start's own
 // same-target refusal (AGENTS.md invariant 5, one layer up from service.claimTarget).
 func (c Controller) runningForTarget(target string) (BuildID, bool) {
+	return c.runningForTargetExcept(target, 0)
+}
+
+// runningForTargetExcept is runningForTarget's own except-self variant — onBuilt's duplicate-
+// driver check (below) needs to ask "is there ANOTHER entry already tracking this target",
+// which plain runningForTarget cannot answer for a Start-originated entry: Start sets e.target at
+// entry creation, before Backend.StartPromotion/onBuilt ever runs, so by the time onBuilt fires
+// the entry's own (unexcluded) copy in c.entries already matches target and would always find
+// itself.
+func (c Controller) runningForTargetExcept(target string, except BuildID) (BuildID, bool) {
 	for build, e := range c.entries {
-		if e.target == target {
+		if build != except && e.target == target {
 			return build, true
 		}
 	}
@@ -447,6 +484,15 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 }
 
 func toBuiltMsg(build BuildID, gen uint64, d service.Drive, err error) builtMsg {
+	if err == nil && d == nil {
+		// A Backend that returns (nil, nil) has no promotion to attach to and no error to show —
+		// production StartPromotion/Resume never do this (§4.1's own re-observation always leaves
+		// one or the other), but a test double or a future Backend implementation that does must
+		// not reach d.State() below: that's a nil interface method call, which panics rather than
+		// degrading to a notice like every other unwired/misbehaving-adaptor path in this package
+		// (PR 2's own gap, closed here rather than left for onBuilt to guard a second time).
+		err = errors.New("session: backend returned neither a drive nor an error")
+	}
 	var state engine.PromotionState
 	var driver Driver
 	if err == nil {
@@ -499,7 +545,12 @@ func (c Controller) Poke(id string) (Controller, tea.Cmd, error) {
 	}
 	e = c.rearm(e)
 	c = c.withEntry(e)
-	return c, stepCmd(e.ctx, e.build, e.gen, e.driver, false), nil
+	// rearm cancelled the old ctx, which stops the old listenCmd (it returns nil the instant it
+	// sees <-ctx.Done(), per its own doc comment) — but nothing else restarts one on the fresh
+	// ctx/gen it just built, so any progress line the re-armed Step reports would sit unread in
+	// progressCh until the whole drive finished: the flight log froze for the rest of it (found
+	// in review of ceaccb2). Batch a fresh listener alongside the Step so progress keeps flowing.
+	return c, tea.Batch(stepCmd(e.ctx, e.build, e.gen, e.driver, false), listenCmd(e.ctx, e.build, e.gen, e.progressCh)), nil
 }
 
 // OverrideCINone re-arms and steps promotion id with Driver.OverrideCINone called first — the
@@ -516,7 +567,9 @@ func (c Controller) OverrideCINone(id string) (Controller, tea.Cmd, error) {
 	}
 	e = c.rearm(e)
 	c = c.withEntry(e)
-	return c, stepCmd(e.ctx, e.build, e.gen, e.driver, true), nil
+	// Same reasoning as Poke's own comment: the re-arm needs a fresh listener on its new
+	// ctx/gen, or progress freezes for the rest of the drive.
+	return c, tea.Batch(stepCmd(e.ctx, e.build, e.gen, e.driver, true), listenCmd(e.ctx, e.build, e.gen, e.progressCh)), nil
 }
 
 func maxAbandonAttempts(cfg Config) int {
@@ -538,7 +591,8 @@ func maxAbandonAttempts(cfg Config) int {
 // (TestAbandonWaitsForBusyStepThenAbandonsOnce's own ordered call log). The wait gives up after
 // Config.AbandonTimeout and proceeds anyway (TestAbandonTimeoutProceeds) — Backend.Abandon's own
 // re-observation is what keeps that safe even if the wait gave up too early (see
-// internal/service.Abandon's own doc comment).
+// internal/service.Abandon's own doc comment). The call itself is bounded separately, and far
+// more generously, by Config.AbandonCallTimeout.
 func (c Controller) Abandon(id string) (Controller, tea.Cmd) {
 	build, ok := c.byID[id]
 	if !ok {
@@ -561,7 +615,7 @@ func (c Controller) Abandon(id string) (Controller, tea.Cmd) {
 }
 
 func (c Controller) abandonCmd(build BuildID, gen uint64, id string) tea.Cmd {
-	backend, timeout := c.backend, c.cfg.AbandonTimeout
+	backend, timeout := c.backend, c.cfg.AbandonCallTimeout
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -670,6 +724,22 @@ func (c Controller) Live() []Snapshot {
 	return out
 }
 
+// AnyRunning reports whether at least one tracked entry is actually in progress — Building,
+// Stepping, or Waiting — the root's own q-with-drives-running gate (Train 2 design PR 3). A
+// Stopped entry (a Blocked step or a terminal, non-retryable error — R/Poke re-arms it) or one
+// already Abandoning does not, by itself, need a confirm before the program quits: nothing
+// further will happen to it without the operator asking again, so there is nothing left running
+// for the confirm to warn about.
+func (c Controller) AnyRunning() bool {
+	for _, e := range c.entries {
+		switch e.phase {
+		case Building, Stepping, Waiting:
+			return true
+		}
+	}
+	return false
+}
+
 func (c Controller) capWait(e entry, wait time.Duration) time.Duration {
 	if wait < c.cfg.MinTick {
 		wait = c.cfg.MinTick
@@ -718,12 +788,61 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 	if !ok || msg.gen != e.gen {
 		return c, nil, nil
 	}
+	if e.abandoning {
+		// Abandon was requested while this entry's Resume call was still in flight — Abandon can
+		// only ever target an id already tracked in byID, and Resume (unlike Start) sets e.id
+		// before the call even starts, so e.id is always known here. The build's own outcome no
+		// longer matters: proceeding to a fresh Step (on success) would silently re-arm past the
+		// cancel, and reporting a build failure (on the ctx this same Abandon call cancelled)
+		// would drop Backend.Abandon entirely — found in review of ceaccb2. Either way the
+		// operator asked to abandon, so that is what happens now. Abandon, when it saw the entry
+		// busy (the Resume call in flight), also scheduled an abandonWaitMsg chain of its own —
+		// bump gen here so that chain (still carrying the old gen) is dropped by onAbandonWait's
+		// own gen check instead of racing this call and invoking Backend.Abandon twice.
+		e.busy = false
+		if msg.err == nil {
+			e.state = msg.state
+			e.driver = msg.drive
+		}
+		e.gen++
+		c = c.withEntry(e)
+		return c, c.abandonCmd(e.build, e.gen, e.id), nil
+	}
 	if msg.err != nil {
 		c = c.withoutEntry(msg.build)
 		return c, nil, []Change{{Kind: ChangeBuildFailed, Build: msg.build, Err: msg.err}}
 	}
 	e.state = msg.state
 	e.id = msg.state.ID
+	// Resume (unlike Start) never has source/target/direct to seed the entry with up front — the
+	// caller only ever names an id — so a resumed entry's Snapshot read blank for all three until
+	// now: the flight header and pane line went blank during Build, and runningForTarget couldn't
+	// see it at all (AGENTS.md invariant 5's own claim didn't hold for a resumed drive — found in
+	// review of ceaccb2). Fill them from msg.state, which service.StartPromotion/Resume both
+	// populate from the very first preflight save (internal/service/start.go's own
+	// SourceEnv/TargetEnv, set before a Driver is ever handed back) — but only when Start hasn't
+	// already set them from its own, equally authoritative req/target/source parameters: a
+	// resumed entry is exactly the one whose e.source/e.target are still blank here.
+	if e.source == "" && e.target == "" {
+		e.source = msg.state.SourceEnv
+		e.target = msg.state.TargetEnv
+		e.direct = msg.state.Direct
+	}
+	// Duplicate-driver window (found in review of ceaccb2): between StartPromotion's own first
+	// preflight save and this process's builtMsg arriving, a fresh listing can already show the
+	// real id beside the still id-less Building entry Start created — Resume(id) then gets past
+	// the byID dedup entirely (Resume sets e.id at entry creation, from the id it was GIVEN, but
+	// nothing here learns the OTHER entry's target until its own onBuilt runs — see
+	// runningForTargetExcept's own doc comment) and this second onBuilt would otherwise adopt a
+	// second live Driver for the exact same target. Once msg.state names the real target, a
+	// same-target collision with a build that already exists independently of this one is exactly
+	// that race resolving in the operator's disfavour — refuse it exactly like Start's own
+	// same-target rule (AGENTS.md invariant 5), rather than silently running two drivers against
+	// one promotion.
+	if _, ok := c.runningForTargetExcept(e.target, e.build); ok {
+		c = c.withoutEntry(e.build)
+		return c, nil, []Change{{Kind: ChangeBuildFailed, Build: msg.build, ID: e.id, Err: ErrTargetBusy}}
+	}
 	e.driver = msg.drive
 	e.phase = Stepping
 	e.busy = true
@@ -775,9 +894,23 @@ func (c Controller) onStep(msg stepMsg) (Controller, tea.Cmd, []Change) {
 	case e.done:
 		// Snap carries the final tick's own state/statuses (already applied to e above) out
 		// past withoutEntry, which is about to make BuildSnapshot/Snapshot forget them —
-		// see Change.Snap's own doc comment.
+		// see Change.Snap's own doc comment. Done wins even while abandoning: the real
+		// promotion finished before the cancel was noticed, so there is nothing left to
+		// abandon.
 		changes = append(changes, Change{Kind: ChangeDone, Build: e.build, ID: e.id, Snap: snapshotOf(e)})
 		c = c.withoutEntry(e.build)
+		return c, nil, changes
+	case abandoning:
+		// This is exactly the busy step Abandon's own wait is watching for — whatever it
+		// reports (blocked, a retryable/non-retryable error, or an ordinary tick) must not
+		// overwrite Abandoning with Stopped: that would let Poke re-arm (bumping gen), which
+		// drops the abandonWaitMsg already scheduled and the abandon silently disappears
+		// (found in review of ceaccb2 — the fix predates the Abandoning phase even existing to
+		// protect). The entry just goes idle (busy already false above); the pending
+		// abandonWaitMsg, next time it fires, proceeds to Backend.Abandon regardless of what
+		// this tick said.
+		changes = append(changes, Change{Kind: ChangeStepped, Build: e.build, ID: e.id})
+		c = c.withEntry(e)
 		return c, nil, changes
 	case e.blocked != nil:
 		e.phase = Stopped
@@ -792,14 +925,6 @@ func (c Controller) onStep(msg stepMsg) (Controller, tea.Cmd, []Change) {
 	}
 
 	changes = append(changes, Change{Kind: ChangeStepped, Build: e.build, ID: e.id})
-	if abandoning {
-		// This is exactly the busy step Abandon's own wait is watching for — do not schedule
-		// another one out from under it (TestAbandonDuringBusyStepCannotBeOutlived's own
-		// shape): the entry goes idle (busy already false above) and the pending
-		// abandonWaitMsg, next time it fires, proceeds to Backend.Abandon.
-		c = c.withEntry(e)
-		return c, nil, changes
-	}
 	if msg.tick.Waiting {
 		e.phase = Waiting
 	} else {

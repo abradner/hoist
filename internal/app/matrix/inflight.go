@@ -104,6 +104,11 @@ func (m Model) expandedSections() []string {
 	out := make([]string, 0, len(m.inflight)*2)
 	for _, s := range m.inflight {
 		head := m.styles.Accent.Render(s.ID) + "   " + m.styles.Title.Render(pair(s)) + m.styles.Dim.Render("   started "+ui.Ago(m.now(), s.StartedAt))
+		if s.Live {
+			// This session is driving it right now — never true for a listing-only entry
+			// (Train 2 design PR 3): distinguish that from "re-observed, last seen here".
+			head += "  " + m.styles.Warn.Render("driving")
+		}
 		strip := m.styleStrip(s)
 		text, command := s.Action()
 		var action string
@@ -164,7 +169,11 @@ func (m Model) compactLine(s flight.Summary) string {
 	// The target can be a 63-character namespace; the verdict is what must survive, so the
 	// target is the part that gives way.
 	target := ansi.Truncate(s.Target, 24, "…")
-	return m.styles.Accent.Render("⟳ "+s.ID+" → "+target) + "   " + m.styles.Warn.Render(s.Verdict()) + m.styles.Dim.Render(" · "+ui.Span(m.now().Sub(s.StartedAt)))
+	verdict := s.Verdict()
+	if s.Live {
+		verdict += " · driving"
+	}
+	return m.styles.Accent.Render("⟳ "+s.ID+" → "+target) + "   " + m.styles.Warn.Render(verdict) + m.styles.Dim.Render(" · "+ui.Span(m.now().Sub(s.StartedAt)))
 }
 
 // inflightLine is the one-line fold for the notes section when no pane fits at all.
