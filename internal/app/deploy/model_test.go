@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -73,6 +74,29 @@ func TestEnterEmitsStartMsgInPRModeByDefault(t *testing.T) {
 	}
 	if msg.Target != "app-production" || !msg.Plan.IsDeploy() {
 		t.Errorf("StartMsg should carry the deploy plan and its target: %+v", msg)
+	}
+}
+
+// TestWithViewCarriesIntoStartMsg pins the WithView plumbing (t1-review.md P2-a): openDeploy
+// (internal/app/app.go) calls WithView with the service.RepoView the plan was actually built
+// against (service.PlannedChange.View), and confirming must carry that exact view through to
+// StartMsg.View unchanged — the root's own StartPromotion call trusts this field as "the view
+// THIS plan was built from" (WithView's own doc comment) without re-deriving it. Mutation check:
+// dropping this call's `m.view = v` line (or start()'s `View: view` field) makes this test fail
+// against the zero RepoView instead of the fixture's own.
+func TestWithViewCarriesIntoStartMsg(t *testing.T) {
+	wantView := service.RepoView{Dir: "/deploy-with-view", FromOrigin: true, SHA: "with-view-sha"}
+	m := fixture(t, config.EnvsConfig{}).WithView(wantView)
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter produced no command")
+	}
+	msg, ok := cmd().(StartMsg)
+	if !ok {
+		t.Fatalf("enter produced %T, want StartMsg", cmd())
+	}
+	if msg.View != wantView {
+		t.Errorf("StartMsg.View = %+v, want the WithView-supplied %+v", msg.View, wantView)
 	}
 }
 
