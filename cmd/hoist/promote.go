@@ -381,7 +381,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	prefixes := eff.promotable
 
-	opts, err := resolutionOptions(cfg, eff.cfg, rf)
+	opts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitUsage

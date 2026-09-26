@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -78,9 +79,13 @@ func resolutionOptions(cfg *config.Config, rc *config.RepoConfig, f resolveFlags
 		opts.registries = cfg.Registries
 	}
 
+	// f.kubeContext is the flag as given (every real caller passes eff.resolveFlags(), which
+	// is itself already flag-else-repo-resolved, so this is usually idempotent); rc's own
+	// configured kube context is the fallback when it is empty. service.KubeContextFor is the
+	// one place this precedence is written, so nothing here reads the RepoConfig field itself.
 	opts.kubeContext = f.kubeContext
-	if opts.kubeContext == "" && rc != nil {
-		opts.kubeContext = rc.Kube.Context
+	if rc != nil {
+		opts.kubeContext = service.KubeContextFor(*rc, f.kubeContext)
 	}
 
 	sources := splitList(f.digestSources)
