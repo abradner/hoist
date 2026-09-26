@@ -67,9 +67,8 @@ func TestFrameTallerThanTheTerminalIsCutNotOverflowed(t *testing.T) {
 	}
 }
 
-// The closing border is never cut off the bottom (#T1-02): when content overflows, the box
-// still ends with its own ╰…╯ row, with a dim "…" continuation row directly above it marking
-// the cut.
+// The closing border is never cut off the bottom: when content overflows, the box still ends
+// with its own ╰…╯ row, with a dim "…" continuation row directly above it marking the cut.
 func TestFrameOverflowNeverCutsTheClosingBorder(t *testing.T) {
 	st := NewStyles(true)
 	body := strings.Repeat("line\n", 50)
