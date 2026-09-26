@@ -18,16 +18,14 @@ import (
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // PollDurations is the plain-value slice of internal/config.PollConfig this screen actually
 // needs, in place of importing internal/config itself. AGENTS.md §4.8: a screen never imports
 // config/registry policy, only the plain values or function types cmd/hoist (the one place
-// allowed to know both sides) translates for it. Zero values are valid — New/pollInterval
-// already fall back to a fixed default for anything left unset.
+// allowed to know both sides) translates for it. Zero values are valid — minTick, applied to
+// engine.PollInterval's result, falls back to a fixed default for anything left unset.
 type PollDurations struct {
 	CI, Approval, Argo, Rollout, Deadline time.Duration
 }
@@ -143,7 +141,7 @@ type Model struct {
 	order []engine.StepName
 	rows  []Row
 	done  bool
-	// stopped is true once a driveFn call returned a non-retryable error (see retryableErr):
+	// stopped is true once a driveFn call returned a non-retryable error (see engine.Retryable):
 	// scheduleTick is not called again automatically, though R still lets the operator retry
 	// by hand (mirroring hoist resume's own "re-run to retry" convention for a terminal
 	// failure — see onDriveResult's own doc comment for why this must not be done regardless
@@ -595,22 +593,24 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 	m.rows = DeriveRows(m.order, m.done, msg.statuses)
 	if msg.err != nil {
 		m.errNotice = redact.Strings(msg.err.Error())
-		if !retryableErr(msg.err) {
-			// A terminal failure — cmd/hoist/drive.go's own driveToCompletion only retries a
-			// *engine.StepError on StepCIGreen/StepApproved (Known bug classes: a transient
-			// 404/permissions hiccup on Checks/Comments); every other shape — a rejected push,
-			// a failed signing commit, ctx.DeadlineExceeded/Canceled included — is terminal
-			// there and returned immediately, never retried. Before this fix, onDriveResult
-			// scheduled another poll for literally any non-nil err, so this screen would
-			// silently repeat a terminal Act failure every ~2s until poll.Deadline elapsed
-			// instead of stopping and surfacing it as a real failure (Codex review, PR #50).
-			// R still lets the operator retry by hand (handleKey's own Reobserve case only
-			// gates on busy/done, not stopped) — mirroring hoist resume's "re-run to retry"
-			// convention for a promotion a killed process left mid-flight.
+		if !engine.Retryable(msg.err) {
+			// A terminal failure — engine.Retryable (the same decision cmd/hoist/drive.go's own
+			// driveToCompletion makes) only retries a *engine.StepError on one of
+			// engine.RetryableStep's five steps (Known bug classes: a transient 404/permissions
+			// hiccup on Checks/Comments/an Argo or rollout Get); every other shape — a rejected
+			// push, a failed signing commit, ctx.DeadlineExceeded/Canceled included — is
+			// terminal there and returned immediately, never retried. Before this fix,
+			// onDriveResult scheduled another poll for literally any non-nil err, so this
+			// screen would silently repeat a terminal Act failure every ~2s until poll.Deadline
+			// elapsed instead of stopping and surfacing it as a real failure (Codex review, PR
+			// #50). R still lets the operator retry by hand (handleKey's own Reobserve case
+			// only gates on busy/done, not stopped) — mirroring hoist resume's "re-run to
+			// retry" convention for a promotion a killed process left mid-flight.
 			m.stopped = true
 			return m, nil
 		}
-		// A retryable error (the CIGreen/Approved transient-hiccup case) must clear m.stopped,
+		// A retryable error (the transient-hiccup case on one of engine.RetryableStep's steps)
+		// must clear m.stopped,
 		// not merely leave scheduleTick to fire: if this poll came from a manual R retry after
 		// an EARLIER, unrelated terminal stop (R bypasses the stopped gate — see its own
 		// comment above), m.stopped was still true from that prior stop, and the automatic
@@ -650,59 +650,6 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, m.scheduleTick()
-}
-
-// retryableErr mirrors cmd/hoist/drive.go's driveToCompletion classification exactly: only a
-// *engine.StepError on StepCIGreen or StepApproved is worth retrying automatically (see
-// retryableStep below); every other error shape — including one that doesn't even parse as
-// *engine.StepError, such as a bare ctx.DeadlineExceeded/Canceled surfacing straight from
-// engine.Drive's own ctx.Err() check — is terminal from this screen's point of view too.
-func retryableErr(err error) bool {
-	var stepErr *engine.StepError
-	if !errors.As(err, &stepErr) || !retryableStep(stepErr.Step) {
-		return false
-	}
-	// The same sentinel exclusion cmd/hoist/drive.go applies, and for the same reason: a
-	// missing Application or Deployment is a structural condition no amount of waiting
-	// resolves. Observe reports it as Blocked, but Act has no way to produce a BlockedError of
-	// its own, so an Act that races a deletion after a successful Observe surfaces the sentinel
-	// as an ordinary error — which, once the cluster steps became retryable, this screen would
-	// have retried until the deadline instead of stopping (Copilot, PR #72).
-	return !isNotFoundErr(stepErr.Err)
-}
-
-// isNotFoundErr mirrors cmd/hoist/drive.go's own, duplicated for the same reason retryableStep
-// is: cmd/hoist is package main and cannot be imported from here.
-func isNotFoundErr(err error) bool {
-	return errors.Is(err, argo.ErrNotFound) || errors.Is(err, rollout.ErrNotFound)
-}
-
-// retryableStep mirrors cmd/hoist/drive.go's own retryableStep exactly. It is duplicated
-// rather than imported for the same reason pollInterval below already is (cmd/hoist is package
-// main and cannot be imported from here): CIGreen and Approved are the only two steps whose
-// Observe calls out to a forge endpoint that can transiently 404/scope-error without the
-// underlying condition (CI status, an approval) actually being answerable yet; every other
-// step's error is terminal. A reviewer changing cmd/hoist/drive.go's own retryableStep should
-// double-check this copy stays in step with it, exactly as pollInterval's own doc comment
-// already asks for that function.
-func retryableStep(step engine.StepName) bool {
-	switch step {
-	case engine.StepCIGreen, engine.StepApproved:
-		// The two forge-polling steps: Checks and Comments can transiently 404 or
-		// scope-error without the underlying condition being answerable yet.
-		return true
-	case engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut:
-		// The three cluster-polling steps, for exactly the same reason: a Kubernetes Get can
-		// fail transiently (an API server restart, a dropped connection) while the sync or
-		// rollout it is asking about is still perfectly well under way. Before the flight
-		// screen drove these, such an error could only reach the CLI's own loop, which
-		// retries; reaching this classifier instead used to stop the flight dead on a hiccup
-		// (issue #64). A genuinely missing Application is a Blocked observation, not an
-		// error, so it is unaffected by this.
-		return true
-	default:
-		return false
-	}
 }
 
 // renewDeadline rebuilds the drive context for another poll.Deadline from now (or an
@@ -749,7 +696,9 @@ func (m Model) tickDelay(failed engine.StepName) time.Duration {
 			phase = m.order[len(m.order)-1]
 		}
 	}
-	d := pollInterval(m.poll, phase)
+	d := minTick(engine.PollInterval(engine.PollIntervals{
+		CI: m.poll.CI, Approval: m.poll.Approval, Argo: m.poll.Argo, Rollout: m.poll.Rollout,
+	}, phase))
 	if !m.deadlineAt.IsZero() {
 		if left := m.deadlineAt.Sub(m.now()); left < d {
 			d = max(left, 0)
@@ -1295,39 +1244,17 @@ func (m Model) hint() string {
 	return h
 }
 
-// pollInterval mirrors cmd/hoist/drive.go's own pollInterval exactly. It is duplicated
-// rather than imported because cmd/hoist is package main and cannot be imported from here;
-// the PR report flags this duplication for a reviewer to double-check against
-// cmd/hoist/drive.go if that function's own switch ever changes. CI and Approval read the
-// PollDurations the caller translated from config.PollConfig at the cmd/hoist boundary, so
-// this never hand-copies cmd/hoist's magic numbers itself — only the 2s fallback for every
-// other step is a literal, identical to cmd/hoist's own (there is nothing to tune there:
-// every other step only ever waits on the interactive signing prompt or a single
-// merge/branch-delete retry).
-func pollInterval(poll PollDurations, phase engine.StepName) time.Duration {
-	const fallback = 2 * time.Second
-	switch phase {
-	case engine.StepCIGreen:
-		if poll.CI <= 0 {
-			return fallback
-		}
-		return poll.CI
-	case engine.StepApproved:
-		if poll.Approval <= 0 {
-			return fallback
-		}
-		return poll.Approval
-	case engine.StepArgoRefreshed, engine.StepArgoSynced:
-		if poll.Argo <= 0 {
-			return fallback
-		}
-		return poll.Argo
-	case engine.StepRolledOut:
-		if poll.Rollout <= 0 {
-			return fallback
-		}
-		return poll.Rollout
-	default:
-		return fallback
+// minTick is a screen floor, not policy: engine.PollInterval returns a configured knob
+// unchanged, including zero (PollDurations{} is the zero value app.go's stub currently passes),
+// and tea.Tick(0, ...) fires immediately/tightly — a real CPU-spin risk this screen's own tick
+// loop must never hit, unlike cmd/hoist's driveToCompletion, which sleeps in a plain for-loop
+// that a zero duration merely skips. Applied to engine.PollInterval's result at this screen's
+// own boundary, never inside engine — a zero interval is a perfectly valid answer everywhere
+// else that reads it.
+func minTick(d time.Duration) time.Duration {
+	const floor = 2 * time.Second
+	if d <= 0 {
+		return floor
 	}
+	return d
 }

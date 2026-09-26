@@ -222,11 +222,11 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 			onWaiting = func() { progress("waiting for signing approval") }
 		}
 		// The full ten either way, now that direct mode converges too (issue #66). The TUI drove
-		// only CoreSteps while three things were missing: DirectSteps stopped at the push,
-		// flight.retryableStep classified only CIGreen/Approved so a transient Kubernetes Get
-		// stopped the flight dead, and buildPollDurations carried neither poll.argo nor
-		// poll.rollout so pollInterval fell back to 2s. All three are addressed, so the screen
-		// now drives what it has always rendered (issue #64).
+		// only CoreSteps while three things were missing: DirectSteps stopped at the push, the
+		// flight screen's retry check (now engine.RetryableStep) classified only CIGreen/Approved
+		// so a transient Kubernetes Get stopped the flight dead, and buildPollDurations carried
+		// neither poll.argo nor poll.rollout so engine.PollInterval fell back to 2s. All three are
+		// addressed, so the screen now drives what it has always rendered (issue #64).
 		// eff.cfg.Envs.Production unfiltered — DirectSteps' own doc comment forbids a
 		// caller narrowing it. Confirmed comes from the screen that ran the gesture.
 		steps := engine.StepsFor(s, g, f, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)

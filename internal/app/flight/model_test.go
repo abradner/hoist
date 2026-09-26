@@ -15,10 +15,8 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // TestStepOrderMatchesAllSteps guards StepOrder (a literal, see rows.go's doc comment)
@@ -799,37 +797,21 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 	})
 }
 
-// TestPollIntervalUsesConfig: scheduleTick's own pollInterval reads the caller-supplied
-// PollDurations for CI/Approval rather than a hand-copied literal.
-func TestPollIntervalUsesConfig(t *testing.T) {
-	poll := PollDurations{CI: 7 * time.Second, Approval: 11 * time.Second}
-	cases := []struct {
-		phase engine.StepName
-		want  time.Duration
-	}{
-		{engine.StepCIGreen, 7 * time.Second},
-		{engine.StepApproved, 11 * time.Second},
-		{engine.StepBranched, 2 * time.Second},
-		{engine.StepMerged, 2 * time.Second},
+// TestMinTickIsAUIFloorNotPolicy is round-9's regression, re-pointed at minTick now that the
+// per-step mapping lives in engine.PollInterval (see internal/engine/policy_test.go for that):
+// PollDurations{} (the zero value app.go's current stub actually passes) must still make
+// tickDelay wait 2s, not fire tea.Tick(0, ...) immediately/tightly — a real CPU-spin risk this
+// screen's own tick loop must never hit. minTick only ever raises a non-positive answer; a
+// configured, positive interval passes through unchanged.
+func TestMinTickIsAUIFloorNotPolicy(t *testing.T) {
+	if got := minTick(0); got != 2*time.Second {
+		t.Errorf("minTick(0) = %v, want the 2s floor", got)
 	}
-	for _, tc := range cases {
-		if got := pollInterval(poll, tc.phase); got != tc.want {
-			t.Errorf("pollInterval(%s) = %v, want %v", tc.phase, got, tc.want)
-		}
+	if got := minTick(-time.Second); got != 2*time.Second {
+		t.Errorf("minTick(-1s) = %v, want the 2s floor", got)
 	}
-}
-
-// TestPollIntervalZeroValueFallsBackToDefault is round-9's regression: PollDurations{} (the zero
-// value app.go's current stub actually passes) must fall back to the same 2s default every
-// other step already gets, not return a literal 0 — tea.Tick(0, ...) fires immediately/tightly,
-// a real CPU-spin risk if a caller ever leaves CI/Approval unset (exactly what the doc comment
-// on PollDurations claims happens, but the code didn't actually do until this fix).
-func TestPollIntervalZeroValueFallsBackToDefault(t *testing.T) {
-	var poll PollDurations
-	for _, phase := range []engine.StepName{engine.StepCIGreen, engine.StepApproved} {
-		if got := pollInterval(poll, phase); got != 2*time.Second {
-			t.Errorf("pollInterval(zero value, %s) = %v, want the 2s default", phase, got)
-		}
+	if got := minTick(7 * time.Second); got != 7*time.Second {
+		t.Errorf("minTick(7s) = %v, want 7s unchanged", got)
 	}
 }
 
@@ -919,76 +901,6 @@ func assertFits(t *testing.T, view string, width int) {
 		if w := ansi.StringWidth(l); w > width {
 			t.Errorf("line %d is %d wide, over %d: %q", i+1, w, width, l)
 		}
-	}
-}
-
-// Issue #64's two remaining halves, both invisible until the screen actually drove the M5
-// steps: a transient Kubernetes error must keep the flight polling, and the operator's
-// configured Argo/rollout cadences must be the ones used.
-func TestRetryableStepCoversTheClusterPollingSteps(t *testing.T) {
-	for _, step := range []engine.StepName{
-		engine.StepCIGreen, engine.StepApproved,
-		engine.StepArgoRefreshed, engine.StepArgoSynced, engine.StepRolledOut,
-	} {
-		if !retryableStep(step) {
-			t.Errorf("%s should be retryable: a transient poll failure there stops the flight dead", step)
-		}
-	}
-	// A step whose failure is genuinely terminal must stay terminal — retrying a broken push
-	// or a rejected commit forever would hide a real problem behind a spinner.
-	for _, step := range []engine.StepName{engine.StepBranched, engine.StepCommitted, engine.StepPushed, engine.StepMerged} {
-		if retryableStep(step) {
-			t.Errorf("%s must not be retryable", step)
-		}
-	}
-}
-
-func TestPollIntervalUsesTheConfiguredArgoAndRolloutCadences(t *testing.T) {
-	poll := PollDurations{
-		CI: 11 * time.Second, Approval: 22 * time.Second,
-		Argo: 33 * time.Second, Rollout: 44 * time.Second,
-	}
-	for step, want := range map[engine.StepName]time.Duration{
-		engine.StepCIGreen:       11 * time.Second,
-		engine.StepApproved:      22 * time.Second,
-		engine.StepArgoRefreshed: 33 * time.Second,
-		engine.StepArgoSynced:    33 * time.Second,
-		engine.StepRolledOut:     44 * time.Second,
-	} {
-		if got := pollInterval(poll, step); got != want {
-			t.Errorf("pollInterval(%s) = %s, want %s — an unconfigured step falls back to 2s and hammers the API", step, got, want)
-		}
-	}
-}
-
-// TestNotFoundOnARetryableStepIsTerminal is the sentinel exclusion cmd/hoist/drive.go has
-// always applied and this screen did not once the three cluster steps became retryable: a
-// missing Application or Deployment is structural, and no amount of waiting brings it back.
-// Observe reports it as Blocked, but Act cannot produce a BlockedError of its own, so an Act
-// that races a deletion after a successful Observe surfaces the sentinel as a plain error —
-// which would then have been retried until poll.Deadline (Copilot, PR #72).
-//
-// Asserted alongside the same step carrying an ordinary transient error, so this cannot pass
-// by the cluster steps having quietly stopped being retryable at all.
-func TestNotFoundOnARetryableStepIsTerminal(t *testing.T) {
-	transient := &engine.StepError{Step: engine.StepArgoSynced, Op: "observe", Err: errors.New("GET applications: connection reset")}
-	if !retryableErr(transient) {
-		t.Fatal("fixture precondition: a transient failure on a cluster step is retryable")
-	}
-	for _, tc := range []struct {
-		name string
-		err  error
-	}{
-		{"argo", argo.ErrNotFound},
-		{"rollout", rollout.ErrNotFound},
-		{"wrapped", fmt.Errorf("reading Argo Application app-production: %w", argo.ErrNotFound)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := &engine.StepError{Step: engine.StepArgoRefreshed, Op: "act", Err: tc.err}
-			if retryableErr(e) {
-				t.Errorf("a %s sentinel on a retryable step must stop the flight, not be polled until the deadline", tc.name)
-			}
-		})
 	}
 }
 

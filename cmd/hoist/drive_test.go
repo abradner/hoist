@@ -18,74 +18,25 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// TestPollIntervalPicksTheConfiguredKnobPerStep is the regression test for the M5 gap:
-// pollInterval switched on engine.StepName for CIGreen/Approved but fell through to the
-// hardcoded 2s default for every other phase, silently including the three M5 steps
-// (StepArgoRefreshed, StepArgoSynced, StepRolledOut) — meaning `promote`/`resume`'s live drive
-// loop ignored poll.argo/poll.rollout entirely and always polled Argo/rollout status every 2s,
-// regardless of what the operator configured. Each of the three new step names must map to its
-// own configured interval, not the fallback, and the fallback itself must still answer for a
-// step with genuinely no config knob (AGENTS.md §4.9: a knob with no real use is a knob nobody
-// needed).
-func TestPollIntervalPicksTheConfiguredKnobPerStep(t *testing.T) {
+// TestPollIntervalsConvertsEveryKnob is the CLI-boundary regression: pollIntervals must carry
+// every one of config.PollConfig's four knobs into engine.PollIntervals unchanged — the actual
+// per-step mapping and fallback are engine.PollInterval's own responsibility, covered in
+// internal/engine/policy_test.go.
+func TestPollIntervalsConvertsEveryKnob(t *testing.T) {
 	poll := config.PollConfig{
 		CI:       config.Duration(11 * time.Second),
 		Approval: config.Duration(22 * time.Second),
 		Argo:     config.Duration(33 * time.Second),
 		Rollout:  config.Duration(44 * time.Second),
 	}
-
-	cases := []struct {
-		phase engine.StepName
-		want  time.Duration
-	}{
-		{engine.StepCIGreen, 11 * time.Second},
-		{engine.StepApproved, 22 * time.Second},
-		{engine.StepArgoRefreshed, 33 * time.Second},
-		{engine.StepArgoSynced, 33 * time.Second},
-		{engine.StepRolledOut, 44 * time.Second},
-		// A step with no configured knob still falls back to the fixed 2s interval — proves the
-		// new cases are additions, not a rewrite that broke the pre-existing fallback.
-		{engine.StepBranched, 2 * time.Second},
-	}
-	for _, c := range cases {
-		if got := pollInterval(poll, c.phase); got != c.want {
-			t.Errorf("pollInterval(%s) = %s, want %s", c.phase, got, c.want)
-		}
+	got := pollIntervals(poll)
+	want := engine.PollIntervals{CI: 11 * time.Second, Approval: 22 * time.Second, Argo: 33 * time.Second, Rollout: 44 * time.Second}
+	if got != want {
+		t.Errorf("pollIntervals(%+v) = %+v, want %+v", poll, got, want)
 	}
 }
 
-// TestRetryableStepIncludesM5PollingSteps is round-1's regression: retryableStep only listed
-// CIGreen and Approved, so a single transient Kubernetes API error (a connection reset, a
-// timeout) reading an Argo Application or Deployment status made driveToCompletion abort
-// promote/resume immediately instead of retrying at poll.argo/poll.rollout until poll.deadline —
-// exactly the same shape of problem CIGreen/Approved were already carved out for.
-func TestRetryableStepIncludesM5PollingSteps(t *testing.T) {
-	cases := []struct {
-		step engine.StepName
-		want bool
-	}{
-		{engine.StepCIGreen, true},
-		{engine.StepApproved, true},
-		{engine.StepArgoRefreshed, true},
-		{engine.StepArgoSynced, true},
-		{engine.StepRolledOut, true},
-		// Every other step's error is still terminal — proves this is an addition, not a
-		// rewrite that made everything retryable.
-		{engine.StepBranched, false},
-		{engine.StepCommitted, false},
-		{engine.StepPushed, false},
-		{engine.StepPROpened, false},
-		{engine.StepMerged, false},
-	}
-	for _, c := range cases {
-		if got := retryableStep(c.step); got != c.want {
-			t.Errorf("retryableStep(%s) = %v, want %v", c.step, got, c.want)
-		}
-	}
-}
-
-// TestDriveToCompletionRetriesTransientRolloutErrors is retryableStep's sibling end-to-end
+// TestDriveToCompletionRetriesTransientRolloutErrors is engine.RetryableStep's sibling end-to-end
 // regression, exercising the actual loop rather than just the classification function: a
 // RolledOutStep whose Rollout.Deployment call always fails with a transient (non-ErrNotFound)
 // error must make driveToCompletion retry at poll.rollout until ctx's deadline elapses — never

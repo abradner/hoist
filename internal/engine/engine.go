@@ -359,11 +359,12 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // would otherwise cost one extra, wasted remote call on the final step, every tick of the
 // flight screen's own poll loop (PR #39 review finding #3).
 // Both of Status's own Observe errors are returned as *StepError (Op: "observe"), not a bare
-// fmt.Errorf, even though nothing here ever calls Act: internal/app/flight.Model's retry
-// classifier (retryableErr, mirroring cmd/hoist/drive.go's own driveToCompletion) only retries
-// automatically on a *StepError naming StepCIGreen or StepApproved — the two steps whose
-// Observe alone can transiently 404/scope-error on a Checks or Comments call without the
-// underlying condition (CI status, an approval) actually being answerable yet. A bare wrapped
+// fmt.Errorf, even though nothing here ever calls Act: Retryable (this package, called by both
+// cmd/hoist/drive.go's driveToCompletion and internal/app/flight.Model's own retry check) only
+// retries automatically on a *StepError naming one of RetryableStep's five steps — CIGreen and
+// Approved, whose Observe alone can transiently 404/scope-error on a Checks or Comments call
+// without the underlying condition (CI status, an approval) actually being answerable yet, plus
+// ArgoRefreshed/ArgoSynced/RolledOut for the same reason against the Kubernetes API. A bare wrapped
 // error carries the same message (StepError.Error()'s "<step>: <op>: <err>" format matches this
 // function's own pre-existing "%s: observe: %w" text exactly, and Unwrap still reaches oerr, so
 // errors.Is/the message text are both unchanged) but cannot be told apart by errors.As, which is

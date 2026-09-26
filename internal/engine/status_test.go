@@ -199,8 +199,8 @@ func TestStatusPropagatesObserveError(t *testing.T) {
 }
 
 // TestStatusObserveErrorIsStepError is PR #50 round-4 review finding #6 (Codex):
-// internal/app/flight.Model's retry classifier (retryableErr) only ever retries a *StepError
-// naming StepCIGreen or StepApproved — the exact shape cmd/hoist/drive.go's own
+// internal/app/flight.Model's retry check (Retryable, this package) only ever retries a
+// *StepError naming one of RetryableStep's steps — the exact shape cmd/hoist/drive.go's own
 // driveToCompletion already retries when Drive's Observe hits the identical transient failure
 // directly. Before this fix, Status wrapped an Observe error with a bare fmt.Errorf, which
 // errors.As(err, &StepError{}) never matches, so a transient Checks/Comments hiccup on the
