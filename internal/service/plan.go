@@ -98,6 +98,18 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 	view := RepoView{Repo: r}
 	if r == cur.Repo {
 		view = cur
+	} else if cur.FromOrigin {
+		// s is in origin mode (LoadRepo(RepoFromOrigin) has run — TUI boot or a later F5) and
+		// req.Repo names a DIFFERENT *gitops.Repo than the one s.view currently holds: an F5
+		// refresh landed between whatever built this request (the TUI's plan.Func closure, the
+		// deploy confirm's own PlanRequest) and this call actually running. Building
+		// RepoView{Repo: r} here — as the branch above does for req.Repo == cur.Repo — would
+		// silently downgrade StartPromotion's later freshness check from CheckRepoViewCurrent
+		// (the tight origin-tip comparison, t1-review.md P2 #6) to checkCloneCurrentForBase (the
+		// looser local-disk check), since FromOrigin would read false. Fail closed instead: the
+		// CLI path below never reaches this branch, because it never calls LoadRepo at all, so
+		// cur.FromOrigin is always false there regardless of what Repo it passes.
+		return PlannedChange{}, fmt.Errorf("service: Plan: the repo view changed while this plan was being built — refresh and try again")
 	}
 
 	if req.Deploy != nil {
