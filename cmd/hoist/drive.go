@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/redact"
@@ -28,72 +28,18 @@ func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 	}
 }
 
-// driveToCompletion runs engine.Drive repeatedly, sleeping pollInterval's answer between
-// attempts, until it succeeds, hits a *engine.BlockedError, or ctx is done (AGENTS.md §4.9's
-// poll.deadline, applied by the caller wrapping ctx with a timeout — never a constant this
-// function invents on its own). AGENTS.md invariant 4: the actual waiting lives here, in the
-// CLI driver's own loop calling Drive (which itself only calls Observe, never sleeps) —
-// nothing about a Step's Act ever blocks on a poll interval.
-//
-// A plain error from Drive (not ErrWaiting, not *BlockedError) is treated as potentially
-// transient — Known bug classes: a 404 or permissions hiccup on Checks/Comments must be
-// retried, not read as a hard failure — logged once and retried after the poll interval, rather
-// than aborting on the first hiccup; ctx cancellation is what actually bounds that retry loop.
-func driveToCompletion(ctx context.Context, steps []engine.Step, s *engine.PromotionState, save func(*engine.PromotionState) error, poll config.PollConfig, stderr io.Writer) error {
-	w := waitingReporter{w: stderr, now: time.Now}
-	for {
-		err := engine.Drive(ctx, steps, s, save)
-		waiting := errors.Is(err, engine.ErrWaiting)
-		switch {
-		case err == nil:
-			return nil
-		case waiting:
-			w.report(s)
-		default:
-			var blocked *engine.BlockedError
-			if errors.As(err, &blocked) {
-				return err
-			}
-			if !engine.Retryable(err) {
-				// Not a step engine.Retryable knows to be transient (Known bug classes: a
-				// 404/scope hiccup on CIGreen's Checks or Approved's Comments/IsAllowedAuthor
-				// calls) — a git/GitHub operation on an earlier step failing terminally (a
-				// rejected push, a broken git binary) will not fix itself by waiting, so report
-				// it immediately exactly as pre-M4 Drive callers did. engine.Retryable also
-				// excludes engine.IsNotFound's sentinels, closing a gap engine.RetryableStep's
-				// own doc comment assumes doesn't exist: ArgoRefreshedStep/RolledOutStep's own
-				// Observe already Blocks cleanly on a missing Application/Deployment (never
-				// reaching here as a plain StepError at all), but their Act calls (Refresh, or
-				// any future write) can independently discover the same absence — a race between
-				// Observe and Act, an Application/Deployment deleted or moved in between — and
-				// Act has no way to produce a *BlockedError itself (Drive always wraps an Act
-				// error as a plain retryable-looking *StepError, engine.go's own Drive). Without
-				// this check, that race silently retries every poll.argo/poll.rollout interval
-				// instead of reporting Blocked immediately (Copilot review, PR #51).
-				return err
-			}
-			fmt.Fprintf(stderr, "hoist: %s (retrying)\n", redact.Strings(err.Error()))
-		}
-		// The sleep is taken in heartbeat-sized pieces so a poll interval longer than
-		// heartbeatEvery (poll.approval accepts any duration) still shows the run is alive
-		// between observations; report on the same state prints nothing unless a heartbeat is
-		// due, and never touches the remote (Copilot on PR #94). Only a pass that actually
-		// waited heartbeats: a retried StepError records no new wait, and a heartbeat off an
-		// older entry would claim the run is still waiting on a step it has moved past
-		// (Copilot on PR #99).
-		remaining := engine.PollInterval(pollIntervals(poll), s.Phase)
-		for remaining > 0 {
-			nap := min(remaining, heartbeatEvery)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(nap):
-			}
-			remaining -= nap
-			if waiting {
-				w.report(s)
-			}
-		}
+// runHooksForCLI builds the service.RunHooks a CLI drive command runs a *service.Driver's Run
+// through — the same waitingReporter/heartbeatEvery reporting cmd/hoist's own driveToCompletion
+// gave every promotion before this PR, now wired as hooks Run itself calls rather than logic
+// duplicated in a loop this package no longer owns (AGENTS.md invariant 4: the actual waiting
+// still lives in Run's own loop, not here — this is only what gets printed while it waits).
+func runHooksForCLI(stderr io.Writer) service.RunHooks {
+	w := &waitingReporter{w: stderr, now: time.Now}
+	return service.RunHooks{
+		OnTick:      func(t service.Tick) { w.report(&t.State) },
+		OnRetry:     func(err error) { fmt.Fprintf(stderr, "hoist: %s (retrying)\n", redact.Strings(err.Error())) },
+		Heartbeat:   heartbeatEvery,
+		OnHeartbeat: func(t service.Tick) { w.report(&t.State) },
 	}
 }
 

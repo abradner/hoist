@@ -11,7 +11,17 @@ import (
 
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 )
+
+// hungDriveFunc adapts a plain Step function to flight.Driver — a fake standing in for a Driver
+// whose Step never returns on its own (blocks on ctx.Done()), for tests that only care about
+// cancellation/wait behavior, never about State()/OverrideCINone().
+type hungDriveFunc func(ctx context.Context) (service.Tick, error)
+
+func (f hungDriveFunc) Step(ctx context.Context) (service.Tick, error) { return f(ctx) }
+func (f hungDriveFunc) State() engine.PromotionState                   { return engine.PromotionState{} }
+func (f hungDriveFunc) OverrideCINone()                                {}
 
 // TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn: the flight screen's own X gesture
 // already confirmed the operator wants this (flight.AbandonMsg's own doc comment) — the root
@@ -129,11 +139,11 @@ func TestFlightAbandonMsgWithoutHandlerShowsNotice(t *testing.T) {
 // back to false through the normal driveResultMsg path.
 func TestFlightAbandonMsgWaitsForBusyDriveCmdBeforeAbandoning(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+	hung := hungDriveFunc(func(ctx context.Context) (service.Tick, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
-		return engine.PromotionState{}, false, nil, ctx.Err()
-	}
+		return service.Tick{}, ctx.Err()
+	})
 	root := sized(t).(Model)
 	root = root.WithAbandon(func(context.Context, string) error { return nil })
 	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}

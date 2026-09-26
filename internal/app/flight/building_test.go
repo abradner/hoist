@@ -130,7 +130,7 @@ func TestAdoptBuiltTransitionsToDriving(t *testing.T) {
 		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true, Detail: "worktree present"}},
 	}}
 	realState := fixtureState()
-	next, cmd := m.AdoptBuilt(realState, drv.fn())
+	next, cmd := m.AdoptBuilt(realState, drv.fn(realState))
 	if next.Building() {
 		t.Error("Building() still true after AdoptBuilt")
 	}

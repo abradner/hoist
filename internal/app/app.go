@@ -28,7 +28,7 @@ import (
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// StartPromotionFunc builds a real engine.PromotionState and flight.DriveFunc for a plan the
+// StartPromotionFunc builds a real engine.PromotionState and flight.Driver for a plan the
 // operator just confirmed (plan.StartMsg) — the id/branch/worktree derivation, the
 // claim-then-rescan one-in-flight check, and the prior-state merge-in that
 // cmd/hoist/promote.go's buildPromotionForConfirm already does for the CLI path (AGENTS.md
@@ -55,7 +55,7 @@ import (
 // implementation reuses the same callback for engine.Drive's onWaiting and per-step save
 // hooks once driving starts, so preflight and the drive that follows it read as one
 // continuous log, not two.
-type StartPromotionFunc func(ctx context.Context, p gitops.Plan, opts StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error)
+type StartPromotionFunc func(ctx context.Context, p gitops.Plan, opts StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error)
 
 // StartOpts is how a screen says which shape of promotion it confirmed. It is a struct rather
 // than a bool so that adding a future mode does not change every call site's meaning silently.
@@ -98,7 +98,7 @@ type Promotion struct {
 type promotionBuiltMsg struct {
 	gen     uint64
 	state   engine.PromotionState
-	driveFn flight.DriveFunc
+	driveFn flight.Driver
 	err     error
 	// deadlineAt is the one absolute instant m.poll.Deadline named at plan.StartMsg time — zero
 	// when there is no configured deadline at all. Carried through so the flight screen's own
@@ -120,7 +120,7 @@ type promotionBuiltMsg struct {
 // run, a test): the pane stays absent and r says so.
 type InFlight struct {
 	List   func(ctx context.Context) ([]flight.Summary, error)
-	Resume func(ctx context.Context, id string) (engine.PromotionState, flight.DriveFunc, error)
+	Resume func(ctx context.Context, id string) (engine.PromotionState, flight.Driver, error)
 }
 
 // openURLResultMsg is the browser launcher's answer for one URL, delivered by the command

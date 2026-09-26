@@ -134,6 +134,31 @@ type HistoryEntry struct {
 // than re-fetched when the main loop reaches that step in its own turn, so the probe never
 // costs a duplicate real call either way.
 func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*PromotionState) error) error {
+	_, _, err := DriveStatus(ctx, steps, s, save)
+	return err
+}
+
+// DriveStatus is Drive plus ObserveAll/Status's own per-step reporting, in the one walk: it
+// runs exactly what Drive runs (the same probe, the same Observe/Act sequence, the same saves),
+// and additionally accumulates a StepStatus for every step it actually reaches — one Observe
+// per step per call, never Drive's walk followed by a second, independent Status walk over the
+// same steps. That second walk is what this function replaces: a driver that wants both "did
+// this poll finish, or fail, or need to wait" (Drive's own return) and "what does every step's
+// row look like right now" (Status's own return) used to have to call both, which for a
+// healthy or waiting poll re-Observed every already-satisfied step a second time — real
+// remote/git/forge calls, doubled on every tick a TUI or CLI driver made (AGENTS.md §9 entry
+// 11's own lesson, generalized: a two-walk shape that happens to agree today is still two walks
+// against the world, and the caller who wants to be told about *this* poll's own destination
+// (see Tick.Stopped in internal/service) should not have to pay for two).
+//
+// An acted step's StepStatus is recorded as cleanly Satisfied with Detail "acted", mirroring the
+// "acted" history line Drive itself already writes — a caller rendering rows sees an
+// already-satisfied step and a just-acted one the same way, which is correct: both are true the
+// instant Act returns without error. When the MergedStep probe (see Drive's own doc comment)
+// short-circuits the walk past Branched..Merged, the probe's own StepStatus is appended here
+// exactly as Status's own probe does — the one entry a caller needs to know the merge itself is
+// done, without this function re-Observing every step the probe already proved satisfied.
+func DriveStatus(ctx context.Context, steps []Step, s *PromotionState, save func(*PromotionState) error) (done bool, statuses []StepStatus, err error) {
 	mergedIdx := -1
 	for i, step := range steps {
 		if step.Name() == StepMerged {
@@ -145,10 +170,11 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 	probedIdx := -1
 	var probed Observation
 	if mergedIdx >= 0 && mergedIdx < len(steps)-1 && phaseIndex(steps, s.Phase) > mergedIdx {
-		if obs, err := steps[mergedIdx].Observe(ctx, s); err == nil {
+		if obs, perr := steps[mergedIdx].Observe(ctx, s); perr == nil {
 			probedIdx, probed = mergedIdx, obs
 			if obs.Blocked == "" && !obs.Waiting && obs.Satisfied {
 				start = mergedIdx + 1
+				statuses = append(statuses, StepStatus{Step: steps[mergedIdx].Name(), Observation: obs})
 			}
 		}
 		// A probe error is deliberately not handled here — it falls through to the main loop,
@@ -157,51 +183,56 @@ func Drive(ctx context.Context, steps []Step, s *PromotionState, save func(*Prom
 	}
 	for i := start; i < len(steps); i++ {
 		step := steps[i]
-		if err := ctx.Err(); err != nil {
-			return err
+		if cerr := ctx.Err(); cerr != nil {
+			return false, statuses, cerr
 		}
 		var obs Observation
-		var err error
+		var oerr error
 		if i == probedIdx {
 			obs = probed
 		} else {
-			obs, err = step.Observe(ctx, s)
+			obs, oerr = step.Observe(ctx, s)
 		}
-		if err != nil {
+		if oerr != nil {
 			s.Phase = step.Name()
-			return &StepError{Step: step.Name(), Op: "observe", Err: err}
+			return false, statuses, &StepError{Step: step.Name(), Op: "observe", Err: oerr}
 		}
 		if obs.Blocked != "" {
 			s.Phase = step.Name()
 			appendHistory(s, step.Name(), "blocked: "+obs.Blocked)
 			saveIfSet(s, save)
-			return &BlockedError{Step: step.Name(), Reason: obs.Blocked}
+			statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
+			return false, statuses, &BlockedError{Step: step.Name(), Reason: obs.Blocked}
 		}
 		if obs.Waiting {
 			s.Phase = step.Name()
 			appendHistory(s, step.Name(), "waiting: "+obs.Detail)
 			saveIfSet(s, save)
-			return ErrWaiting
+			statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
+			return false, statuses, ErrWaiting
 		}
 		if !obs.Satisfied {
 			if err := step.Act(ctx, s); err != nil {
 				s.Phase = step.Name()
 				appendHistory(s, step.Name(), "act failed: "+err.Error())
 				saveIfSet(s, save)
-				return &StepError{Step: step.Name(), Op: "act", Err: err}
+				statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
+				return false, statuses, &StepError{Step: step.Name(), Op: "act", Err: err}
 			}
 			appendHistory(s, step.Name(), "acted")
+			obs = Observation{Satisfied: true, Detail: "acted"}
 		} else {
 			appendHistory(s, step.Name(), "already satisfied: "+obs.Detail)
 		}
+		statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
 		s.Phase = step.Name()
 		if save != nil {
 			if err := save(s); err != nil {
-				return fmt.Errorf("%s: saving state: %w", step.Name(), err)
+				return false, statuses, fmt.Errorf("%s: saving state: %w", step.Name(), err)
 			}
 		}
 	}
-	return nil
+	return true, statuses, nil
 }
 
 // phaseIndex returns the index within steps whose Name() matches phase, or -1 if phase is empty,

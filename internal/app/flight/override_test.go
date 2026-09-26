@@ -47,7 +47,7 @@ func blockedOnCINone(t *testing.T, drv *stubDrive) Model {
 	s := fixtureState()
 	s.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
 	drv.statuses = ciNoneStatuses(t, s.ID)
-	m := New(s, PollDurations{}, drv.fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m := New(s, PollDurations{}, drv.fn(s)).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	m = uitest.Drain(m, m.Init(), Model.Update)
 	if !m.stopped || !m.offersCINoneOverride() {
 		t.Fatalf("fixture precondition: screen should be blocked on the ci.none reason (stopped=%v offer=%v)", m.stopped, m.offersCINoneOverride())
@@ -149,7 +149,7 @@ func TestOverrideKeyDoesNothingForOtherBlocks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			drv := &stubDrive{statuses: tc.statuses}
-			m := New(fixtureState(), PollDurations{}, drv.fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+			m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 			m = runInit(t, m) // not Drain: a waiting result schedules a real tick Drain would follow
 			if m.offersCINoneOverride() {
 				t.Fatal("the offer must not be made for this block")
@@ -232,7 +232,7 @@ func TestApplyCINoneOverrideRefusesOnADoneScreen(t *testing.T) {
 		st(engine.StepBranched, engine.Observation{Satisfied: true}),
 		st(engine.StepRolledOut, engine.Observation{Satisfied: true}),
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	m = runInit(t, m)
 	if !m.done {
 		t.Fatal("fixture precondition: the screen should be done")
@@ -241,15 +241,24 @@ func TestApplyCINoneOverrideRefusesOnADoneScreen(t *testing.T) {
 	if cmd != nil {
 		t.Error("a done screen must not schedule a drive")
 	}
-	if m.state.CINoneOverride {
-		t.Error("a done screen recorded CINoneOverride with nothing to re-drive")
+	// m.state.CINoneOverride is never set on the screen's own state any more — the override
+	// lives on the Driver (drv.overrideCalls), set inside a re-drive's own goroutine
+	// (ApplyCINoneOverride's own doc comment) — so asserting it here would pass whether or not
+	// this screen's own refusal actually stopped anything from reaching the Driver (t1-review.md
+	// P3). Asserting the Driver was never called is the real claim this test makes.
+	if drv.overrideCalls != 0 {
+		t.Errorf("a done screen must never call the Driver's OverrideCINone, got %d calls", drv.overrideCalls)
 	}
 	if !strings.Contains(m.notice, "not applied") {
 		t.Errorf("notice should say the override was not applied, got %q", m.notice)
 	}
 
-	ctl, cmd := blockedOnCINone(t, &stubDrive{}).ApplyCINoneOverride()
-	if cmd == nil || !ctl.state.CINoneOverride {
-		t.Errorf("positive control: a blocked screen must record and re-drive (cmd=%v flag=%v)", cmd != nil, ctl.state.CINoneOverride)
+	// The positive control: a blocked screen schedules a re-drive. The override itself is set
+	// inside that re-drive's own goroutine now (stepCmd(true), off the Update call stack — see
+	// ApplyCINoneOverride's own doc comment), so it is not yet on ctl.state here; running cmd
+	// (TestApplyCINoneOverrideRedrivesWithTheFlagSet) is what proves the flag actually reaches
+	// the Driver.
+	if _, cmd := blockedOnCINone(t, &stubDrive{}).ApplyCINoneOverride(); cmd == nil {
+		t.Error("positive control: a blocked screen must schedule a re-drive")
 	}
 }

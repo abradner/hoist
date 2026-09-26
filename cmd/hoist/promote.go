@@ -556,7 +556,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return nil
 	}
 
-	err = driveToCompletion(ctx, steps, s, save, cfg.Poll, stderr)
+	d := service.NewDriver(steps, s, save, pollIntervals(cfg.Poll), service.DriverHooks{})
+	err = d.Run(ctx, runHooksForCLI(stderr))
 	return reportDriveResult(stdout, stderr, "hoist promote", plan.SourceEnv, plan.TargetEnv, s, err)
 }
 

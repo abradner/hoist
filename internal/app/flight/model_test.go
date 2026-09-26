@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
@@ -96,28 +97,66 @@ func fixtureState() engine.PromotionState {
 	}
 }
 
-// stubDrive returns a DriveFunc that always returns the given (done, statuses, err),
-// counting calls and recording the state it was invoked with.
+// stubDrive is a fake flight.Driver: Step always answers the fixed (done, statuses, err) a test
+// configured, counting calls and recording the state it was invoked with (lastSeen — the
+// Driver's own internal state, s.state, as it stood the instant Step ran, matching what a real
+// service.Driver's Step reads before mutating it). state seeds that internal state (a real
+// Driver is always constructed already holding one, from cmd/hoist's own *engine.PromotionState
+// — a test that cares what ID/fields a poll sees sets this the same way); next, when its ID is
+// non-empty, replaces it for this and every later Step call, the same way a real Driver's own
+// state advances once DriveStatus acts on or stops at a step.
 type stubDrive struct {
-	calls    int
-	lastSeen engine.PromotionState
-	next     engine.PromotionState
-	done     bool
-	statuses []engine.StepStatus
-	err      error
+	calls         int
+	lastSeen      engine.PromotionState
+	state         engine.PromotionState
+	next          engine.PromotionState
+	done          bool
+	statuses      []engine.StepStatus
+	err           error
+	wait          time.Duration
+	overrideCalls int
 }
 
-func (s *stubDrive) fn() DriveFunc {
-	return func(_ context.Context, state engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		s.calls++
-		s.lastSeen = state
-		next := s.next
-		if next.ID == "" {
-			next = state
-		}
-		return next, s.done, s.statuses, s.err
+func (s *stubDrive) Step(context.Context) (service.Tick, error) {
+	s.calls++
+	if s.next.ID != "" {
+		s.state = s.next
 	}
+	s.lastSeen = s.state
+	// Retry mirrors service.Driver.Step's own engine.Retryable(err) — a fake standing in for a
+	// real Driver must classify retries the same way, not require every test to compute and set
+	// it by hand.
+	return service.Tick{State: s.state, Done: s.done, Statuses: s.statuses, Retry: engine.Retryable(s.err), Wait: s.wait}, s.err
 }
+
+func (s *stubDrive) State() engine.PromotionState { return s.state }
+
+func (s *stubDrive) OverrideCINone() {
+	s.overrideCalls++
+	s.state.CINoneOverride = true
+}
+
+// fn adapts s to the Driver interface, seeding its internal state with seed — a real
+// service.Driver is always constructed already holding the promotion's own state (cmd/hoist's
+// own *engine.PromotionState), and a fake standing in for one needs the same starting point so
+// a poll that doesn't set next still returns the state the test constructed New/AdoptBuilt with,
+// exactly as before the Driver owned its own state independently of what Model passed each call.
+func (s *stubDrive) fn(seed engine.PromotionState) Driver {
+	s.state = seed
+	return s
+}
+
+// hungDrive is a Driver whose Step blocks on ctx.Done() rather than ever returning on its own —
+// TestDriveCmdBoundedByPollDeadline/TestDriveCmdSharesOneAbsoluteDeadlineAcrossPolls' own fake
+// for a stalled network call.
+type hungDrive struct{ state engine.PromotionState }
+
+func (h hungDrive) Step(ctx context.Context) (service.Tick, error) {
+	<-ctx.Done()
+	return service.Tick{State: h.state}, ctx.Err()
+}
+func (h hungDrive) State() engine.PromotionState { return h.state }
+func (h hungDrive) OverrideCINone()              {}
 
 // runBatch drives one tea.Cmd through Update exactly once — mirrors internal/app's own root
 // loop (each cmd's message is delivered once, never re-run), matching plan.Model's own
@@ -160,7 +199,7 @@ func TestInitDrivesImmediately(t *testing.T) {
 	drv := &stubDrive{statuses: []engine.StepStatus{
 		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true, Detail: "worktree present"}},
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	if !m.busy {
 		t.Fatal("busy = false immediately after New with a non-nil driveFn")
 	}
@@ -184,10 +223,7 @@ func TestInitDrivesImmediately(t *testing.T) {
 // default) means no bound at all, by design — only the case actually reachable via real config
 // (deadline set) is tested here.
 func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
-	hung := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		<-ctx.Done()
-		return s, false, nil, ctx.Err()
-	}
+	hung := hungDrive{state: fixtureState()}
 	m := New(fixtureState(), PollDurations{Deadline: 20 * time.Millisecond}, hung)
 	cmd := m.driveCmd()
 	if cmd == nil {
@@ -221,10 +257,7 @@ func TestDriveCmdBoundedByPollDeadline(t *testing.T) {
 // creation — returning near-instantly — rather than getting its own fresh window and blocking
 // for another almost-full poll.Deadline.
 func TestDriveCmdSharesOneAbsoluteDeadlineAcrossPolls(t *testing.T) {
-	hung := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		<-ctx.Done()
-		return s, false, nil, ctx.Err()
-	}
+	hung := hungDrive{state: fixtureState()}
 	m := New(fixtureState(), PollDurations{Deadline: 60 * time.Millisecond}, hung)
 
 	msg1, ok := m.driveCmd()().(driveResultMsg)
@@ -248,7 +281,7 @@ func TestDriveCmdSharesOneAbsoluteDeadlineAcrossPolls(t *testing.T) {
 // different flight.Model instance (see TestStaleDriveResultFromAnotherModelIsIgnored below,
 // PR #50 review finding #4). This is the direct, narrow check that driveCmd actually stamps it.
 func TestDriveCmdStampsCurrentGen(t *testing.T) {
-	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn())
+	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn(fixtureState()))
 	msg, ok := m.driveCmd()().(driveResultMsg)
 	if !ok {
 		t.Fatalf("driveCmd's result is %T, want driveResultMsg", msg)
@@ -269,14 +302,14 @@ func TestDriveCmdStampsCurrentGen(t *testing.T) {
 // closure. This builds a driveResultMsg stamped with one Model's gen ("A", aborted) and feeds
 // it to a completely different Model ("B") — B must ignore it outright, unchanged.
 func TestStaleDriveResultFromAnotherModelIsIgnored(t *testing.T) {
-	a := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn()) // stands in for the aborted promotion
+	a := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn(fixtureState())) // stands in for the aborted promotion
 	staleFromA := driveResultMsg{
 		gen:   a.gen,
 		state: engine.PromotionState{ID: "from-a-not-b"},
 		done:  true,
 	}
 
-	b := New(engine.PromotionState{ID: "b-own-id", SourceEnv: "x", TargetEnv: "y"}, PollDurations{}, (&stubDrive{}).fn())
+	b := New(engine.PromotionState{ID: "b-own-id", SourceEnv: "x", TargetEnv: "y"}, PollDurations{}, (&stubDrive{}).fn(engine.PromotionState{ID: "b-own-id", SourceEnv: "x", TargetEnv: "y"}))
 	if b.gen == a.gen {
 		t.Fatal("setup: two New() calls produced the same gen — this test can't tell stale from current")
 	}
@@ -323,7 +356,7 @@ func TestReobserveBypassesTick(t *testing.T) {
 	drv := &stubDrive{statuses: []engine.StepStatus{
 		{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = runInit(t, m) // consume the initial drive so calls resets meaning clearly
 	if drv.calls != 1 {
 		t.Fatalf("setup: driveFn called %d times, want 1", drv.calls)
@@ -349,7 +382,7 @@ func TestReobserveBypassesTick(t *testing.T) {
 // fire an overlapping DriveFunc call.
 func TestReobserveIgnoredWhileBusy(t *testing.T) {
 	drv := &stubDrive{}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	// Do not run Init's cmd — m.busy is already true (set by New), simulating "a drive call
 	// is in flight".
 	if !m.busy {
@@ -404,17 +437,17 @@ func TestOpenPRKey(t *testing.T) {
 // handler mishandling an abort with an ID nothing downstream could safely act on.
 func TestAbortKeyNoticeWhenNotDriving(t *testing.T) {
 	cases := []struct {
-		name    string
-		state   engine.PromotionState
-		driveFn DriveFunc
+		name   string
+		state  engine.PromotionState
+		driver Driver
 	}{
 		{"nil driveFn, non-empty ID (today's actual stub shape has driveFn nil)", fixtureState(), nil},
-		{"real driveFn, empty ID", engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"}, (&stubDrive{}).fn()},
+		{"real driveFn, empty ID", engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"}, (&stubDrive{}).fn(engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"})},
 		{"nil driveFn, empty ID", engine.PromotionState{}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(tc.state, PollDurations{}, tc.driveFn)
+			m := New(tc.state, PollDurations{}, tc.driver)
 			m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 			m, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 			if cmd != nil {
@@ -433,7 +466,7 @@ func TestAbortKeyNoticeWhenNotDriving(t *testing.T) {
 // the currently-always-true stub case, it does not change the general contract.
 func TestAbortKeyEmitsWhenDriving(t *testing.T) {
 	state := fixtureState() // ID: "abcd1234"
-	m := New(state, PollDurations{}, (&stubDrive{}).fn())
+	m := New(state, PollDurations{}, (&stubDrive{}).fn(state))
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if cmd == nil {
 		t.Fatal("x produced no command")
@@ -486,7 +519,7 @@ func TestLogToggle(t *testing.T) {
 // terminal-step counterpart PR #50 review finding #7 added.
 func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
 	drv := &stubDrive{err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
@@ -509,6 +542,47 @@ func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
 	}
 }
 
+// TestRetryScheduleUsesTheDriversWait is TestRetryAfterAStatusErrorPollsAtTheFailedStepsCadence's
+// (pre-Driver; internal/service/driver_test.go now covers the Driver's own half of that
+// computation directly) flight-side twin: TestDriveErrorShowsNoticeAndKeepsPolling above already
+// proves *a* tick gets scheduled after a retryable drive error, but not that it is scheduled at
+// service.Tick.Wait specifically — the poll interval service.Driver.Step computed for whichever
+// step actually failed (AGENTS.md invariant 4: the real waiting lives in the caller's own loop).
+// A wiring regression that scheduled at some fixed or hardcoded interval instead of msg.wait
+// would pass that test just as well, since it only checks a tick is scheduled at all. This drives
+// the returned tea.Cmd (scheduleTickIn's own tea.Tick, a blocking sleep) with a wait small enough
+// to resolve near-instantly and asserts the elapsed time lands near it, not near minTick's 2s
+// floor or any other value.
+func TestRetryScheduleUsesTheDriversWait(t *testing.T) {
+	want := 15 * time.Millisecond
+	drv := &stubDrive{
+		err:  &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")},
+		wait: want,
+	}
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+
+	cmd := m.Init()
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("Init's command = %#v, want a 2-command batch (spinner tick, drive)", msg)
+	}
+	driveResult := batch[1]()
+	_, tickCmd := m.Update(driveResult)
+	if tickCmd == nil {
+		t.Fatal("no tick scheduled after a retryable drive error")
+	}
+
+	start := time.Now()
+	tickCmd()
+	elapsed := time.Since(start)
+
+	if elapsed < want/2 || elapsed > want*10 {
+		t.Fatalf("tick fired after %v, want close to the Driver's own wait=%v (not minTick's 2s floor or a hardcoded interval)", elapsed, want)
+	}
+}
+
 // TestDriveErrorOnNonRetryableStepStopsPolling is PR #50 review finding #7 (Codex):
 // cmd/hoist/drive.go's own driveToCompletion retries a *engine.StepError only on
 // StepCIGreen/StepApproved; every other step's error — a rejected push, a failed signing
@@ -520,7 +594,7 @@ func TestDriveErrorShowsNoticeAndKeepsPolling(t *testing.T) {
 // immediate result of processing the error or for a tick arriving afterward.
 func TestDriveErrorOnNonRetryableStepStopsPolling(t *testing.T) {
 	drv := &stubDrive{err: &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
@@ -562,7 +636,7 @@ func TestDriveResultAdoptsStateOnError(t *testing.T) {
 		next: withPR,
 		err:  &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")},
 	}
-	m := New(original, PollDurations{}, drv.fn())
+	m := New(original, PollDurations{}, drv.fn(original))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	batch := m.Init()().(tea.BatchMsg)
@@ -592,7 +666,7 @@ func TestDriveResultUpdatesRowsOnError(t *testing.T) {
 		},
 		err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")},
 	}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	batch := m.Init()().(tea.BatchMsg)
@@ -622,7 +696,7 @@ func TestDriveResultUpdatesRowsOnError(t *testing.T) {
 // transient kind that's supposed to keep retrying on its own.
 func TestRetryableErrorAfterPriorStopClearsStoppedAndResumesPolling(t *testing.T) {
 	terminal := &stubDrive{err: &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")}}
-	m := New(fixtureState(), PollDurations{}, terminal.fn())
+	m := New(fixtureState(), PollDurations{}, terminal.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	batch := m.Init()().(tea.BatchMsg)
@@ -634,7 +708,7 @@ func TestRetryableErrorAfterPriorStopClearsStoppedAndResumesPolling(t *testing.T
 	// The operator presses R (Reobserve) to retry by hand; this time the poll comes back with
 	// a retryable error instead (a transient CI-endpoint hiccup).
 	retryable := &stubDrive{err: &engine.StepError{Step: engine.StepCIGreen, Op: "observe", Err: errors.New("GET check-runs: 404")}}
-	m.driveFn = retryable.fn()
+	m.driver = retryable.fn(m.state)
 	m, retryCmd := m.handleKey(tea.KeyPressMsg{Code: 'R', Text: "R"})
 	if retryCmd == nil {
 		t.Fatal("R produced no command")
@@ -679,7 +753,7 @@ func TestDriveResultBlockedStopsPolling(t *testing.T) {
 			Blocked: "origin/promo-1 already exists with different content",
 		}},
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	batch := m.Init()().(tea.BatchMsg)
@@ -707,7 +781,7 @@ func TestDriveErrorRedactsRegisteredSecret(t *testing.T) {
 	const secret = "SEKRIT-FLIGHT-TOKEN"
 	redact.Register(secret)
 	drv := &stubDrive{err: errors.New("checking CI status: token " + secret + " rejected")}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
@@ -727,7 +801,7 @@ func TestDoneStopsTicking(t *testing.T) {
 	drv := &stubDrive{done: true, statuses: []engine.StepStatus{
 		{Step: engine.StepMerged, Observation: engine.Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}},
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn())
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 	m = runInit(t, m)
 	if !m.done {
@@ -761,7 +835,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 
 	t.Run("busy: spinner.TickMsg reschedules", func(t *testing.T) {
 		drv := &stubDrive{}
-		m := New(fixtureState(), PollDurations{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 		if !m.busy {
 			t.Fatal("setup: expected busy = true (New sets it for a non-nil driveFn)")
 		}
@@ -773,7 +847,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 
 	t.Run("not busy: spinner.TickMsg does not reschedule", func(t *testing.T) {
 		drv := &stubDrive{}
-		m := New(fixtureState(), PollDurations{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 		m.busy = false // simulate the gap between polls, waiting on scheduleTick's timer
 		_, cmd := m.Update(spinner.TickMsg{})
 		if cmd != nil {
@@ -785,7 +859,7 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 		drv := &stubDrive{done: true, statuses: []engine.StepStatus{
 			{Step: engine.StepMerged, Observation: engine.Observation{Satisfied: true, Detail: "merged"}},
 		}}
-		m := New(fixtureState(), PollDurations{}, drv.fn())
+		m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
 		m = runInit(t, m)
 		if !m.done {
 			t.Fatal("setup: expected done = true")
@@ -959,54 +1033,33 @@ func TestLogScrollsByKeypress(t *testing.T) {
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
 // The wait before a poll is capped at what is left of the deadline (#59): a 1s deadline with a
-// 20s CI interval used to sleep the full 20s and report the deadline 19s late.
-func TestTickDelayIsCappedAtTheDeadline(t *testing.T) {
+// 20s wait used to sleep the full 20s and report the deadline 19s late. Which interval to wait
+// for a given step is now the service.Driver's own engine.PollInterval computation (Tick.Wait),
+// not this screen's — this test is scoped to what is still this screen's job: minTick's floor
+// and the deadline cap, via capToDeadline directly (scheduleTickIn's own tea.Tick delay isn't
+// otherwise observable).
+func TestCapToDeadline(t *testing.T) {
 	now := time.Date(2026, 3, 5, 12, 0, 0, 0, time.UTC)
-	m := New(fixtureState(), PollDurations{CI: 20 * time.Second, Deadline: time.Hour}, nil).WithNow(func() time.Time { return now })
-	m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{
-		st(engine.StepBranched, engine.Observation{Satisfied: true}),
-		st(engine.StepCIGreen, engine.Observation{Waiting: true}),
-	})
-	if d := m.tickDelay(""); d != 20*time.Second {
-		t.Fatalf("an hour left: delay %v, want the CI interval", d)
+	m := New(fixtureState(), PollDurations{Deadline: time.Hour}, nil).WithNow(func() time.Time { return now })
+	if d := m.capToDeadline(20 * time.Second); d != 20*time.Second {
+		t.Fatalf("an hour left: delay %v, want the wait unchanged", d)
 	}
 	m.deadlineAt = now.Add(time.Second)
-	if d := m.tickDelay(""); d != time.Second {
+	if d := m.capToDeadline(20 * time.Second); d != time.Second {
 		t.Fatalf("a second left: delay %v, want 1s", d)
 	}
 	m.deadlineAt = now.Add(-time.Second)
-	if d := m.tickDelay(""); d != 0 {
+	if d := m.capToDeadline(20 * time.Second); d != 0 {
 		t.Fatalf("deadline passed: delay %v, want an immediate poll", d)
-	}
-}
-
-// After a Status error on CI or approval, Status returns no row for the failing step, so the
-// active step is unknown and the retry used to poll at the last step's 2s fallback (#61). The
-// error names the step, and the retry polls at that step's cadence.
-func TestRetryAfterAStatusErrorPollsAtTheFailedStepsCadence(t *testing.T) {
-	m := New(fixtureState(), PollDurations{CI: 20 * time.Second, Approval: 30 * time.Second}, nil)
-	m.rows = DeriveRows(StepOrder, false, []engine.StepStatus{st(engine.StepBranched, engine.Observation{Satisfied: true})})
-	if d := m.tickDelay(""); d == 30*time.Second {
-		t.Fatal("setup: no active row must not already read as the approval step")
-	}
-	if d := m.tickDelay(engine.StepApproved); d != 30*time.Second {
-		t.Fatalf("retry after an approval Status error: delay %v, want the approval interval", d)
-	}
-	if d := m.tickDelay(engine.StepCIGreen); d != 20*time.Second {
-		t.Fatalf("retry after a CI Status error: delay %v, want the CI interval", d)
 	}
 }
 
 // R after the deadline has passed used to reuse the exhausted context and fail before it
 // started (#57). It now gets a fresh window of poll.Deadline and says so.
 func TestReobserveAfterTheDeadlineGetsAFreshWindow(t *testing.T) {
-	calls := 0
-	drive := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		calls++
-		return s, false, nil, ctx.Err()
-	}
+	drive := &stubDrive{}
 	now := time.Now() // a wall-clock instant: the renewed context is a real deadline
-	m := New(fixtureState(), PollDurations{Deadline: time.Millisecond}, drive).WithNow(func() time.Time { return now })
+	m := New(fixtureState(), PollDurations{Deadline: time.Millisecond}, drive.fn(fixtureState())).WithNow(func() time.Time { return now })
 	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	time.Sleep(5 * time.Millisecond) // the real deadline in New's context passes
 	if m.ctx.Err() == nil {
@@ -1021,7 +1074,7 @@ func TestReobserveAfterTheDeadlineGetsAFreshWindow(t *testing.T) {
 	if !m.deadlineAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("deadline renewed to %v, want now+poll.Deadline", m.deadlineAt)
 	}
-	if calls != 0 {
+	if drive.calls != 0 {
 		t.Fatal("R must not have driven synchronously")
 	}
 }
