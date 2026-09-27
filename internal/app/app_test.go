@@ -479,20 +479,18 @@ func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 // session.Controller's own private entry.gen, never a field app.go holds or a test at this
 // layer can observe directly. Its guarantee is proven where it is now enforced —
 // TestStaleStepMsgAfterPokeIsDropped and TestControllerIsCopyOnWrite in
-// internal/app/session/controller_test.go — and, at this layer, by
-// TestStaleBuiltMsgFromCancelledBuildIsDropped below.
+// internal/app/session/controller_test.go.
 
-// TestStaleBuiltMsgFromCancelledBuildIsDropped replaces TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped
-// (PR #50 round-4 review finding #4, Codex), re-expressed for the session controller (Train 2
-// design PR 2): StartMsg pushes a building flight screen on the keypress itself, so the plan
-// screen is no longer on top and the operator's Esc routes to flight.BackMsg, which now calls
-// session.Controller.CancelBuild — the build's own entry is dropped and its ctx cancelled.
-// Without session.Controller's own generation check (onBuilt: `!ok || msg.gen != e.gen`), the
-// eventual builtMsg would still resurrect a flight screen (which immediately starts driving:
-// committing, pushing, opening a PR) for a plan the operator already backed out of. This proves
-// the stale result is dropped outright: the stack stays on the plan screen BackMsg returned to,
-// and nothing new is pushed or mirrored.
-func TestStaleBuiltMsgFromCancelledBuildIsDropped(t *testing.T) {
+// TestEscFromBuildingTruncatesPastThePlanScreenUnderneath replaces
+// TestEscFromBuildingWithAPlanScreenUnderneathStillLands (audit UX-H6/FB-H2, a follow-up to Train
+// 2 design PR 3): esc on the flight screen must land on the matrix even with a plan screen still
+// underneath it, not on that plan screen — landing there left it still ticked and ready, so Enter
+// would start the very drive esc just left watching. This is the plan-screen-still-underneath
+// shape TestEscDuringBuildKeepsBuilding does not cover (that one starts with only the matrix
+// underneath): esc here must close BOTH the flight screen and the plan screen in one gesture, and
+// the build that keeps running in the background still lands and is tracked once its result
+// arrives, even though nothing is on top to mirror it onto any more.
+func TestEscFromBuildingTruncatesPastThePlanScreenUnderneath(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
 		return wantState, driverAlways(wantState), nil
@@ -515,21 +513,22 @@ func TestStaleBuiltMsgFromCancelledBuildIsDropped(t *testing.T) {
 	}
 	buildCmd := sessionBuildCmd(t, cmd) // the request's own build call, not yet run
 
-	// Before it resolves, the operator backs out of the building flight screen (Esc — flight.
-	// Model emits BackMsg for this key regardless of screen state).
+	// The operator backs out of the building flight screen (Esc). This must close BOTH the flight
+	// screen AND the plan screen underneath it, landing on the matrix — not pop just one and leave
+	// the plan screen (with its still-ticked selection) reachable again.
 	m, _ = m.Update(flight.BackMsg{})
-	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("flight.BackMsg left stack at %d screens, want 2 (popped back to the plan screen)", n)
+	if n := len(m.(Model).stack); n != 1 {
+		t.Fatalf("flight.BackMsg left stack at %d screens, want 1 (truncated past the plan screen, straight to the matrix)", n)
 	}
 
-	built := buildCmd() // ...now the cancelled build's own result lands.
+	built := buildCmd() // ...now the still-running build's own result lands.
 	before := len(m.(Model).stack)
-	m, cmd = m.Update(built)
-	if cmd != nil {
-		t.Errorf("a stale built result produced a command: %#v", cmd())
-	}
+	m, _ = m.Update(built)
 	if n := len(m.(Model).stack); n != before {
-		t.Errorf("stack changed to %d screens processing a stale built result, want unchanged at %d (no flight screen mirrored for a cancelled build)", n, before)
+		t.Errorf("stack changed to %d screens processing the build's own result, want unchanged at %d (nothing left on the stack to mirror onto)", n, before)
+	}
+	if !m.(Model).sess.Running("abcd1234") {
+		t.Error("the build backed out of via esc must still land and be tracked — PR 3's own point")
 	}
 }
 
@@ -834,21 +833,25 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 	}
 }
 
-// TestBackingOutCancelsOutstandingBuild is Copilot's PR #50 final-round finding, re-proved
-// against session.Controller.CancelBuild (Train 2 design): the pre-session buildGen guard only
-// ever stopped an abandoned build's eventual RESULT from being acted on — it did nothing to the
-// goroutine itself, which used to run to completion regardless, bounded only by poll.Deadline
-// (often hours), potentially still claiming and persisting a real, orphaned "in-flight"
-// promotion long after the operator backed out and moved on to something else. This proves
-// flight.BackMsg (esc on the building screen) actually interrupts the outstanding
-// startPromotion call's own context, not just its result — via
-// session.Controller.CancelBuild's own e.cancel() call.
-func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
-	gotErr := make(chan error, 1)
+// TestBackingOutNoLongerCancelsOutstandingBuild replaces TestBackingOutCancelsOutstandingBuild
+// (Train 2 design PR 3, the operator's own decision, inverting PR #50's own final-round finding):
+// esc on the building flight screen used to interrupt the outstanding startPromotion call's own
+// context via session.Controller.CancelBuild — PR 3 removes that call from flight.BackMsg's
+// handler entirely (app.go), so the build now keeps running to completion regardless of whether
+// the operator is still watching it. This proves the outstanding call's ctx is NOT cancelled: the
+// hung fixture never sees ctx.Err() within the wait window, and only unblocks once the test itself
+// releases it.
+func TestBackingOutNoLongerCancelsOutstandingBuild(t *testing.T) {
+	release := make(chan struct{})
+	sawCancel := make(chan error, 1)
 	hung := func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
-		<-ctx.Done()
-		gotErr <- ctx.Err()
-		return engine.PromotionState{}, nil, ctx.Err()
+		select {
+		case <-ctx.Done():
+			sawCancel <- ctx.Err()
+			return engine.PromotionState{}, nil, ctx.Err()
+		case <-release:
+			return engine.PromotionState{ID: "abcd1234"}, driverAlways(engine.PromotionState{ID: "abcd1234"}), nil
+		}
 	}
 	promo := testPromo{Start: hung}
 	m := sizedWithPromotion(t, promo)
@@ -860,23 +863,29 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	if n := len(m.(Model).stack); n != 2 {
 		t.Fatalf("stack has %d screens after StartMsg, want 2 (matrix, the building flight screen)", n)
 	}
-	go sessionBuildCmd(t, cmd)()
+	buildCmd := sessionBuildCmd(t, cmd)
+	built := make(chan tea.Msg, 1)
+	go func() { built <- buildCmd() }()
 
-	// Esc on the building flight screen: flight.BackMsg's own handler (app.go) reads the top
-	// screen's Attached() — id is still "" during Building — and calls
-	// session.Controller.CancelBuild for it.
+	// Esc on the building flight screen: PR 3's own point is that this does nothing to the
+	// outstanding build's ctx any more.
 	m, _ = m.Update(flight.BackMsg{})
-	if m.(Model).sess.Running("") {
-		t.Fatal("setup: Running(\"\") can never be true — a build has no id until it lands")
-	}
 
 	select {
-	case err := <-gotErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("build's own ctx.Err() = %v, want context.Canceled", err)
+	case err := <-sawCancel:
+		t.Fatalf("the build's ctx was cancelled (err=%v); esc must no longer cancel a building screen's own build", err)
+	case <-time.After(100 * time.Millisecond):
+		// No cancellation observed within a generous window — exactly what PR 3 asks for.
+	}
+	close(release)
+	select {
+	case msg := <-built:
+		tm, _ := m.Update(msg)
+		if !tm.(Model).sess.Running("abcd1234") {
+			t.Error("the build that kept running after esc must still land and be tracked")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("backing out did not cancel the outstanding build's context within 2s")
+		t.Fatal("the build never completed after being released")
 	}
 }
 
@@ -1080,14 +1089,8 @@ func TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure(t *testing.T) {
 	}
 }
 
-// TestFlightAbortMsgReturnsToMatrix: AbortMsg's real engine-level semantics (close the PR?
-// delete the branch?) are deliberately out of scope for this brief (see app.go's own comment
-// on this case) — the one narrow, safe interpretation implemented is a pure navigation
-// reset: drop every screen above the matrix, leaving the real branch/PR/state file untouched.
-// This pushes matrix -> plan -> flight (three deep) first, specifically to prove AbortMsg
-// resets all the way to the matrix rather than popping only the flight screen back to plan.
 // attachedWithDriver runs a real StartMsg through to a mirrored, attached flight screen driven
-// by driver — the fixture both AbortMsg/BackMsg cancellation tests below need: a real
+// by driver — the fixture the drive-outlives-the-screen tests below need: a real
 // session.Controller entry, tracked under id, whose first Step call driver answers.
 func attachedWithDriver(t *testing.T, id string, driver session.Driver) (Model, tea.Cmd) {
 	t.Helper()
@@ -1099,100 +1102,205 @@ func attachedWithDriver(t *testing.T, id string, driver session.Driver) (Model, 
 	return attach(t, tm.(Model), cmd)
 }
 
-func TestFlightAbortMsgReturnsToMatrix(t *testing.T) {
-	m, _ := attachedWithDriver(t, "abcd1234", driverAlways(engine.PromotionState{ID: "abcd1234"}))
+// TestEscFromFlightLeavesDriveRunning is Train 2 design PR 3's central behaviour change, replacing
+// the three tests that used to prove the opposite (x's own "return to matrix"/"cancels the
+// in-flight drive" pair, and esc's identical cancelling twin — x itself is now retired): the
+// operator's own decision is that leaving the flight screen never stops a drive — the branch, PR
+// (or direct push) and every later step keep happening exactly as if the flight screen were still
+// open. This proves the entry's ctx is NOT cancelled, that a poll delivered after esc still Steps
+// it (a cancelled ctx would have made the fake driver return ctx.Err() instead), and that the
+// matrix's own in-flight pane still advances from that Step's result.
+func TestEscFromFlightLeavesDriveRunning(t *testing.T) {
+	drv := &funcDriver{
+		StateFunc: func() engine.PromotionState { return engine.PromotionState{ID: "abcd1234"} },
+	}
+	drv.StepFunc = func(ctx context.Context) (service.Tick, error) {
+		if err := ctx.Err(); err != nil {
+			return service.Tick{}, err
+		}
+		return service.Tick{State: drv.StateFunc(), Waiting: true, Wait: time.Hour}, nil
+	}
+	m, stepCmd := attachedWithDriver(t, "abcd1234", drv)
 	if n := len(m.stack); n != 2 {
 		t.Fatalf("setup: stack has %d screens once attached, want 2 (matrix, flight)", n)
 	}
+	mm := stepOnce(t, m, stepCmd) // settle the entry at Busy=false before esc
 
-	tm, _ := tea.Model(m).Update(flight.AbortMsg{ID: "abcd1234"})
-	if n := len(tm.(Model).stack); n != 1 {
-		t.Errorf("AbortMsg should return all the way to the matrix: stack has %d screens, want 1", n)
+	tm, cmd := tea.Model(mm).Update(flight.BackMsg{})
+	root := tm.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("esc should pop back to the matrix: stack has %d screens, want 1", n)
 	}
-	if v := plain(tm); strings.Contains(v, "abcd1234") {
-		t.Errorf("matrix view should not mention the aborted promotion's id:\n%s", v)
+	if !root.sess.Running("abcd1234") {
+		t.Fatal("esc must leave the entry tracked — the drive keeps running")
+	}
+	if cmd == nil {
+		t.Fatal("popping back to the matrix must re-list at once")
+	}
+	cmd() // the Relist call itself
+
+	// R would refuse (ErrBusy) while a Step is outstanding, but nothing is: prove the drive is
+	// truly alive by poking it and watching it actually Step, the way a real poll would land on
+	// its own after esc with nobody driving it interactively.
+	sess, pokeCmd, err := root.sess.Poke("abcd1234")
+	if err != nil {
+		t.Fatalf("Poke after esc: %v (a cancelled ctx would refuse or the entry would be gone)", err)
+	}
+	root.sess = sess
+	if pokeCmd == nil {
+		t.Fatal("Poke produced no Step command")
+	}
+	tm2, _ := root.Update(pokeCmd())
+	root = tm2.(Model)
+	if !root.sess.Running("abcd1234") {
+		t.Fatal("the promotion vanished after a Step landed post-esc")
 	}
 }
 
-// TestFlightAbortMsgCancelsInFlightDriveCmd is Copilot's PR #50 round-11 finding, re-proved
-// against session.Controller.Stop (Train 2 design): popping the flight screen used to leave any
-// driveCmd already in flight running to completion, free to keep committing, pushing, opening a
-// PR, or merging after the operator had walked away — and since the claim was already released
-// once the initial state saved, a later reconfirmation of the same deterministic promotion id
-// could start a second driver racing the first. This proves AbortMsg actually cancels the
-// entry's own ctx via session.Controller.Stop, not just its message.
-func TestFlightAbortMsgCancelsInFlightDriveCmd(t *testing.T) {
-	gotErr := make(chan error, 1)
-	hung := funcDriver{
-		StepFunc: func(ctx context.Context) (service.Tick, error) {
-			<-ctx.Done()
-			gotErr <- ctx.Err()
-			return service.Tick{}, ctx.Err()
-		},
-		// StateFunc matters here: stateDrive.State() (fakeservice_test.go) passes straight
-		// through to this when a driver is supplied, and session.Controller.onBuilt reads the
-		// promotion's real id from exactly that — a funcDriver whose StateFunc is left nil
-		// reports an empty id, so the entry is never registered under "abcd1234" and
-		// Stop("abcd1234") below would silently find nothing to cancel.
-		StateFunc: func() engine.PromotionState { return engine.PromotionState{ID: "abcd1234"} },
+// TestEnterReattachesWithoutSecondResume: r/enter on the matrix's in-flight pane for a promotion
+// already running here (session.Controller.Running) must push a fresh flight screen mirroring the
+// SAME entry rather than asking the backend to Resume it a second time — the attacker is a rival
+// Backend.Resume call that would construct a second, independent Driver racing the first one
+// under a second BuildID. The fixture's own *fakeService leaves ResumeFn unset entirely
+// (fakeservice_test.go's own contract: an unwired method panics loudly rather than silently
+// succeeding), so a rival call is caught two ways here: the re-attached screen's own BuildID must
+// equal the ORIGINAL one (never a fresh one Resume would mint), and there must still be exactly
+// one entry tracked — a real second Resume, wired to this same fake, would have panicked the
+// moment its own returned command ran.
+func TestEnterReattachesWithoutSecondResume(t *testing.T) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		return engine.PromotionState{ID: "abcd1234"}, driverAlways(engine.PromotionState{ID: "abcd1234"}), nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	tm, cmd := m.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	mm, _ := attach(t, tm.(Model), cmd) // Busy=true: the entry is Running the instant it's built
+	if n := len(mm.stack); n != 2 {
+		t.Fatalf("setup: stack has %d screens once attached, want 2", n)
 	}
-	m, stepCmd := attachedWithDriver(t, "abcd1234", hung)
-	if stepCmd == nil {
-		t.Fatal("setup: session.ChangeBuilt's own first Step command is nil")
-	}
-	go stepCmd()
-
-	tm, _ := tea.Model(m).Update(flight.AbortMsg{ID: "abcd1234"})
-	if n := len(tm.(Model).stack); n != 1 {
-		t.Fatalf("setup: AbortMsg should return to the matrix: stack has %d screens, want 1", n)
+	before, ok := mm.sess.Snapshot("abcd1234")
+	if !ok {
+		t.Fatal("setup: promotion not tracked once attached")
 	}
 
-	select {
-	case err := <-gotErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("hung driveFn's own ctx.Err() = %v, want context.Canceled", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("AbortMsg did not cancel the entry's in-flight driveCmd within 2s")
+	// esc: stop watching, drive keeps running (TestEscFromFlightLeavesDriveRunning's own proof).
+	tm2, _ := tea.Model(mm).Update(flight.BackMsg{})
+	root := tm2.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("esc did not pop back to the matrix: stack has %d screens, want 1", n)
+	}
+
+	// r/enter on the pane: matrix.ResumeMsg is the message either key emits.
+	tm3, cmd3 := root.Update(matrix.ResumeMsg{ID: "abcd1234"})
+	root3 := tm3.(Model)
+	if cmd3 != nil {
+		// Only reached if Controller.Resume mistakenly built a fresh resume command for an id
+		// it already tracks — running it here (rather than leaving it uncalled) is deliberate:
+		// against this fixture's ResumeFn-unset fakeService that would panic outright.
+		tm4, _ := root3.Update(cmd3())
+		root3 = tm4.(Model)
+	}
+	if n := len(root3.stack); n != 2 {
+		t.Fatalf("re-attach should push exactly one flight screen: stack has %d screens, want 2", n)
+	}
+	fs, ok := root3.stack[1].(flightScreen)
+	if !ok {
+		t.Fatalf("top screen is %T, want the re-attached flightScreen", root3.stack[1])
+	}
+	if _, build := fs.Attached(); build != before.Build {
+		t.Errorf("re-attach produced BuildID %d, want the original %d — a second build exists", build, before.Build)
+	}
+	if n := len(root3.sess.Live()); n != 1 {
+		t.Errorf("session.Controller tracks %d entries after re-attach, want exactly 1", n)
+	}
+	if v := plain(root3); !strings.Contains(v, "abcd1234") {
+		t.Errorf("re-attached flight screen missing the promotion's id:\n%s", v)
 	}
 }
 
-// TestFlightBackMsgCancelsInFlightDriveCmd is TestFlightAbortMsgCancelsInFlightDriveCmd's
-// sibling for the other way a flight screen gets popped: pressing Esc (BackMsg), which had the
-// exact same gap.
-func TestFlightBackMsgCancelsInFlightDriveCmd(t *testing.T) {
-	gotErr := make(chan error, 1)
-	hung := funcDriver{
-		StepFunc: func(ctx context.Context) (service.Tick, error) {
-			<-ctx.Done()
-			gotErr <- ctx.Err()
-			return service.Tick{}, ctx.Err()
+// TestEscDuringBuildKeepsBuilding: esc on the BUILDING flight screen (no real id yet — the
+// preflight window) must leave that build running too, the Building-phase twin of
+// TestEscFromFlightLeavesDriveRunning. TestBackingOutNoLongerCancelsOutstandingBuild proves the
+// ctx-level half of this same guarantee directly; this one proves the build actually lands and is
+// tracked afterward — proved here by observing the outstanding
+// startPromotion call actually complete rather than see ctx.Err().
+func TestEscDuringBuildKeepsBuilding(t *testing.T) {
+	landed := make(chan engine.PromotionState, 1)
+	promo := testPromo{Start: func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		// A real startPromotion would take real wall-clock time; this fixture only needs to
+		// prove the ctx it was handed is still alive by the time esc has already returned —
+		// checking ctx.Err() here, synchronously, is enough (no goroutine/sleep needed) and
+		// avoids flaking on a busy CI runner.
+		s := engine.PromotionState{ID: "abcd1234"}
+		landed <- s
+		return s, driverAlways(s), ctx.Err()
+	}}
+	m := sizedWithPromotion(t, promo)
+	tm, cmd := m.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	if n := len(tm.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after StartMsg, want 2 (matrix, the building flight screen)", n)
+	}
+	buildCmd := sessionBuildCmd(t, cmd) // not yet run
+
+	tm2, _ := tm.Update(flight.BackMsg{})
+	if n := len(tm2.(Model).stack); n != 1 {
+		t.Fatalf("esc during Building should pop to the matrix: stack has %d screens, want 1", n)
+	}
+
+	built := buildCmd() // ...now the build actually runs, ctx un-cancelled.
+	select {
+	case s := <-landed:
+		if s.ID != "abcd1234" {
+			t.Fatalf("startPromotion saw an unexpected state: %+v", s)
+		}
+	default:
+		t.Fatal("startPromotion's own closure never ran")
+	}
+	// The result still lands (session.Controller.onBuilt's own gen check has nothing stale to
+	// drop here — this entry was never cancelled) and the promotion is tracked, matching "the
+	// build keeps running" rather than being silently dropped as stale.
+	tm3, _ := tm2.Update(built)
+	root := tm3.(Model)
+	if !root.sess.Running("abcd1234") {
+		t.Fatal("a build backed out of via esc must still land and be tracked — PR 3's own point")
+	}
+}
+
+// TestReobserveKeyThroughRoot: a real "R" keypress on an attached flight screen, driven through
+// the root's own Update exactly as a running program would — the top screen's own key handling
+// emits flight.ReobserveMsg, and the root's case (unchanged by PR 3) answers it by calling
+// session.Controller.Poke, which drives one more real Step call against the fake driver.
+func TestReobserveKeyThroughRoot(t *testing.T) {
+	var stepCalls int
+	drv := funcDriver{
+		StepFunc: func(context.Context) (service.Tick, error) {
+			stepCalls++
+			return service.Tick{State: engine.PromotionState{ID: "abcd1234"}, Waiting: true, Wait: time.Hour}, nil
 		},
-		// StateFunc matters here: stateDrive.State() (fakeservice_test.go) passes straight
-		// through to this when a driver is supplied, and session.Controller.onBuilt reads the
-		// promotion's real id from exactly that — a funcDriver whose StateFunc is left nil
-		// reports an empty id, so the entry is never registered under "abcd1234" and
-		// Stop("abcd1234") below would silently find nothing to cancel.
 		StateFunc: func() engine.PromotionState { return engine.PromotionState{ID: "abcd1234"} },
 	}
-	m, stepCmd := attachedWithDriver(t, "abcd1234", hung)
-	if stepCmd == nil {
-		t.Fatal("setup: session.ChangeBuilt's own first Step command is nil")
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		return engine.PromotionState{ID: "abcd1234"}, drv, nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	tm, cmd := m.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	mm, stepCmd := attach(t, tm.(Model), cmd)
+	mm = stepOnce(t, mm, stepCmd) // settle Busy=false so R is not refused
+	if stepCalls != 1 {
+		t.Fatalf("setup: %d step calls, want 1", stepCalls)
 	}
-	go stepCmd()
 
-	tm, _ := tea.Model(m).Update(flight.BackMsg{})
-	if n := len(tm.(Model).stack); n != 1 {
-		t.Fatalf("setup: BackMsg should pop the flight screen: stack has %d screens, want 1", n)
+	var top tea.Model = mm
+	top, reobserveCmd := press(t, top, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if reobserveCmd == nil {
+		t.Fatal("R on the attached flight screen produced no command")
 	}
-
-	select {
-	case err := <-gotErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("hung driveFn's own ctx.Err() = %v, want context.Canceled", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("BackMsg did not cancel the entry's in-flight driveCmd within 2s")
+	top, pokeCmd := top.Update(reobserveCmd()) // flight.ReobserveMsg reaches the root
+	if pokeCmd == nil {
+		t.Fatal("R's ReobserveMsg produced no re-drive command")
+	}
+	top.Update(pokeCmd()) // the actual Step call
+	if stepCalls != 2 {
+		t.Errorf("Step called %d time(s) after R, want 2 (the setup call plus exactly one re-drive)", stepCalls)
 	}
 }
 
@@ -1584,6 +1692,60 @@ func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 	if n := len(m3.(Model).stack); n != 1 {
 		t.Fatalf("esc left %d screens on the stack, want 1 (back to the matrix)", n)
 	}
+}
+
+// TestEscFromDeployFlightTruncatesPastTheDeployConfirmScreenUnderneath is the deploy path's twin
+// of TestEscFromBuildingTruncatesPastThePlanScreenUnderneath (audit UX-H6/FB-H2): picker → deploy
+// confirm → enter starts the drive and pushes the flight screen directly on top of the deploy
+// confirm screen (m.start's own doc comment); esc from there must land on the matrix, not back on
+// that confirm screen still holding the same diff and ready to start the identical deploy again on
+// Enter.
+func TestEscFromDeployFlightTruncatesPastTheDeployConfirmScreenUnderneath(t *testing.T) {
+	wantState := engine.PromotionState{ID: "abcd1234", TargetEnv: "app-production"}
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		return wantState, driverAlways(wantState), nil
+	}}
+	m := sizedWithPromotion(t, promo)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	m, cmd := pressD(t, m)
+	m, _ = m.Update(cmd())
+	m, _ = m.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/web",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("fixture precondition: stack has %d screens after opening the deploy confirm, want 2", n)
+	}
+
+	// enter, on the real deploy confirm screen — not deploy.StartMsg constructed by hand — so this
+	// proves the actual onKey gesture, not just the message it emits.
+	tm, startCmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if startCmd == nil {
+		t.Fatal("enter on the deploy confirm screen produced no command")
+	}
+	m2, cmd2 := tm.Update(startCmd())
+	if cmd2 == nil {
+		t.Fatal("deploy.StartMsg with a wired startPromotion produced no command")
+	}
+	if n := len(m2.(Model).stack); n != 3 {
+		t.Fatalf("stack has %d screens right after enter, want 3 (matrix, deploy confirm, the building flight screen)", n)
+	}
+	mm, _ := attach(t, m2.(Model), cmd2) // Busy=true: the entry is Running the instant it's built
+
+	tm3, cmd3 := tea.Model(mm).Update(flight.BackMsg{})
+	root := tm3.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("esc left %d screens on the stack, want 1 (truncated past the deploy confirm screen, straight to the matrix)", n)
+	}
+	if !root.sess.Running("abcd1234") {
+		t.Fatal("esc must leave the drive tracked and running")
+	}
+	if cmd3 == nil {
+		t.Fatal("truncating to the matrix must re-list at once")
+	}
+	cmd3()
 }
 
 // R on the matrix opens the restart screen for the family under the cursor, and the matrix stays

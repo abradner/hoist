@@ -45,9 +45,8 @@ func idleAttached(t *testing.T, svc *fakeService, id string) Model {
 
 // TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn: the flight screen's own X gesture
 // already confirmed the operator wants this (flight.AbandonMsg's own doc comment) — the root
-// pops back to the matrix immediately (mirroring AbortMsg's own shape) and
-// session.Controller.Abandon fires the real AbandonFn as a command; once that resolves, the
-// notice reports the outcome.
+// pops back to the matrix immediately and session.Controller.Abandon fires the real AbandonFn as
+// a command; once that resolves, the notice reports the outcome.
 func TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn(t *testing.T) {
 	var gotID string
 	svc := &fakeService{AbandonFn: func(_ context.Context, id string) error {
@@ -177,6 +176,105 @@ func TestFlightAbandonMsgWaitsForBusyStepBeforeAbandoning(t *testing.T) {
 			t.Fatal("AbandonFn was never called within 2s of the busy Step being cancelled")
 		}
 		root, waitCmd = root.Update(waitCmd())
+		if waitCmd == nil {
+			t.Fatal("the abandon wait/dispatch chain produced no further command before AbandonFn was called")
+		}
+	}
+}
+
+// TestAbandonDuringBusyStepCannotBeOutlived drives the X gesture through real keypresses
+// (X, y, enter) rather than injecting flight.AbandonMsg directly (every other abandon test above
+// does that), then proves the entry cannot be "outlived" by a race: R (session.ReobserveMsg),
+// sent while the wait is still watching a busy Step, is refused outright (ErrBusy, from
+// session.Controller.Poke's own Abandoning guard) with a notice naming the promotion and no new
+// Step call — the attacker this guards against is a re-observe racing the abandon's own wait, once
+// re-armed a Step could be outstanding again the moment Backend.Abandon also runs. Only after the
+// busy Step actually returns does the wait proceed, and Backend.Abandon is called exactly once.
+func TestAbandonDuringBusyStepCannotBeOutlived(t *testing.T) {
+	release := make(chan struct{})
+	var stepCalls int
+	abandoned := make(chan string, 1)
+	hung := funcDriver{
+		StepFunc: func(ctx context.Context) (service.Tick, error) {
+			stepCalls++
+			select {
+			case <-ctx.Done():
+				return service.Tick{}, ctx.Err()
+			case <-release:
+				return service.Tick{State: engine.PromotionState{ID: "abcd1234"}, Done: true}, nil
+			}
+		},
+		// See app_test.go's own comment on this same shape: stateDrive.State() passes straight
+		// through to this, and session.Controller.onBuilt reads the promotion's real id from
+		// exactly that.
+		StateFunc: func() engine.PromotionState { return engine.PromotionState{ID: "abcd1234"} },
+	}
+	svc := &fakeService{
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+			return engine.PromotionState{ID: "abcd1234"}, hung, nil
+		},
+		AbandonFn: func(_ context.Context, id string) error { abandoned <- id; return nil },
+	}
+	m := sizedWithService(t, svc, Promotion{}).(Model)
+	tm, cmd := m.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	mm, stepCmd := attach(t, tm.(Model), cmd) // Busy=true: onBuilt's own first Step is outstanding
+	go stepCmd()
+
+	// X, y, enter: the flight screen's own keypress-then-confirm gesture, driven through real
+	// keys rather than the AbandonMsg every other test in this file injects directly.
+	var top tea.Model = mm
+	top, _ = press(t, top, tea.KeyPressMsg{Code: 'X', Text: "X"})
+	if !strings.Contains(plain(top), "Abandon promotion") {
+		t.Fatalf("setup: X did not open the abandon confirm dialog:\n%s", plain(top))
+	}
+	top, _ = press(t, top, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	top, cmd2 := press(t, top, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd2 == nil {
+		t.Fatal("enter on the abandon confirm produced no command")
+	}
+	top, waitCmd := top.Update(cmd2()) // AbandonMsg reaches the root's own handler
+	root := top.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("Abandon should return to the matrix immediately: stack has %d screens, want 1", n)
+	}
+	if waitCmd == nil {
+		t.Fatal("Abandon produced no wait command while the Step is busy")
+	}
+
+	// R, sent directly (the flight screen is already gone — the root's own case answers it
+	// regardless): refused while Abandoning, no new Step, and the operator sees why.
+	before := stepCalls
+	top2, cmd3 := root.Update(flight.ReobserveMsg{ID: "abcd1234"})
+	root2 := top2.(Model)
+	if cmd3 != nil {
+		t.Error("R produced a command while the promotion is abandoning")
+	}
+	if !strings.Contains(root2.notice, "abcd1234") {
+		t.Errorf("notice = %q, want it to name the refused promotion", root2.notice)
+	}
+	if stepCalls != before {
+		t.Errorf("Step called %d additional time(s) after the refused R, want 0", stepCalls-before)
+	}
+
+	// Release the busy Step: the wait loop notices it returned and proceeds to the real
+	// AbandonFn exactly once.
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case id := <-abandoned:
+			if id != "abcd1234" {
+				t.Fatalf("AbandonFn called with %q, want abcd1234", id)
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("AbandonFn was never called within 2s of the busy Step being released")
+		}
+		var tm tea.Model
+		tm, waitCmd = root2.Update(waitCmd())
+		root2 = tm.(Model)
 		if waitCmd == nil {
 			t.Fatal("the abandon wait/dispatch chain produced no further command before AbandonFn was called")
 		}

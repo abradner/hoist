@@ -33,18 +33,20 @@ type PollDurations struct {
 
 // keyMap is this screen's own key vocabulary, on top of the root's global quit keys.
 type keyMap struct {
-	Open, Reobserve, Abort, Abandon, Log, Back, Override key.Binding
+	Open, Reobserve, Abandon, Log, Back, Override key.Binding
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
 		Open:      key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open PR")),
 		Reobserve: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "re-observe")),
-		Abort:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "abort")),
-		// Capital, like R: x already means "stop watching" (read-only, nothing engine-side —
-		// AbortMsg's own doc comment), so a write this destructive gets the shift key out of
-		// reach of a mistyped x, mirroring the matrix screen's own R/r convention (AGENTS.md
-		// §4.8).
+		// Capital: a write this destructive gets the shift key out of reach of a mistyped
+		// letter, mirroring the matrix screen's own R/r convention (AGENTS.md §4.8). Lower-case
+		// x used to mean "stop watching" (read-only, nothing engine-side) but is retired (Train
+		// 2 design PR 3): esc already does that, and does it without pretending the drive itself
+		// stopped — a promotion this screen was merely watching keeps running whether or not
+		// anything is watching it, so a second key for the identical no-op taught the wrong
+		// mental model.
 		Abandon:  key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "abandon")),
 		Log:      key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "log")),
 		Back:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
@@ -58,25 +60,28 @@ func defaultKeyMap() keyMap {
 // type; mirrors matrix.OpenPlanMsg and plan.BackMsg).
 type OpenPRMsg struct{ URL string }
 
-// AbortMsg asks whatever composes screens to abort promotion ID — closing the PR, deleting
-// the branch, or whatever "abort" means operationally is out of scope for this screen; it
-// only requests it (same convention as OpenPRMsg above).
-type AbortMsg struct{ ID string }
-
 // AbandonMsg asks whatever composes screens to retire promotion ID for good: `hoist abandon`'s
 // own write — release the state file, and close the PR / delete the branch if it opened either.
-// A distinct type from AbortMsg on purpose, not a repurposing of it: AbortMsg's own doc comment
-// and parity row both describe purely-local, non-destructive semantics ("the branch, PR and
-// state file stay") that predate this message and are still what x means; giving the identical
-// name new, destructive behavior would silently invalidate that description without anything
-// able to catch the drift. Emitted only after the X gesture's own huh.Confirm answers yes
-// (AGENTS.md invariant 5's keypress-then-confirm shape), and never for a promotion this screen
-// itself believes has already landed — the root's real handler re-observes and refuses
-// authoritatively regardless (this screen's own guard is UI politeness only, the same relation
-// OverrideCINoneMsg has to CIGreenStep's own re-check).
+// A distinct type from BackMsg on purpose: BackMsg's own doc comment and parity row describe
+// purely-local, non-destructive semantics (leaving the branch, PR and state file exactly as they
+// are, the drive itself still running) — giving that identical, harmless meaning a destructive
+// second sense would silently invalidate the description without anything able to catch the
+// drift. Emitted only after the X gesture's own huh.Confirm answers yes (AGENTS.md invariant 5's
+// keypress-then-confirm shape), and never for a promotion this screen itself believes has already
+// landed — the root's real handler re-observes and refuses authoritatively regardless (this
+// screen's own guard is UI politeness only, the same relation OverrideCINoneMsg has to
+// CIGreenStep's own re-check).
 type AbandonMsg struct{ ID string }
 
-// BackMsg pops this screen back to whatever was underneath it (mirrors plan.BackMsg).
+// BackMsg asks whatever composes screens to close every screen above the matrix at once — esc,
+// even when a plan or deploy confirm screen sits underneath this one (the screen that started the
+// drive: m.start's own doc comment, app.go). It never pops back to that confirm screen instead:
+// doing so used to leave it still ticked and ready, so Enter there started the very drive esc just
+// left watching (audit UX-H6/FB-H2, the operator's own decision, a follow-up to Train 2 design PR
+// 3's original "leaving flight never cancels anything"). The drive keeps running exactly as it
+// was; the root only stops mirroring it onto a screen. enter/r on the matrix's in-flight pane
+// re-attaches a fresh flight screen to the same running entry later (session.Controller.Running's
+// own dedup, already in Start/Resume, means that never starts a second one).
 type BackMsg struct{}
 
 // OverrideCINoneMsg is the operator's confirmed answer to the one Blocked reason that has an
@@ -315,20 +320,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		id := m.id
 		return m, func() tea.Msg { return ReobserveMsg{ID: id} }
-	case key.Matches(msg, m.keys.Abort):
-		// Nothing to abort when the promotion has no real ID yet (Building — the same guard
-		// PR #39 review finding #2 asked for: emitting AbortMsg here would hand the root nothing
-		// it could safely act on).
-		if m.id == "" {
-			m.notice = "nothing to abort — this promotion isn't being driven yet"
-			return m, nil
-		}
-		id := m.id
-		return m, func() tea.Msg { return AbortMsg{ID: id} }
 	case key.Matches(msg, m.keys.Abandon):
-		// Same emptiness guard as Abort above — a UI politeness check only, since the root's
-		// real handler re-observes and refuses authoritatively regardless (AbandonMsg's own
-		// doc comment).
+		// Nothing to abandon when the promotion has no real ID yet (Building) — a UI politeness
+		// check only, since the root's real handler re-observes and refuses authoritatively
+		// regardless (AbandonMsg's own doc comment).
 		if m.id == "" {
 			m.notice = "nothing to abandon — this promotion isn't being driven yet"
 			return m, nil
@@ -740,7 +735,7 @@ func (m Model) statusLeft() string {
 }
 
 func (m Model) hint() string {
-	h := "R re-observe · x abort · l log · esc back"
+	h := "R re-observe · l log · esc back"
 	// Offering X on a finished promotion just refuses (handleKey's own guard: "abandoning is
 	// not a rollback"), the same reasoning "o open PR" already applies below for a promotion
 	// with no PR yet — a key that only ever leads to a notice is not worth advertising.

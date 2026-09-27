@@ -1052,6 +1052,28 @@ test lives** (if one exists).
    `internal/engine/steps_converge_test.go`, and
    `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `internal/service/inflight_test.go`
    (#165, #166).
+12. **A background effect owned by a screen dies with the screen.** What happened: before the
+   session controller existed (Train 2 design, FB-H2), the flight screen owned its own driver, ctx
+   and tick chain — so leaving it (Esc) had to cancel that ctx or leak the goroutine, and "leaving"
+   and "stopping the promotion" were the same code path by construction. That coupling was never a
+   deliberate choice about what Esc should MEAN; it was a consequence of where the state happened
+   to live. The operator's own reading of that behaviour — the drive audibly stops the instant you
+   look away from it — is the wrong mental model for a promotion that waits on a human for hours:
+   backing out to check something else should not be indistinguishable from cancelling. Root cause:
+   ownership by the wrong layer. A drive is a fact about the WORLD (§4.1) — a branch pushed, a PR
+   open, a claim held — and only incidentally something a screen happens to be watching right now;
+   giving the screen the only reference to it means popping the screen is the only way anything
+   else ever finds out the drive existed. Rule: a background effect that must outlive navigation is
+   owned by something above every screen that can navigate — here, `internal/app/session.Controller`
+   (a value on the ROOT model, D1 of the Train 2 design) — and a screen only ever mirrors a
+   `Snapshot` of it (D3); popping a screen changes what is drawn, never what is running. `x` (the
+   screen's own "stop watching" key) is retired entirely once `esc` already means exactly that and
+   nothing more. Regression tests: `TestEscFromFlightLeavesDriveRunning`,
+   `TestEnterReattachesWithoutSecondResume`, `TestEscDuringBuildKeepsBuilding`,
+   `TestBackingOutNoLongerCancelsOutstandingBuild`, `TestXDoesNothingOnFlight`, and
+   `TestAbandonDuringBusyStepCannotBeOutlived` (the same ownership rule is what lets Abandon's own
+   wait for a busy Step, and R's refusal while it waits, be answered correctly by the controller
+   alone, with no screen involved at all) — all in `internal/app` and `internal/app/flight`.
 
 ## 10. Maintaining This Document
 

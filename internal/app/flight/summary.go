@@ -27,6 +27,11 @@ type Summary struct {
 	// longer in config), redacted at the render boundary like every other upstream string.
 	// The Rows are then every step not-reached and the pane says so rather than guessing.
 	Err string
+	// Live is true when this Summary was built from this session's own session.Controller entry
+	// (app.go's summaryForSnapshot) rather than purely from a fresh listing (summaryFor) — the
+	// pane's own way to say "hoist itself is driving this, right now" versus "re-observed, last
+	// seen at this state" (Train 2 design PR 3's own "the pane marks drives running here").
+	Live bool
 }
 
 // Summarize builds a Summary from a state and engine.Status's result for it.

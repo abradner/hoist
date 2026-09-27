@@ -58,6 +58,18 @@ func (d *fakeDrive) Step(context.Context) (service.Tick, error) {
 	return t, err
 }
 
+// resumedStateDrive is fakeDrive with State() overridden to return a fixed state immediately —
+// exactly what a real resumed Driver already carries the moment Backend.Resume hands it back
+// (unlike fakeDrive's own State(), which only reports something once a scripted Step has actually
+// run) — TestOnBuiltSetsSourceTargetDirectForResumedEntry needs onBuilt's own toBuiltMsg (which
+// reads d.State() before any Step call) to see SourceEnv/TargetEnv/Direct right away.
+type resumedStateDrive struct {
+	fakeDrive
+	state engine.PromotionState
+}
+
+func (d *resumedStateDrive) State() engine.PromotionState { return d.state }
+
 // fakeBackend records every call it makes ("start", "resume", "abandon", "list"), in order, and
 // answers through whichever func field the test supplied.
 type fakeBackend struct {
@@ -250,8 +262,12 @@ func TestStaleStepMsgAfterPokeIsDropped(t *testing.T) {
 	}
 	// Resolve Poke's own fresh Step too, so the entry is idle again (busy=false, gen 2) by the
 	// time the stale poll arrives below — isolating the gen check from the separate busy guard,
-	// which would otherwise mask a missing gen check (both currently refuse a busy entry).
-	h, _ = hop(h, freshStepCmd)
+	// which would otherwise mask a missing gen check (both currently refuse a busy entry). Poke's
+	// own cmd is now a batch (stepCmd + a fresh listenCmd, since a re-arm needs its own progress
+	// listener too), so this goes through started/runFirst exactly like Start's and Resume's own
+	// batched cmd, rather than hop (which would hand harnessUpdate a raw tea.BatchMsg — not a
+	// session.Event — and silently do nothing).
+	h, _ = started(h, freshStepCmd)
 
 	before := len(calls)
 	h, next := hop(h, stalePoll) // the attacker: gen-1's own scheduled poll, delivered after Poke re-armed to gen 2
@@ -370,6 +386,454 @@ func TestAbandonTimeoutProceeds(t *testing.T) {
 	}
 }
 
+// TestAbandonCallGetsItsOwnGenerousTimeout: Backend.Abandon does real work (ObserveAll,
+// ClosePR, DeleteRemoteBranch) that can legitimately take longer than the short busy-Step wait
+// (AbandonWait/AbandonTimeout) but well within AbandonCallTimeout. abandonCmd's own ctx must be
+// bound by AbandonCallTimeout, never by AbandonTimeout — conflating the two (found in review of
+// ceaccb2) meant a real abandon regularly failed with "context deadline exceeded". The fake here
+// sleeps on the real wall clock (abandonCmd's ctx comes from context.Background(), unaffected by
+// the test's fixed/injected clock) for longer than AbandonTimeout but shorter than
+// AbandonCallTimeout, then reports whether its ctx had already expired.
+func TestAbandonCallGetsItsOwnGenerousTimeout(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second},
+	}}
+	var sawExpired bool
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(ctx context.Context, _ string) ([]string, error) {
+			time.Sleep(20 * time.Millisecond)
+			sawExpired = ctx.Err() != nil
+			return nil, ctx.Err()
+		},
+	}
+	cfg := testConfig(now)
+	cfg.AbandonWait = time.Millisecond
+	cfg.AbandonTimeout = 2 * time.Millisecond       // the short busy-step wait bound
+	cfg.AbandonCallTimeout = 200 * time.Millisecond // the call's own, generous bound
+	c := New(backend, cfg)
+
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // resolve the first Step so the entry goes idle (busy=false) before Abandon
+
+	c2, abandonCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	h.changes = nil
+	if abandonCmd == nil {
+		t.Fatal("Abandon on an idle entry produced no command")
+	}
+	h = h.drain(abandonCmd)
+
+	if len(h.changes) != 1 || h.changes[0].Kind != ChangeAbandoned {
+		t.Fatalf("changes = %+v, want exactly one ChangeAbandoned", h.changes)
+	}
+	if sawExpired {
+		t.Fatal("Backend.Abandon's ctx had already expired after 20ms — abandonCmd is using the short busy-wait timeout instead of AbandonCallTimeout")
+	}
+}
+
+// TestAbandonDuringResumeBuildSucceedsCallsAbandonOnce: Abandon fired while a resumed entry's
+// Resume call is still in flight (Building) must, once that call returns successfully, still
+// call Backend.Abandon exactly once and never issue a Step — proceeding to a fresh stepCmd (the
+// pre-fix behaviour) would silently re-arm past the cancel the operator just asked for (found in
+// review of ceaccb2, e.abandoning was written but never read).
+func TestAbandonDuringResumeBuildSucceedsCallsAbandonOnce(t *testing.T) {
+	now := fixedClock(time.Now())
+	var stepCalls []string
+	drive := &fakeDrive{id: "promo-1", calls: &stepCalls}
+	abandoned := 0
+	backend := &fakeBackend{
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return []string{"closed PR #1"}, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+
+	// Abandon fires while the Resume call is still in flight (Building, busy) — it must take the
+	// busy-wait path, not call Backend.Abandon yet.
+	c2, abandonWaitCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonWaitCmd == nil {
+		t.Fatal("Abandon on a busy (Building) entry produced no wait command")
+	}
+	if abandoned != 0 {
+		t.Fatal("Backend.Abandon called before the busy Resume even returned")
+	}
+
+	// The Resume call itself now returns successfully.
+	h, followUp := started(h, resumeCmd)
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning produced no command — Backend.Abandon should have been called via abandonCmd")
+	}
+	if abandoned != 0 {
+		t.Fatalf("Backend.Abandon called before its own returned command ran: %d", abandoned)
+	}
+	// Draining followUp must be the abandonCmd itself — resolving it must not produce a Step
+	// call and must remove the entry (a successful abandon).
+	h = h.drain(followUp)
+	if len(stepCalls) != 0 {
+		t.Fatalf("Step calls after abandon-during-build: %v, want none", stepCalls)
+	}
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after abandon-during-build completed")
+	}
+
+	// The stale abandonWaitMsg chain scheduled by the original Abandon call (old gen) must be
+	// inert now — it must not call Backend.Abandon a second time.
+	h, next := hop(h, abandonWaitCmd)
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times total — the stale abandonWaitMsg chain called it again", abandoned)
+	}
+	if next != nil {
+		t.Fatal("the stale (superseded) abandonWaitMsg chain produced a follow-up command")
+	}
+}
+
+// TestAbandonDuringResumeBuildErrorStillCallsAbandon: when the resumed entry's own Resume call
+// comes back with an error (service.Resume checks ctx.Err() eagerly once Abandon cancelled its
+// ctx), Backend.Abandon must still run — dropping it because the build "failed" left the branch
+// and PR the operator asked to abandon untouched (found in review of ceaccb2).
+func TestAbandonDuringResumeBuildErrorStillCallsAbandon(t *testing.T) {
+	now := fixedClock(time.Now())
+	abandoned := 0
+	backend := &fakeBackend{
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+			return nil, context.Canceled
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+
+	c2, abandonWaitCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonWaitCmd == nil {
+		t.Fatal("Abandon on a busy entry produced no wait command")
+	}
+
+	h, followUp := started(h, resumeCmd) // the Resume call returns an error
+	for _, ch := range h.changes {
+		if ch.Kind == ChangeBuildFailed {
+			t.Fatal("a build error while abandoning was reported as ChangeBuildFailed instead of proceeding to Backend.Abandon")
+		}
+	}
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning (build error) produced no command")
+	}
+	h = h.drain(followUp)
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times after a failed build-while-abandoning, want 1", abandoned)
+	}
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after abandon-during-failed-build completed")
+	}
+}
+
+// TestBlockedDuringAbandonKeepsAbandoningPhase: a Blocked tick reported for a Step that Abandon
+// is waiting on must not overwrite phase Abandoning with Stopped — doing so let Poke re-arm
+// (bumping gen), which drops the abandonWaitMsg already scheduled and the abandon silently
+// disappears (found in review of ceaccb2).
+func TestBlockedDuringAbandonKeepsAbandoningPhase(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Blocked: &engine.BlockedError{Reason: "conflict"}},
+	}}
+	abandoned := 0
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd) // onBuilt's own first Step call, not yet resolved — entry busy
+
+	c2, abandonWaitCmd := h.c.Abandon("promo-1")
+	h.c = c2
+
+	h, followUp := hop(h, stepCmd1) // the busy step returns Blocked
+	if followUp != nil {
+		t.Fatal("a Blocked tick observed while abandoning scheduled a follow-up (must wait for abandonWaitMsg instead)")
+	}
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 no longer tracked after a Blocked tick while abandoning")
+	}
+	if snap.Phase != Abandoning {
+		t.Fatalf("phase after a Blocked tick while abandoning = %v, want Abandoning", snap.Phase)
+	}
+	if _, _, err := h.c.Poke("promo-1"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Poke while Abandoning after a Blocked tick = %v, want ErrBusy", err)
+	}
+
+	h = h.drain(abandonWaitCmd) // busy has cleared — proceeds to Backend.Abandon
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times, want 1", abandoned)
+	}
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after abandon completed")
+	}
+}
+
+// TestWithoutEntryCancelsCtx: a finished (Done) or failed-to-build entry's own ctx must be
+// cancelled the moment it is dropped, so its listenCmd goroutine (blocked on progressCh) and its
+// context.WithDeadline timer both stop immediately instead of leaking until the entry's own 4h
+// deadline — the leak listenCmd's own doc comment claims is fixed (found in review of ceaccb2:
+// two removal sites, onStep's Done case and onBuilt's build-failed case, never actually called
+// cancel).
+func TestWithoutEntryCancelsCtx(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Done: true},
+	}}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	entryCtx := h.c.entries[build].ctx
+	if entryCtx.Err() != nil {
+		t.Fatal("entry ctx already cancelled before the drive even finished")
+	}
+
+	h, next := started(h, cmd)
+	h = h.drain(next) // resolves the scripted Done tick
+
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after Done")
+	}
+	select {
+	case <-entryCtx.Done():
+	default:
+		t.Fatal("entry ctx was not cancelled when the finished entry was removed — its listenCmd goroutine and deadline timer leak")
+	}
+	if entryCtx.Err() != context.Canceled {
+		t.Fatalf("entry ctx.Err() = %v, want context.Canceled", entryCtx.Err())
+	}
+}
+
+// TestWithoutEntryCancelsCtxOnBuildFailure is TestWithoutEntryCancelsCtx's build-failure twin:
+// onBuilt's own ChangeBuildFailed removal path must cancel just as reliably.
+func TestWithoutEntryCancelsCtxOnBuildFailure(t *testing.T) {
+	now := fixedClock(time.Now())
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return nil, errors.New("boom")
+	}}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	entryCtx := h.c.entries[build].ctx
+
+	h, _ = started(h, cmd) // the build fails; onBuilt removes the entry via withoutEntry
+
+	if entryCtx.Err() != context.Canceled {
+		t.Fatalf("entry ctx.Err() after a failed build = %v, want context.Canceled", entryCtx.Err())
+	}
+}
+
+// TestPokeRearmsAFreshListener: after Poke re-arms an entry onto a new ctx/gen, a progress line
+// the re-armed Step reports must still reach onProgress — Poke's own returned cmd used to be the
+// bare stepCmd, with nothing left listening on progressCh for the entry's new generation (the old
+// listenCmd stops the instant rearm cancels the old ctx, per its own doc comment); the flight log
+// froze for the rest of the drive (found in review of ceaccb2).
+func TestPokeRearmsAFreshListener(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1"} // always Waiting — never Done
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // settle the first Step so the entry is idle before Poke
+
+	c2, pokeCmd, pokeErr := h.c.Poke("promo-1")
+	h.c = c2
+	if pokeErr != nil {
+		t.Fatalf("Poke: %v", pokeErr)
+	}
+	batch, ok := pokeCmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 || batch[0] == nil || batch[1] == nil {
+		t.Fatalf("Poke's own cmd = %#v, want tea.BatchMsg(stepCmd, listenCmd)", pokeCmd)
+	}
+
+	// Push a progress line onto the (re-armed) entry's own channel, as a real driver's Hooks.Progress
+	// would, then run the batch's second element (the fresh listener) and feed its result through
+	// Update — this is exactly what a live progress line needs to actually surface.
+	ch := h.c.entries[build].progressCh
+	ch <- "restarted step"
+	h, _ = harnessUpdate(h, batch[1]())
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 no longer tracked")
+	}
+	if len(snap.Log) != 1 || snap.Log[0].Text != "restarted step" {
+		t.Fatalf("Log after Poke's re-armed listener = %+v, want exactly one line \"restarted step\"", snap.Log)
+	}
+}
+
+// TestOnBuiltSetsSourceTargetDirectForResumedEntry: Resume, unlike Start, never has
+// source/target/direct to seed an entry with up front (the caller only ever names an id) — before
+// this fix the entry stayed blank for the whole Building window and forever after, so the flight
+// header/pane line read blank and a resumed drive's target could not be seen by
+// runningForTarget/ErrTargetBusy at all (AGENTS.md invariant 5's own claim didn't hold — found in
+// review of ceaccb2). onBuilt must fill all three in from msg.state.
+func TestOnBuiltSetsSourceTargetDirectForResumedEntry(t *testing.T) {
+	now := fixedClock(time.Now())
+	state := engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod", Direct: true}
+	drive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: state}
+	backend := &fakeBackend{resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+	snapBeforeBuilt, _ := h.c.Snapshot("promo-1")
+	if snapBeforeBuilt.Source != "" || snapBeforeBuilt.Target != "" {
+		t.Fatalf("setup: entry already carries source/target before onBuilt: %+v", snapBeforeBuilt)
+	}
+
+	h, _ = started(h, resumeCmd)
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 not tracked after onBuilt")
+	}
+	if snap.Source != "staging" || snap.Target != "prod" || !snap.Direct {
+		t.Fatalf("snapshot after onBuilt = %+v, want Source=staging Target=prod Direct=true", snap)
+	}
+
+	// The invariant this was actually for: a resumed drive's target must now be visible to
+	// Start's own same-target refusal.
+	if _, _, _, err := h.c.Start(service.StartRequest{}, "staging", "prod"); !errors.Is(err, ErrTargetBusy) {
+		t.Fatalf("Start against a resumed drive's target = %v, want ErrTargetBusy", err)
+	}
+}
+
+// TestResumeDuringStartBuildOfSameTargetIsDeduped closes the duplicate-driver window found in
+// review of ceaccb2: between StartPromotion's own first preflight save and this process's
+// builtMsg arriving, a fresh listing can already show the real id beside the still id-less
+// Building entry Start created. Resume(id) at that point gets past the byID dedup entirely
+// (Resume sets e.id from the id it was GIVEN — that entry has no way to know it collides with
+// Start's own still-id-less entry until its own onBuilt reveals the target) and would otherwise
+// end up running a second live Driver against the exact same target. onBuilt must refuse the
+// second one exactly like Start's own same-target rule, once the target is known.
+func TestResumeDuringStartBuildOfSameTargetIsDeduped(t *testing.T) {
+	now := fixedClock(time.Now())
+	startDrive := &fakeDrive{id: "promo-1"} // always Waiting
+	resumeDrive := &resumedStateDrive{
+		fakeDrive: fakeDrive{id: "promo-1"},
+		state:     engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"},
+	}
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return startDrive, nil
+		},
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+			return resumeDrive, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	// Start's own Building entry registers "prod" as its target immediately, before
+	// StartPromotion's own background call ever runs — this is the entry a same-target Resume
+	// races against.
+	c, startBuild, startCmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+
+	// A listing (not modelled here directly) already shows "promo-1" — the operator resumes it
+	// before Start's own builtMsg has landed.
+	c2, resumeBuild, resumeCmd, err := h.c.Resume("promo-1")
+	h.c = c2
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if resumeBuild == startBuild {
+		t.Fatal("setup: Resume returned the Start entry's own BuildID — byID already deduped it, nothing left to test")
+	}
+
+	// The resumed call's own build finishes first — this is exactly where the collision must be
+	// caught.
+	h, follow := started(h, resumeCmd)
+	if follow != nil {
+		t.Fatal("a deduped duplicate build produced a follow-up Step command")
+	}
+	if len(h.changes) != 1 || h.changes[0].Kind != ChangeBuildFailed {
+		t.Fatalf("changes = %+v, want exactly one ChangeBuildFailed", h.changes)
+	}
+	if !errors.Is(h.changes[0].Err, ErrTargetBusy) {
+		t.Fatalf("ChangeBuildFailed.Err = %v, want ErrTargetBusy", h.changes[0].Err)
+	}
+	if _, ok := h.c.BuildSnapshot(resumeBuild); ok {
+		t.Fatal("the duplicate resumed build is still tracked")
+	}
+	// The original Start entry must be entirely unaffected.
+	if snap, ok := h.c.BuildSnapshot(startBuild); !ok || snap.Target != "prod" {
+		t.Fatalf("the original Start entry was disturbed: %+v (ok=%v)", snap, ok)
+	}
+
+	// Cleanly finish the original — proves this is not a leftover held-open target, just the
+	// duplicate.
+	h, _ = harnessUpdate(h, runFirst(startCmd))
+}
+
 // TestSecondStartSameTargetRefused pins AGENTS.md invariant 5 at this layer: Controller itself
 // refuses a second Start for a target env it is already tracking, before ever calling Backend.
 func TestSecondStartSameTargetRefused(t *testing.T) {
@@ -435,6 +899,37 @@ func TestResumeOfRunningIDStartsNothing(t *testing.T) {
 		if call == "resume" {
 			t.Fatal("Backend.Resume was called")
 		}
+	}
+}
+
+// TestAnyRunningReflectsPhase: AnyRunning is true for Building/Stepping/Waiting and false once
+// an entry settles at Stopped (blocked) or is removed outright (Done) — the root's own
+// q-with-drives-running gate (Train 2 design PR 3) must not keep asking once there is nothing
+// left that a quit would actually interrupt.
+func TestAnyRunningReflectsPhase(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Blocked: &engine.BlockedError{Reason: "conflict"}},
+	}}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !c.AnyRunning() {
+		t.Fatal("Building must count as running")
+	}
+	h := harness{c: c}
+	h, next := started(h, cmd) // onBuilt's own first Step call is issued...
+	if !h.c.AnyRunning() {
+		t.Fatal("Stepping must count as running")
+	}
+	h, _ = harnessUpdate(h, next()) // ...and lands the scripted Blocked tick.
+	if h.c.AnyRunning() {
+		t.Fatal("a Stopped (blocked) entry must not count as running — R can re-arm it later, but nothing is happening to it right now")
 	}
 }
 
@@ -550,6 +1045,41 @@ func TestBuildFailedRemovesEntry(t *testing.T) {
 	}
 }
 
+// TestBackendReturningNilDriveAndNilErrIsBuildFailed is PR 2's own documented gap (its final
+// report flagged toBuiltMsg's own contract as untested): a Backend returning (nil, nil) — no
+// drive, no error — must not reach d.State() below, a nil-interface method call that panics
+// rather than degrading like every other misbehaving-adaptor path in this package. This proves
+// toBuiltMsg turns that shape into a clear ChangeBuildFailed instead.
+func TestBackendReturningNilDriveAndNilErrIsBuildFailed(t *testing.T) {
+	now := fixedClock(time.Now())
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return nil, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("panicked on a nil drive/nil error backend answer: %v", r)
+			}
+		}()
+		h, _ = started(h, cmd)
+	}()
+	if _, ok := h.c.BuildSnapshot(build); ok {
+		t.Fatal("a build failed this way is still tracked")
+	}
+	if len(h.changes) != 1 || h.changes[0].Kind != ChangeBuildFailed {
+		t.Fatalf("changes = %+v, want exactly one ChangeBuildFailed", h.changes)
+	}
+	if h.changes[0].Err == nil {
+		t.Error("ChangeBuildFailed carries no error to show the operator")
+	}
+}
+
 // TestProgressListenerStopsOnCancel proves the fix for app.go's own documented goroutine leak:
 // once an entry's ctx is done, listenCmd's own select returns nil rather than blocking on the
 // channel forever with nobody left to drain it.
@@ -593,3 +1123,248 @@ func TestProgressLineDeliveredAndReissued(t *testing.T) {
 		t.Fatalf("Log = %+v, want the one delivered line", snap.Log)
 	}
 }
+
+// --- ported flight-level tests (P2 #6) -----------------------------------
+//
+// These port the coverage TestDriveResultBlockedStopsPolling, TestDriveErrorOnNonRetryableStepStopsPolling,
+// TestDriveErrorShowsNoticeAndKeepsPolling, TestRetryableErrorAfterPriorStop…, TestCapToDeadline,
+// TestMinTickIsAUIFloorNotPolicy, TestReobserveAfterTheDeadlineGetsAFreshWindow and
+// TestApplyCINoneOverrideRedrivesWithTheFlagSet used to provide one layer up, in
+// internal/app/flight, before Train 2 moved drive-owning down into this package (ceaccb2,
+// 16fea38) and left no controller-level replacement (found in review of ceaccb2).
+
+// TestBlockedTickSchedulesNoPoll: a Blocked tick must not schedule a follow-up poll — Poke (R) is
+// the only thing that re-arms a blocked entry.
+func TestBlockedTickSchedulesNoPoll(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Blocked: &engine.BlockedError{Reason: "conflict"}},
+	}}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, next := started(h, cmd)
+	h, follow := harnessUpdate(h, next())
+	if follow != nil {
+		t.Fatal("a Blocked tick scheduled a follow-up poll")
+	}
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok || snap.Phase != Stopped {
+		t.Fatalf("snapshot after Blocked = %+v, want Phase=Stopped", snap)
+	}
+}
+
+// TestNonRetryableErrorSchedulesNoPoll: an error with Tick.Retry=false must stop polling, just
+// like Blocked.
+func TestNonRetryableErrorSchedulesNoPoll(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1",
+		steps: []service.Tick{{State: engine.PromotionState{ID: "promo-1"}, Retry: false}},
+		errs:  []error{errors.New("fatal")},
+	}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, next := started(h, cmd)
+	h, follow := harnessUpdate(h, next())
+	if follow != nil {
+		t.Fatal("a non-retryable error scheduled a follow-up poll")
+	}
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok || snap.Phase != Stopped {
+		t.Fatalf("snapshot after a non-retryable error = %+v, want Phase=Stopped", snap)
+	}
+	if snap.Err == nil {
+		t.Fatal("snapshot lost the non-retryable error")
+	}
+}
+
+// TestRetryableErrorKeepsPolling: an error with Tick.Retry=true must still schedule the next
+// poll, unlike a non-retryable one — a transient failure (a flaky forge read) must not wedge the
+// drive the way a real block does.
+func TestRetryableErrorKeepsPolling(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1",
+		steps: []service.Tick{
+			{State: engine.PromotionState{ID: "promo-1"}, Retry: true, Wait: 5 * time.Second},
+			{State: engine.PromotionState{ID: "promo-1"}, Done: true},
+		},
+		errs: []error{errors.New("transient")},
+	}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, next := started(h, cmd)
+	h, follow := harnessUpdate(h, next())
+	if follow == nil {
+		t.Fatal("a retryable error produced no follow-up poll")
+	}
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 not tracked after a retryable error")
+	}
+	if snap.Phase == Stopped {
+		t.Fatal("a retryable error left the entry Stopped — it must keep polling")
+	}
+	if snap.Err == nil {
+		t.Fatal("snapshot lost the retryable error (still worth showing while it keeps polling)")
+	}
+	h = h.drain(follow) // resolves to the scripted Done
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after Done")
+	}
+}
+
+// TestCapWaitRespectsMinTickFloor: a Step's own requested wait, however small (even zero or
+// negative), is floored to Config.MinTick — the same floor flight.Model.minTick used to apply one
+// layer up.
+func TestCapWaitRespectsMinTickFloor(t *testing.T) {
+	now := fixedClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cfg := testConfig(now)
+	cfg.MinTick = 2 * time.Second
+	cfg.Deadline = time.Hour
+	c := New(&fakeBackend{}, cfg)
+	e := entry{deadlineAt: now().Add(cfg.Deadline)}
+	if got := c.capWait(e, time.Millisecond); got != cfg.MinTick {
+		t.Fatalf("capWait(1ms) = %v, want the MinTick floor %v", got, cfg.MinTick)
+	}
+	if got := c.capWait(e, -time.Second); got != cfg.MinTick {
+		t.Fatalf("capWait(-1s) = %v, want the MinTick floor %v", got, cfg.MinTick)
+	}
+}
+
+// TestCapWaitRespectsDeadlineCap: a Step's own requested wait, however large, is capped to what
+// is actually left of the entry's own deadline — never scheduling a poll the deadline will have
+// already passed by.
+func TestCapWaitRespectsDeadlineCap(t *testing.T) {
+	now := fixedClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	cfg := testConfig(now)
+	cfg.MinTick = time.Millisecond
+	c := New(&fakeBackend{}, cfg)
+	e := entry{deadlineAt: now().Add(10 * time.Second)}
+	if got := c.capWait(e, time.Hour); got != 10*time.Second {
+		t.Fatalf("capWait(1h) with 10s left on the deadline = %v, want 10s", got)
+	}
+	// Past the deadline entirely: never a negative wait.
+	e2 := entry{deadlineAt: now().Add(-time.Second)}
+	if got := c.capWait(e2, time.Hour); got != 0 {
+		t.Fatalf("capWait past the deadline = %v, want 0 (never negative)", got)
+	}
+}
+
+// TestPokeGivesAFreshDeadlineAt: Poke (rearm) must start a new deadline window from now, not
+// extend the stale one — a promotion parked for hours and then poked should get a fresh
+// Config.Deadline budget, not immediately read as "about to expire."
+func TestPokeGivesAFreshDeadlineAt(t *testing.T) {
+	now := fixedClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	drive := &fakeDrive{id: "promo-1"} // always Waiting
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // settle busy=false before Poke
+
+	snapBefore, _ := h.c.Snapshot("promo-1")
+
+	later := now().Add(3 * time.Hour)
+	h.c.cfg.Now = fixedClock(later) // simulate real time passing before the operator pokes
+	c2, pokeCmd, pokeErr := h.c.Poke("promo-1")
+	h.c = c2
+	if pokeErr != nil {
+		t.Fatalf("Poke: %v", pokeErr)
+	}
+	if pokeCmd == nil {
+		t.Fatal("Poke produced no command")
+	}
+
+	snapAfter, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 not tracked after Poke")
+	}
+	if !snapAfter.DeadlineAt.After(snapBefore.DeadlineAt) {
+		t.Fatalf("DeadlineAt after Poke = %v, want later than the original %v", snapAfter.DeadlineAt, snapBefore.DeadlineAt)
+	}
+	wantDeadline := later.Add(testConfig(now).Deadline)
+	if !snapAfter.DeadlineAt.Equal(wantDeadline) {
+		t.Fatalf("DeadlineAt after Poke = %v, want a fresh window from the poke time: %v", snapAfter.DeadlineAt, wantDeadline)
+	}
+}
+
+// TestOverrideCINoneCallsDriverBeforeStep: OverrideCINone must call Driver.OverrideCINone before
+// Driver.Step — the whole point is that the next Step call actually observes the override.
+func TestOverrideCINoneCallsDriverBeforeStep(t *testing.T) {
+	now := fixedClock(time.Now())
+	var order []string
+	drive := &orderedOverrideDrive{order: &order}
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // settle busy=false before the override
+	order = nil             // discard the setup Step call — only the override's own ordering matters
+
+	c2, overrideCmd, overrideErr := h.c.OverrideCINone("promo-1")
+	h.c = c2
+	if overrideErr != nil {
+		t.Fatalf("OverrideCINone: %v", overrideErr)
+	}
+	batch, ok := overrideCmd().(tea.BatchMsg)
+	if !ok || len(batch) < 1 {
+		t.Fatalf("OverrideCINone's own cmd = %#v, want tea.BatchMsg(stepCmd, listenCmd)", overrideCmd)
+	}
+	h, _ = harnessUpdate(h, batch[0]()) // runs the actual (override-first) Step call
+
+	if len(order) != 2 || order[0] != "override" || order[1] != "step" {
+		t.Fatalf("call order = %v, want [override step]", order)
+	}
+}
+
+// orderedOverrideDrive records the order OverrideCINone and Step are called in.
+type orderedOverrideDrive struct {
+	order *[]string
+}
+
+func (d *orderedOverrideDrive) ID() string { return "promo-1" }
+
+func (d *orderedOverrideDrive) OverrideCINone() { *d.order = append(*d.order, "override") }
+
+func (d *orderedOverrideDrive) State() engine.PromotionState {
+	return engine.PromotionState{ID: "promo-1"}
+}
+
+func (d *orderedOverrideDrive) Step(context.Context) (service.Tick, error) {
+	*d.order = append(*d.order, "step")
+	return service.Tick{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second}, nil
+}
+
+func (d *orderedOverrideDrive) Run(context.Context, service.RunHooks) error { return nil }

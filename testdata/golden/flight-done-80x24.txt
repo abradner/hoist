@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-promotion complete         o open PR · R re-observe · x abort · l log · esc back
+promotion complete                   o open PR · R re-observe · l log · esc back

@@ -87,7 +87,7 @@ var registry = []op{
 	{
 		Name: "resume a promotion from wherever Observe finds it",
 		CLI:  "resume --env --kube-context",
-		TUI:  "matrix.ResumeMsg r (or enter on the pane), driven in the launch's --kube-context when given",
+		TUI:  "matrix.ResumeMsg r (or enter on the pane) re-attaches to a drive already running here without starting a second one, driven in the launch's --kube-context when given",
 	},
 	{
 		Name: "open the promotion's PR",
@@ -95,9 +95,9 @@ var registry = []op{
 		TUI:  "flight.OpenPRMsg o on the flight screen, o on the in-flight pane",
 	},
 	{
-		Name: "stop watching a promotion; the branch, PR and state file stay",
-		CLI:  "promote ctrl-c (resume picks it up again)",
-		TUI:  "flight.AbortMsg x on the flight screen",
+		Name: "stop driving a promotion; branch, PR and state stay",
+		CLI:  "promote ctrl-c",
+		TUI:  "q with drives running, behind a confirm; esc on the flight screen only stops watching — the drive continues and enter re-attaches",
 	},
 	{
 		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",

@@ -242,30 +242,25 @@ func TestOpenPRKey(t *testing.T) {
 	}
 }
 
-// TestAbortKeyNoticeWhenNotAttached: x is a no-op-with-notice, never emitting AbortMsg, while
-// still Building (no real promotion id yet).
-func TestAbortKeyNoticeWhenNotAttached(t *testing.T) {
-	m := NewAttached(building("app-staging", "app-production", false), PollDurations{})
-	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
-	if cmd != nil {
-		t.Fatal("x produced a command when there is nothing to abort")
-	}
-	if !strings.Contains(m.View(), "nothing to abort") {
-		t.Errorf("view missing the not-driving notice:\n%s", m.View())
-	}
-}
-
-// TestAbortKeyEmitsWhenAttached: once a real, non-empty promotion id has landed, x emits AbortMsg.
-func TestAbortKeyEmitsWhenAttached(t *testing.T) {
-	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}) // ID: "abcd1234"
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
-	if cmd == nil {
-		t.Fatal("x produced no command")
-	}
-	msg, ok := cmd().(AbortMsg)
-	if !ok || msg.ID != "abcd1234" {
-		t.Errorf("x's command = %#v, want AbortMsg{ID: abcd1234}", cmd())
+// TestXDoesNothingOnFlight replaces TestAbortKeyNoticeWhenNotAttached/TestAbortKeyEmitsWhenAttached
+// (Train 2 design PR 3: x is retired — esc already means "stop watching", and a second key for
+// the identical no-op invited the belief that it did something to the drive). Lower-case x must
+// now be a total no-op: no command, no notice, and (the acceptance grep's own point,
+// AGENTS.md §9 entry 12) nothing in this package's own keymap still binds it.
+func TestXDoesNothingOnFlight(t *testing.T) {
+	for _, m := range []Model{
+		NewAttached(building("app-staging", "app-production", false), PollDurations{}),
+		NewAttached(stepping(fixtureState(), false, nil), PollDurations{}), // ID: "abcd1234"
+	} {
+		m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+		before := m.View()
+		got, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		if cmd != nil {
+			t.Errorf("x produced a command: %#v", cmd())
+		}
+		if got.View() != before {
+			t.Errorf("x changed the view:\nbefore:\n%s\nafter:\n%s", before, got.View())
+		}
 	}
 }
 
@@ -420,7 +415,7 @@ func TestViewFixedSize(t *testing.T) {
 		m.state.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"} // a PR exists, so o is offered
 		m = m.SetSize(100, 30).SetStyles(styles)
 		got := m.View()
-		for _, want := range []string{"app-staging → app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "R re-observe", "x abort", "l log"} {
+		for _, want := range []string{"app-staging → app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "R re-observe", "l log"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q:\n%s", want, got)
 			}
