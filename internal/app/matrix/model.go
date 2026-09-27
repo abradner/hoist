@@ -1297,14 +1297,19 @@ const selectedMarker = "▸ "
 const productionMarker = " ⚠"
 
 // statusBar is the matrix's own footer, through keys.Footer (T3-03/04): the env under the
-// cursor on the left (named "(production)" there exactly as before — every write gesture is
-// gated on it), the writes and verbs an operator is actually looking for the key of on the
-// right, in priority order so a narrow terminal drops the least useful first.
+// cursor on the left, the writes and verbs an operator is actually looking for the key of on
+// the right, in priority order so a narrow terminal drops the least useful first. The cursor's
+// own production marker (T3 followup, group 3) is productionMarker — the same "⚠" the header
+// and the notes sentence already use — rather than the spelled-out " (production)" this used to
+// read: at 120 columns the write-verb hints leave the status too little room, and
+// ui.StatusBar's own truncation-with-ellipsis rule was cutting "env b (production)" down to
+// "env b (produc…", a fragment that reads worse than no suffix at all. The shorter marker fits,
+// and the notes sentence below is still what actually spells "production" out for the operator.
 func (m Model) statusBar() string {
 	env := m.CurrentEnv()
 	status := "env " + orNoEnv(env)
 	if env != "" && m.IsProduction(env) {
-		status = "env " + env + " (production)"
+		status = "env " + env + productionMarker
 	}
 	target := m.CurrentEnv()
 	promoteLong := "p promote into"
