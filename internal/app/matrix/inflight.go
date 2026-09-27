@@ -93,8 +93,8 @@ func (m Model) inflightPane(rows int) string {
 		return expanded
 	}
 	lines := make([]string, 0, n)
-	for _, s := range m.inflight {
-		lines = append(lines, m.compactLine(s))
+	for i, s := range m.inflight {
+		lines = append(lines, m.compactLine(i, s))
 	}
 	if compact := title + "\n" + strings.Join(lines, "\n"); lipgloss.Height(compact) <= rows {
 		return compact
@@ -142,7 +142,7 @@ func paneAge(m Model, s flight.Summary) string {
 // expandedSections is one section per promotion: two header lines, a rule, then the action.
 func (m Model) expandedSections() []string {
 	out := make([]string, 0, len(m.inflight)*2)
-	for _, s := range m.inflight {
+	for i, s := range m.inflight {
 		started := "starting…"
 		if !s.StartedAt.IsZero() {
 			started = "started " + ui.Ago(m.now(), s.StartedAt)
@@ -153,6 +153,7 @@ func (m Model) expandedSections() []string {
 			// (Train 2 design PR 3): distinguish that from "re-observed, last seen here".
 			head += "  " + m.styles.Warn.Render("driving")
 		}
+		head = m.paneMarker(i) + head
 		strip := m.styleStrip(s)
 		text, command := approvalCopy(s)
 		var action string
@@ -168,9 +169,46 @@ func (m Model) expandedSections() []string {
 		default:
 			action = m.styles.Dim.Render(s.Verdict())
 		}
+		if cd := m.countdownText(s); cd != "" {
+			if action != "" {
+				action += "  " + m.styles.Dim.Render(cd)
+			} else {
+				action = m.styles.Dim.Render(cd)
+			}
+		}
 		out = append(out, head+"\n"+strip, action)
 	}
 	return out
+}
+
+// paneMarker is the pane-row cursor (commit 1 of the T3-06 train): "▸ " styled through
+// st.Cursor for the entry under m.paneCursor while focus is on the pane (Focus, grid.go's own
+// FocusPane), or two plain spaces otherwise — the same width either way, so a row's own text
+// never shifts depending on whether it happens to be selected. The marker is text, not only
+// colour, for the same reason the grid's own row cursor is (dataRow's own doc comment): goldens
+// are ANSI-stripped, so a cursor that only ever changed a background colour would be invisible
+// to every test that isn't a style assertion.
+func (m Model) paneMarker(i int) string {
+	if m.focus == FocusPane && i == m.paneCursor {
+		return m.styles.Cursor.Render(selectedMarker)
+	}
+	return "  "
+}
+
+// countdownText is "next check in Ns" for an entry session.Controller has told this session it
+// will re-observe on its own (Summary.NextPoll, non-zero exactly when Waiting) — "" for anything
+// else, so a caller can append it unconditionally without an extra empty check of its own.
+// Rounded to the second so it does not repaint on sub-second jitter, mirroring flight.Model's
+// own actionSection countdown, the pane's counterpart once T3-06 lands.
+func (m Model) countdownText(s flight.Summary) string {
+	if s.NextPoll.IsZero() {
+		return ""
+	}
+	remaining := s.NextPoll.Sub(m.now())
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("next check in %s", remaining.Round(time.Second))
 }
 
 // approvalCopy is s.Action() with one wording fix (T3-05, UX-H10): a promotion blocked on the
@@ -242,7 +280,7 @@ func stepState(r flight.Row) ui.StepState {
 }
 
 // compactLine is the narrow form: "⟳ 5pr6sd333t → app-production   blocked on approval · 12m".
-func (m Model) compactLine(s flight.Summary) string {
+func (m Model) compactLine(i int, s flight.Summary) string {
 	// The target can be a 63-character namespace; the verdict is what must survive, so the
 	// target is the part that gives way.
 	target := ansi.Truncate(s.Target, 24, "…")
@@ -250,7 +288,11 @@ func (m Model) compactLine(s flight.Summary) string {
 	if s.Live {
 		verdict += " · driving"
 	}
-	return m.styles.Accent.Render("⟳ "+paneID(s)+" → "+target) + "   " + m.styles.Warn.Render(verdict) + m.styles.Dim.Render(" · "+paneAge(m, s))
+	line := m.paneMarker(i) + m.styles.Accent.Render("⟳ "+paneID(s)+" → "+target) + "   " + m.styles.Warn.Render(verdict) + m.styles.Dim.Render(" · "+paneAge(m, s))
+	if cd := m.countdownText(s); cd != "" {
+		line += m.styles.Dim.Render(" · " + cd)
+	}
+	return line
 }
 
 // inflightLine is the one-line fold for the notes section when no pane fits at all.
