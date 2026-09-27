@@ -1673,9 +1673,12 @@ func TestEscDuringBuildKeepsBuilding(t *testing.T) {
 // wait) always ended in "could not start promotion: …" instead of re-attaching.
 func TestEnterOnBuildingPaneEntryReattaches(t *testing.T) {
 	// The fake fakeService this constructs has no ResumeFn set — Backend.Resume (fakeService.Resume,
-	// fakeservice_test.go) panics if called at all, which is this test's proof that Resume is
-	// called zero times: a wrong fix that still routes through session.Controller.Resume("")
-	// fails this test by panicking, not merely by asserting the wrong screen.
+	// fakeservice_test.go) panics if called at all. That is not what actually catches a wrong fix
+	// here, though: unlike TestEnterReattachesWithoutSecondResume (which deliberately runs the
+	// resulting resume command to force the panic), this test never runs resumeCmd — a wrong fix
+	// that still routes through session.Controller.Resume("") just builds an entry under a blank
+	// id and fails the assertions below (wrong BuildID, wrong screen, wrong Live() count), the
+	// same as any other logic bug would.
 	release := make(chan struct{})
 	promo := testPromo{Start: func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
 		<-release // never resolves until the test says so — stays Building throughout

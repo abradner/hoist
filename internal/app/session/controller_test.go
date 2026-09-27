@@ -672,6 +672,48 @@ func TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands(t *testing.T) {
 	}
 }
 
+// TestAbandonDuringResumeBuildFillsSourceTarget: an Abandon fired while a resumed entry's own
+// Resume call is still in flight, that call then succeeding, must fill source/target/direct from
+// the landed state exactly as the ordinary (non-abandoning) success path does — otherwise the
+// header a caller renders during the brief window before the abandon itself completes reads
+// blank, the same gap TestOnBuiltSetsSourceTargetDirectForResumedEntry closed for the ordinary
+// path but which this branch (a separate early return in onBuilt) never inherited.
+func TestAbandonDuringResumeBuildFillsSourceTarget(t *testing.T) {
+	now := fixedClock(time.Now())
+	state := engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod", Direct: true}
+	drive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: state}
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return drive, nil },
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+	c2, _ := h.c.Abandon("promo-1") // busy (Building) — takes the wait path
+	h.c = c2
+
+	h, followUp := started(h, resumeCmd) // the Resume call now succeeds
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning produced no command")
+	}
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 not tracked between the build landing and the abandon completing")
+	}
+	if snap.Source != "staging" || snap.Target != "prod" || !snap.Direct {
+		t.Fatalf("snapshot mid-abandon = %+v, want Source=staging Target=prod Direct=true", snap)
+	}
+
+	h = h.drain(followUp) // let the abandon itself finish, for a clean test
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after the abandon completed")
+	}
+}
+
 // TestBlockedDuringAbandonKeepsAbandoningPhase: a Blocked tick reported for a Step that Abandon
 // is waiting on must not overwrite phase Abandoning with Stopped — doing so let Poke re-arm
 // (bumping gen), which drops the abandonWaitMsg already scheduled and the abandon silently
@@ -1516,6 +1558,54 @@ func TestOverrideCINoneCallsDriverBeforeStep(t *testing.T) {
 
 	if len(order) != 2 || order[0] != "override" || order[1] != "step" {
 		t.Fatalf("call order = %v, want [override step]", order)
+	}
+}
+
+// TestOverrideCINoneRearmsAFreshListener is TestPokeRearmsAFreshListener's OverrideCINone twin:
+// TestOverrideCINoneCallsDriverBeforeStep only pins the returned command's own BATCH SHAPE
+// (stepCmd, listenCmd) and call ordering — it never actually delivers a progress line through
+// the re-armed listener, so a regression that broke live progress after an override (the same
+// class of bug TestPokeRearmsAFreshListener guards against one call down) would pass it silently.
+// This drives an actual line through the batch's second element and asserts it reaches the log.
+func TestOverrideCINoneRearmsAFreshListener(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1"} // always Waiting — never Done
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // settle the first Step so the entry is idle before OverrideCINone
+
+	c2, overrideCmd, overrideErr := h.c.OverrideCINone("promo-1")
+	h.c = c2
+	if overrideErr != nil {
+		t.Fatalf("OverrideCINone: %v", overrideErr)
+	}
+	batch, ok := overrideCmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 || batch[0] == nil || batch[1] == nil {
+		t.Fatalf("OverrideCINone's own cmd = %#v, want tea.BatchMsg(stepCmd, listenCmd)", overrideCmd)
+	}
+
+	// Push a progress line onto the re-armed entry's own channel, then run the batch's second
+	// element (the fresh listener) and feed its result through Update — exactly what a live
+	// progress line needs to actually surface after an override, not merely the batch shape.
+	ch := h.c.entries[build].progressCh
+	ch <- "override applied, stepping again"
+	h, _ = harnessUpdate(h, batch[1]())
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 no longer tracked")
+	}
+	if len(snap.Log) != 1 || snap.Log[0].Text != "override applied, stepping again" {
+		t.Fatalf("Log after OverrideCINone's re-armed listener = %+v, want exactly one line", snap.Log)
 	}
 }
 

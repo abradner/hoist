@@ -840,6 +840,16 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 		if msg.err == nil {
 			e.state = msg.state
 			e.driver = msg.drive
+			// Same fill as the ordinary (non-abandoning) success path below: a Resume never has
+			// source/target/direct to seed the entry with up front, so without this an abandon
+			// fired during a resumed entry's Build window would show a blank header for the brief
+			// window before the abandon actually completes (found in review — the ordinary path's
+			// own fill was never reached here, since this branch returns before it).
+			if e.source == "" && e.target == "" {
+				e.source = msg.state.SourceEnv
+				e.target = msg.state.TargetEnv
+				e.direct = msg.state.Direct
+			}
 		}
 		if e.abandonIssued {
 			// Abandon's own wait chain (Abandon's immediate path, or onAbandonWait's timeout
