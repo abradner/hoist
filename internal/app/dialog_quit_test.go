@@ -35,7 +35,7 @@ func pressRoot(m tea.Model, k string) (tea.Model, tea.Cmd) {
 
 // TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit is the composition the flight
 // screen's own CapturesText test cannot prove: with the flight screen on top, blocked on
-// ci.none and its c dialog up, q through the ROOT is handed to the dialog rather than
+// ci.none and its shift+c dialog up, q through the ROOT is handed to the dialog rather than
 // falling through to the global "q" handling — an operator mid-decision cannot dismiss the
 // dialog by typing what they think is a command. Positive control: the same q, with no dialog
 // up, never quits either — the flight screen is not the matrix, so q is unbound there under the
@@ -43,8 +43,8 @@ func pressRoot(m tea.Model, k string) (tea.Model, tea.Cmd) {
 func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234"), state: engine.PromotionState{ID: "abcd1234"}}
 	tm := blockedOnCINoneAtRoot(t, drv)
-	if !strings.Contains(plain(tm), "c treat as green") {
-		t.Fatalf("setup: the flight screen should offer c:\n%s", plain(tm))
+	if !strings.Contains(plain(tm), "shift+c treat as green") {
+		t.Fatalf("setup: the flight screen should offer shift+c:\n%s", plain(tm))
 	}
 	tm, cmd0 := pressRoot(tm, "q")
 	if quits(cmd0) {
@@ -54,13 +54,13 @@ func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 		t.Fatalf("q on flight should raise the transient hint:\n%s", plain(tm))
 	}
 
-	tm, _ = pressRoot(tm, "c")
+	tm, _ = pressRoot(tm, "shift+c")
 	if !strings.Contains(plain(tm), "treat no checks as green") {
-		t.Fatalf("c did not open the flight dialog:\n%s", plain(tm))
+		t.Fatalf("shift+c did not open the flight dialog:\n%s", plain(tm))
 	}
 	tm, cmd := pressRoot(tm, "q")
 	if quits(cmd) {
-		t.Fatal("q quit the program while the flight screen's c dialog was open")
+		t.Fatal("q quit the program while the flight screen's shift+c dialog was open")
 	}
 	if !tm.(Model).capturesText() {
 		t.Error("the flight dialog closed on q")

@@ -60,6 +60,9 @@ func TestFlightGolden(t *testing.T) {
 		return NewAttached(snap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
 	}
 	uitest.Golden(t, "flight-done", doneSnap().SetSize(80, 24).View(), 80, 24)
+	// v2·04b's own frame size: the done state at the height the mockup draws it, so the
+	// golden-vs-mockup diff (T3-06's own review gate) has a same-size comparison to make.
+	uitest.Golden(t, "flight-done", doneSnap().SetSize(80, 16).View(), 80, 16)
 
 	s := fixtureState()
 	s.Direct, s.SourceEnv = true, ""
@@ -122,8 +125,8 @@ func TestActionSectionShowsCountdownWhileWaiting(t *testing.T) {
 	snap.Busy = false
 	snap.NextPoll = now().Add(12500 * time.Millisecond)
 	m := NewAttached(snap, PollDurations{}).WithNow(now)
-	if got := m.actionSection(); !strings.Contains(got, "next check in 13s") || !strings.Contains(got, "R now") {
-		t.Fatalf("actionSection() = %q, want a rounded 13s countdown naming R", got)
+	if got := m.actionSection(); !strings.Contains(got, "next check in 13s") || !strings.Contains(got, "r now") {
+		t.Fatalf("actionSection() = %q, want a rounded 13s countdown naming r", got)
 	}
 
 	m.busy = true

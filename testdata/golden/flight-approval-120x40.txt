@@ -1,4 +1,4 @@
-╭─ hoist · promotion · in flight ──────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · promotion · waiting for approval ───────────────────────────────────────────────────────────────────────────╮
 │abcd1234   app-staging → app-production                                                             started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │✓ branch                                                                                                              │
@@ -13,12 +13,12 @@
 │· argo sync                                                                                                           │
 │· rollout                                                                                                             │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:                                                                    │
-│                                                                                                                      │
-│    hoist approve abcd1234                                                                                            │
+│waiting for an approver to comment `hoist approve abcd1234` on PR #103 · o opens it                                   │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │history                                                                                                               │
-│2026-09-01T12:00:00Z  branched      acted                                                                             │
+│4 days ago  branch        acted                                                                                       │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                 o open PR · X abandon · R re-observe · l log · esc back
+                        esc back (keeps running) · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help

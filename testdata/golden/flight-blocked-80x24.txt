@@ -1,9 +1,10 @@
-╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+╭─ hoist · promotion · blocked ────────────────────────────────────────────────╮
 │abcd1234   app-staging → app-production                     started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │✓ branch                                                                      │
 │✗ commit                                                                      │
-│    branch hoist/app-production/abcd1234 already exists with different content│
+│    branch hoist/app-production/abcd1234 already exists with different        │
+│    content                                                                   │
 │· push                                                                        │
 │· PR                                                                          │
 │· CI                                                                          │
@@ -13,12 +14,11 @@
 │· argo sync                                                                   │
 │· rollout                                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked — branch hoist/app-production/abcd1234 already exists with different  │
-│content                                                                       │
-│R to re-observe once resolved                                                 │
+│blocked                                                                       │
+│r to re-observe once resolved                                                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │history                                                                       │
-│2026-09-01T12:00:00Z  branched      acted                                     │
+│4 days ago  branch        acted                                               │
 │…                                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-blocked: resolve the co… o open PR · X abandon · R re-observe · l log · esc back
+esc back · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help

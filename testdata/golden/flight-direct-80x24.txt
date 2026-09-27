@@ -11,7 +11,7 @@
 │· rollout                                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │history                                                                       │
-│2026-09-01T12:00:00Z  branched      acted                                     │
+│4 days ago  branch        acted                                               │
 │                                                                              │
 │                                                                              │
 │                                                                              │
@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                     X abandon · R re-observe · l log · esc back
+            esc back · w watch · l log · shift+x abandon · r re-observe · ? help
