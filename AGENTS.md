@@ -997,7 +997,7 @@ test lives** (if one exists).
    `TestDirectModeSupersedeDoesNotCoverAReplacedImageRepo` in `internal/engine/direct_test.go`,
    the five `TestArgoSynced{Accepts,Rejects,Carried}…` cases in
    `internal/engine/steps_converge_test.go`, and
-   `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `cmd/hoist/findinflight_test.go`
+   `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `internal/service/inflight_test.go`
    (#165, #166).
 
 ## 10. Maintaining This Document

@@ -40,6 +40,15 @@ type RepoView struct {
 	// when LoadRepo fell back to the clone itself (RepoFromOrigin's fetch failed) or was asked
 	// for RepoFromClone directly.
 	FromOrigin bool
+	// SHA is origin/<base>'s tip at the moment THIS view was built (FromOrigin only; "" for a
+	// clone-mode view or a fallback). Dir names a cached directory under repoViewDir, keyed only
+	// by cloneDir — a LATER LoadRepo(RepoFromOrigin) call (an F5 refresh) checks that same
+	// directory out to a NEW ref in place, so a Dir string alone cannot tell an old view from a
+	// newer one once the refresh has run: CheckRepoViewCurrent must compare against the SHA this
+	// view actually captured, never re-derive one by reading Dir's current on-disk HEAD, or a
+	// refresh that lands between building a plan and confirming it would silently launder a
+	// stale plan by making the check compare origin's tip against itself (t1-review.md P2 #6).
+	SHA string
 	// Fallback is refreshRepoView's own error when RepoFromOrigin had to fall back to the
 	// clone. nil whenever FromOrigin is true, or for RepoFromClone.
 	Fallback error
@@ -53,12 +62,13 @@ func (s *Service) LoadRepo(ctx context.Context, mode RepoMode) (RepoView, error)
 	switch mode {
 	case RepoFromOrigin:
 		dir := s.settings.RepoDir
-		fresh, err := refreshRepoView(ctx, s.Git(), s.settings.RepoDir, s.settings.Base)
+		fresh, sha, err := refreshRepoView(ctx, s.Git(), s.settings.RepoDir, s.settings.Base)
 		if err != nil {
 			view.Fallback = err
 		} else {
 			dir = fresh
 			view.FromOrigin = true
+			view.SHA = sha
 		}
 		r, derr := gitops.Discover(dir, s.settings.AppsRoot)
 		if derr != nil {
@@ -124,56 +134,59 @@ func repoViewDir(cloneDir string) (string, error) {
 // ordinary way goes stale the moment hoist itself writes anything. checkRepoViewCurrent
 // (below) is the narrower check that's left: has origin/<base> moved again since this view was
 // last refreshed.
-func refreshRepoView(ctx context.Context, g git.Git, cloneDir, base string) (viewDir string, err error) {
+func refreshRepoView(ctx context.Context, g git.Git, cloneDir, base string) (viewDir, sha string, err error) {
 	if _, _, err := g.FetchBranch(ctx, cloneDir, "origin", base); err != nil {
-		return "", fmt.Errorf("fetching origin/%s: %w", base, err)
+		return "", "", fmt.Errorf("fetching origin/%s: %w", base, err)
 	}
 	viewDir, err = repoViewDir(cloneDir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// Mirrors pkg/git.Exec's own resolveBase reasoning: prefer the remote-tracking ref
 	// whenever it exists, fully qualified either way so a tag named like the branch or like
 	// "origin/<base>" can never win the short-name lookup (issue #100).
 	ref := "refs/heads/" + base
 	if _, ok, rerr := g.RevParse(ctx, cloneDir, "refs/remotes/origin/"+base); rerr != nil {
-		return "", rerr
+		return "", "", rerr
 	} else if ok {
 		ref = "refs/remotes/origin/" + base
 	}
 	if err := g.RemoveWorktree(ctx, cloneDir, viewDir); err != nil {
-		return "", fmt.Errorf("clearing the previous cached repo view: %w", err)
+		return "", "", fmt.Errorf("clearing the previous cached repo view: %w", err)
 	}
 	if err := g.WorktreeAtRef(ctx, cloneDir, viewDir, ref); err != nil {
-		return "", fmt.Errorf("checking out a cached view of %s: %w", ref, err)
+		return "", "", fmt.Errorf("checking out a cached view of %s: %w", ref, err)
 	}
-	return viewDir, nil
-}
-
-// CheckRepoViewCurrent refuses a confirm whose plan (built from viewDir, at whatever moment
-// refreshRepoView last ran — TUI boot or a since F5) no longer matches origin/<base>'s present
-// tip. Deliberately NOT checkCloneCurrentForBase's per-file blob comparison: that function's
-// whole shape assumes cloneDir's working tree tracks refs/heads/<base>, the local branch —
-// true for an ordinary checkout, false by construction for viewDir, which is deliberately
-// checked out from origin, never the local branch. What's left to verify is simpler: re-fetch
-// origin/<base> and compare its SHA to what viewDir was checked out at.
-//
-// viewDir empty or equal to cloneDir (refreshRepoView itself failed, the caller fell back to
-// the clone) skips this check entirely — there is nothing cached to compare against.
-//
-// Exported (unlike repoViewDir/refreshRepoView) because cmd/hoist/wiring.go's
-// buildStartPromotion still calls this directly in this train — StartPromotion itself moves
-// into this package only in PR D.
-func CheckRepoViewCurrent(ctx context.Context, g git.Git, cloneDir, base, viewDir string) error {
-	if viewDir == "" || viewDir == cloneDir {
-		return nil
-	}
-	viewedSHA, ok, err := g.RevParse(ctx, viewDir, "HEAD")
-	if err != nil {
-		return err
+	sha, ok, rerr := g.RevParse(ctx, viewDir, "HEAD")
+	if rerr != nil {
+		return "", "", rerr
 	}
 	if !ok {
-		return fmt.Errorf("%s: cached repo view has no HEAD", viewDir)
+		return "", "", fmt.Errorf("%s: cached repo view has no HEAD", viewDir)
+	}
+	return viewDir, sha, nil
+}
+
+// CheckRepoViewCurrent refuses a confirm whose plan (built from a view captured at viewedSHA,
+// whatever moment refreshRepoView last ran to produce it — TUI boot or a since F5) no longer
+// matches origin/<base>'s present tip. Deliberately NOT checkCloneCurrentForBase's per-file blob
+// comparison: that function's whole shape assumes cloneDir's working tree tracks
+// refs/heads/<base>, the local branch — true for an ordinary checkout, false by construction for
+// a cached origin view, which is deliberately checked out from origin, never the local branch.
+// What's left to verify is simpler: re-fetch origin/<base> and compare its SHA to viewedSHA.
+//
+// viewedSHA takes the CALLER'S already-captured RepoView.SHA rather than re-reading viewDir's
+// current on-disk HEAD: repoViewDir is keyed only by cloneDir, so a LATER LoadRepo(RepoFromOrigin)
+// call (an F5 refresh) checks that same directory out to a new ref IN PLACE — re-deriving the
+// "viewed" SHA from disk at check time would therefore always read whatever the most recent
+// refresh just wrote, making every check trivially pass regardless of which view a plan was
+// actually built from (t1-review.md P2 #6, the fail-open this replaces).
+//
+// viewedSHA == "" (refreshRepoView itself failed and the caller fell back to the clone, or this
+// is a clone-mode view) skips this check entirely — there is nothing cached to compare against.
+func CheckRepoViewCurrent(ctx context.Context, g git.Git, cloneDir, base, viewedSHA string) error {
+	if viewedSHA == "" {
+		return nil
 	}
 	freshSHA, _, err := g.FetchBranch(ctx, cloneDir, "origin", base)
 	if err != nil {

@@ -178,15 +178,15 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
 		case done && retain > 0 && time.Since(s.LastActivity()) > retain:
 			if aerr := engine.ArchiveState(s.ID); aerr != nil {
-				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archiving failed: %v\n", s.ID, s.TargetEnv, statusDetail(status.Observation), aerr)
+				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archiving failed: %v\n", s.ID, s.TargetEnv, service.Detail(status.Observation), aerr)
 			} else {
-				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archived (older than %s)\n", s.ID, s.TargetEnv, statusDetail(status.Observation), retain)
+				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archived (older than %s)\n", s.ID, s.TargetEnv, service.Detail(status.Observation), retain)
 				archivedThisRun[s.ID] = true
 			}
 		case done:
-			fmt.Fprintf(stdout, "%s  %-20s  done (%s)\n", s.ID, s.TargetEnv, statusDetail(status.Observation))
+			fmt.Fprintf(stdout, "%s  %-20s  done (%s)\n", s.ID, s.TargetEnv, service.Detail(status.Observation))
 		default:
-			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, status.Step, statusDetail(status.Observation))
+			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, status.Step, service.Detail(status.Observation))
 		}
 	}
 	if *archived {

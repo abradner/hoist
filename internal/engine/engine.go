@@ -390,21 +390,21 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // would otherwise cost one extra, wasted remote call on the final step, every tick of the
 // flight screen's own poll loop (PR #39 review finding #3).
 // Both of Status's own Observe errors are returned as *StepError (Op: "observe"), not a bare
-// fmt.Errorf, even though nothing here ever calls Act: Retryable (this package, called by both
-// cmd/hoist/drive.go's driveToCompletion and internal/app/flight.Model's own retry check) only
-// retries automatically on a *StepError naming one of RetryableStep's five steps — CIGreen and
-// Approved, whose Observe alone can transiently 404/scope-error on a Checks or Comments call
-// without the underlying condition (CI status, an approval) actually being answerable yet, plus
-// ArgoRefreshed/ArgoSynced/RolledOut for the same reason against the Kubernetes API. A bare wrapped
-// error carries the same message (StepError.Error()'s "<step>: <op>: <err>" format matches this
-// function's own pre-existing "%s: observe: %w" text exactly, and Unwrap still reaches oerr, so
-// errors.Is/the message text are both unchanged) but cannot be told apart by errors.As, which is
-// all that classifier can use. Before this, a transient hiccup on the immediately-following
-// Status call — after engine.Drive had itself already observed the very same step successfully
-// as Waiting or Blocked, in cmd/hoist/wiring.go's own DriveFunc — surfaced as a plain error the
-// flight screen read as terminal and stopped polling on for good, unlike the CLI's own
-// driveToCompletion, which retries the identical shape of failure when Drive's own Observe hits
-// it directly (Codex review, PR #50 round 4).
+// fmt.Errorf, even though nothing here ever calls Act: Retryable (this package, called by
+// internal/service.Driver.Run for both the CLI and the flight screen, which now share the one
+// retry/poll policy — service:Driver) only retries automatically on a *StepError naming one of
+// RetryableStep's five steps — CIGreen and Approved, whose Observe alone can transiently
+// 404/scope-error on a Checks or Comments call without the underlying condition (CI status, an
+// approval) actually being answerable yet, plus ArgoRefreshed/ArgoSynced/RolledOut for the same
+// reason against the Kubernetes API. A bare wrapped error carries the same message
+// (StepError.Error()'s "<step>: <op>: <err>" format matches this function's own pre-existing
+// "%s: observe: %w" text exactly, and Unwrap still reaches oerr, so errors.Is/the message text
+// are both unchanged) but cannot be told apart by errors.As, which is all that classifier can
+// use. Before this, a transient hiccup on the immediately-following Status call — after
+// engine.Drive had itself already observed the very same step successfully as Waiting or
+// Blocked — surfaced as a plain error that Driver.Run's own retry classification read as
+// terminal and stopped polling on for good, unlike Drive's own Observe hitting the identical
+// shape of failure directly (Codex review, PR #50 round 4).
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
 	var probeErr error

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/internal/app"
-	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -34,7 +33,7 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(strings.Replace(string(raw), "none: green", "none: prompt", 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	eff := buildEffForFixture(t, cfgPath)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -44,8 +43,7 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)

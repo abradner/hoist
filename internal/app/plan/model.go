@@ -108,12 +108,20 @@ type StartMsg struct {
 	// same set recomputeDiff already filters Plan.Edits by.
 	Ticked         []string
 	Source, Target string
+	// View is the service.RepoView the underlying planFn call actually planned against
+	// (service.PlannedChange.View, carried through loadedMsg) — the root's StartPromotion call
+	// passes this as StartRequest.View so the freshness check re-checks the SAME view this plan
+	// was built from, rather than whatever the service's current view has since become (an F5
+	// refresh between loading this screen and pressing Enter must not silently launder a plan
+	// built from a now-stale view; t1-review.md P2 #6).
+	View service.RepoView
 }
 
 // loadedMsg is delivered once the async discovery+resolution+BuildPlan cmd finishes.
 type loadedMsg struct {
 	plan    gitops.Plan
 	outcome service.Resolution
+	view    service.RepoView
 	// err is fatal for this screen (rendered, never panics): either resolveFn failed —
 	// which AGENTS.md §4.10 states is a whole-operation failure whenever resolution was
 	// attempted at all, the same asymmetry cmd/hoist's runPlan enforces for the CLI — or
@@ -172,9 +180,13 @@ type Model struct {
 
 	plan    gitops.Plan
 	outcome service.Resolution
-	rows    []Row
-	prefix  string // the image-repo prefix every row shares, shown once in the header
-	deltas  map[string]history.State
+	// view is the service.RepoView the most recent loadCmd actually planned against (from
+	// loadedMsg.view) — carried into StartMsg.View so the root's StartPromotion call checks
+	// freshness against the view THIS plan was built from (t1-review.md P2 #6).
+	view   service.RepoView
+	rows   []Row
+	prefix string // the image-repo prefix every row shares, shown once in the header
+	deltas map[string]history.State
 
 	multiSelect *huh.MultiSelect[string]
 	ticked      []string // bound to multiSelect's accessor
@@ -434,7 +446,7 @@ func (m Model) loadCmd() tea.Cmd {
 		if pc.Resolution != nil {
 			outcome = *pc.Resolution
 		}
-		return loadedMsg{plan: pc.Plan, outcome: outcome}
+		return loadedMsg{plan: pc.Plan, outcome: outcome, view: pc.View}
 	}
 }
 
@@ -509,6 +521,7 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 	}
 	m.plan = msg.plan
 	m.outcome = msg.outcome
+	m.view = msg.view
 	m.rows = DeriveRows(m.plan, m.outcome.Res)
 	m.prefix = CommonPrefix(m.rows)
 	if keep {
@@ -576,9 +589,9 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		ticked := append([]string(nil), m.ticked...)
-		plan, outcome, mode, source, target := m.plan, m.outcome, m.mode, m.source, m.target
+		plan, outcome, mode, source, target, view := m.plan, m.outcome, m.mode, m.source, m.target, m.view
 		return m.leave(), func() tea.Msg {
-			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target}
+			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target, View: view}
 		}
 	case key.Matches(kmsg, m.keys.Mode):
 		if m.envs.IsProduction(m.target) {

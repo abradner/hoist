@@ -261,14 +261,16 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 // something that reflects the pre-edit state and stays that way across any number of calls.
 //
 // CommittedStep.expectedBlobs is this function's only caller, for both the PR and the direct
-// flow, and it always passes dir = s.CloneDir — validated ahead of time by cmd/hoist's
-// checkCloneCurrentForBase, which refuses to start the engine at all when the clone disagrees
-// with origin/<base>. Direct mode cannot lean on that same validate-and-refuse dance for the
-// files it never even knew to look at (a new occurrence origin/<base> gained that the clone's
-// own disk never had — round-N finding), so cmd/hoist guards that case separately: it discovers
-// against a throwaway snapshot of origin/<base>'s actual current tree and refuses on a missing
-// occurrence (discoverAtFreshBase and checkNoMissingOccurrenceAtFreshBase in
-// cmd/hoist/promote.go). That snapshot never feeds this function.
+// flow, and it always passes dir = s.CloneDir — validated ahead of time by
+// internal/service.StartPromotion's own freshness check (checkCloneCurrentForBase or
+// CheckRepoViewCurrent, by view — internal/service/fresh.go, internal/service/repo.go), which
+// refuses to start the engine at all when the checkout disagrees with origin/<base>. Direct mode
+// cannot lean on that same validate-and-refuse dance for the files it never even knew to look at
+// (a new occurrence origin/<base> gained that the clone's own disk never had — round-N finding),
+// so StartPromotion guards that case separately: it discovers against a throwaway snapshot of
+// origin/<base>'s actual current tree and refuses on a missing occurrence
+// (discoverAtFreshBase/checkFreshBase in internal/service/fresh.go). That snapshot never feeds
+// this function.
 //
 // An earlier version of this comment claimed cmd/hoist called this directly against the
 // snapshot and passed the result in via PromotionState.ExpectedBlobs before Drive started, so

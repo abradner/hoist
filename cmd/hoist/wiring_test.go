@@ -15,26 +15,13 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/internal/service"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// tuiCluster supplies buildStartPromotion's Argo/Deployment adaptors from whatever
-// newPromoteFixture pointed newArgo/newRollout at, so a test wires exactly what runTUI wires
-// rather than a differently-shaped stand-in.
-func tuiCluster(t *testing.T) (argo.Argo, rollout.Rollout, error) {
-	t.Helper()
-	a, _, aerr := newArgo("")
-	ro, _, rerr := newRollout("")
-	return a, ro, errors.Join(aerr, rerr)
-}
-
-// buildEffForFixture loads cfgPath (built by newPromoteFixture) and resolves it into the
-// effective value runTUI itself would build for the TUI, standing in for
-// gitops.Discover+selectRepo's own real work without duplicating main.go's flag-parsing.
-func buildEffForFixture(t *testing.T, cfgPath string) effective {
+func loadCfgAndEffForFixture(t *testing.T, cfgPath string) (*config.Config, effective) {
 	t.Helper()
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
@@ -47,7 +34,26 @@ func buildEffForFixture(t *testing.T, cfgPath string) effective {
 	if eff.cfg == nil {
 		t.Fatal("fixture config should resolve to exactly one repo")
 	}
-	return eff
+	return cfg, eff
+}
+
+// buildSvcForFixture builds the same *service.Service runTUI itself would build for cfgPath — the
+// long-lived, session-wide Service buildStartPromotion (wiring.go) is now a thin adapter over —
+// and loads its current repo view (RepoFromClone: a pure local disk read, exactly what runTUI's
+// own RepoFromOrigin falls back to when there is nothing to fetch from, and what every test
+// fixture's origin already agrees with anyway) so StartRequest's own nil-Repo/nil-View defaults
+// resolve to something, mirroring runTUI's own svc.LoadRepo call at boot. Returns the Service
+// alongside the effective value, for tests that also need eff.repo/eff.appsRoot/eff.promotable
+// to build their own plan via gitops.Discover+BuildPlan the way runTUI's own plan screen does.
+func buildSvcForFixture(t *testing.T, cfgPath string) (*service.Service, effective) {
+	t.Helper()
+	cfg, eff := loadCfgAndEffForFixture(t, cfgPath)
+	set := settingsFor(cfg, eff)
+	svc := service.New(set, serviceDeps())
+	if _, err := svc.LoadRepo(context.Background(), service.RepoFromClone); err != nil {
+		t.Fatal(err)
+	}
+	return svc, eff
 }
 
 // driveToDone runs driveFn repeatedly (mirroring what the flight screen's own tick loop does,
@@ -99,7 +105,7 @@ func driveToDone(t *testing.T, clone string, driveFn flight.Driver, start engine
 // the M4-wiring-brief's pre-fix nil DriveFunc stub.
 func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -110,8 +116,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
@@ -185,8 +190,8 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 // covered where that lifecycle actually lives, internal/app/app_test.go's
 // TestProgressSurvivesFromPreflightThroughDrive.
 func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
-	cfgPath, clone, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	cfgPath, clone, _ := newPromoteFixture(t)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -197,8 +202,7 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 
 	var mu sync.Mutex
 	var lines []string
@@ -237,7 +241,7 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 // flight, rather than silently opening a second branch/PR for it.
 func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -281,8 +285,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
@@ -306,8 +309,8 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 // with the same message runPromote uses, rather than panicking on a nil-pointer RepoConfig
 // field or on a nil forge.
 func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
-	cfgPath, _, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	cfgPath, _, _ := newPromoteFixture(t)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 	eff.cfg.GitHub = ""
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
@@ -319,8 +322,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
@@ -345,7 +347,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 // with no PR opened and no state file left behind.
 func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
@@ -370,8 +372,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
@@ -405,8 +406,8 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 // engine.Drive's own save to release (which, per engine.Drive's own code, never even runs when
 // the very first step's Observe returns a plain error before Act is ever reached).
 func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
-	cfgPath, _, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	cfgPath, _, _ := newPromoteFixture(t)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
@@ -417,8 +418,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
@@ -507,8 +507,8 @@ func TestBrowserCommandPerOS(t *testing.T) {
 // would drive the promotion as a PR: opening a branch and a PR for a change the operator
 // explicitly asked to push straight to base.
 func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
-	cfgPath, _, f := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	cfgPath, _, _ := newPromoteFixture(t)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -517,8 +517,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
+	start := buildStartPromotion(svc)
 
 	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true}, nil)
 	if err != nil {
@@ -559,7 +558,7 @@ func mustStatePath(t *testing.T, id string) string {
 // must not disagree with them about when a GitHub login is needed (issue #55).
 func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	cfgPath, clone, _ := newPromoteFixture(t)
-	eff := buildEffForFixture(t, cfgPath)
+	svc, eff := buildSvcForFixture(t, cfgPath)
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	prodFile := filepath.Join(clone, "cluster/apps/app-production/app/deployment.yaml")
 	content := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v2@" + digestNew + "\n"
@@ -577,9 +576,11 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, ro, cerr := tuiCluster(t)
 	forgeErr := errors.New("gh: not logged in")
-	start := buildStartPromotion(eff, r, eff.repo, newGit, nil, forgeErr, a, ro, cerr, config.PollConfig{})
+	prevForge := newForge
+	newForge = func(string) (forge.Forge, error) { return nil, forgeErr }
+	t.Cleanup(func() { newForge = prevForge })
+	start := buildStartPromotion(svc)
 	_, _, err = start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)

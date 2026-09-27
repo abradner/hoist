@@ -30,6 +30,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -50,6 +51,12 @@ type StartMsg struct {
 	Confirmed bool
 	Target    string
 	Image     string
+	// View is the service.RepoView the deploy plan was actually built against (WithView,
+	// set by the root's openDeploy from the same service.PlannedChange.View planFn returned) —
+	// carried through so the root's StartPromotion call re-checks freshness against the view
+	// THIS plan was built from, not whatever the service's current view has since become
+	// (t1-review.md P2 #6, mirroring plan.StartMsg.View).
+	View service.RepoView
 }
 
 // Mode values — plan's own, so the root can treat both screens' StartMsgs the same way
@@ -101,6 +108,7 @@ type Model struct {
 	width, height int
 
 	pl         gitops.Plan
+	view       service.RepoView
 	root       string
 	target     string
 	image      string
@@ -178,6 +186,15 @@ func (m Model) WithDirectMode() Model {
 		return m
 	}
 	m.mode = ModeDirect
+	return m
+}
+
+// WithView records the service.RepoView the plan was actually built against (New's own caller,
+// openDeploy, gets this from the same service.PlannedChange planFn returned) — carried into
+// StartMsg.View so the root's StartPromotion call checks freshness against the view THIS plan
+// was built from (t1-review.md P2 #6).
+func (m Model) WithView(v service.RepoView) Model {
+	m.view = v
 	return m
 }
 
@@ -282,10 +299,10 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 // start emits the confirmation. Confirmed is true only on the direct path, which is only ever
 // reached through the huh.Confirm above (or the picker's own, via WithDirectMode).
 func (m Model) start(mode string) tea.Cmd {
-	pl, target, img := m.pl, m.target, m.image
+	pl, target, img, view := m.pl, m.target, m.image, m.view
 	confirmed := mode == ModeDirect
 	return func() tea.Msg {
-		return StartMsg{Plan: pl, Mode: mode, Confirmed: confirmed, Target: target, Image: img}
+		return StartMsg{Plan: pl, Mode: mode, Confirmed: confirmed, Target: target, Image: img, View: view}
 	}
 }
 

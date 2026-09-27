@@ -108,16 +108,12 @@ func TestRefreshRepoViewReadsOrigin(t *testing.T) {
 
 	newSHA := pushFromASeparateClone(t, clone)
 
-	viewDir, err := refreshRepoView(context.Background(), git.Exec{}, clone, "main")
+	viewDir, viewedSHA, err := refreshRepoView(context.Background(), git.Exec{}, clone, "main")
 	if err != nil {
 		t.Fatalf("refreshRepoView: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(viewDir, "elsewhere.txt")); err != nil {
 		t.Errorf("cached view at %s does not contain origin's own new file: %v", viewDir, err)
-	}
-	viewedSHA, ok, err := (git.Exec{}).RevParse(context.Background(), viewDir, "HEAD")
-	if err != nil || !ok {
-		t.Fatalf("cached view HEAD: ok=%v err=%v", ok, err)
 	}
 	if viewedSHA != newSHA {
 		t.Errorf("cached view HEAD = %s, want origin's new tip %s", viewedSHA, newSHA)
@@ -143,22 +139,21 @@ func TestRefreshRepoViewReusesCacheOnSecondCall(t *testing.T) {
 	clone := newRepoFixture(t)
 	g := git.Exec{}
 
-	first, err := refreshRepoView(context.Background(), g, clone, "main")
+	first, _, err := refreshRepoView(context.Background(), g, clone, "main")
 	if err != nil {
 		t.Fatalf("first refreshRepoView: %v", err)
 	}
 	newSHA := pushFromASeparateClone(t, clone)
 
-	second, err := refreshRepoView(context.Background(), g, clone, "main")
+	second, sha, err := refreshRepoView(context.Background(), g, clone, "main")
 	if err != nil {
 		t.Fatalf("second refreshRepoView: %v", err)
 	}
 	if first != second {
 		t.Errorf("cache path changed between calls: %s vs %s, want the same reused directory", first, second)
 	}
-	sha, ok, err := g.RevParse(context.Background(), second, "HEAD")
-	if err != nil || !ok || sha != newSHA {
-		t.Errorf("second refresh HEAD = %s ok=%v err=%v, want origin's new tip %s", sha, ok, err, newSHA)
+	if sha != newSHA {
+		t.Errorf("second refresh SHA = %s, want origin's new tip %s", sha, newSHA)
 	}
 }
 
@@ -176,12 +171,12 @@ func TestCheckRepoViewCurrentAcceptsAStaleLocalBranch(t *testing.T) {
 
 	pushFromASeparateClone(t, clone)
 
-	viewDir, err := refreshRepoView(context.Background(), g, clone, "main")
+	_, viewedSHA, err := refreshRepoView(context.Background(), g, clone, "main")
 	if err != nil {
 		t.Fatalf("refreshRepoView: %v", err)
 	}
 
-	if err := CheckRepoViewCurrent(context.Background(), g, clone, "main", viewDir); err != nil {
+	if err := CheckRepoViewCurrent(context.Background(), g, clone, "main", viewedSHA); err != nil {
 		t.Errorf("CheckRepoViewCurrent refused a view that is still current against origin: %v", err)
 	}
 }
@@ -192,14 +187,14 @@ func TestCheckRepoViewCurrentAcceptsAStaleLocalBranch(t *testing.T) {
 func TestCheckRepoViewCurrentRefusesWhenOriginMovesAgain(t *testing.T) {
 	clone := newRepoFixture(t)
 	g := git.Exec{}
-	viewDir, err := refreshRepoView(context.Background(), g, clone, "main")
+	_, viewedSHA, err := refreshRepoView(context.Background(), g, clone, "main")
 	if err != nil {
 		t.Fatalf("refreshRepoView: %v", err)
 	}
 
 	pushFromASeparateClone(t, clone)
 
-	err = CheckRepoViewCurrent(context.Background(), g, clone, "main", viewDir)
+	err = CheckRepoViewCurrent(context.Background(), g, clone, "main", viewedSHA)
 	if err == nil {
 		t.Fatal("CheckRepoViewCurrent accepted a view origin has since moved past")
 	}
@@ -208,16 +203,14 @@ func TestCheckRepoViewCurrentRefusesWhenOriginMovesAgain(t *testing.T) {
 	}
 }
 
-// TestCheckRepoViewCurrentSkipsWhenNoView: the runTUI boot-fallback shape — viewDir equal to
-// cloneDir (refreshRepoView itself failed and the caller fell back to the clone) means there is
-// no separate cached view to have gone stale, so nothing here should refuse.
+// TestCheckRepoViewCurrentSkipsWhenNoView: the runTUI boot-fallback shape — an empty viewedSHA
+// (refreshRepoView itself failed and the caller fell back to the clone, or this is a clone-mode
+// view, which never sets RepoView.SHA at all) means there is no captured origin SHA to have gone
+// stale, so nothing here should refuse.
 func TestCheckRepoViewCurrentSkipsWhenNoView(t *testing.T) {
 	clone := newRepoFixture(t)
 	g := git.Exec{}
-	if err := CheckRepoViewCurrent(context.Background(), g, clone, "main", clone); err != nil {
-		t.Errorf("CheckRepoViewCurrent should be a no-op when viewDir == cloneDir: %v", err)
-	}
 	if err := CheckRepoViewCurrent(context.Background(), g, clone, "main", ""); err != nil {
-		t.Errorf("CheckRepoViewCurrent should be a no-op for an empty viewDir: %v", err)
+		t.Errorf("CheckRepoViewCurrent should be a no-op for an empty viewedSHA: %v", err)
 	}
 }
