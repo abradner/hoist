@@ -42,6 +42,14 @@ import (
 // BackMsg asks whatever composes screens to pop this one.
 type BackMsg struct{}
 
+// RefreshMsg is r/F5/ctrl+r (T3-09): rebuild the diff at fresh origin. The screen has no way to
+// fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection),
+// so this asks the root to run the matrix's own completion-triggered refresh
+// (requestMatrixRefresh, the same fetch F5 already runs there) and rebuild this screen once
+// matrix.RepoRefreshedMsg lands with the new *gitops.Repo — internal/app/app.go's own new case,
+// mirroring plan.RefreshMsg exactly (T3-09's own shared "r" path).
+type RefreshMsg struct{}
+
 // StartMsg is the operator confirming the deploy. Mode mirrors plan.StartMsg's: ModePR opens
 // a pull request, ModeDirect commits straight to the base branch. Confirmed is true only when
 // ModeDirect was reached through this screen's own huh.Confirm — engine.DirectCommitGateStep
@@ -197,6 +205,38 @@ func (m Model) WithView(v service.RepoView) Model {
 	return m
 }
 
+// Target is the env this deploy would write into — RefreshMsg's own root handler reads this
+// back to rebuild the same PlanRequest (Deploy: &ref, Target: this) against a fresh repo.
+func (m Model) Target() string { return m.target }
+
+// ImageRef is the caller-named reference this deploy would write — RefreshMsg's own root
+// handler reads this back the same way as Target, above.
+func (m Model) ImageRef() string { return m.image }
+
+// Reload is RefreshMsg's own rebuild (T3-09): the root calls this synchronously once it has
+// rebuilt pl against a fresh *gitops.Repo (mirroring openDeploy's own direct planFn call —
+// AGENTS.md §4.3's reasoning is about resolving a digest, and a deploy plan never resolves one,
+// the reference is caller-supplied), replacing the plan and the diff/commit views it feeds
+// without disturbing anything the operator has already set (mode, the yaml/commits toggle).
+func (m Model) Reload(pl gitops.Plan, view service.RepoView) Model {
+	m.pl = pl
+	m.view = view
+	ticked := map[string]bool{}
+	for _, e := range pl.Edits {
+		ticked[e.Ref.Repo] = true
+	}
+	m.ticked = ticked
+	body, err := plan.RenderDiff(m.root, pl.Edits, ticked)
+	if err != nil {
+		m.diffErr = err
+	} else {
+		m.diffErr = nil
+		m.diffText = body
+		m.diff.SetContent(body)
+	}
+	return m
+}
+
 // Init implements the screen contract; nothing to load, the plan arrived built.
 func (m Model) Init() tea.Cmd { return nil }
 
@@ -256,6 +296,13 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		m.showYAML = !m.showYAML
 		return m, nil
+	case "r", "f5", "ctrl+r":
+		// T3-09: rebuilds the diff at fresh origin — this screen has no way to fetch origin
+		// itself (AGENTS.md §4.3), so it asks the root to run the matrix's own
+		// completion-triggered refresh and rebuild this screen once the fresh repo lands
+		// (RefreshMsg's own doc comment; mirrors plan.RefreshMsg exactly, T3-09's shared "r"
+		// path).
+		return m, func() tea.Msg { return RefreshMsg{} }
 	}
 	return m.scroll(msg)
 }
@@ -652,7 +699,8 @@ func (m Model) hints() string {
 	}
 	hints = append(hints,
 		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓", Pri: 3},
-		keys.Hint{B: keys.Log, Long: "l activity", Pri: 4},
+		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r", Pri: 4},
+		keys.Hint{B: keys.Log, Long: "l activity", Pri: 5},
 		keys.Hint{B: keys.Esc, Long: "esc back to tags", Short: "esc back", Pri: -1},
 	)
 	return keys.Footer(m.styles, m.width, "", hints, true)

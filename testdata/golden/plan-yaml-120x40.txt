@@ -1,6 +1,6 @@
-╭─ hoist · confirm promotion · yaml ───────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · promotion · confirm · yaml ─────────────────────────────────────────────────────────────────────────────────╮
 │app-staging  →  app-production   images under ghcr.io/example/                                                mode: PR│
-│3 repos ticked · no history for 3                                                                    d  back to impact│
+│3 repos ticked · 7 image references, 4 files · no history for 3                                      d  back to impact│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ counta  v202601151010 → v202602201200    │--- a/cluster/apps/app-production/counta/app.yaml                     │
 │┃   ✓ marketing  → sha-1a2b3c4d5e6f708192a3b4c…│+++ b/cluster/apps/app-production/counta/app.yaml                     │
@@ -37,4 +37,4 @@
 │┃                                              │     spec:                                                            │
 │┃                                              │       containers:                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                           tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back
+    enter promote · space tick · d yaml · e edit digest · shift+d direct · r · tab pane · l activity · esc back · ? help

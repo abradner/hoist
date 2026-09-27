@@ -1,16 +1,14 @@
 ╭─ hoist · promotion · confirm ────────────────────────────────────────────────╮
-│app-staging  →  app-production   images under ghcr.io/example/        mode: PR│
-│3 repos ticked · 7 image references, 4 files · no history for… d  see the yaml│
+│app-staging  →  app-production   images under ghcr.io/e… mode: PR · production│
+│3 repos ticked · 41 commits · 3 migrations · 3 image referenc… d  see the yaml│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│┃ > ✓ counta  v202601151010 → v9    │counta                                   │
-│┃   ✓ marketing  → sha-1a2b3c4d5e6f…│v202601151010 → v9                       │
-│┃   ✓ ! web  → v202602150930        │3 occurrences · 2 files · digest from    │
-│┃                                   │override                                 │
+│┃   ✓ marketi…  → sha-1a2b3c4d5e6f  │orders                                   │
+│┃ > ✓ orders  → v2026022012         │v2026011510 → v2026022012                │
+│┃   ✓ web  → v2026021509            │1 occurrence · 1 file · digest from pods │
 │┃                                   │                                         │
-│┃                                   │no commit history —                      │
-│┃                                   │ghcr.io/example/counta has no app repo in│
-│┃                                   │repos[].apps                             │
-│┃                                   │                                         │
+│┃                                   │v2026022012 is 18 commits ahead of       │
+│┃                                   │v2026011510 · migrations not tracked for │
+│┃                                   │this app                                 │
 │┃                                   │                                         │
 │┃                                   │                                         │
 │┃                                   │                                         │
@@ -20,5 +18,7 @@
 │┃                                   │                                         │
 │┃                                   │                                         │
 │┃                                   │                                         │
+│  · worker · already current        │                                         │
+│                                    │                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-          enter promote · space tick · d · e · shift+d direct · r · esc · ? more
+   enter promote · space tick · d · e · r · tab pane · l activity · esc · ? help

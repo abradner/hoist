@@ -51,7 +51,7 @@ var registry = []op{
 	{
 		Name: "plan a promotion, read-only",
 		CLI:  "plan --from --to --dry-run --repo --apps-root --promotable --digest-sources",
-		TUI:  "matrix.OpenPlanMsg p promotes INTO the cursor column (T3-04): the source is the one reverse pair when exactly one exists, else the plan screen itself asks; the plan screen writes nothing until enter",
+		TUI:  "matrix.OpenPlanMsg p promotes INTO the cursor column (T3-04): the source is the one reverse pair when exactly one exists, else the plan screen itself asks; the plan screen writes nothing until enter; plan.RefreshMsg r (T3-09) rebuilds the plan at fresh origin through the matrix's own completion-triggered refresh",
 	},
 	{
 		Name: "promote: drive the pipeline to rollout",
@@ -66,7 +66,7 @@ var registry = []op{
 	{
 		Name: "deploy one named image into an env",
 		CLI:  "deploy --env --image --dry-run --repo --apps-root --promotable",
-		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff; esc on the deploy confirm (deploy.BackMsg) returns to the tag picker, not the matrix (T3-08: the picker stays on the stack underneath)",
+		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff; esc on the deploy confirm (deploy.BackMsg) returns to the tag picker, not the matrix (T3-08: the picker stays on the stack underneath); deploy.RefreshMsg r (T3-09) rebuilds the diff at fresh origin, same path as the plan screen's own r",
 	},
 	{
 		Name: "restart an env's Deployments without changing what they declare",
@@ -112,7 +112,7 @@ var registry = []op{
 	{
 		Name: "override one repo's digest before planning",
 		CLI:  "plan --digest promote --digest",
-		TUI:  "o on the plan screen: a huh.Input dialog, validated like --digest, rebuilds the plan with the override named as its source",
+		TUI:  "e on the plan screen (T3-09: was o): a huh.Input dialog, validated like --digest, rebuilds the plan with the override named as its source",
 	},
 	{
 		Name: "treat a PR with no checks as green under ci.none: prompt",

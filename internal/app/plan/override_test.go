@@ -70,7 +70,7 @@ func TestOverrideGestureRebuildsThePlan(t *testing.T) {
 	if !ok {
 		t.Fatal("setup: no hovered row")
 	}
-	m = uitest.Keys(m, updateFn, "o")
+	m = uitest.Keys(m, updateFn, "e")
 	if !m.overriding {
 		t.Fatal("o did not open the override dialog")
 	}
@@ -111,7 +111,7 @@ func TestOverrideGestureRebuildsThePlan(t *testing.T) {
 func TestOverrideRefusesAnUnpinnedTag(t *testing.T) {
 	m, seen := overrideFixture(t)
 	hovered, _ := m.hoveredRow()
-	m = uitest.Keys(m, updateFn, "o")
+	m = uitest.Keys(m, updateFn, "e")
 	m = typeInto(m, hovered.Repo+":v9")
 	m = uitest.Keys(m, updateFn, "enter")
 	if !m.overriding {
@@ -139,7 +139,7 @@ func TestOverrideRefusesAnUnpinnedTag(t *testing.T) {
 func TestOverrideEscCancels(t *testing.T) {
 	m, seen := overrideFixture(t)
 	before := m.rows
-	m, cmd := m.Update(uitest.Key("o"))
+	m, cmd := m.Update(uitest.Key("e"))
 	m = uitest.Drain(m, cmd, updateFn)
 	m, cmd = m.Update(uitest.Key("esc"))
 	if cmd != nil {
@@ -165,7 +165,7 @@ func TestOverrideCapturesText(t *testing.T) {
 	if m.CapturesText() {
 		t.Fatal("captures text before the dialog is open")
 	}
-	m = uitest.Keys(m, updateFn, "o")
+	m = uitest.Keys(m, updateFn, "e")
 	if !m.CapturesText() {
 		t.Error("the open dialog must capture text")
 	}
@@ -177,7 +177,7 @@ func TestOverrideCapturesText(t *testing.T) {
 func TestOverrideWithoutAResolver(t *testing.T) {
 	m := readyModel(t, config.EnvsConfig{})
 	hovered, _ := m.hoveredRow()
-	m = uitest.Keys(m, updateFn, "o")
+	m = uitest.Keys(m, updateFn, "e")
 	m = typeInto(m, hovered.Repo+":v9@"+overrideDigest)
 	m = uitest.Keys(m, updateFn, "enter")
 	row, _ := m.hoveredRow()
@@ -197,14 +197,14 @@ func TestOverrideRebuildKeepsTheTickedSetAndCursor(t *testing.T) {
 		t.Fatalf("fixture has %d selectable rows, want at least 2", len(sel))
 	}
 	unticked, kept := sel[0].Repo, sel[1].Repo
-	m = uitest.Keys(m, updateFn, "x", "down")
+	m = uitest.Keys(m, updateFn, "space", "down")
 	if has(m.ticked, unticked) || !has(m.ticked, kept) {
 		t.Fatalf("setup: ticked = %v after x, want %s unticked and %s ticked", m.ticked, unticked, kept)
 	}
 	if r, _ := m.hoveredRow(); r.Repo != kept {
 		t.Fatalf("setup: hovered %q after down, want %q", r.Repo, kept)
 	}
-	m = uitest.Keys(m, updateFn, "o")
+	m = uitest.Keys(m, updateFn, "e")
 	m = typeInto(m, kept+":v9@"+overrideDigest)
 	m = uitest.Keys(m, updateFn, "enter")
 	if m.overriding || len(*seen) != 2 {
@@ -246,7 +246,7 @@ func TestViewGoldenOverride(t *testing.T) {
 		m, _ := overrideFixture(t)
 		m = m.SetSize(size[0], size[1])
 		hovered, _ := m.hoveredRow()
-		m = uitest.Keys(m, updateFn, "o")
+		m = uitest.Keys(m, updateFn, "e")
 		uitest.Golden(t, "plan-override-dialog", m.View(), size[0], size[1])
 		m = typeInto(m, hovered.Repo+":v9@"+overrideDigest)
 		m = uitest.Keys(m, updateFn, "enter")

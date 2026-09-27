@@ -65,6 +65,17 @@ func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	if !tm.(Model).capturesText() {
 		t.Error("the flight dialog closed on q")
 	}
+	// P2-11 (T3 review): "q never quits off the matrix anyway" makes !quits(cmd) true
+	// regardless of whether the root actually routed this q to the dialog, so that check alone
+	// cannot fail for any input — and capturesText() reflects the screen's OWN confirmingCINone
+	// flag, which the dialog set on shift+c and a misrouted q would never touch either. The
+	// real positive control is that the transient "q quits from the matrix" hint, which the
+	// FIRST press above raised with no dialog open, does not reappear: if the root had fallen
+	// through to its own global q handling instead of deferring to CapturesText, this is what
+	// would visibly change.
+	if got := plain(tm); strings.Contains(got, "q quits from the matrix") {
+		t.Errorf("the quit hint reappeared while the shift+c dialog was open — q should have gone to the dialog:\n%s", got)
+	}
 	if got := plain(tm); !strings.Contains(got, "treat no checks as green") {
 		t.Errorf("the dialog should still be drawn after q:\n%s", got)
 	}
@@ -97,9 +108,9 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 		t.Fatalf("q on the plan screen should raise the transient hint:\n%s", plain(tm))
 	}
 
-	tm, _ = pressRoot(tm, "o")
+	tm, _ = pressRoot(tm, "e")
 	if !strings.Contains(plain(tm), "override the digest for") {
-		t.Fatalf("o did not open the plan override dialog:\n%s", plain(tm))
+		t.Fatalf("e did not open the plan override dialog:\n%s", plain(tm))
 	}
 	tm, cmd := pressRoot(tm, "q")
 	if quits(cmd) {
@@ -108,7 +119,20 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	if !tm.(Model).capturesText() {
 		t.Error("the plan override dialog closed on q")
 	}
-	if got := plain(tm); !strings.Contains(got, "override the digest for") {
+	// P2-11 (T3 review): "q never quits off the matrix anyway" makes !quits(cmd) true
+	// regardless of whether this dialog actually captured the key, so that check alone cannot
+	// fail for any input. The real positive control is that "q" landed IN the input's own
+	// value — the override field is pre-filled "<repo>=", so a "q" that reached the widget
+	// appends to it — and that the transient "q quits from the matrix" hint, which the FIRST
+	// press above raised with no dialog open, does not reappear once the dialog swallowed it.
+	got := plain(tm)
+	if !strings.Contains(got, "ghcr.io/example/counta=q") {
+		t.Errorf("\"q\" did not land in the override input's own value (want \"...counta=q\"):\n%s", got)
+	}
+	if strings.Contains(got, "q quits from the matrix") {
+		t.Errorf("the quit hint reappeared while the override dialog was open — q should have gone to the widget:\n%s", got)
+	}
+	if !strings.Contains(got, "override the digest for") {
 		t.Errorf("the dialog should still be drawn after q:\n%s", got)
 	}
 }

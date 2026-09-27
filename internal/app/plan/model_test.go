@@ -250,28 +250,29 @@ func (e sentinelErr) Error() string { return string(e) }
 
 const errCannotReachCluster = sentinelErr("cluster unreachable: dial tcp: no route to host")
 
-// TestModeToggleAfterConfirm: m on a non-production target opens the confirm dialog; enter
-// commits the operator's choice.
+// TestModeToggleAfterConfirm: shift+d on a non-production target opens the confirm dialog
+// (T3-09: was m); enter commits the operator's choice. Kept as the mutant-proof test named in
+// the T3-09 design: reverting toggleDirect's WithKeyMap call must make this fail.
 func TestModeToggleAfterConfirm(t *testing.T) {
 	m := readyModel(t, config.EnvsConfig{})
 	if m.mode != ModePR {
 		t.Fatalf("initial mode = %q, want pr", m.mode)
 	}
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m, cmd := m.Update(uitest.Key("shift+d"))
 	if cmd != nil {
 		if _, isStart := cmd().(StartMsg); isStart {
-			t.Error("m must not confirm the plan")
+			t.Error("shift+d must not confirm the plan")
 		}
 	}
 	if !m.confirming {
-		t.Fatal("m did not open the confirm dialog for a non-production target")
+		t.Fatal("shift+d did not open the confirm dialog for a non-production target")
 	}
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "Switch to direct mode") || !strings.Contains(v, "app-staging  →  app-production") {
 		t.Fatalf("the dialog must sit over the screen:\n%s", v)
 	}
 	// Answered through the widget's own key, never by assigning the bound bool: an earlier
 	// version of this test set m.confirmValue directly and so never noticed that
-	// huh.NewConfirm ships a zero keymap and ignored every keypress — the m gesture could not
+	// huh.NewConfirm ships a zero keymap and ignored every keypress — the gesture could not
 	// be completed by a real operator at all (#85's named trap, the plan screen's instance).
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -283,7 +284,7 @@ func TestModeToggleAfterConfirm(t *testing.T) {
 	}
 	// And no: the asymmetry that makes the above mean something.
 	n := readyModel(t, config.EnvsConfig{})
-	n, _ = n.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	n, _ = n.Update(uitest.Key("shift+d"))
 	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	n, _ = n.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if n.mode != ModePR {
@@ -291,30 +292,50 @@ func TestModeToggleAfterConfirm(t *testing.T) {
 	}
 	// esc leaves the dialog without leaving the screen.
 	e := readyModel(t, config.EnvsConfig{})
-	e, _ = e.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	e, _ = e.Update(uitest.Key("shift+d"))
 	e, cmd = e.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if cmd != nil || e.confirming {
 		t.Errorf("esc in the dialog: cmd=%v confirming=%v", cmd, e.confirming)
 	}
+	// A second shift+d, with no confirmation, turns direct mode back off (T3-09: the retired m
+	// gesture confirmed both directions; the approved keymap only asks "when turning on").
+	off, _ := m.Update(uitest.Key("shift+d"))
+	if off.confirming {
+		t.Error("turning direct mode back off must not open a confirmation")
+	}
+	if off.mode != ModePR {
+		t.Errorf("mode = %q after a second shift+d, want %q", off.mode, ModePR)
+	}
+	// capslock+d must not toggle anything — only shift+d counts (rule 5's own caps-lock test).
+	cl, cmd := readyModel(t, config.EnvsConfig{}).Update(uitest.Key("capslock+d"))
+	if cmd != nil || cl.confirming || cl.mode != ModePR {
+		t.Errorf("capslock+d must do nothing: mode=%q confirming=%v cmd=%v", cl.mode, cl.confirming, cmd)
+	}
 }
 
-// TestModeBlockedForProduction: m on a production target never opens the confirm dialog;
-// the bar explains why (AGENTS.md §4.5 — direct mode is not offered at all).
-func TestModeBlockedForProduction(t *testing.T) {
+// TestShiftDNotOfferedForProduction: shift+d on a production target never opens the confirm
+// dialog, changes nothing, and shows no notice at all — direct mode is not offered there (rule
+// 5, AGENTS.md §4.5), never refused with an explanation the operator would read as a broken key
+// (T3-09: was m, which used to show a notice; mirrors deploy.Model's identical gesture, T3-08).
+func TestShiftDNotOfferedForProduction(t *testing.T) {
 	envs := config.EnvsConfig{Production: []string{"app-production"}}
 	m := readyModel(t, envs)
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	before := m.View()
+	m2, cmd := m.Update(uitest.Key("shift+d"))
 	if cmd != nil {
-		t.Error("m produced a command")
+		t.Error("shift+d produced a command")
 	}
-	if m.confirming {
-		t.Error("m opened the confirm dialog for a production target")
+	if m2.confirming {
+		t.Error("shift+d opened the confirm dialog for a production target")
 	}
-	if !strings.Contains(m.notice, "production") {
-		t.Errorf("notice = %q, want an explanation naming production", m.notice)
+	if m2.notice != "" {
+		t.Errorf("notice = %q, want none: the key is simply not offered", m2.notice)
 	}
-	if m.mode != ModePR {
-		t.Errorf("mode changed to %q despite being blocked", m.mode)
+	if m2.mode != ModePR {
+		t.Errorf("mode changed to %q despite being blocked", m2.mode)
+	}
+	if got := m2.View(); got != before {
+		t.Errorf("shift+d on a production target must change nothing on screen:\nbefore:\n%s\nafter:\n%s", before, got)
 	}
 	if !strings.Contains(m.modeLabel(), "production") {
 		t.Errorf("bar = %q, want it to explain why", m.modeLabel())
@@ -450,7 +471,8 @@ func TestFilterModeEngagesAndCapturesText(t *testing.T) {
 // navigation, not just filtering: Down against a freshly built multiSelect used to move
 // nothing at all (round 5 finding 3 — every keymap-gated mode on these fields was inert, not
 // only "/"). huh doesn't expose the field's own cursor directly, so this drives it indirectly
-// through Toggle ("x"): Down then "x" must toggle a DIFFERENT row than "x" alone at the initial
+// through Toggle (T3-09: "space", "x" retired — keys.HuhKeyMap's own MultiSelect.Toggle is
+// space only): Down then space must toggle a DIFFERENT row than space alone at the initial
 // cursor position, which is only possible if Down actually moved the cursor first.
 //
 // This also exercises a second, independent gap the WithKeyMap fix alone did not close:
@@ -463,10 +485,10 @@ func TestFilterModeEngagesAndCapturesText(t *testing.T) {
 // consistent (View() and multiSelect.GetValue() agree with each other), but writes made through
 // that accessor never reached the traveling m.ticked — the exact case Toggle needs, since
 // updateReady reads m.ticked (not the field) for the notice check and StartMsg.Ticked. Confirmed
-// directly before adding the fix below: after WithKeyMap alone, pressing "x" visibly unchecked a
-// row in multiSelect.View() while m.ticked (and equalSets(before, m.ticked) below) stayed
-// unchanged. updateReady now re-reads m.ticked from m.multiSelect.GetValue() after every Update
-// call, which is what makes this test — and the real screen — see the toggle at all.
+// directly before adding the fix below: after WithKeyMap alone, pressing the toggle key visibly
+// unchecked a row in multiSelect.View() while m.ticked (and equalSets(before, m.ticked) below)
+// stayed unchanged. updateReady now re-reads m.ticked from m.multiSelect.GetValue() after every
+// Update call, which is what makes this test — and the real screen — see the toggle at all.
 func TestDownMovesMultiSelectCursor(t *testing.T) {
 	m := readyModel(t, config.EnvsConfig{})
 	if len(m.rows) < 2 {
@@ -475,18 +497,18 @@ func TestDownMovesMultiSelectCursor(t *testing.T) {
 	before := append([]string(nil), m.ticked...)
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m, _ = m.Update(uitest.Key("space"))
 
 	if equalSets(before, m.ticked) {
-		t.Fatal("ticked set unchanged after down+x: Toggle never reached the field (keymap still unwired?)")
+		t.Fatal("ticked set unchanged after down+space: Toggle never reached the field (keymap still unwired?)")
 	}
 	// Untoggling the very first row (no Down) must differ from untoggling whatever Down landed
-	// on above, or this test can't actually distinguish "Down moved the cursor" from "x toggled
-	// row 0 regardless of Down".
+	// on above, or this test can't actually distinguish "Down moved the cursor" from "space
+	// toggled row 0 regardless of Down".
 	m2 := readyModel(t, config.EnvsConfig{})
-	m2, _ = m2.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m2, _ = m2.Update(uitest.Key("space"))
 	if equalSets(m.ticked, m2.ticked) {
-		t.Fatal("down+x toggled the same row as x alone: Down does not appear to move the cursor")
+		t.Fatal("down+space toggled the same row as space alone: Down does not appear to move the cursor")
 	}
 }
 
@@ -542,6 +564,36 @@ func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 	}
 }
 
+// TestSourceSelectCompletesThroughRealInput is P2-10 from the T3 review: no test built
+// New(..., "", target, ...) — the "promote into <target> from…" source prompt (buildSourceSelect,
+// reached when only the target is known, e.g. the matrix's own "promote into" menu item with a
+// single reverse pair) — and pressed down/enter through it, unlike the target prompt's own
+// TestEnvSelectResyncsTargetFromField/TestBuildEnvSelectWiresFiltering pair above. This drives
+// the real construction path (New -> buildSourceSelect, not a hand-built Select) with down then
+// enter, proving the source prompt's own enter-confirms handling in updateSelectEnv actually
+// advances past stateSelectEnv with the field's own resynced value — the fixture repo's own
+// SourcesFor("app-production") offers exactly one candidate (app-staging), so down is a no-op
+// here the same way TestEnvSelectResyncsTargetFromField's own comment explains for the target
+// side, but enter still has to complete the gesture through the real widget.
+func TestSourceSelectCompletesThroughRealInput(t *testing.T) {
+	r := discoverFixture(t)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	if m.state != stateSelectEnv || !m.selectingSource {
+		t.Fatalf("state = %v selectingSource = %v, want stateSelectEnv/true (target set, source unset)", m.state, m.selectingSource)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.source != "app-staging" {
+		t.Fatalf("source = %q after down, want app-staging (SourcesFor's only candidate)", m.source)
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.state != stateLoading {
+		t.Fatalf("state = %v after enter, want stateLoading — updateSelectEnv did not advance past the source prompt", m.state)
+	}
+	if cmd == nil {
+		t.Error("enter on the source prompt produced no command (Init's own load)")
+	}
+}
+
 // TestSkipStagingWarning: promoting straight to a production env that is not the source's
 // configured pair shows the warning, never blocks.
 func TestSkipStagingWarning(t *testing.T) {
@@ -565,7 +617,7 @@ func TestViewGolden(t *testing.T) {
 		m := readyModel(t, envs).SetSize(size[0], size[1])
 		got := ansi.Strip(m.View())
 		for _, want := range []string{
-			"hoist · confirm promotion", "app-staging  →  app-production", "images under ghcr.io/example/", "mode: PR",
+			"hoist · promotion · confirm", "app-staging  →  app-production", "images under ghcr.io/example/", "mode: PR",
 			"counta", "v202602201200", "3 repos ticked", "no commit history",
 			"d  see the yaml",
 		} {
@@ -634,16 +686,31 @@ func TestViewGoldenCollidingLabels(t *testing.T) {
 	r := discoverFixture(t)
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	same := func(repo string) gitops.Edit {
-		ref := ref(repo + ":v202602201200@sha256:" + strings.Repeat("a", 64))
-		return edit("cluster/apps/app-production/web/deployment.yaml", ref, ref)
+		// T3-09: Old != New — an edit with matching refs is a no-op row (Row.NoOp), which is
+		// excluded from the tickable multiSelect this test is about, and so never reaches the
+		// label-collision code (Labels/fitLabel) at all.
+		oldRef := ref(repo + ":v202601151010@sha256:" + strings.Repeat("a", 64))
+		newRef := ref(repo + ":v202602201200@sha256:" + strings.Repeat("b", 64))
+		return edit("cluster/apps/app-production/web/deployment.yaml", oldRef, newRef)
 	}
 	pl := gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production", Edits: []gitops.Edit{
 		same("ghcr.io/example/web-frontend-service-alpha"),
 		same("ghcr.io/example/web-frontend-service-beta"),
 		same("ghcr.io/example/db"),
 	}}
-	m, _ = m.Update(scope.Result[loadedMsg]{From: m.scope.ID, V: loadedMsg{plan: pl}})
+	// Built directly rather than through onLoaded (scope.Result[loadedMsg]): this test is about
+	// Labels' own collision disambiguation on the left pane, and onLoaded unconditionally calls
+	// recomputeDiff, which would read these fabricated edits' File off the real fixture disk —
+	// a path that does not exist there, since the whole point of "same" above is a plan that was
+	// never discovered from it. m.diff is left at its zero value; the default (non-yaml) ready
+	// view never reads it.
+	m.state = stateReady
+	m.plan = pl
+	m.rows = DeriveRows(pl, nil)
+	m.prefix = CommonPrefix(m.rows)
+	m.buildMultiSelect()
 	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m = m.refreshRight()
 	v := ansi.Strip(m.View())
 	for _, want := range []string{"…alpha", "…beta"} {
 		if !strings.Contains(v, want) {
