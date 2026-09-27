@@ -340,6 +340,112 @@ func TestAbandonWaitsForBusyStepThenAbandonsOnce(t *testing.T) {
 	}
 }
 
+// TestAbandonTwiceWhileBusyWaitCallsBackendOnce: a second Abandon while the first is still
+// waiting for a busy Step to notice its cancelled ctx (the flight screen offering X again before
+// the entry has actually left Abandoning — see internal/app/flight's own guard) must not schedule
+// a second abandonWaitMsg chain: onAbandonWait's own dispatch of Backend.Abandon is guarded only
+// by e.busy and the attempt count, not by abandonIssued, so two independent wait chains racing the
+// same busy-clearing step would both eventually dispatch abandonCmd. The fix is Abandon itself
+// refusing to do anything once the entry is already Abandoning.
+func TestAbandonTwiceWhileBusyWaitCallsBackendOnce(t *testing.T) {
+	now := fixedClock(time.Now())
+	var calls []string
+	drive := &fakeDrive{id: "promo-1", calls: &calls} // always Waiting
+	abandoned := 0
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd) // entry is now busy
+
+	c2, abandonWaitCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonWaitCmd == nil {
+		t.Fatal("first Abandon while busy produced no wait command")
+	}
+
+	// Second X, still mid-wait: must be a pure no-op.
+	c3, secondCmd := h.c.Abandon("promo-1")
+	h.c = c3
+	if secondCmd != nil {
+		t.Fatal("Abandon while already Abandoning (mid-wait) scheduled another command")
+	}
+
+	h, _ = hop(h, stepCmd1) // the busy step returns; entry is no longer busy
+	h, abandonRunCmd := hop(h, abandonWaitCmd)
+	h = h.drain(abandonRunCmd)
+
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.entries[build]; ok {
+		t.Fatal("entry still tracked after a successful abandon")
+	}
+}
+
+// TestAbandonTwiceWhileBackendCallInFlightCallsOnce: a second Abandon issued while the first's
+// own Backend.Abandon call is already dispatched (but not yet resolved) must also be a no-op —
+// the exact "closing the PR / deleting branch and state twice" case the finding named.
+func TestAbandonTwiceWhileBackendCallInFlightCallsOnce(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second},
+	}}
+	abandoned := 0
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // step returns Waiting; entry is idle (not busy)
+
+	c2, abandonCmd1 := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonCmd1 == nil {
+		t.Fatal("first Abandon on an idle entry produced no command")
+	}
+
+	// Second X while the first's Backend.Abandon call is outstanding (abandonCmd1 not yet run).
+	c3, secondCmd := h.c.Abandon("promo-1")
+	h.c = c3
+	if secondCmd != nil {
+		t.Fatal("Abandon while already Abandoning (backend call in flight) scheduled another command")
+	}
+
+	h = h.drain(abandonCmd1)
+
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.entries[build]; ok {
+		t.Fatal("entry still tracked after a successful abandon")
+	}
+}
+
 // TestAbandonTimeoutProceeds: a busy step that never notices cancellation must not wedge
 // Abandon forever — once Config.AbandonTimeout elapses, Backend.Abandon runs anyway.
 func TestAbandonTimeoutProceeds(t *testing.T) {
@@ -552,6 +658,167 @@ func TestAbandonDuringResumeBuildErrorStillCallsAbandon(t *testing.T) {
 	}
 	if _, ok := h.c.Snapshot("promo-1"); ok {
 		t.Fatal("promo-1 still tracked after abandon-during-failed-build completed")
+	}
+}
+
+// TestFailedAbandonOfNeverBuiltDriveRemovesEntry: Abandon fired against an entry whose own
+// Backend.Resume call is still in flight (Building), where that call then fails AND
+// Backend.Abandon itself also fails, must not leave a Stopped entry with a nil Driver behind — a
+// later Poke against it would call Step on a nil interface and panic. Before the fix, onAbandoned's
+// error path always kept the entry (phase=Stopped, busy=false) regardless of whether a driver
+// had ever been attached; this pins that a driver-less failed abandon instead drops the entry
+// entirely, and Poke afterward is a clean ErrNotFound rather than a panic.
+func TestFailedAbandonOfNeverBuiltDriveRemovesEntry(t *testing.T) {
+	now := fixedClock(time.Now())
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return nil, context.Canceled },
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, errors.New("forge down") },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+
+	c2, _ := h.c.Abandon("promo-1")
+	h.c = c2
+
+	h, followUp := started(h, resumeCmd) // the Resume call fails; onBuilt's abandoning branch calls Backend.Abandon
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning (build error) produced no command")
+	}
+	h = h.drain(followUp) // Backend.Abandon itself fails too
+
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("BUG: a driver-less entry survives a failed abandon — Poke against it would panic")
+	}
+
+	// Defence in depth: even if some future path left such an entry behind, Poke/OverrideCINone
+	// refuse it outright rather than reaching Step on a nil Driver.
+	if _, _, err := h.c.Poke("promo-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Poke after the entry was removed = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPokeRefusesADriverLessEntry directly pins Poke/OverrideCINone's own ErrNoDriver guard
+// (the "defence in depth" half of TestFailedAbandonOfNeverBuiltDriveRemovesEntry): an entry
+// stopped with no Driver ever attached must never reach Driver.Step.
+func TestPokeRefusesADriverLessEntry(t *testing.T) {
+	now := fixedClock(time.Now())
+	c := New(&fakeBackend{}, testConfig(now))
+	c = c.withEntry(entry{build: 1, id: "promo-1", phase: Stopped})
+	if _, _, err := c.Poke("promo-1"); !errors.Is(err, ErrNoDriver) {
+		t.Fatalf("Poke on a driver-less entry = %v, want ErrNoDriver", err)
+	}
+	if _, _, err := c.OverrideCINone("promo-1"); !errors.Is(err, ErrNoDriver) {
+		t.Fatalf("OverrideCINone on a driver-less entry = %v, want ErrNoDriver", err)
+	}
+}
+
+// TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands: Abandon fired against a busy (Building)
+// entry schedules an abandonWaitMsg chain that gives up after Config.AbandonTimeout and
+// dispatches Backend.Abandon itself — but if the entry's own slow Resume call THEN lands (at the
+// same gen, since the gen bump onBuilt's abandoning branch does only takes effect after it
+// returns), onBuilt's abandoning branch must not dispatch a second Backend.Abandon call of its
+// own. Before the fix, onBuilt always issued its own abandonCmd whenever e.abandoning was true,
+// trusting the gen bump to protect against a race that had, in this exact ordering, already
+// happened before the bump ran.
+func TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands(t *testing.T) {
+	now := fixedClock(time.Now())
+	abandoned := 0
+	backend := &fakeBackend{
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+			return &fakeDrive{id: "promo-1"}, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) { abandoned++; return nil, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+	c2, waitCmd := h.c.Abandon("promo-1") // busy (Building) — takes the wait path
+	h.c = c2
+
+	// Drive the wait chain to its own timeout, WITHOUT the slow Resume call landing yet — this
+	// is onAbandonWait's own terminal branch dispatching Backend.Abandon.
+	cmd := waitCmd
+	var held tea.Msg
+	for i := 0; i < 10 && cmd != nil; i++ {
+		msg := cmd()
+		if _, ok := msg.(abandonedMsg); ok {
+			held = msg // Backend.Abandon already ran (abandoned == 1); hold its result, don't deliver it yet
+			break
+		}
+		h, cmd = harnessUpdate(h, msg)
+	}
+	if held == nil {
+		t.Fatal("setup: the abandon wait chain never reached its own Backend.Abandon call")
+	}
+	if abandoned != 1 {
+		t.Fatalf("setup: Backend.Abandon called %d times before the slow Resume landed, want 1", abandoned)
+	}
+
+	// Now the slow Resume call finally returns, at the same gen onBuilt's abandoning branch reads.
+	h, followUp := started(h, resumeCmd)
+	if abandoned != 1 {
+		t.Fatalf("BUG: onBuilt's abandoning branch dispatched a second Backend.Abandon call: %d", abandoned)
+	}
+	if followUp != nil {
+		t.Fatal("onBuilt's abandoning branch produced a follow-up command once abandonIssued was already set")
+	}
+
+	// Deliver the held abandonedMsg from the wait chain's own call, as it would arrive for real.
+	h, _ = harnessUpdate(h, held)
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times total, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after the abandon completed")
+	}
+}
+
+// TestAbandonDuringResumeBuildFillsSourceTarget: an Abandon fired while a resumed entry's own
+// Resume call is still in flight, that call then succeeding, must fill source/target/direct from
+// the landed state exactly as the ordinary (non-abandoning) success path does — otherwise the
+// header a caller renders during the brief window before the abandon itself completes reads
+// blank, the same gap TestOnBuiltSetsSourceTargetDirectForResumedEntry closed for the ordinary
+// path but which this branch (a separate early return in onBuilt) never inherited.
+func TestAbandonDuringResumeBuildFillsSourceTarget(t *testing.T) {
+	now := fixedClock(time.Now())
+	state := engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod", Direct: true}
+	drive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: state}
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return drive, nil },
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+	c2, _ := h.c.Abandon("promo-1") // busy (Building) — takes the wait path
+	h.c = c2
+
+	h, followUp := started(h, resumeCmd) // the Resume call now succeeds
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning produced no command")
+	}
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 not tracked between the build landing and the abandon completing")
+	}
+	if snap.Source != "staging" || snap.Target != "prod" || !snap.Direct {
+		t.Fatalf("snapshot mid-abandon = %+v, want Source=staging Target=prod Direct=true", snap)
+	}
+
+	h = h.drain(followUp) // let the abandon itself finish, for a clean test
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after the abandon completed")
 	}
 }
 
@@ -832,6 +1099,61 @@ func TestResumeDuringStartBuildOfSameTargetIsDeduped(t *testing.T) {
 	// Cleanly finish the original — proves this is not a leftover held-open target, just the
 	// duplicate.
 	h, _ = harnessUpdate(h, runFirst(startCmd))
+}
+
+// TestStartLandingFirstSurvivesADedupedResume is
+// TestResumeDuringStartBuildOfSameTargetIsDeduped's own order-reversed twin: here the RESUME's
+// build lands first (mapping byID["promo-1"] to its own BuildID), and Start's own duplicate build
+// for the same target is the one refused once IT lands second. Before the fix, onBuilt's dedup
+// removed the refused (Start) entry via withoutEntry, which deleted byID["promo-1"]
+// unconditionally — even though it now pointed at the SURVIVING Resume entry, not the one being
+// removed — leaving the survivor's own BuildSnapshot alive but its Snapshot(id) lookup (and so
+// Poke/Abandon/Resume-by-id) unable to find it at all.
+func TestStartLandingFirstSurvivesADedupedResume(t *testing.T) {
+	now := fixedClock(time.Now())
+	startDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
+	resumeDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return startDrive, nil
+		},
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return resumeDrive, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, startBuild, startCmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	c2, resumeBuild, resumeCmd, err := h.c.Resume("promo-1")
+	h.c = c2
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if resumeBuild == startBuild {
+		t.Fatal("setup: Resume returned the Start entry's own BuildID — byID already deduped it")
+	}
+
+	// Start's own build lands FIRST this time, mapping byID["promo-1"] to startBuild.
+	h, follow := started(h, startCmd)
+	if follow == nil {
+		t.Fatal("setup: Start's own build produced no follow-up Step command")
+	}
+	// The Resume's build lands second — this is the one onBuilt's same-target dedup refuses.
+	h, follow2 := started(h, resumeCmd)
+	if follow2 != nil {
+		t.Fatal("a deduped duplicate build produced a follow-up Step command")
+	}
+
+	if _, ok := h.c.BuildSnapshot(startBuild); !ok {
+		t.Fatal("the surviving Start entry is gone")
+	}
+	if _, ok := h.c.Snapshot("promo-1"); !ok {
+		t.Fatal("BUG: the surviving Start entry is alive but byID[\"promo-1\"] was deleted by the refused duplicate's own removal")
+	}
+	if _, ok := h.c.BuildSnapshot(resumeBuild); ok {
+		t.Fatal("the refused duplicate resumed build is still tracked")
+	}
 }
 
 // TestSecondStartSameTargetRefused pins AGENTS.md invariant 5 at this layer: Controller itself
@@ -1349,6 +1671,54 @@ func TestOverrideCINoneCallsDriverBeforeStep(t *testing.T) {
 	}
 }
 
+// TestOverrideCINoneRearmsAFreshListener is TestPokeRearmsAFreshListener's OverrideCINone twin:
+// TestOverrideCINoneCallsDriverBeforeStep only pins the returned command's own BATCH SHAPE
+// (stepCmd, listenCmd) and call ordering — it never actually delivers a progress line through
+// the re-armed listener, so a regression that broke live progress after an override (the same
+// class of bug TestPokeRearmsAFreshListener guards against one call down) would pass it silently.
+// This drives an actual line through the batch's second element and asserts it reaches the log.
+func TestOverrideCINoneRearmsAFreshListener(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1"} // always Waiting — never Done
+	backend := &fakeBackend{startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+		return drive, nil
+	}}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // settle the first Step so the entry is idle before OverrideCINone
+
+	c2, overrideCmd, overrideErr := h.c.OverrideCINone("promo-1")
+	h.c = c2
+	if overrideErr != nil {
+		t.Fatalf("OverrideCINone: %v", overrideErr)
+	}
+	batch, ok := overrideCmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 || batch[0] == nil || batch[1] == nil {
+		t.Fatalf("OverrideCINone's own cmd = %#v, want tea.BatchMsg(stepCmd, listenCmd)", overrideCmd)
+	}
+
+	// Push a progress line onto the re-armed entry's own channel, then run the batch's second
+	// element (the fresh listener) and feed its result through Update — exactly what a live
+	// progress line needs to actually surface after an override, not merely the batch shape.
+	ch := h.c.entries[build].progressCh
+	ch <- "override applied, stepping again"
+	h, _ = harnessUpdate(h, batch[1]())
+
+	snap, ok := h.c.Snapshot("promo-1")
+	if !ok {
+		t.Fatal("promo-1 no longer tracked")
+	}
+	if len(snap.Log) != 1 || snap.Log[0].Text != "override applied, stepping again" {
+		t.Fatalf("Log after OverrideCINone's re-armed listener = %+v, want exactly one line", snap.Log)
+	}
+}
+
 // orderedOverrideDrive records the order OverrideCINone and Step are called in.
 type orderedOverrideDrive struct {
 	order *[]string
@@ -1368,3 +1738,221 @@ func (d *orderedOverrideDrive) Step(context.Context) (service.Tick, error) {
 }
 
 func (d *orderedOverrideDrive) Run(context.Context, service.RunHooks) error { return nil }
+
+// --- P2-1/P3-1 review follow-through (t2-followup) ------------------------
+
+// TestFailedAbandonWithDriverReArmsGenAndClearsBusy_WaitingCase is P2-1's first repro: an idle
+// (Waiting) entry's Abandon takes the immediate (!busy) dispatch path; before onBuilt/onStep ever
+// re-arm anything, the LAST Step already scheduled a pollMsg (the ordinary Waiting->next-poll
+// chain) that is still queued when Backend.Abandon comes back with an error. Before the fix,
+// onAbandoned's error-with-driver branch set phase back to Stopped but left gen and busy
+// untouched, so that queued pollMsg (same gen, busy=false, phase != Abandoning) passed onPoll's
+// guard and dispatched a fresh Step against the ctx Abandon had already cancelled — silently
+// reviving an entry the operator was told had failed to abandon. The fix (e.gen++, e.busy=false in
+// that branch) makes the queued pollMsg stale, so onPoll drops it instead.
+func TestFailedAbandonWithDriverReArmsGenAndClearsBusy_WaitingCase(t *testing.T) {
+	now := fixedClock(time.Now())
+	var calls []string
+	drive := &fakeDrive{id: "promo-1", calls: &calls, steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second},
+	}}
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			return nil, errors.New("forge unreachable")
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, pendingPoll := hop(h, stepCmd1) // Step returns Waiting: entry idle, its own next poll captured but NOT run
+	if pendingPoll == nil {
+		t.Fatal("no poll scheduled after a Waiting step")
+	}
+
+	c2, abandonCmd := h.c.Abandon("promo-1") // idle entry -> Abandon's own immediate dispatch path
+	h.c = c2
+	if abandonCmd == nil {
+		t.Fatal("Abandon on an idle entry produced no command")
+	}
+	h, _ = hop(h, abandonCmd) // Backend.Abandon errors -> onAbandoned's error-with-driver branch
+
+	if e := h.c.entries[build]; e.phase != Stopped {
+		t.Fatalf("phase after a failed abandon = %v, want Stopped", e.phase)
+	}
+
+	stepsBefore := len(calls)
+	h, next := hop(h, pendingPoll) // the attacker: the poll scheduled before Abandon, delivered after
+	if next != nil {
+		t.Fatal("a pending poll scheduled before a failed abandon still produced a follow-up command")
+	}
+	if got := len(calls); got != stepsBefore {
+		t.Fatalf("the pending poll triggered a Step call: %d -> %d, want no change", stepsBefore, got)
+	}
+	if got := h.c.entries[build].phase; got != Stopped {
+		t.Fatalf("phase drifted to %v after the stale poll, want it to stay Stopped", got)
+	}
+}
+
+// TestFailedAbandonWithDriverReArmsGenAndClearsBusy_SteppingBusyCase is P2-1's second repro: the
+// entry is still Stepping (busy) when the abandon wait gives up and dispatches Backend.Abandon —
+// which then errors while that original Step call is STILL in flight. Before the fix, the busy
+// Step's eventual (ordinary, non-terminal) result reached onStep with e.phase already reset to
+// Stopped (not Abandoning any more), so onStep's own abandoning-special-case never triggered and
+// it fell through to the generic "schedule the next poll" path instead — reviving the entry from
+// Stopped back to Waiting/Stepping despite the abandon having failed.
+func TestFailedAbandonWithDriverReArmsGenAndClearsBusy_SteppingBusyCase(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1"} // never resolves on its own; this test drives its Step call by hand
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			return nil, errors.New("forge unreachable")
+		},
+	}
+	cfg := testConfig(now)
+	cfg.AbandonWait = time.Millisecond
+	cfg.AbandonTimeout = time.Millisecond // maxAbandonAttempts == 1: the very first wait tick dispatches
+	c := New(backend, cfg)
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd) // onBuilt's own first Step is outstanding (busy=true) — captured, not run
+
+	c2, abandonWaitCmd := h.c.Abandon("promo-1") // busy -> the wait chain, not the immediate dispatch
+	h.c = c2
+	if abandonWaitCmd == nil {
+		t.Fatal("Abandon on a busy entry produced no wait command")
+	}
+
+	h, abandonRunCmd := hop(h, abandonWaitCmd) // wait expires immediately (max attempts 1) -> dispatches Backend.Abandon
+	if abandonRunCmd == nil {
+		t.Fatal("the expired abandon wait produced no Backend.Abandon command")
+	}
+	h, _ = hop(h, abandonRunCmd) // Backend.Abandon errors, while stepCmd1 is STILL outstanding
+
+	if e := h.c.entries[build]; e.phase != Stopped {
+		t.Fatalf("phase after a failed abandon = %v, want Stopped", e.phase)
+	}
+
+	before := len(h.changes)
+	h, next := hop(h, stepCmd1) // the attacker: the original in-flight Step, resolving with an ordinary (non-terminal) tick
+	if next != nil {
+		t.Fatal("the in-flight step's own result, delivered after a failed abandon, scheduled another poll")
+	}
+	if len(h.changes) != before {
+		t.Fatalf("the stale step result produced %d more Change(s), want 0", len(h.changes)-before)
+	}
+	if got := h.c.entries[build].phase; got != Stopped {
+		t.Fatalf("phase drifted to %v after the stale step result, want it to stay Stopped", got)
+	}
+}
+
+// TestAbandonedChangeCarriesNonAbandoningPhase is P3-1's first repro: ChangeAbandoned's own Snap
+// used to be captured while e.phase was still Abandoning (the success path never changed it before
+// snapshotting) — so a flight screen still attached to this build at the moment the abandon
+// finishes would Mirror(snap) and see Phase == session.Abandoning, latching m.abandoning forever
+// true for a screen with no entry left to ever un-latch it. The fix sets phase to a terminal value
+// before snapshotting.
+func TestAbandonedChangeCarriesNonAbandoningPhase(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second},
+	}}
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, nil },
+	}
+	c := New(backend, testConfig(now))
+
+	c, _, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // idle now
+
+	c2, abandonCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonCmd == nil {
+		t.Fatal("Abandon on an idle entry produced no command")
+	}
+	h, _ = hop(h, abandonCmd)
+
+	var found bool
+	for _, ch := range h.changes {
+		if ch.Kind != ChangeAbandoned {
+			continue
+		}
+		found = true
+		if ch.Snap.Phase == Abandoning {
+			t.Fatalf("ChangeAbandoned's Snap.Phase = Abandoning, want a terminal phase a flight screen would stop mirroring as \"abandoning\"")
+		}
+	}
+	if !found {
+		t.Fatal("no ChangeAbandoned in the changes returned")
+	}
+}
+
+// TestAbandonFailedOnDriverlessEntryCarriesTerminalSnap is P3-1's second repro: the driver-nil
+// branch of onAbandoned's error path used to build its ChangeAbandonFailed with no Snap at all,
+// so a caller trying to mirror it onto an attached flight screen (the entry is already removed —
+// BuildSnapshot returns false) fell back to a zero-value Snapshot{} — indistinguishable from a
+// screen that was never attached to anything, rather than an honest terminal state.
+func TestAbandonFailedOnDriverlessEntryCarriesTerminalSnap(t *testing.T) {
+	now := fixedClock(time.Now())
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return nil, context.Canceled },
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, errors.New("forge down") },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+
+	c2, _ := h.c.Abandon("promo-1")
+	h.c = c2
+
+	h, followUp := started(h, resumeCmd) // the Resume call fails; onBuilt's abandoning branch calls Backend.Abandon
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning (build error) produced no command")
+	}
+	h = h.drain(followUp) // Backend.Abandon itself fails too
+
+	var found bool
+	for _, ch := range h.changes {
+		if ch.Kind != ChangeAbandonFailed {
+			continue
+		}
+		if ch.ID != "promo-1" {
+			continue
+		}
+		found = true
+		if ch.Snap.ID != "promo-1" {
+			t.Fatalf("ChangeAbandonFailed's Snap.ID = %q, want \"promo-1\" — an empty Snap is indistinguishable from an unattached screen", ch.Snap.ID)
+		}
+		if ch.Snap.Phase == Abandoning {
+			t.Fatalf("ChangeAbandonFailed's Snap.Phase = Abandoning, want a terminal phase")
+		}
+	}
+	if !found {
+		t.Fatal("no ChangeAbandonFailed for promo-1 in the changes returned")
+	}
+}

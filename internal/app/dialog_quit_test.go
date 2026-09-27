@@ -195,3 +195,60 @@ func TestQuitWithNoRunningDriveQuitsImmediately(t *testing.T) {
 		t.Fatal("q with nothing running must quit immediately")
 	}
 }
+
+// TestQuitAsksWhileAbandonCallIsInFlight is P2-2's own repro (review of #182/43bfa38):
+// session.Controller.AnyRunning used to exclude every Abandoning entry outright, so once the X
+// gesture had already popped back to the matrix and dispatched the real Backend.Abandon call
+// (still outstanding — nothing has told the operator it finished), q quit the whole program
+// immediately instead of asking first, killing that in-flight Abandon (close the PR, delete the
+// branch, delete the state file) mid-way. The fix counts an Abandoning entry as running once its
+// own Backend.Abandon call has actually been dispatched (abandonIssued), which is exactly the
+// idle-entry path X/y/enter drives here — the wait-for-a-busy-Step half of Abandon is deliberately
+// not what this test exercises (TestAbandonDuringBusyStepCannotBeOutlived already covers that
+// window; here the entry is idle, so Abandon takes its own immediate-dispatch path).
+func TestQuitAsksWhileAbandonCallIsInFlight(t *testing.T) {
+	svc := &fakeService{
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+			return engine.PromotionState{ID: "abcd1234"}, idleDriver{id: "abcd1234"}, nil
+		},
+		// Never actually invoked by this test — the point is the WINDOW between Abandon
+		// dispatching this call and it resolving, which is already open the instant
+		// session.Controller.Abandon returns its own command, before that command ever runs.
+		AbandonFn: func(context.Context, string) error {
+			t.Fatal("Backend.Abandon must not run before this test drives its own command")
+			return nil
+		},
+	}
+	mm := idleAttached(t, svc, "abcd1234")
+
+	var top tea.Model = mm
+	top, _ = press(t, top, tea.KeyPressMsg{Code: 'X', Text: "X"})
+	if !strings.Contains(plain(top), "Abandon promotion") {
+		t.Fatalf("setup: X did not open the abandon confirm dialog:\n%s", plain(top))
+	}
+	top, _ = press(t, top, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	top, cmd := press(t, top, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on the abandon confirm produced no command")
+	}
+	top, abandonCmd := top.Update(cmd()) // root's flight.AbandonMsg handler: pops to the matrix, dispatches Abandon
+	root := top.(Model)
+	if n := len(root.stack); n != 1 {
+		t.Fatalf("Abandon should return to the matrix immediately: stack has %d screens, want 1", n)
+	}
+	if abandonCmd == nil {
+		t.Fatal("Abandon on an idle entry produced no command — nothing is actually in flight")
+	}
+	if !root.sess.AnyRunning() {
+		t.Fatal("setup: a dispatched (not yet resolved) Backend.Abandon call must count as running")
+	}
+
+	var rootModel tea.Model = root
+	rootModel, quitCmd := pressRoot(rootModel, "q")
+	if quits(quitCmd) {
+		t.Fatal("q quit the program immediately while Backend.Abandon was in flight")
+	}
+	if !strings.Contains(plain(rootModel), "Quit hoist?") {
+		t.Fatalf("q did not open the quit confirm dialog while an Abandon call was in flight:\n%s", plain(rootModel))
+	}
+}
