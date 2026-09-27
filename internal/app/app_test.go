@@ -596,6 +596,88 @@ func TestSecondStartForSameTargetIsRefused(t *testing.T) {
 	}
 }
 
+// TestDoubleEnterStartsOnce is Train 2 design PR 8's own regression test for FB-L4: two Enter
+// keypresses on a loaded, ready plan screen, back to back with NOTHING drained in between (the
+// attacker is the queued second Enter, exactly as fast as bubbletea can deliver two keys before
+// the first one's own command has even had a chance to run) must still reach
+// session.Controller.Start — and so app.Service.StartPromotion — exactly once. Before plan.Model
+// gained its own one-shot starting guard (model.go), pressing Enter twice like this emitted TWO
+// plan.StartMsg values; TestSecondStartForSameTargetIsRefused already proves the SECOND one is
+// refused by session.Controller's own same-target bookkeeping (so no second drive ever actually
+// started), but the operator would see the "already running" refusal notice flash across a
+// promotion that had, in fact, just started successfully — confusing, and needless plumbing for
+// something the plan screen itself can simply not ask for twice. This test would fail on the old
+// behavior only if it counted the notice, not the call count session.Controller already
+// protects; instead it directly counts app.Service.StartPromotion, so it is pinned to the
+// guard's own purpose (no wasted second attempt) rather than restating
+// TestSecondStartForSameTargetIsRefused's assertion under a new name.
+func TestDoubleEnterStartsOnce(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production", "app-production": "app-staging"}}
+	planFn := func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, []string{"ghcr.io/"}, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	}
+	var calls int
+	svc := &fakeService{startFn: func(_ context.Context, p gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		calls++
+		return engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv}, driverAlways(engine.PromotionState{ID: "abcd1234"}), nil
+	}}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, planFn, svc, Promotion{}, nil, apprestart.Funcs{})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+
+	// p: open the plan screen for app-staging (envs.Pairs sends it straight to app-production,
+	// stateLoading — no manual env-select step needed), then land its real load.
+	tm, cmd := press(t, tm, uitest.Key("p"))
+	tm, cmd = tm.Update(cmd()) // matrix.OpenPlanMsg -> pushes the screen, returns its Init()
+	loadCmd := extractPlanLoadCmd(t, cmd)
+	tm, _ = tm.Update(loadCmd())
+	if v := plain(tm); !strings.Contains(v, "app-production") {
+		t.Fatalf("setup: plan screen not showing a loaded, ready plan:\n%s", v)
+	}
+
+	// Two Enters, queued: neither of these tea.Cmd results is invoked until after BOTH
+	// keypresses have already been processed by Update, exactly what "no draining in between"
+	// means — a real bubbletea program can deliver a second keypress before the runtime has
+	// gotten around to running the first one's own command.
+	tm1, cmd1 := press(t, tm, uitest.Key("enter"))
+	_, cmd2 := press(t, tm1, uitest.Key("enter"))
+
+	if cmd1 == nil {
+		t.Fatal("first enter produced no command")
+	}
+	if cmd2 != nil {
+		// A command here at all would mean the guard let a second StartMsg through — fatal
+		// before even trying to run it (sessionBuildCmd would panic on the wrong shape, and
+		// running it risks the real listenCmd's blocking channel read, sessionBuildCmd's own
+		// doc comment).
+		t.Fatal("second, immediately-queued enter produced a command — the starting guard did not hold")
+	}
+
+	// Only now is cmd1 actually drained: cmd1() is the plan screen's own emitted plan.StartMsg,
+	// fed into the root exactly as attachedWithDriver's own fixture does, so this reaches
+	// m.start -> session.Controller.Start for real. cmd2 has nothing left to drain, which is
+	// the point — the guard meant there was only ever one command to run. Never drainRoot here:
+	// it would also invoke the real Start's own listenCmd, a channel read that blocks forever
+	// absent a runtime (sessionBuildCmd's own doc comment).
+	tm2, startCmd := tm1.Update(cmd1())
+	m1, stepCmd := attach(t, tm2.(Model), startCmd)
+	m1 = stepOnce(t, m1, stepCmd)
+
+	if calls != 1 {
+		t.Fatalf("StartPromotion called %d times for two back-to-back Enters, want exactly 1", calls)
+	}
+	if n := len(m1.sess.Live()); n != 0 {
+		t.Errorf("session.Controller.Live() has %d entries after the one real start finished (driverAlways answers Done immediately), want 0 — a second, still-running entry would mean a second start actually landed", n)
+	}
+}
+
 // TestStartMsgFiltersToTickedRepos is PR #50 review finding #2: plan.StartMsg.Ticked is the
 // repo subset the operator actually left checked (the same set plan.Model.recomputeDiff
 // already filters the confirm screen's own diff by), but msg.Plan carries BuildPlan's full,
@@ -2397,9 +2479,9 @@ func TestDoneShowsNewTagWithoutF5(t *testing.T) {
 		t.Fatal(err)
 	}
 	var refreshCalls int
-	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) {
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, string, error) {
 		refreshCalls++
-		return fresh, nil
+		return fresh, "", nil
 	})
 
 	before := listCalls
@@ -2443,9 +2525,9 @@ func TestLandedRefreshesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	var refreshCalls int
-	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) {
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, string, error) {
 		refreshCalls++
-		return fresh, nil
+		return fresh, "", nil
 	})
 
 	m2, cmd := m.apply([]session.Change{{Kind: session.ChangeStepped, Build: 1, ID: "abcd1234"}})
@@ -2488,7 +2570,7 @@ func TestEarlierF5AnswerCannotOverwriteCompletionRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, error) { return newRepo, nil })
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, string, error) { return newRepo, "", nil })
 
 	m2, cmd := m.apply([]session.Change{{Kind: session.ChangeDone, Build: 1, ID: "abcd1234"}})
 	m3 := drainRoot(m2, cmd)

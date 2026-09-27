@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -129,6 +130,20 @@ type Model struct {
 	// whole budget names, owned and renewed by session.Controller now (Poke/OverrideCINone's own
 	// rearm), never recomputed here. Zero when the controller was configured with no deadline.
 	deadlineAt time.Time
+	// nextPoll mirrors the entry's own Snapshot.NextPoll — when session.Controller will next
+	// re-observe this promotion on its own, absent an R. Zero while building, busy, done or
+	// stopped (session.Controller only ever sets it for a Waiting entry); actionSection's own
+	// countdown (Train 2 design PR 8) is what makes that wait visible rather than a screen that
+	// looks the same whether it is about to check again in one second or is quietly wedged.
+	nextPoll time.Time
+	// tickID stamps this instance's own 1s countdown-redraw ticks (scope.After), distinct from
+	// any other flight instance's — never a Scope/ctx, since this screen drives nothing and owns
+	// no cancellable call of its own (D3): the tick carries no work, it only wakes Update once a
+	// second so the countdown's rendered text advances while this screen is the one on top (a
+	// tick delivered while some other screen is on top reaches THAT screen's Update instead,
+	// which does not recognize it and drops it — which is exactly what stops the chain once this
+	// screen is no longer visible, with nothing further to clean up).
+	tickID scope.ID
 
 	spinner spinner.Model
 	showLog bool
@@ -190,6 +205,7 @@ func NewAttached(s session.Snapshot, poll PollDurations) Model {
 		// is the operator's question every time a promotion runs, not a fact to go looking for
 		// behind a key. l still hides it for an operator who wants the room back.
 		showLog: true,
+		tickID:  scope.New(),
 	}
 	_ = poll // kept for signature stability (see PollDurations' own doc comment)
 	return m.Mirror(s)
@@ -218,6 +234,7 @@ func (m Model) Mirror(s session.Snapshot) Model {
 	m.done = s.Done
 	m.stopped = s.Phase == session.Stopped
 	m.deadlineAt = s.DeadlineAt
+	m.nextPoll = s.NextPoll
 
 	state := s.State
 	if m.building {
@@ -242,33 +259,73 @@ func (m Model) Mirror(s session.Snapshot) Model {
 	return m
 }
 
-// Init starts the spinner's tick chain whenever there is something to animate (Building, or a
-// Step outstanding) — a mirrored screen with nothing in flight has nothing to animate, so this
-// returns nil rather than a permanent, invisible tick loop (PR #39 review finding #5, still true
-// here: the loop this guards is the spinner's own reschedule in Update, not a poll this screen no
-// longer drives).
+// waiting is true exactly when actionSection's own countdown applies: an ordinary in-progress
+// promotion, not building, not mid-Step, not done, not stopped, with session.Controller having
+// told this screen when it will next check on its own (Mirror's own nextPoll assignment).
+func (m Model) waiting() bool {
+	return !m.building && !m.busy && !m.done && !m.stopped && !m.nextPoll.IsZero()
+}
+
+// countdownTick is the 1s redraw wake-up actionSection's countdown needs while m.waiting() — it
+// carries no data of its own; scope.Result[countdownTick] exists purely to be delivered back to
+// THIS instance (tickID's own doc comment) and dropped by any other screen's Update.
+type countdownTick struct{}
+
+// Init starts whichever tick chain this screen needs to animate on its own: the spinner's while
+// Building or a Step is outstanding (unchanged), or the 1s countdown redraw while m.waiting() —
+// a mirrored screen with nothing in flight and nothing counting down has nothing to animate, so
+// this returns nil rather than a permanent, invisible tick loop (PR #39 review finding #5, still
+// true here: the loop this guards is Update's own reschedule, not a poll this screen no longer
+// drives).
 func (m Model) Init() tea.Cmd {
 	if m.building || m.busy {
 		return m.spinner.Tick
 	}
+	if m.waiting() {
+		return scope.After(m.tickID, time.Second, countdownTick{})
+	}
 	return nil
 }
 
-// Update handles the screen's own keys and the spinner's tick chain. Every async result this
-// screen used to process directly (a drive's own Tick, a progress line) now arrives only as a
-// fresher Mirror call from the root — this package issues no tea.Cmd that talks to a Driver or a
-// channel at all (Train 2 design, D3; TestFlightNeverCallsDriver pins it).
+// Update handles the screen's own keys and its two tick chains. Every async result this screen
+// used to process directly (a drive's own Tick, a progress line) now arrives only as a fresher
+// Mirror call from the root — this package issues no tea.Cmd that talks to a Driver or a channel
+// at all (Train 2 design, D3; TestFlightNeverCallsDriver pins it). The spinner and the countdown
+// chains hand off to each other at whichever end delivers next (their own doc comments): a
+// mirrorAttached call from the root updates this screen's state directly, with no Init and no
+// message through here, so each chain's own delivery is what notices the OTHER condition has
+// become true meanwhile and starts that chain instead — the only gap is a screen sitting fully
+// idle (neither chain alive) when a background Mirror alone moves it back into m.waiting(), which
+// self-heals on the next keypress or Mirror-carried spinner/countdown delivery regardless.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case spinner.TickMsg:
-		// Keep the chain alive only while something is actually animating; stop it the moment
-		// nothing is, rather than rescheduling unconditionally (PR #39 review finding #5).
 		if !m.building && !m.busy {
+			// The step that was outstanding when this tick was scheduled has since resolved.
+			// Hand off to the countdown chain if there is now something to count down to,
+			// rather than just stopping (PR #39 review finding #5 still holds: never
+			// reschedule unconditionally).
+			if m.waiting() {
+				return m, scope.After(m.tickID, time.Second, countdownTick{})
+			}
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+	case scope.Result[countdownTick]:
+		if scope.Foreign(m.tickID, msg) {
+			return m, nil
+		}
+		if m.building || m.busy {
+			// A poll fired while this chain was ticking. Hand off to the spinner chain rather
+			// than reschedule a countdown that no longer applies.
+			return m, m.spinner.Tick
+		}
+		if m.waiting() {
+			return m, scope.After(m.tickID, time.Second, countdownTick{})
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -680,6 +737,16 @@ func (m Model) actionSection() string {
 			return m.styles.Bad.Render("blocked — resolve the conflict, then R to re-observe")
 		}
 		return m.styles.Bad.Render("stopped — see the error below; R retries")
+	case m.waiting():
+		// #PR8: the ordinary "nothing wrong, just waiting for the next scheduled check" case
+		// used to say nothing at all here (the step list's own Active row already names what
+		// it's waiting on) — indistinguishable from a hang for however long the poll interval
+		// is. Round to the second so the countdown does not repaint on sub-second jitter.
+		remaining := m.nextPoll.Sub(m.now())
+		if remaining < 0 {
+			remaining = 0
+		}
+		return m.styles.Dim.Render(fmt.Sprintf("next check in %s · R now", remaining.Round(time.Second)))
 	}
 	return ""
 }

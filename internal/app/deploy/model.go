@@ -127,6 +127,17 @@ type Model struct {
 	confirmV bool
 	notice   string
 	ticked   map[string]bool
+
+	// starting is plan.Model.starting's own twin (see its doc comment there for the full
+	// reasoning, #PR8/FB-L4): set the instant Enter emits StartMsg, cleared only by
+	// ResetStarting, which the root calls after popping a failed build back onto this screen.
+	starting bool
+}
+
+// ResetStarting clears the one-shot Enter guard starting sets. See its own doc comment.
+func (m Model) ResetStarting() Model {
+	m.starting = false
+	return m
 }
 
 // New builds the screen for an already-constructed deploy plan. root is the repo checkout the
@@ -228,6 +239,11 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "esc":
 		return m, func() tea.Msg { return BackMsg{} }
 	case "enter":
+		if m.starting {
+			// #PR8/FB-L4: a repeated Enter before the root has reacted at all — see starting's
+			// own doc comment.
+			return m, nil
+		}
 		if m.diffErr != nil {
 			// The screen's entire promise is that the bytes are visible before anything is
 			// written. When RenderDiff failed there are no bytes on screen, so enter would
@@ -237,6 +253,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.notice = "cannot confirm a deploy whose diff could not be rendered — esc back and retry"
 			return m, nil
 		}
+		m.starting = true
 		return m, m.start(m.mode)
 	case "d":
 		if m.history.Delta == nil {

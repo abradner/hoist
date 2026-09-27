@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/restart"
@@ -62,17 +63,14 @@ func onePlan() restart.Plan {
 	}
 }
 
-// drain runs a command the way the runtime would, one level deep, feeding its message back.
+// drain runs a command the way the runtime would, recursively, via uitest.Drain — which unpacks
+// every tea.BatchMsg in order (AGENTS.md §9 entry 7). This package's own busyMarker is a plain
+// static string, never a ticking spinner (P3 #9, t2-review.md), but Init/start/the Rolling
+// transition can still batch other real work alongside a scope.Do call, so a hand-rolled
+// single-level unwrap would mishandle that batch the same way a nested one would.
 func drain(t *testing.T, m Model, cmd tea.Cmd) Model {
 	t.Helper()
-	for i := 0; cmd != nil && i < 20; i++ {
-		msg := cmd()
-		if msg == nil {
-			return m
-		}
-		m, cmd = m.Update(msg)
-	}
-	return m
+	return uitest.Drain(m, cmd, func(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) })
 }
 
 func ready(t *testing.T, f *fakeFuncs, production bool) Model {
@@ -244,6 +242,79 @@ func TestRestartGolden(t *testing.T) {
 		t.Fatalf("dialog must sit over the screen:\n%s", v)
 	}
 	uitest.Golden(t, "restart-confirm", m.View(), 80, 24)
+}
+
+// TestRestartRollingGolden is #PR8/FB-M7's own visible-wait golden: the moment a restart has
+// actually been asked for but no rollout progress has been observed yet, every target still
+// shows the "…" pending marker (render's own case), and the header now carries busyMarker —
+// before this PR, "rolling" here read identically to a screen that had silently wedged. The
+// startedMsg is delivered directly, not through the real cmd chain the enter key would produce:
+// that chain also schedules the observe poll, and this golden wants the deterministic frame
+// right after the transition, not whatever the observe poll's own timing happens to have
+// produced by the time a real run gets here.
+func TestRestartRollingGolden(t *testing.T) {
+	f := &fakeFuncs{plan: onePlan()}
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := ready(t, f, false).SetSize(size[0], size[1])
+		// enter (non-production) -> m.start(): state becomes stateStarting, the one state
+		// scope.Result[startedMsg] is accepted from (its own doc comment). The real DoFunc cmd
+		// this also returns is deliberately never invoked here — see the golden's own comment.
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		if m.state != stateStarting {
+			t.Fatalf("setup: state = %v, want stateStarting", m.state)
+		}
+		m, _ = m.Update(scope.Result[startedMsg]{From: m.scope.ID, V: startedMsg{at: time.Now().UTC()}})
+		if m.state != stateRolling {
+			t.Fatalf("setup: state = %v, want stateRolling", m.state)
+		}
+		uitest.Golden(t, "restart-rolling", m.View(), size[0], size[1])
+	}
+}
+
+// TestBusyMarkerShowsOnlyWhileBusy pins busy()/headerSection's own busyMarker gating: reading,
+// starting and rolling show it; the states an operator is not waiting on anything in (confirm,
+// done, failed) must not — the marker shown there would be advertising work that already
+// finished, or never started. Checks for the EXACT "<marker> <state word>" pairing
+// headerSection builds, rather than scanning for the marker's own glyph in isolation:
+// "app-staging" and "app-staging / web" already contain a bare "-" and "/", which a naive
+// per-character scan would misread (found the hard way, back when this checked a spinner glyph
+// instead — this test's own prior-revision history). P3 #9 (t2-review.md) replaced the
+// never-ticked spinner.Model this used to check with the plain static busyMarker: the spinner
+// was permanently frozen on its first frame, which reads as wedged rather than busy.
+func TestBusyMarkerShowsOnlyWhileBusy(t *testing.T) {
+	m := New("app-staging", "web", []string{"web"}, false, (&fakeFuncs{plan: onePlan()}).funcs(), ui.NewStyles(true)).SetSize(80, 24)
+	hasMarker := func(m Model) bool {
+		return strings.Contains(ansi.Strip(m.headerSection()), busyMarker+" "+m.stateWord())
+	}
+
+	if m.state != stateReading || !hasMarker(m) {
+		t.Errorf("stateReading must show the busy marker in the header:\n%s", ansi.Strip(m.headerSection()))
+	}
+
+	m.state = stateConfirm
+	if hasMarker(m) {
+		t.Errorf("stateConfirm must not show the busy marker:\n%s", ansi.Strip(m.headerSection()))
+	}
+
+	m.state = stateStarting
+	if !hasMarker(m) {
+		t.Errorf("stateStarting must show the busy marker:\n%s", ansi.Strip(m.headerSection()))
+	}
+
+	m.state = stateRolling
+	if !hasMarker(m) {
+		t.Errorf("stateRolling must show the busy marker:\n%s", ansi.Strip(m.headerSection()))
+	}
+
+	m.state = stateDone
+	if hasMarker(m) {
+		t.Errorf("stateDone must not show the busy marker:\n%s", ansi.Strip(m.headerSection()))
+	}
+
+	m.state = stateFailed
+	if hasMarker(m) {
+		t.Errorf("stateFailed must not show the busy marker:\n%s", ansi.Strip(m.headerSection()))
+	}
 }
 
 // TestStartedMsgFromAnotherInstanceIsForeign is the package-local half of app's own

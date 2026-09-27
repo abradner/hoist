@@ -144,6 +144,26 @@ type Model struct {
 	width, height int
 }
 
+// busyMarker renders alongside the state word while busy() is true — reading, starting or
+// rolling (#PR8/FB-M7's own list): before this, none of those three states carried any visible
+// sign that they were doing anything rather than having quietly wedged (the same "is this still
+// alive" question flight.Model's own spinner already answers for a promotion in flight). A
+// bubbles/v2 spinner.Model was tried here first and never actually animated (P3 #9,
+// t2-review.md): Init/start/the Rolling transition below are relied on elsewhere (attach-style
+// app-level tests, sessionBuildCmd's own single-cmd shape) to return their real work as ONE
+// unbatched command, and nothing in this package ever issued the spinner's own tea.Tick to
+// advance it past its first frame — so the "spinner" was a permanently frozen glyph, which reads
+// as wedged rather than busy, the opposite of the point. A plain static marker says exactly what
+// it is: something is happening, with no claim of motion this screen never delivers.
+const busyMarker = "…"
+
+// busy reports whether the header should show busyMarker beside the state word: an outstanding
+// Read/Do/Observe call, or a rollout still in progress. Never stateConfirm, stateDone or
+// stateFailed — nothing is happening for the operator to wait on in any of those.
+func (m Model) busy() bool {
+	return m.state == stateReading || m.state == stateStarting || m.state == stateRolling
+}
+
 // New builds the screen for one family in one env. names are the Deployments the repo says that
 // family declares; nothing is read from the cluster until Init runs.
 //
@@ -435,7 +455,14 @@ func (m Model) View() string {
 
 func (m Model) headerSection() string {
 	left := m.styles.Title.Render(m.env) + " / " + m.styles.Title.Render(m.family)
-	right := m.styles.Dim.Render(m.stateWord())
+	word := m.stateWord()
+	if m.busy() {
+		// #PR8/FB-M7: reading/starting/rolling are the three states an operator has no way to
+		// tell apart from a wedged screen without this — the same question flight.Model's own
+		// spinner answers for a promotion in flight.
+		word = busyMarker + " " + word
+	}
+	right := m.styles.Dim.Render(word)
 	if m.production {
 		right = m.styles.Production.Render("production") + "   " + right
 	}

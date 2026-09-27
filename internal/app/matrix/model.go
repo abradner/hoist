@@ -62,8 +62,10 @@ type DriftMsg struct {
 // (AGENTS.md §4.6). Mirrors DriftFunc's own shape: a plain function type this screen holds
 // and calls (§4.8 — a screen may call a function type it's handed, just never import the
 // git/network machinery behind it itself), built once by cmd/hoist and installed with
-// WithRefreshRepo.
-type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, error)
+// WithRefreshRepo. The returned rev is origin/<base>'s tip at the moment this view was built
+// (svc.RefreshRepo's own RepoView.SHA, #PR8) — "" when the fetch fell back to the clone, since
+// there is then nothing freshly read to name.
+type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, string, error)
 
 // RepoRefreshedMsg carries RefreshRepoFunc's answer back to Update. Gen ties it to the
 // askRepoRefresh call that issued it, the same way DriftMsg's own gen does for the cluster
@@ -82,7 +84,10 @@ type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, error)
 type RepoRefreshedMsg struct {
 	Gen  uint64
 	Repo *gitops.Repo
-	Err  error
+	// Rev is RefreshRepoFunc's own third result — origin/<base>'s tip this refresh read, ""
+	// when it fell back to the clone. #PR8's F5 success note names it.
+	Rev string
+	Err error
 }
 
 // nextGen numbers refresh generations across every Model this process builds, so two
@@ -352,11 +357,11 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := scope.Timeout(scope.RefreshRepo)
 		defer cancel()
-		repo, err := refresh(ctx)
+		repo, rev, err := refresh(ctx)
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
 			err = fmt.Errorf("did not answer in %s", scope.RefreshRepo)
 		}
-		return RepoRefreshedMsg{Gen: gen, Repo: repo, Err: err}
+		return RepoRefreshedMsg{Gen: gen, Repo: repo, Rev: rev, Err: err}
 	}
 }
 
@@ -411,6 +416,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return nm, nil
 		}
 		nm := m.WithRepo(msg.Repo)
+		if msg.Rev != "" {
+			// #PR8: the operator asked "did F5 actually do anything" enough times that a
+			// silent success (indistinguishable from a dead key — AGENTS.md §9 entry 10's own
+			// lesson, applied here to F5 rather than a confirm) needed its own answer.
+			nm.notice = fmt.Sprintf("origin/%s re-read · %s", nm.baseName(), shortSHA(msg.Rev))
+		}
 		if again {
 			return nm.askRepoRefresh()
 		}
@@ -755,6 +766,25 @@ func (m Model) WithRun(base, kubeContext string) Model {
 	return m
 }
 
+// baseName is m.base with the WithRun/title default filled in — "main" when the operator ran
+// with no --base, since that is what F5's own re-read note (#PR8) should call the branch it
+// just re-read rather than printing an empty "origin/ re-read".
+func (m Model) baseName() string {
+	if m.base == "" {
+		return "main"
+	}
+	return m.base
+}
+
+// shortSHA shortens a full sha for the F5 success note (#PR8), the same 12-char convention
+// internal/service's own shortRev uses for a plan-staleness error.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
 func (m Model) title() string {
 	t := "hoist · matrix · " + displayRoot(m.repo.Root)
 	if m.base != "" && m.base != "main" {
@@ -788,6 +818,13 @@ func (m Model) baseNotes() []string {
 	inner := max(m.width-2, 1)
 	var lines []string
 	switch {
+	case m.refreshingRepo:
+		// #PR8: shown for the whole refresh, not just the instant F5 was pressed — a plain
+		// m.notice would be wiped by the very next keypress (every other key handler clears it
+		// first), which would make a refresh that outlives one keystroke look like it never
+		// started. Takes priority over m.notice so a stale success/error note from a PREVIOUS
+		// refresh cannot linger on top of the one now in flight.
+		lines = append(lines, m.styles.Notice.Render(fmt.Sprintf("re-reading origin/%s…", m.baseName())))
 	case m.notice != "":
 		lines = append(lines, m.styles.Notice.Render(ansi.Wordwrap(m.notice, inner, "")))
 	default:
