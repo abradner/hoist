@@ -95,10 +95,8 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return code
 	}
 
-	kctx := *kubeContext
-	if kctx == "" && eff.cfg != nil {
-		kctx = eff.cfg.Kube.Context
-	}
+	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo).
+	kctx := eff.kubeContext
 	ro, usedContext, err := newRollout(kctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))

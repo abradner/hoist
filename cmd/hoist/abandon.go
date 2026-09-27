@@ -14,6 +14,7 @@ import (
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 )
 
 // abandonPromotion retires promotion id for good: releases the state file and, if it opened a
@@ -56,7 +57,7 @@ func abandonPromotion(ctx context.Context, cfg *config.Config, id string) ([]str
 		return nil, fmt.Errorf("no promotion %s found", id)
 	}
 
-	rc, ok := repoConfigFor(cfg, s.RepoFullName)
+	rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
 	if !ok {
 		return nil, fmt.Errorf("%s: repo %s is not in the config file", s.ID, s.RepoFullName)
 	}

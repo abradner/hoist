@@ -91,10 +91,8 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	fam := r.Envs[target.Namespace].Families[path.Base(target.SourcePath)]
 
 	argoNamespace := argoNamespaceOf(eff.cfg)
-	ctxName := *kubeContext
-	if eff.cfg != nil && ctxName == "" {
-		ctxName = eff.cfg.Kube.Context
-	}
+	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo).
+	ctxName := eff.kubeContext
 
 	a, usedCtx, err := newArgo(ctxName)
 	if err != nil {

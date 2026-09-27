@@ -10,11 +10,13 @@ import (
 
 	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/matrix"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
@@ -34,7 +36,7 @@ import (
 // failing runTUI outright) since a repo with no github configured never needs f at all — see
 // the eff.cfg check below, which reports that more specific case first.
 // viewDir is what the plan was actually discovered from — the TUI's own cached view of
-// origin/<base> (repoview.go, runTUI), not eff.repo's working tree. checkRepoViewCurrent below
+// origin/<base> (internal/service's repo view, runTUI), not eff.repo's working tree. service.CheckRepoViewCurrent below
 // replaces checkCloneCurrentForBase's old job here: since r (and therefore every plan built
 // from it) already comes from origin's own committed content, there is no local-disk-vs-origin
 // gap left to reconcile the way checkCloneCurrentForBase exists to catch (its own comparison
@@ -83,7 +85,7 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 		// this, in the same order (promote.go) — kept identical here so the CLI and TUI cannot
 		// disagree about when a plan is trustworthy.
 		report("checking your checkout against origin/" + eff.base)
-		if err := checkRepoViewCurrent(ctx, g, eff.repo, eff.base, viewDir); err != nil {
+		if err := service.CheckRepoViewCurrent(ctx, g, eff.repo, eff.base, viewDir); err != nil {
 			return engine.PromotionState{}, nil, err
 		}
 		if !anyRealEdit(p.Edits) {
@@ -322,7 +324,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			if s == nil {
 				return engine.PromotionState{}, nil, fmt.Errorf("no promotion %s found", id)
 			}
-			rc, ok := repoConfigFor(cfg, s.RepoFullName)
+			rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
 			if !ok {
 				return engine.PromotionState{}, nil, fmt.Errorf("%s: repo %s is not in the config file", s.ID, s.RepoFullName)
 			}
@@ -330,7 +332,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			if err != nil {
 				return engine.PromotionState{}, nil, err
 			}
-			a, ro, err := buildArgoRolloutIn(rc, kubeOverride)
+			a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, kubeOverride)
 			if err != nil {
 				return engine.PromotionState{}, nil, err
 			}
@@ -360,7 +362,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 // observeForList re-observes one state for the in-flight pane: engine.Status over the list
 // the state implies, so the pane can draw every step, not only where it stopped.
 func observeForList(ctx context.Context, cfg *config.Config, s *engine.PromotionState, kubeOverride string) flight.Summary {
-	rc, ok := repoConfigFor(cfg, s.RepoFullName)
+	rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
 	if !ok {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("repo %s is not in the config file", s.RepoFullName))
 	}
@@ -368,7 +370,7 @@ func observeForList(ctx context.Context, cfg *config.Config, s *engine.Promotion
 	if err != nil {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build a forge client: %w", err))
 	}
-	a, ro, err := buildArgoRolloutIn(rc, kubeOverride)
+	a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, kubeOverride)
 	if err != nil {
 		return flight.Summarize(*s, false, nil, fmt.Errorf("could not build an Argo/rollout client: %s", redact.Strings(err.Error())))
 	}
@@ -556,5 +558,19 @@ func buildRestartFuncs(ro rollout.Rollout, rolloutErr error, poll config.PollCon
 			return restart.Observe(ctx, ro, env, names, at)
 		},
 		Interval: interval,
+	}
+}
+
+// buildRefreshRepoFunc is F5's own re-read of origin (matrix.RefreshRepoFunc), adapted from
+// svc.RefreshRepo (internal/service/repo.go) — the same refreshRepoView + gitops.Discover pair
+// runTUI's own boot does, through the one Service both share, so the matrix and a plan built
+// moments later never disagree about which origin/<base> either was reading.
+func buildRefreshRepoFunc(svc *service.Service) matrix.RefreshRepoFunc {
+	return func(ctx context.Context) (*gitops.Repo, error) {
+		view, err := svc.RefreshRepo(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return view.Repo, nil
 	}
 }

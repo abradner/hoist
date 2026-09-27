@@ -14,47 +14,10 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
-
-// buildArgoRolloutIn constructs this run's Argo/Rollout adaptors from rc's kube context —
-// exactly the pair `hoist promote` builds alongside its forge client (promote.go), needed here
-// too since runPromotions/runResume also drive/observe AllSteps, which always wires all ten
-// steps regardless of which one a given promotion currently sits at. The operator's explicit
-// --kube-context (#105) takes the place of rc's own kube.context when non-empty — the one
-// rule every face that lists or resumes promotions applies, so a state file from another repo
-// is observed and driven against the cluster the operator named, not that repo's default.
-// Empty keeps rc's.
-func buildArgoRolloutIn(rc config.RepoConfig, kubeOverride string) (argo.Argo, rollout.Rollout, error) {
-	if kubeOverride != "" {
-		rc.Kube.Context = kubeOverride
-	}
-	a, _, err := newArgo(rc.Kube.Context)
-	if err != nil {
-		return nil, nil, err
-	}
-	ro, _, err := newRollout(rc.Kube.Context)
-	if err != nil {
-		return nil, nil, err
-	}
-	return a, ro, nil
-}
-
-// repoConfigFor finds cfg's repos[] entry whose GitHub name matches repoFullName — how both
-// runPromotions and runResume locate the credential/CloneDir context a stored PromotionState
-// doesn't carry a config reference for (state files are repo-agnostic beyond RepoFullName
-// itself, on purpose — AGENTS.md §4.1: the state file is an index, not a second copy of config).
-func repoConfigFor(cfg *config.Config, repoFullName string) (config.RepoConfig, bool) {
-	for _, r := range cfg.Repos {
-		if r.GitHub == repoFullName {
-			return r, true
-		}
-	}
-	return config.RepoConfig{}, false
-}
 
 // ensureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
 // decoding an older file leaves the field empty (round-1 review finding), and
@@ -187,7 +150,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	// them a second time — round-2 review finding.
 	archivedThisRun := map[string]bool{}
 	for _, s := range states {
-		rc, ok := repoConfigFor(cfg, s.RepoFullName)
+		rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
 		if !ok {
 			fmt.Fprintf(stdout, "%s  %-20s  %s (last recorded; repo %s is not in the config file, cannot re-observe)\n", s.ID, s.TargetEnv, s.Phase, s.RepoFullName)
 			continue
@@ -197,7 +160,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build a forge client: %v)\n", s.ID, s.TargetEnv, err)
 			continue
 		}
-		a, ro, err := buildArgoRolloutIn(rc, *kubeContext)
+		a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
 		if err != nil {
 			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build an Argo/rollout client: %s)\n", s.ID, s.TargetEnv, redact.Strings(err.Error()))
 			continue
@@ -308,7 +271,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			if st.TargetEnv != *env {
 				continue
 			}
-			rc, ok := repoConfigFor(cfg, st.RepoFullName)
+			rc, ok := service.RepoConfigFor(cfg, st.RepoFullName)
 			if !ok {
 				// A state naming a repo no longer in config (removed, or renamed since this
 				// promotion started) is exactly the same "can't confirm" case obsErrs already
@@ -324,7 +287,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
 				continue
 			}
-			a, ro, ferr := buildArgoRolloutIn(rc, *kubeContext)
+			a, ro, ferr := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
 			if ferr != nil {
 				obsErrs = append(obsErrs, fmt.Sprintf("%s: building Argo/rollout clients: %v", st.ID, ferr))
 				continue
@@ -365,7 +328,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		}
 	}
 
-	rc, ok := repoConfigFor(cfg, s.RepoFullName)
+	rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
 	if !ok {
 		fmt.Fprintf(stderr, "hoist resume: %s: repo %s is not in the config file\n", s.ID, s.RepoFullName)
 		return exitFailure
@@ -375,7 +338,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
 		return exitFailure
 	}
-	a, ro, err := buildArgoRolloutIn(rc, *kubeContext)
+	a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
 		return exitFailure

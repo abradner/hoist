@@ -26,6 +26,7 @@ import (
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -306,6 +307,34 @@ func selectRepo(cfg *config.Config, sel selection) (effective, error) {
 	return eff, nil
 }
 
+// settingsFor builds the service.Settings a command's own Service is constructed from, out of
+// the same effective flag/config precedence selectRepo already computed — the one place
+// cmd/hoist reads eff into the shape internal/service takes, so a command never re-derives its
+// own copy of the kube-context/promotable/poll precedence eff already settled.
+func settingsFor(cfg *config.Config, eff effective) service.Settings {
+	s := service.Settings{
+		RepoDir:      eff.repo,
+		AppsRoot:     eff.appsRoot,
+		Base:         eff.base,
+		Promotable:   eff.promotable,
+		KubeContext:  eff.kubeContext,
+		KubeOverride: eff.kubeOverride,
+		Repo:         eff.cfg,
+		Config:       cfg,
+	}
+	if cfg != nil {
+		s.Poll = engine.PollIntervals{
+			CI:       time.Duration(cfg.Poll.CI),
+			Approval: time.Duration(cfg.Poll.Approval),
+			Argo:     time.Duration(cfg.Poll.Argo),
+			Rollout:  time.Duration(cfg.Poll.Rollout),
+		}
+		s.Deadline = time.Duration(cfg.Poll.Deadline)
+		s.Retain = time.Duration(cfg.State.Retain)
+	}
+	return s
+}
+
 func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -348,7 +377,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		fmt.Fprintf(stderr, "hoist plan: %s\n", msg)
 		return exitUsage
 	}
-	opts, err := resolutionOptions(cfg, eff.cfg, rf)
+	opts, err := resolutionOptions(cfg, eff.cfg, eff.resolveFlags())
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
 		return exitUsage
@@ -614,23 +643,24 @@ var tuiRunner = runTUI
 // alone — the plan screen then runs in "digest sources: none" mode with default resolution
 // options and an empty envs config, matching what M1 offered before this milestone.
 func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
-	// viewDir is a cached worktree at origin/<base> (repoview.go), fetched fresh here and on
-	// every F5 — never eff.repo's own working tree directly, and never the operator's own
-	// checkout touched to get it (AGENTS.md §4.6). Falls back to eff.repo itself (today's
-	// exact pre-#PR7 behavior — a pure local disk read, no network needed) when origin can't
-	// be reached at all: browsing the matrix must stay possible offline, warn-don't-block
-	// (principle 5) rather than a new hard requirement a read-only screen never had before.
-	viewDir := eff.repo
-	if fresh, verr := refreshRepoView(context.Background(), newGit, eff.repo, eff.base); verr != nil {
-		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, verr, eff.repo)
-	} else {
-		viewDir = fresh
-	}
-	r, err := gitops.Discover(viewDir, eff.appsRoot)
+	svc := service.New(settingsFor(cfg, eff), serviceDeps())
+
+	// The repo view is a cached worktree at origin/<base> (internal/service's repo.go),
+	// fetched fresh here and on every F5 — never eff.repo's own working tree directly, and
+	// never the operator's own checkout touched to get it (AGENTS.md §4.6). Falls back to
+	// eff.repo itself (today's exact pre-#PR7 behavior — a pure local disk read, no network
+	// needed) when origin can't be reached at all: browsing the matrix must stay possible
+	// offline, warn-don't-block (principle 5) rather than a new hard requirement a read-only
+	// screen never had before.
+	view, err := svc.LoadRepo(context.Background(), service.RepoFromOrigin)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
 	}
+	if view.Fallback != nil {
+		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, view.Fallback, eff.repo)
+	}
+	r, viewDir := view.Repo, view.Dir
 	var envs config.EnvsConfig
 	if eff.cfg != nil {
 		envs = eff.cfg.Envs
@@ -695,7 +725,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
 		WithAbandon(buildAbandonFunc(cfg)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
-		WithRefreshRepo(buildRefreshRepoFunc(newGit, eff.repo, eff.base, eff.appsRoot)).
+		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).
 		WithRun(eff.base, eff.kubeContext)
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
@@ -833,11 +863,9 @@ func buildTagsFunc(cfg *config.Config, rc *config.RepoConfig, kubeContext string
 		auth, clusterSecret, opRef := entryAuthConfig(entry, reg)
 		regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
 		if clusterSecret != "" && has(auth, registry.AuthCluster) {
-			kctx := kubeContext
-			if kctx == "" && rc != nil {
-				kctx = rc.Kube.Context
-			}
-			if cluster, _, err := newCluster(kctx); err == nil {
+			// kubeContext arrives already resolved (eff.kubeContext) — no fallback left to
+			// apply here.
+			if cluster, _, err := newCluster(kubeContext); err == nil {
 				regCfg.ClusterSecret, regCfg.Cluster = clusterSecret, cluster
 			}
 			// An unreachable cluster here just means the cluster credential source will

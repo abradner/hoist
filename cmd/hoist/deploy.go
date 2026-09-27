@@ -152,10 +152,9 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
 	}
-	kctx := *kubeContext
-	if kctx == "" && eff.cfg != nil {
-		kctx = eff.cfg.Kube.Context
-	}
+	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo)
+	// — the one resolved value every cluster-touching call in this command reads.
+	kctx := eff.kubeContext
 	// Both modes reach the Argo/rollout steps now that DirectSteps converges too (issue #66),
 	// so these are unconditional. An earlier revision built them only for the PR path, because
 	// direct mode stopped at the push and would otherwise have demanded a cluster for work it

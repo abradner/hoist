@@ -68,11 +68,10 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 	if cfg != nil {
 		registries = cfg.Registries
 	}
-	kctx := kubeContext
-	if kctx == "" {
-		kctx = rc.Kube.Context
-	}
-	h := &historyAdaptor{rc: rc, kubeContext: kctx, registries: registries, reg: reg, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
+	// kubeContext arrives already resolved (the root flag, else the selected repo's own
+	// kube.context — settingsFor/runTUI's eff.kubeContext), so there is no fallback left to
+	// apply here.
+	h := &historyAdaptor{rc: rc, kubeContext: kubeContext, registries: registries, reg: reg, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -98,7 +97,7 @@ type registryOrErr struct {
 // historyAdaptor holds the memoised clients and the cache behind buildHistoryFuncs.
 type historyAdaptor struct {
 	rc          *config.RepoConfig
-	kubeContext string // the root --kube-context, else rc.Kube.Context
+	kubeContext string // already resolved: the root --kube-context, else the repo's own configured context
 	registries  []config.RegistryConfig
 	reg         resolveOptions // the root credential-chain overrides (#132); auth/clusterSecret/opRef only
 
