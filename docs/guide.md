@@ -5,10 +5,10 @@ to do something, or stopped, and you need to know whether that is a bug or the p
 below is rendered from the test fixture, which is why the images are `ghcr.io/example/…` and the
 environments have placeholder names; the shapes are exact.
 
-Contents: [the matrix](#the-matrix) · [promote a pair](#promote-a-pair) · [deploy a
-build](#deploy-a-build) · [restart a family](#restart-a-family) · [when it
-stops](#when-it-stops) · [resuming](#resuming) · [registry credentials](#registry-credentials) ·
-[direct mode](#direct-mode)
+Contents: [keys at a glance](#keys-at-a-glance) · [the matrix](#the-matrix) · [promote a
+pair](#promote-a-pair) · [deploy a build](#deploy-a-build) · [restart a family](#restart-a-family)
+· [when it stops](#when-it-stops) · [resuming](#resuming) · [registry
+credentials](#registry-credentials) · [direct mode](#direct-mode)
 
 Three keys work the same everywhere: `?` opens a full help overlay naming every key the current
 screen honours (`esc`, `?` or `enter` closes it); `l` opens the activity log — every result and
@@ -17,6 +17,38 @@ on; `q` quits hoist, but only from the matrix (with a confirm if a drive is stil
 pressed anywhere else it does nothing but remind you to go back first. `ctrl+c` quits immediately
 from any screen, no confirm, and on the way out names every promotion still in flight with its own
 `hoist resume <id>`.
+
+## Keys at a glance
+
+Every key hoist honours, one meaning per letter across every screen it appears on
+(`internal/ui/keys`, the one registry the help overlay and this table both draw from — a write
+that starts or confirms a remote change always shows as `shift+<letter>`, never a bare capital,
+since a legacy terminal cannot tell a real shift from caps lock pressed by mistake):
+
+| Key | Meaning | Screens |
+|---|---|---|
+| `enter` | the one primary action — open the menu, run the highlighted item, start a promotion/deploy/restart, review a tag | every screen except flight, watch, config, activity |
+| `esc` | back — never cancels a drive that's running | every screen |
+| `?` | help overlay | every screen |
+| `l` | activity log | every screen |
+| `q` | quit; only from the bare matrix (confirms if a drive is running) | matrix |
+| `ctrl+c` | quit immediately, no confirm | every screen |
+| `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
+| `o` | open the PR (chooser if several are in flight) | matrix, flight |
+| `p` | promote into the cursor's column | matrix, menu |
+| `t` | deploy a tag | matrix, menu |
+| `w` | watch the family/target | matrix, menu, flight |
+| `c` | read-only config view | matrix |
+| `d` | toggle the yaml diff | plan, deploy |
+| `e` | override the digest by hand | plan |
+| `/` | filter | plan, tags |
+| `space` | tick/untick a repo | plan |
+| `tab` | switch pane (table ⇄ in-flight, repos ⇄ impact, list ⇄ commits) | matrix, plan, tags |
+| `shift+r` | restart the family (write; the restart screen's own confirm is `enter`) | matrix, menu |
+| `shift+x` | abandon (write) | matrix, flight |
+| `shift+d` | toggle direct mode (write) | plan, deploy |
+| `shift+c` | override a `ci.none: prompt` block (write) | flight |
+| ↑↓←→, `pgup`/`pgdn`, `home`/`end` | move / scroll / page | every list or viewport |
 
 ## The matrix
 
@@ -33,19 +65,38 @@ history authenticate to the registry with, exactly as on `plan` or `promote`; th
 always asks the pods alone.
 
 ```
-╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY      ▸ A                   B                    C                     │
-│ absent      v1            pinned                       v9    pinned          │
-│ drift       v1          unpinned  v2           pinned  v2  unpinned          │
-│ empty                             no images                                  │
-│ mixedtags   2 versions     split                                             │
-│ multi       2 images      pinned  2 images   unpinned                        │
-│ pinned      v1            pinned  v1           pinned  v1    pinned          │
-│ sidecar     v1            pinned  v1           pinned                        │
-│ thirdparty  7           external  8          external  8   external          │
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│my-gitops · base main                                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│─────────────┬───────────────────────────────┬─────────────────────────────── │
+│ FAMILY      │ ▸ APP-STAGING                 │ APP-PRODUCTION ⚠               │
+│─────────────┼───────────────────────────────┼─────────────────────────────── │
+│ marketing   │ sha256:aaaaaaaaaaaa    pinned │ sha256:aaaaaaaaaaaa    pinned  │
+│ ▸ orders    │ v202602201200          pinned │ v202601151010          pinned  │
+│ temporal    │ 2 images             external │ 2 images             external  │
+│ web         │ 2 versions              split │ v202601010101          pinned  │
+│ worker      │ v3                   unpinned │ v2                   unpinned  │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│in flight · 1                                                                 │
+│  5pr6sd333t   app-staging → app-production   started 12m ago                 │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
   enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
 ```
+
+(This and every other frame below is abridged from `testdata/golden/*-mockup-80x24.txt` — the same
+`internal/app/plan.mockupPlanModel`-style fixtures the screens' own golden tests render, built with
+realistic names for docs rather than the `ghcr.io/example/…` placeholder fixture the walkthrough
+below uses, then trimmed or annotated for the page. Not every screen shown has its own mockup
+golden yet, so treat these as illustrative rather than byte-exact. A screen's own golden test
+failing is a signal this guide may have gone stale, not a guarantee it hasn't.)
 
 The words:
 
@@ -68,20 +119,9 @@ listing what each key would do there — including "promote into … from…" wh
 ambiguous — so a letter never has to be guessed. `r`/`F5`/`ctrl+r` re-read origin/`<base>` and
 ask the cluster again — the same re-read that makes `w`, `shift+r` and `t` see a family or a
 cluster fix moments after it lands, not just after a restart. When something is promoting, it is
-listed under the table with its step strip and — when it is waiting on you — the exact command:
-
-```
-├──────────────────────────────────────────────────────────────────────────────┤
-│in flight · 1                                                                 │
-│5pr6sd333t   app-staging → app-production   started 12m ago                   │
-│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
-│· argo refresh  · argo sync  · rollout                                        │
-│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-The pane is drawn inside the matrix's own frame (T3-05) rather than as a separate box stacked
-under it — it ends at the same closing border the table does.
+listed under the table (the "in flight" pane in the mockup above) with its step strip and — when it
+is waiting on you — the exact command; the pane is drawn inside the matrix's own frame rather than
+a separate box stacked under it, so it ends at the same closing border the table does.
 
 That list is re-observed against GitHub and the cluster at boot and on every poll, never read
 from a log; `tab` moves the cursor onto the pane (`↑`/`↓` between several), where `enter` reopens
@@ -121,19 +161,21 @@ added. A bare tag that nothing can pin is refused — hoist never writes a tag w
 
 ```
 ╭─ hoist · promotion · confirm ────────────────────────────────────────────────╮
-│app-staging  →  app-production   images under ghcr.io/example/        mode: PR│
-│3 repos ticked · 7 image references, 4 files · no history for… d  see the yaml│
+│app-staging  →  app-production   images under ghcr.io/e… mode: PR · production│
+│3 repos ticked · 41 commits · 3 migrations · 3 image referenc… d  see the yaml│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│┃ > ✓ counta  → v202602201200       │counta                                   │
-│┃   ✓ marketing  → sha-1a2b3c4d5e6f…│v202601151010 → v202602201200            │
-│┃   ✓ ! web  → v202602150930        │3 occurrences · 2 files · digest from    │
-│┃                                   │manifest                                 │
+│┃   ✓ marketi…  → sha-1a2b3c4d5e6f  │orders                                   │
+│┃ > ✓ orders  → v2026022012         │v2026011510 → v2026022012                │
+│┃   ✓ web  → v2026021509            │1 image reference · 1 file · digest from │
+│┃                                   │pods                                     │
 │┃                                   │                                         │
-│┃                                   │no commit history —                      │
-│┃                                   │ghcr.io/example/counta has no app repo in│
-│┃                                   │repos[].apps                             │
+│┃                                   │v2026022012 is 18 commits ahead of       │
+│┃                                   │v2026011510 · migrations not tracked for │
+│┃                                   │this app                                 │
+│┃                                   │                                         │
+│  · worker · already current        │                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-          enter promote · space tick · d · e · shift+d direct · r · esc · ? more
+    enter promote · space tick · d yaml · e digest · r fresh · esc back · ? more
 ```
 
 The totals line above the columns names what the ticked set actually ships: repos, commits,
@@ -143,10 +185,12 @@ current` — since ticking it would write nothing. Left: the repos, ticked (`spa
 leave it out; `!` marks a repo with a warning). Right: the repo under the cursor — the versions in
 full, where its digest came from, its warnings as plain sentences, and, when `repos[].apps` maps
 the image to its source repo, the commits between what the target declares and what is about to be
-written, with any migration among them. `d` swaps the right pane for the YAML diff; `enter` means
-the same from either view. `e` opens a dialog to override the hovered repo's digest by hand (the
-CLI's `--digest`, validated the same way). `shift+d` switches to direct mode on a non-production
-target (see [direct mode](#direct-mode)); it is not offered at all on a production target — the
+written, with any migration among them — `orders` above has no app mapping to walk, so it reports
+"migrations not tracked for this app" rather than guessing. `d` swaps the right pane for the YAML
+diff; `enter` means the same from either view. `e` opens a dialog to override the hovered repo's
+digest by hand (the CLI's `--digest`, validated the same way). `shift+d` switches to direct mode on
+a non-production target (see [direct mode](#direct-mode)); it is not offered at all on a production
+target, exactly as this frame's footer shows no `shift+d` at all — the
 key does nothing there, rather than refusing with a notice. `r`/`F5`/`ctrl+r` rebuild the plan at
 fresh origin, the same fetch `F5` already runs on the matrix.
 
@@ -213,53 +257,68 @@ the identical promotion twice finds the first one's branch and PR rather than op
 picker for that image in the cursor column:
 
 ```
-╭─ hoist · tags · app-production ────────────────────────────────────────────────────────────────────╮
-│ghcr.io/example/app  →  app-production   production                                                │
-│app-production declares  v1 · 111111111111 · since 4 weeks ago                                     │
-│note: app-staging (paired staging)'s committed manifest tag is v3; v3 is the tag committed there —│
-│tags move, so this is not proof of the same build                                                 │
-├──────────────────────────────────────────────────────────────────────────────────────────────────┤
-│   TAG  BUILT          DIGEST                                                                     │
-│▸ v3   3 days ago     333333333333  in app-staging                                                │
-│  v2   4 weeks ago    222222222222                                                                │
-│  v1   2 months ago   111111111111  ◂ declared here                                               │
-├──────────────────────────────────────────────────────────────────────────────────────────────────┤
-│v3 is 14 commits ahead of v1 · 1 migration                                                        │
-│  4a1c2ef  Add rate limiting to the public API                                                    │
-│  e9b0d31  Fix N+1 query when resolving digests                                                   │
-│  77c0ffe  db: add index on events.created_at  migration                                          │
-│                                                                                    ↓ 8 more commits│
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-                enter review v3 · → read commit · / filter · r reload · esc back · ? help
+╭─ hoist · tags · app-staging ─────────────────────────────────────────────────╮
+│ghcr.io/example/app  →  app-staging                                           │
+│app-staging declares  v1 · 111111111111 · since 4 weeks ago                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│   TAG          BUILT          DIGEST                                         │
+│▸ v3           3 days ago     333333333333                                    │
+│  v2           4 weeks ago    222222222222                                    │
+│  v1           2 months ago   111111111111  ◂ declared here                   │
+│── digest tags (sha-…): builds named by hash ──                               │
+│  sha-3333333  3 days ago     333333333333                                    │
+│── moving tags (latest, branches): not releases ──                            │
+│  latest       3 days ago     333333333333                                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│v3 is 14 commits ahead of v1 · 2 migrations                                   │
+│  4a1c2ef  Add rate limiting to the public API                                │
+│  e9b0d31  Fix N+1 query when resolving digests                               │
+│                                                             ↓ 12 more commits│
+╰──────────────────────────────────────────────────────────────────────────────╯
+ enter review v3 · → read · / filter · r reload · l activity · esc back · ? help
 ```
 
 The header says what the environment *declares* (the manifest, dated by when that line last
-changed) — never "runs", because this screen does not read the cluster. Each tag has its build
-age, whether the paired staging environment has committed it, and, under the cursor, the commits
-between the declared build and that tag with any migration marked. `enter` reviews the change —
-this screen's one primary action; `→` reads a commit in full and `tab` moves focus into the
-commit list first (`←`, or `esc`, back to the list). `r` reloads the tag list. A tag whose digest
-could not be read is not selectable, for the same reason a bare tag is never written.
+changed) — never "runs", because this screen does not read the cluster; on a production target the
+header instead warns when the tag under the cursor has not been committed in the paired staging
+environment yet (`testdata/golden/tags-production-80x24.txt`). The list is grouped since no
+registry marks a tag's kind (`tags.Classify`): releases lead with no divider above them, then
+digest-named tags (`sha-…`), then moving tags (`latest`, branch names) each under their own
+divider — nothing is hidden, and `/` filters across all three. Each tag has its build age and,
+under the cursor, the commits between the declared build and that tag with any migration marked.
+`enter` reviews the change — this screen's one primary action; `tab` moves focus into the commit
+list, then `→` reads one in full (`pgdn`/`pgup` page its body, `home`/`end` jump to its ends; `←`
+or `esc` back to the list). `r` reloads the tag list. A
+tag whose digest could not be read is not selectable, for the same reason a bare tag is never
+written.
 
 The confirm screen then leads with the delta and the migrations:
 
 ```
-╭─ hoist · deploy · confirm ─────────────────────────────────────────────────────╮
-│ghcr.io/example/web:v9   →   app-production          mode: PR · shift+d direct│
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
+│ghcr.io/example/app:v3   →   app-production          mode: PR · shift+d direct│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 weeks│
+│rolling out 14 commits · 2 migrations · replacing v1, declared 4 weeks        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  4a1c2ef  Add rate limiting to the public API                                │
 │  e9b0d31  Fix N+1 query when resolving digests                               │
 │  77c0ffe  db: add index on events.created_at  migration                      │
+│  1b2d3e4  Bump temporal SDK to 1.31                                          │
+│  6f8a90c  Drop the legacy /v1/export endpoint                                │
+│  a3e91b2  db: backfill events.tenant_id  migration                           │
+│  9d2c4e1  Retry the registry HEAD on 429                                     │
+│  c0ffee1  Log the resolved digest at startup                                 │
+│  5e6f7a8  Move health checks to /healthz                                     │
+│  d4c3b2a  Tidy the Dockerfile layers                                         │
+│                                                            ↓ 4 more commits  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │2 migrations run on this deploy:                                              │
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│writes 3 image references in 1 file · digest dddddddddddd      d  see the yaml│
+│writes 3 image references in 1 file · digest 333333333333      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                    enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags
+      enter deploy · d yaml · shift+d direct · ↑/↓ · r fresh · esc back · ? more
 ```
 
 The chip always also names the key that flips the mode — `shift+d direct` (or `shift+d PR` once
@@ -302,22 +361,25 @@ So there is no plan, no branch, no PR, no state file, and nothing to resume: run
 restarts again, which is the operation.
 
 ```
-╭─ hoist · restart · web/app-staging ───────────────────────────────────────────╮
+╭─ hoist · restart · web/app-staging ──────────────────────────────────────────╮
 │app-staging / web                               production   not yet restarted│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │1 Deployment in app-staging                                                   │
 │                                                                              │
-│   web  1 replica(s) · RollingUpdate · last restart: never restarted this way │
+│   web  1 replica · RollingUpdate · last restart: never restarted this way    │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but   │
 │       there is no redundancy if the replacement fails                        │
 │     ! no readiness probe: a new pod counts as available the moment it        │
 │       starts, before it can serve                                            │
-│     ! unpinned image(s) ghcr.io/example/web:v1: a replacement pod can pull   │
-│       a different build than the one running now, so this restart may not be │
-│       a no-op                                                                │
+│     ! unpinned image ghcr.io/example/web:v1: a replacement pod can pull a    │
+│       different build than the one running now, so this restart may not be a │
+│       no-op                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                    l activity · enter restart · esc back · ? help
+                                  l activity · enter restart · esc back · ? help
 ```
+
+Pressing `enter` on a production target overlays a confirmation dialog before anything rolls
+(`--confirm-production=<env>` is the CLI's own second acknowledgement, below).
 
 Every target is named first, with its replica count, strategy and last restart, and every reason
 the restart will not be graceful is a sentence. None of them blocks. A production env takes a
