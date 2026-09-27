@@ -951,6 +951,59 @@ func TestResumeDuringStartBuildOfSameTargetIsDeduped(t *testing.T) {
 	h, _ = harnessUpdate(h, runFirst(startCmd))
 }
 
+// TestStartLandingFirstSurvivesADedupedResume is
+// TestResumeDuringStartBuildOfSameTargetIsDeduped's own order-reversed twin: here the RESUME's
+// build lands first (mapping byID["promo-1"] to its own BuildID), and Start's own duplicate build
+// for the same target is the one refused once IT lands second. Before the fix, onBuilt's dedup
+// removed the refused (Start) entry via withoutEntry, which deleted byID["promo-1"]
+// unconditionally — even though it now pointed at the SURVIVING Resume entry, not the one being
+// removed — leaving the survivor's own BuildSnapshot alive but its Snapshot(id) lookup (and so
+// Poke/Abandon/Resume-by-id) unable to find it at all.
+func TestStartLandingFirstSurvivesADedupedResume(t *testing.T) {
+	now := fixedClock(time.Now())
+	startDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
+	resumeDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
+	backend := &fakeBackend{
+		startFn:  func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) { return startDrive, nil },
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return resumeDrive, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, startBuild, startCmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	c2, resumeBuild, resumeCmd, err := h.c.Resume("promo-1")
+	h.c = c2
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if resumeBuild == startBuild {
+		t.Fatal("setup: Resume returned the Start entry's own BuildID — byID already deduped it")
+	}
+
+	// Start's own build lands FIRST this time, mapping byID["promo-1"] to startBuild.
+	h, follow := started(h, startCmd)
+	if follow == nil {
+		t.Fatal("setup: Start's own build produced no follow-up Step command")
+	}
+	// The Resume's build lands second — this is the one onBuilt's same-target dedup refuses.
+	h, follow2 := started(h, resumeCmd)
+	if follow2 != nil {
+		t.Fatal("a deduped duplicate build produced a follow-up Step command")
+	}
+
+	if _, ok := h.c.BuildSnapshot(startBuild); !ok {
+		t.Fatal("the surviving Start entry is gone")
+	}
+	if _, ok := h.c.Snapshot("promo-1"); !ok {
+		t.Fatal("BUG: the surviving Start entry is alive but byID[\"promo-1\"] was deleted by the refused duplicate's own removal")
+	}
+	if _, ok := h.c.BuildSnapshot(resumeBuild); ok {
+		t.Fatal("the refused duplicate resumed build is still tracked")
+	}
+}
+
 // TestSecondStartSameTargetRefused pins AGENTS.md invariant 5 at this layer: Controller itself
 // refuses a second Start for a target env it is already tracking, before ever calling Backend.
 func TestSecondStartSameTargetRefused(t *testing.T) {

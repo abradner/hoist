@@ -347,7 +347,15 @@ func (c Controller) withoutEntry(build BuildID) Controller {
 	}
 	c.entries = maps.Clone(c.entries)
 	delete(c.entries, build)
-	if ok && e.id != "" {
+	// byID[e.id] is only ever deleted when it still points at THIS build — a Resume racing a
+	// Start for the same promotion id can leave byID[id] pointing at the SURVIVING entry by the
+	// time the loser is removed here (found in review: onBuilt's own same-target dedup refuses
+	// the second builtMsg to land, but if the FIRST one to land already mapped byID[id] to its
+	// own build, removing the second, refused entry unconditionally deleted that live mapping out
+	// from under the entry that actually won). Deleting unconditionally would make the surviving
+	// entry unreachable by Snapshot/Resume/Poke/Abandon while BuildSnapshot still shows it alive —
+	// exactly the state TestProbeByIDClobber (t2-review.md) pins.
+	if ok && e.id != "" && c.byID[e.id] == build {
 		c.byID = maps.Clone(c.byID)
 		delete(c.byID, e.id)
 	}
