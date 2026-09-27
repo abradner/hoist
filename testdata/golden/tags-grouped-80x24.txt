@@ -11,14 +11,14 @@
 │  fix-docker-workflow-secre…  1 day ago      111111111111                     │
 │  latest                      2 days ago     222222222222                     │
 │  main                        3 days ago     333333333333                     │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │no commit history — app-staging does not declare ghcr.io/example/app yet, so …│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-
-
-
-
-
-
-
              ↑/↓ move · / filter · space review the change · D direct · esc back

@@ -8,6 +8,25 @@
 │▸ v3   3 days ago     333333333333  in app-staging                                                                    │
 │  v2   4 weeks ago    222222222222                                                                                    │
 │  v1   2 months ago   111111111111  ◂ declared here                                                                   │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │v3 is 14 commits ahead of v1 · 1 migration                                                                            │
 │  4a1c2ef  Add rate limiting to the public API                                                                        │
@@ -18,23 +37,4 @@
 │  ccccccc  older change                                                                                               │
 │…8 more                                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
                                          ↑/↓ move · tab commits · enter read commit · space review the change · esc back

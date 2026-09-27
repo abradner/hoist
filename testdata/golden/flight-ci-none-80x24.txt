@@ -19,6 +19,6 @@
 │press c to treat no checks as green for this promotion                        │
 │R to re-observe once resolved                                                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│history                                                                       │
-│2026-09-01T12:00:00Z  branched      acted                                     │
+│…                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
 o open PR · c treat as green · X abandon · R re-observe · x abort · l log · esc…
