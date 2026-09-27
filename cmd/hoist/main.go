@@ -656,8 +656,8 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	root := app.New(r, eff.promotable, envs, svc.Plan, promo, tagsFn, restartFn).
 		WithConfigView(cfg.File, cfg.Found, configText).
 		WithHistory(historyFn).
-		WithInFlight(buildInFlightFuncs(cfg, eff.kubeOverride)).
-		WithAbandon(buildAbandonFunc(cfg)).
+		WithInFlight(buildInFlightFuncs(svc)).
+		WithAbandon(buildAbandonFunc(svc)).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).

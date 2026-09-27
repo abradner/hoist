@@ -8,6 +8,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 )
 
 // buildInFlightFuncs lists every state file, re-observed, and names the reason when one
@@ -16,7 +17,8 @@ import (
 func TestBuildInFlightFuncsListsAndNamesTheUnobservable(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
 	cfg := &config.Config{Repos: []config.RepoConfig{{Path: "/x", GitHub: "me/my-gitops"}}}
-	f := buildInFlightFuncs(cfg, "")
+	svc := service.New(service.Settings{Config: cfg}, serviceDeps())
+	f := buildInFlightFuncs(svc)
 	list, err := f.List(context.Background())
 	if err != nil || len(list) != 0 {
 		t.Fatalf("empty state dir: list=%v err=%v", list, err)
@@ -42,7 +44,10 @@ func TestBuildInFlightFuncsListsAndNamesTheUnobservable(t *testing.T) {
 	if _, _, err := f.Resume(context.Background(), "orphan01"); err == nil || !strings.Contains(err.Error(), "not in the config file") {
 		t.Fatalf("resume of an orphan: err=%v", err)
 	}
-	if buildInFlightFuncs(nil, "").List != nil {
+	if buildInFlightFuncs(nil).List != nil {
+		t.Fatal("nil service: nothing wired")
+	}
+	if buildInFlightFuncs(service.New(service.Settings{}, serviceDeps())).List != nil {
 		t.Fatal("no config: nothing wired")
 	}
 }

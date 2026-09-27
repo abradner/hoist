@@ -8,78 +8,40 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// ensureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
-// decoding an older file leaves the field empty (round-1 review finding), and
-// ArgoRefreshedStep/ArgoSyncedStep both take their `len(apps) == 0` "no Argo Application in this
-// promotion's plan" success path on an empty ArgoApps — so an upgraded, already-in-flight
-// promotion could be reported complete having never actually checked the Application it edited.
-//
-// An empty ArgoApps alongside a non-empty Edits is unambiguous evidence of exactly that: engine.
-// ArgoAppNames' own contract (see its doc comment) means a real call against a non-empty edit set
-// can never itself return an empty, non-error slice — every edit's directory maps to exactly one
-// family/Application, or the call errors naming the orphan edit. So this only ever fires for a
-// state genuinely predating ArgoApps' introduction, never for a fresh, post-M5 promotion that
-// legitimately touches no Argo Application (which also has no Edits at all, since BuildPlan
-// produces edits only from what an env's own families declare).
-//
-// s.ArgoApps is otherwise left untouched — state.go's own doc comment ("computed once ... then
-// carried unchanged across every resume") still governs every other case, matching Edits/
-// CommitMessage/PRTitle/PRBody's own carried-not-recomputed treatment.
-//
-// s.ArgoNamespace gets the identical treatment in the same pass, for the identical reason: a
-// pre-M5 state file decodes it as the empty string too (the field didn't exist yet), and
-// argoApplications() builds an argo.Application with whatever s.ArgoNamespace holds verbatim —
-// an empty namespace fails Argo.Get's own input validation outright ("application needs a
-// namespace"), rather than merely under-reporting like an empty ArgoApps does. Both fields are
-// always set together at construction time for every post-M5 promotion (promote.go), so "ArgoApps
-// is empty and Edits is not" is exactly as unambiguous a legacy signal for ArgoNamespace as it is
-// for ArgoApps itself — this function's own name stays ensureArgoApps since Applications remain
-// the primary concern, but it now closes both gaps a legacy state can have (Copilot review).
-//
-// s.EditApps gets the same treatment as a third, independent gap (round-2 review, PR #182): a
-// state file saved any time between M5 and EditApps' own introduction has a populated ArgoApps
-// but a nil EditApps, since the two fields were computed together at construction from this PR
-// on but ArgoApps alone before it — so "ArgoApps non-empty" cannot stand in for "EditApps
-// populated" the way it does for ArgoNamespace above, and this checks EditApps on its own
-// terms, discovering the repo only once for whichever of the two repairs this state actually
-// needs.
-func ensureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
-	needsApps := len(s.ArgoApps) == 0 && len(s.Edits) > 0
-	needsEditApps := len(s.EditApps) == 0 && len(s.Edits) > 0
-	if !needsApps && !needsEditApps {
-		return nil
+// promotionsSettings builds the service.Settings runPromotions/runResume/runAbandon share:
+// these three commands never select a single repo (a state file names its own, possibly
+// different from whatever --repo would have selected), so this is deliberately narrower than
+// settingsFor — just the config file, the operator's own --kube-context override, and the
+// poll/deadline/retain knobs every one of svc.List/svc.Resume/svc.Abandon needs.
+func promotionsSettings(cfg *config.Config, kubeOverride string) service.Settings {
+	set := service.Settings{Config: cfg, KubeOverride: kubeOverride}
+	if cfg != nil {
+		set.Poll = pollIntervals(cfg.Poll)
+		set.Deadline = time.Duration(cfg.Poll.Deadline)
+		set.Retain = time.Duration(cfg.State.Retain)
 	}
-	r, err := gitops.Discover(s.CloneDir, rc.AppsRoot)
-	if err != nil {
-		return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
+	return set
+}
+
+// boundedCommandContext gives runPromotions/runResume/runAbandon the same interruptible,
+// deadline-bounded context every one of them built by hand before this PR: talking to a real
+// forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate
+// (round-6 finding, applied to runPromotions and missed on runResume's --env path until this
+// unification).
+func boundedCommandContext(deadline time.Duration) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	if deadline <= 0 {
+		return ctx, stop
 	}
-	if needsApps {
-		apps, err := engine.ArgoAppNames(r, s.TargetEnv, s.Edits)
-		if err != nil {
-			return fmt.Errorf("rebuilding Argo Applications for a pre-M5 state file: %w", err)
-		}
-		s.ArgoApps = apps
-		s.ArgoNamespace = rc.Kube.ArgoNamespace
-	}
-	if needsEditApps {
-		editApps, err := engine.EditApps(r, s.TargetEnv, s.Edits)
-		if err != nil {
-			return fmt.Errorf("rebuilding per-edit Argo Applications for a state file predating EditApps: %w", err)
-		}
-		s.EditApps = editApps
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	return ctx, func() { cancel(); stop() }
 }
 
 // runPromotions is `hoist promotions`: lists every promotion state file under
@@ -107,21 +69,18 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		}
 		return exitUsage
 	}
-	states, err := engine.ListStates()
+	set := promotionsSettings(cfg, *kubeContext)
+	svc := service.New(set, serviceDeps())
+
+	ctx, stop := boundedCommandContext(set.Deadline)
+	defer stop()
+
+	listed, err := svc.List(ctx, service.ListOpts{RepoFullName: *repoFilter, ArchiveDoneOlderThan: set.Retain})
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promotions: %v\n", err)
 		return exitFailure
 	}
-	if *repoFilter != "" {
-		var filtered []*engine.PromotionState
-		for _, s := range states {
-			if s.RepoFullName == *repoFilter {
-				filtered = append(filtered, s)
-			}
-		}
-		states = filtered
-	}
-	if len(states) == 0 && !*archived {
+	if len(listed) == 0 && !*archived {
 		if *repoFilter != "" {
 			// Named explicitly rather than folded into the bare message below: a --repo typo
 			// (repos[].github is owner/name, not the config entry's own name: or path:) would
@@ -133,72 +92,35 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		fmt.Fprintln(stdout, "hoist promotions: no promotions found")
 		return 0
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	// Bounded the same way promote/resume's own drive path already is (round-6 finding): each
-	// candidate's re-observation talks to a real forge/git, and a hung call here had no bound
-	// at all beyond an interrupt — `hoist promotions` could stall forever on one bad candidate
-	// instead of listing the rest.
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
-	}
-	retain := time.Duration(cfg.State.Retain)
-	// archivedThisRun tracks ids this same invocation just moved to the archive, so --archived's
-	// own listing below (which reads ArchiveDir fresh, after the loop) does not print one of
-	// them a second time — round-2 review finding.
+	// archivedThisRun tracks ids this same invocation just moved to the archive (Listed.Archived),
+	// so --archived's own listing below (which reads ArchiveDir fresh, after the loop) does not
+	// print one of them a second time — round-2 review finding.
 	archivedThisRun := map[string]bool{}
-	for _, s := range states {
-		rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
-		if !ok {
-			fmt.Fprintf(stdout, "%s  %-20s  %s (last recorded; repo %s is not in the config file, cannot re-observe)\n", s.ID, s.TargetEnv, s.Phase, s.RepoFullName)
-			continue
-		}
-		f, err := newForge(rc.GitHub)
-		if err != nil {
-			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build a forge client: %v)\n", s.ID, s.TargetEnv, err)
-			continue
-		}
-		a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
-		if err != nil {
-			fmt.Fprintf(stdout, "%s  %-20s  ? (could not build an Argo/rollout client: %s)\n", s.ID, s.TargetEnv, redact.Strings(err.Error()))
-			continue
-		}
-		if err := ensureArgoApps(s, rc); err != nil {
-			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
-			continue
-		}
-		// Observed by the list the state itself implies, not by whichever list this command
-		// happens to know about: a direct run can never satisfy the PR path's push/PR/merge steps
-		// and would list as in flight forever (engine.ObserveSteps).
-		done, status, err := engine.ObserveAll(ctx, engine.ObserveSteps(s, newGit, f, a, ro, nil), s)
+	for _, l := range listed {
+		s := l.State
 		switch {
-		case err != nil:
-			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, err)
-		case done && retain > 0 && time.Since(s.LastActivity()) > retain:
-			if aerr := engine.ArchiveState(s.ID); aerr != nil {
-				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archiving failed: %v\n", s.ID, s.TargetEnv, service.Detail(status.Observation), aerr)
-			} else {
-				fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archived (older than %s)\n", s.ID, s.TargetEnv, service.Detail(status.Observation), retain)
-				archivedThisRun[s.ID] = true
-			}
-		case done:
-			fmt.Fprintf(stdout, "%s  %-20s  done (%s)\n", s.ID, s.TargetEnv, service.Detail(status.Observation))
+		case l.Unconfigured:
+			fmt.Fprintf(stdout, "%s  %-20s  %s (last recorded; repo %s is not in the config file, cannot re-observe)\n", s.ID, s.TargetEnv, s.Phase, s.RepoFullName)
+		case l.Err != nil:
+			fmt.Fprintf(stdout, "%s  %-20s  ? (%v)\n", s.ID, s.TargetEnv, l.Err)
+		case l.Archived:
+			fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archived (older than %s)\n", s.ID, s.TargetEnv, service.Detail(l.Last.Observation), set.Retain)
+			archivedThisRun[s.ID] = true
+		case l.ArchiveErr != nil:
+			fmt.Fprintf(stdout, "%s  %-20s  done (%s) — archiving failed: %v\n", s.ID, s.TargetEnv, service.Detail(l.Last.Observation), l.ArchiveErr)
+		case l.Done:
+			fmt.Fprintf(stdout, "%s  %-20s  done (%s)\n", s.ID, s.TargetEnv, service.Detail(l.Last.Observation))
 		default:
-			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, status.Step, service.Detail(status.Observation))
+			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, l.Last.Step, service.Detail(l.Last.Observation))
 		}
 	}
 	if *archived {
-		arch, err := engine.ListArchivedStates()
+		arch, err := svc.ListArchived(*repoFilter)
 		if err != nil {
 			fmt.Fprintf(stderr, "hoist promotions: listing archived promotions: %v\n", err)
 			return exitFailure
 		}
 		for _, s := range arch {
-			if *repoFilter != "" && s.RepoFullName != *repoFilter {
-				continue
-			}
 			if archivedThisRun[s.ID] {
 				continue
 			}
@@ -232,165 +154,29 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		return exitUsage
 	}
 
-	states, err := engine.ListStates()
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
-		return exitFailure
-	}
-
-	var s *engine.PromotionState
-	if id != "" {
-		for _, st := range states {
-			if st.ID == id {
-				s = st
-				break
-			}
-		}
-		if s == nil {
-			fmt.Fprintf(stderr, "hoist resume: no promotion %s found\n", id)
-			return exitFailure
-		}
-	} else {
-		var matches []*engine.PromotionState
-		// obsErrs collects a re-observation failure per candidate instead of silently filtering
-		// it out of consideration (a transient GitHub/git error must never be indistinguishable
-		// from "this candidate simply isn't in flight" — that could misleadingly report "no
-		// in-flight promotion" with one candidate, or silently resolve to a different one with
-		// several, without ever confirming the choice was actually unambiguous).
-		var obsErrs []string
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-		// Bounded the same way runPromotions' own re-observe loop already is (round-6 finding,
-		// applied there but missed here): a hung forge/git call on one candidate must not stall
-		// `hoist resume --env` forever before it even selects an id.
-		if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, deadline)
-			defer cancel()
-		}
-		for _, st := range states {
-			if st.TargetEnv != *env {
-				continue
-			}
-			rc, ok := service.RepoConfigFor(cfg, st.RepoFullName)
-			if !ok {
-				// A state naming a repo no longer in config (removed, or renamed since this
-				// promotion started) is exactly the same "can't confirm" case obsErrs already
-				// exists for below — silently skipping it here would let `resume --env`
-				// misleadingly report "no in-flight promotion" (one candidate) or resolve to a
-				// different match without ever establishing that choice was unambiguous
-				// (several candidates, one of which is unconfirmable).
-				obsErrs = append(obsErrs, fmt.Sprintf("%s: repo %q is not in the current config; restore it or name this promotion's id explicitly", st.ID, st.RepoFullName))
-				continue
-			}
-			f, ferr := newForge(rc.GitHub)
-			if ferr != nil {
-				obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
-				continue
-			}
-			a, ro, ferr := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
-			if ferr != nil {
-				obsErrs = append(obsErrs, fmt.Sprintf("%s: building Argo/rollout clients: %v", st.ID, ferr))
-				continue
-			}
-			if ferr := ensureArgoApps(st, rc); ferr != nil {
-				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
-				continue
-			}
-			done, _, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(st, newGit, f, a, ro, nil), st)
-			if oerr != nil {
-				obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
-				continue
-			}
-			if !done {
-				matches = append(matches, st)
-			}
-		}
-		stop()
-		if len(obsErrs) > 0 {
-			sort.Strings(obsErrs)
-			fmt.Fprintf(stderr, "hoist resume: could not confirm whether %d candidate(s) for %s are in flight (never silently excluded): %s\n", len(obsErrs), *env, strings.Join(obsErrs, "; "))
-			return exitFailure
-		}
-		switch len(matches) {
-		case 0:
-			fmt.Fprintf(stderr, "hoist resume: no in-flight promotion targets %s\n", *env)
-			return exitFailure
-		case 1:
-			s = matches[0]
-		default:
-			var ids []string
-			for _, m := range matches {
-				ids = append(ids, m.ID)
-			}
-			sort.Strings(ids)
-			fmt.Fprintf(stderr, "hoist resume: %d in-flight promotions target %s (%s); name one by id\n", len(matches), *env, joinIDs(ids))
-			return exitUsage
-		}
-	}
-
-	rc, ok := service.RepoConfigFor(cfg, s.RepoFullName)
-	if !ok {
-		fmt.Fprintf(stderr, "hoist resume: %s: repo %s is not in the config file\n", s.ID, s.RepoFullName)
-		return exitFailure
-	}
-	f, err := newForge(rc.GitHub)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
-		return exitFailure
-	}
-	a, ro, err := service.ArgoRolloutFor(serviceDeps(), rc, *kubeContext)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
-		return exitFailure
-	}
-
-	// s.CINone/CIGrace/Approval/Approvers/Collaborators are deliberately NOT re-read from rc
-	// here: PromotionState's own doc comment (internal/engine/state.go) states the invariant
-	// that these are policy "as of when this promotion started", carried forward so "a promotion
-	// never straddles two different policies mid-flight" — re-reading them from the current
-	// config file on every resume would let an operator's mid-flight config edit do exactly that
-	// (change what CI/approval policy this specific promotion enforces after it has already
-	// started), which is the bug this comment replaces a fix for. The persisted state file's
-	// values (loaded by engine.ListStates/LoadState above) are trusted as-is. Only
-	// --override-ci-none is an explicit, one-shot operator instruction for *this* invocation, so
-	// it still always wins over whatever was persisted.
-	//
-	// ArgoNamespace is different in kind, not just carried along by analogy: it doesn't gate a
-	// decision against historical events the way the M4 fields above do (a re-read there could
-	// silently re-judge an already-recorded approval/CI comment against a changed policy), it
-	// only names where a *live* Get for this env's Argo Applications lands. If an operator moves
-	// those Applications to a different namespace while a promotion is mid-flight, re-reading it
-	// here means ArgoRefreshedStep/ArgoSyncedStep keep finding them; a stale value would instead
-	// fail loudly (Application not found) rather than misjudge anything quietly. So, unlike the
-	// M4 fields, it's re-read from the current config on every resume, same as a fresh `hoist
-	// promote` would compute it (AGENTS.md §4.9). ArgoApps does not follow either rule either — it
-	// is a structural fact about the plan already committed to, exactly like Edits, and this
-	// function does not recompute it for a state that already carries it. The one exception is
-	// ensureArgoApps just below: a state file written before M5 added the field never had a
-	// chance to carry it at all, which is a gap in "already committed to", not an instance of it
-	// (round-1 review finding — see ensureArgoApps' own doc comment).
-	s.ArgoNamespace = rc.Kube.ArgoNamespace
-	if *overrideCINone {
-		s.CINoneOverride = true
-	}
-	if err := ensureArgoApps(s, rc); err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
-		return exitFailure
-	}
-
-	statePath, err := engine.StatePath(s.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %v\n", err)
-		return exitFailure
-	}
-	save := func(st *engine.PromotionState) error { return engine.SaveState(statePath, st) }
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	set := promotionsSettings(cfg, *kubeContext)
+	svc := service.New(set, serviceDeps())
+	ctx, stop := boundedCommandContext(set.Deadline)
 	defer stop()
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
+
+	if id == "" {
+		// obsErrs (service.UnconfirmedError) collects a re-observation failure per candidate
+		// instead of silently filtering it out of consideration (a transient GitHub/git error
+		// must never be indistinguishable from "this candidate simply isn't in flight" — that
+		// could misleadingly report "no in-flight promotion" with one candidate, or silently
+		// resolve to a different one with several, without ever confirming the choice was
+		// actually unambiguous).
+		st, err := svc.FindInFlightForEnv(ctx, *env)
+		if err != nil {
+			var ambiguous *service.AmbiguousError
+			if errors.As(err, &ambiguous) {
+				fmt.Fprintf(stderr, "hoist resume: %v\n", ambiguous)
+				return exitUsage
+			}
+			fmt.Fprintf(stderr, "hoist resume: %v\n", err)
+			return exitFailure
+		}
+		id = st.ID
 	}
 
 	waited := false
@@ -401,27 +187,18 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		}
 	}
 	// Drive the mode this promotion actually is, not the one resume happens to know best. A
-	// direct promotion never pushed s.Branch and has no PR, so AllSteps would find PushedStep
-	// unsatisfied, push the branch and open one — turning a deliberately PR-less deploy into a
+	// direct promotion never pushed its branch and has no PR, so driving it through the PR-path
+	// steps would push the branch and open one — turning a deliberately PR-less deploy into a
 	// PR, with two real writes (Codex, PR #43). An earlier revision refused to resume these at
-	// all, on the belief that runResume could not reach envs.production for the gate; it can —
-	// repoConfigFor above already resolved rc for exactly this state — so the honest fix is to
-	// drive DirectSteps rather than to decline.
-	//
-	// Confirmed is true because this promotion's own existence is the confirmation: the state
-	// file only exists because the operator already passed --confirm-direct when they started
-	// it. DirectCommitGateStep still re-derives the production refusal independently of that
-	// (direct.go), so resuming can never reach an env the original run would have been refused.
-	steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, onWaiting)
-	d := service.NewDriver(steps, s, save, pollIntervals(cfg.Poll), service.DriverHooks{})
-	err = d.Run(ctx, runHooksForCLI(stderr))
-	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, s, err)
-}
-
-func joinIDs(ids []string) string {
-	out := ids[0]
-	for _, id := range ids[1:] {
-		out += ", " + id
+	// all, on the belief that runResume could not reach envs.production for the gate; it can, so
+	// the honest fix is svc.Resume driving DirectSteps rather than declining (see its own doc
+	// comment).
+	d, err := svc.Resume(ctx, id, service.ResumeOpts{OverrideCINone: *overrideCINone, Hooks: service.Hooks{OnWaiting: onWaiting}})
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
+		return exitFailure
 	}
-	return out
+	err = d.Run(ctx, runHooksForCLI(stderr))
+	s := d.State()
+	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, &s, err)
 }

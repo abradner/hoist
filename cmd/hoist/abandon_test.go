@@ -8,9 +8,19 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 )
+
+// abandonPromotion is this test file's own thin wrapper over svc.Abandon
+// (internal/service/promotions.go, PR E) — the logic these tests exercise moved there; this
+// keeps every scenario below unchanged (same fixture, same assertions) while now driving the
+// moved implementation instead of a cmd/hoist-local copy of it.
+func abandonPromotion(ctx context.Context, cfg *config.Config, id string) ([]string, error) {
+	svc := service.New(promotionsSettings(cfg, ""), serviceDeps())
+	return svc.Abandon(ctx, id)
+}
 
 // buildPROpenedState drives a promotion through exactly the four PR-opening steps
 // (engine.Steps: branch, commit, push, open the PR) — NOT CIGreen/Approved/Merged, so the

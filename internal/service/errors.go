@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/image"
@@ -52,6 +53,51 @@ type InFlightConflictError struct {
 func (e *InFlightConflictError) Error() string {
 	return fmt.Sprintf("promotion %s targeting %s is still in flight (at %s: %s); run `hoist resume %s` instead of starting a second one",
 		e.Conflict.ID, e.Env, e.Status.Step, Detail(e.Status.Observation), e.Conflict.ID)
+}
+
+// NotFoundError is Find's own "no such promotion" (ID set) and FindInFlightForEnv's own "no
+// in-flight promotion targets this env" (Env set) — one type for both, since both are the same
+// shape of answer ("nothing matched") to the two different questions `hoist resume` can be
+// asked (by id, or by --env). Exactly one of ID/Env is ever set. Error() reproduces
+// cmd/hoist/resume.go's own pre-move wording verbatim, so a caller printing it unchanged (the
+// CLI renderer) prints exactly what it always has.
+type NotFoundError struct {
+	ID  string
+	Env string
+}
+
+func (e *NotFoundError) Error() string {
+	if e.Env != "" {
+		return fmt.Sprintf("no in-flight promotion targets %s", e.Env)
+	}
+	return fmt.Sprintf("no promotion %s found", e.ID)
+}
+
+// AmbiguousError is FindInFlightForEnv's own "more than one in-flight promotion targets this
+// env" — AGENTS.md invariant 5 says there should never legitimately be two, so this is always a
+// caller error (name one by id) rather than something FindInFlightForEnv resolves on its own.
+// IDs is sorted before Error() is ever called, so the message is deterministic.
+type AmbiguousError struct {
+	Env string
+	IDs []string
+}
+
+func (e *AmbiguousError) Error() string {
+	return fmt.Sprintf("%d in-flight promotions target %s (%s); name one by id", len(e.IDs), e.Env, strings.Join(e.IDs, ", "))
+}
+
+// UnconfirmedError is FindInFlightForEnv's own refusal to silently exclude a candidate it could
+// not re-observe (a transient forge/git error, a repo removed from config since the promotion
+// started): every candidate targeting Env that could not be confirmed either way is named in
+// Errs (sorted before this error is built), rather than treated as "not in flight" — which could
+// misleadingly report NotFoundError when the real reason is that the answer is simply unknown.
+type UnconfirmedError struct {
+	Env  string
+	Errs []string
+}
+
+func (e *UnconfirmedError) Error() string {
+	return fmt.Sprintf("could not confirm whether %d candidate(s) for %s are in flight (never silently excluded): %s", len(e.Errs), e.Env, strings.Join(e.Errs, "; "))
 }
 
 // Detail picks whichever of Observation's message fields is set — Blocked takes precedence

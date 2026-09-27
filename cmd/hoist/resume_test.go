@@ -13,7 +13,6 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
-	"github.com/abradner/hoist/pkg/gitops"
 )
 
 func TestPromotionsEmptyStateDir(t *testing.T) {
@@ -437,78 +436,9 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	}
 }
 
-// TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone is ensureArgoApps' carve-out for the common
-// case (every post-M5 promotion): a state that already carries ArgoApps must never be
-// recomputed — state.go's own doc comment ("computed once ... then carried unchanged across
-// every resume") still governs. CloneDir/AppsRoot deliberately name a path that doesn't exist,
-// so a call into gitops.Discover here would fail loudly — proving this path never attempts one.
-func TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone(t *testing.T) {
-	s := &engine.PromotionState{
-		ArgoApps: []string{"already-set"},
-		EditApps: map[string]string{"cluster/apps/app-production/app/deployment.yaml": "already-set"},
-		Edits:    []gitops.Edit{{Occurrence: gitops.Occurrence{File: "cluster/apps/app-production/app/deployment.yaml"}}},
-		CloneDir: "/does/not/exist",
-	}
-	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
-	if err := ensureArgoApps(s, rc); err != nil {
-		t.Fatalf("ensureArgoApps = %v, want nil (already populated, must never attempt discovery)", err)
-	}
-	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "already-set" {
-		t.Fatalf("ArgoApps = %v, want left untouched", s.ArgoApps)
-	}
-	if len(s.EditApps) != 1 || s.EditApps["cluster/apps/app-production/app/deployment.yaml"] != "already-set" {
-		t.Fatalf("EditApps = %v, want left untouched", s.EditApps)
-	}
-}
-
-// TestEnsureArgoAppsBackfillsEditAppsWhenArgoAppsAlreadyPopulated proves the round-2 repair
-// path: a state file saved any time between M5 (ArgoApps) and EditApps' own introduction has
-// ArgoApps populated but EditApps nil, and the old "ArgoApps non-empty means fully populated,
-// skip everything" check would leave EditApps nil forever — silently starving
-// ArgoSyncedStep.revisionCarries of the per-Application scoping it now needs (steps_converge.go's
-// editsForApp). Unlike the sibling test above, this drives a real gitops.Discover against
-// newPromoteFixture's own clone, so the mutant this guards against is "ensureArgoApps decides
-// EditApps doesn't need rebuilding", not just "it decides nothing needs rebuilding".
-func TestEnsureArgoAppsBackfillsEditAppsWhenArgoAppsAlreadyPopulated(t *testing.T) {
-	_, clone, _ := newPromoteFixture(t)
-	const file = "cluster/apps/app-production/app/deployment.yaml"
-	s := &engine.PromotionState{
-		TargetEnv: "app-production",
-		CloneDir:  clone,
-		ArgoApps:  []string{"app-app-production"},
-		Edits:     []gitops.Edit{{Occurrence: gitops.Occurrence{File: file}}},
-	}
-	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
-	if err := ensureArgoApps(s, rc); err != nil {
-		t.Fatalf("ensureArgoApps = %v, want nil", err)
-	}
-	if len(s.ArgoApps) != 1 || s.ArgoApps[0] != "app-app-production" {
-		t.Fatalf("ArgoApps = %v, want left untouched (only EditApps was missing)", s.ArgoApps)
-	}
-	if len(s.EditApps) != 1 || s.EditApps[file] != "app-app-production" {
-		t.Fatalf("EditApps = %v, want {%q: \"app-app-production\"}", s.EditApps, file)
-	}
-}
-
-// TestEnsureArgoAppsLeavesGenuinelyEditlessStateAlone is ensureArgoApps' other carve-out: a
-// state with no Edits at all has nothing for ArgoAppNames to have ever found regardless of when
-// it was built (ArgoAppNames' own contract: it only ever produces an app name from an edit's own
-// directory) — an empty ArgoApps here is not evidence of a pre-M5 state, so this must not attempt
-// discovery either. Same deliberately-nonexistent CloneDir/AppsRoot as the sibling test above.
-func TestEnsureArgoAppsLeavesGenuinelyEditlessStateAlone(t *testing.T) {
-	s := &engine.PromotionState{
-		ArgoApps: nil,
-		Edits:    nil,
-		CloneDir: "/does/not/exist",
-	}
-	rc := config.RepoConfig{AppsRoot: "cluster/apps"}
-	if err := ensureArgoApps(s, rc); err != nil {
-		t.Fatalf("ensureArgoApps = %v, want nil (no edits, nothing to rebuild)", err)
-	}
-	if s.ArgoApps != nil {
-		t.Fatalf("ArgoApps = %v, want nil", s.ArgoApps)
-	}
-}
+// The three EnsureArgoApps carve-out/repair tests formerly here (already populated, EditApps
+// backfill, genuinely editless) moved to internal/service/promotions_test.go alongside the
+// function itself (PR E).
 
 // TestResumeDrivesADirectPromotionAsDirectNotAsAPR is the regression for the P1 Codex found on
 // PR #43, now that resume can actually do something about it. A --direct promotion pushes to

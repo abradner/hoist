@@ -95,7 +95,8 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	for _, tc := range []struct{ override, want string }{{effFlag.kubeOverride, "flag-ctx"}, {effA.kubeOverride, "ctx-b"}} {
 		var argoCtx string
 		newArgo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
-		funcs := buildInFlightFuncs(cfg, tc.override)
+		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
+		funcs := buildInFlightFuncs(svc)
 		_, _, err := funcs.Resume(context.Background(), "resume01")
 		if err == nil || argoCtx != tc.want {
 			t.Fatalf("override %q: Resume's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
