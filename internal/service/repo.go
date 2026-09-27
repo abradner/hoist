@@ -47,7 +47,7 @@ type RepoView struct {
 	// newer one once the refresh has run: CheckRepoViewCurrent must compare against the SHA this
 	// view actually captured, never re-derive one by reading Dir's current on-disk HEAD, or a
 	// refresh that lands between building a plan and confirming it would silently launder a
-	// stale plan by making the check compare origin's tip against itself (t1-review.md P2 #6).
+	// stale plan by making the check compare origin's tip against itself.
 	SHA string
 	// Fallback is refreshRepoView's own error when RepoFromOrigin had to fall back to the
 	// clone. nil whenever FromOrigin is true, or for RepoFromClone.
@@ -87,7 +87,7 @@ func (s *Service) LoadRepo(ctx context.Context, mode RepoMode) (RepoView, error)
 		// so publishing outside that lock let whichever of the two happened to reach s.mu.Lock
 		// second win regardless of which one actually finished its own fetch-discover sequence
 		// second — an older refresh's stale view could overwrite a newer one that had already
-		// landed (P3 #8, t2-review.md). Publishing before Unlock keeps "last to hold refreshMu"
+		// landed (P3 #8). Publishing before Unlock keeps "last to hold refreshMu"
 		// and "last to publish" the same event.
 		s.mu.Lock()
 		s.view = view
@@ -199,7 +199,7 @@ func refreshRepoView(ctx context.Context, g git.Git, cloneDir, base string) (vie
 // call (an F5 refresh) checks that same directory out to a new ref IN PLACE — re-deriving the
 // "viewed" SHA from disk at check time would therefore always read whatever the most recent
 // refresh just wrote, making every check trivially pass regardless of which view a plan was
-// actually built from (t1-review.md P2 #6, the fail-open this replaces).
+// actually built from (the fail-open this replaces).
 //
 // viewedSHA == "" (refreshRepoView itself failed and the caller fell back to the clone, or this
 // is a clone-mode view) skips this check entirely — there is nothing cached to compare against.

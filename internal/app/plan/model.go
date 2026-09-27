@@ -76,9 +76,9 @@ type state int
 
 const (
 	// stateSelectEnv prompts for the missing env with a huh.Select — the target when p opened
-	// this screen with a source but no configured pair for it (rare after T3-04: p now always
+	// this screen with a source but no configured pair for it (rare after p now always
 	// carries a target), or the SOURCE when p opened it with a target but no unambiguous
-	// reverse pair (T3-04's own "promote into <target> from…", the normal ambiguous case).
+	// reverse pair (the screen's own "promote into <target> from…", the normal ambiguous case).
 	// selectingSource says which.
 	stateSelectEnv state = iota
 	stateLoading         // resolving + building the plan (spinner)
@@ -118,7 +118,7 @@ type StartMsg struct {
 	// passes this as StartRequest.View so the freshness check re-checks the SAME view this plan
 	// was built from, rather than whatever the service's current view has since become (an F5
 	// refresh between loading this screen and pressing Enter must not silently launder a plan
-	// built from a now-stale view; t1-review.md P2 #6).
+	// built from a now-stale view;).
 	View service.RepoView
 }
 
@@ -150,13 +150,13 @@ type historyMsg struct {
 	err   error
 }
 
-// RefreshMsg is r/F5/ctrl+r (T3-09): rebuild the plan at fresh origin. The screen has no way to
+// RefreshMsg is r/F5/ctrl+r rebuild the plan at fresh origin. The screen has no way to
 // fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection;
 // service.Plan itself never fetches either, it only reads whatever repo the service currently
 // holds), so this asks the root to run the matrix's own completion-triggered refresh
 // (requestMatrixRefresh, the same fetch F5 already runs there) and rebuild this screen's plan
 // once matrix.RepoRefreshedMsg lands with the new *gitops.Repo — internal/app/app.go's own new
-// case, mirroring deploy.RefreshMsg exactly (T3-09's own shared "r" path).
+// case, mirroring deploy.RefreshMsg exactly (the screen's own shared "r" path).
 type RefreshMsg struct{}
 
 // Model is the plan screen. It is a value: Update, SetSize and SetStyles return the
@@ -181,7 +181,7 @@ type Model struct {
 	err   error
 
 	envSelect *huh.Select[string]
-	// selectingSource is true when envSelect is prompting for the SOURCE (T3-04's own
+	// selectingSource is true when envSelect is prompting for the SOURCE (the screen's own
 	// "promote into <target> from…") rather than the target — the field the huh binding
 	// writes into, and what updateSelectEnv resyncs from GetValue and moves on from, differ
 	// accordingly.
@@ -194,7 +194,7 @@ type Model struct {
 	outcome service.Resolution
 	// view is the service.RepoView the most recent loadCmd actually planned against (from
 	// loadedMsg.view) — carried into StartMsg.View so the root's StartPromotion call checks
-	// freshness against the view THIS plan was built from (t1-review.md P2 #6).
+	// freshness against the view THIS plan was built from.
 	view   service.RepoView
 	rows   []Row
 	prefix string // the image-repo prefix every row shares, shown once in the header
@@ -272,7 +272,7 @@ func newViewport() viewport.Model {
 	return v
 }
 
-// New builds the plan screen. T3-04 retires the old "P forces a prompt" gesture: p on the
+// New builds the plan screen. retires the old "P forces a prompt" gesture: p on the
 // matrix always names a Target (the cursor's column), and Source is either the one
 // unambiguous reverse pair or "" — in which case this screen prompts "promote into <target>
 // from…" itself, rather than the matrix ever forcing a prompt for an arbitrary target. A
@@ -328,7 +328,7 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
-// Reload is RefreshMsg's own rebuild (T3-09): the root calls this once matrix.RepoRefreshedMsg
+// Reload is RefreshMsg's own rebuild the root calls this once matrix.RepoRefreshedMsg
 // lands with a fresh *gitops.Repo, from origin, so this screen's plan is rebuilt against exactly
 // what F5 just fetched rather than the boot-time snapshot it was opened with. A no-op outside
 // stateReady: a load already in flight (stateLoading) or a still-open env prompt has nothing yet
@@ -362,7 +362,7 @@ func (m *Model) buildEnvSelect() {
 		}
 		sel = sel.Options(opts...)
 	} else {
-		// T3-10 (UX-M18's own convention, matrix's emptyView): name what to check, not just
+		// (UX-M18's own convention, matrix's emptyView): name what to check, not just
 		// what failed — hoist discovers envs from Argo CD Application wrappers under the apps
 		// root, so a repo with only one is either genuinely single-env or looking in the wrong
 		// place.
@@ -371,7 +371,7 @@ func (m *Model) buildEnvSelect() {
 	m.envSelect = sel
 }
 
-// buildSourceSelect is buildEnvSelect's mirror for T3-04's own "promote into <target>
+// buildSourceSelect is buildEnvSelect's mirror for the screen's own "promote into <target>
 // from…": every other discovered env is a candidate source, bound to m.source instead of
 // m.target.
 func (m *Model) buildSourceSelect() {
@@ -431,7 +431,7 @@ func (m *Model) rebuildMultiSelect() {
 	}
 	ms := huh.NewMultiSelect[string]().Value(&m.ticked)
 	// Same wiring as buildEnvSelect's own WithKeyMap call — see CapturesText's doc comment.
-	// This is what makes Down/space("x" retired, T3-09)/"/" actually reach the field's Update.
+	// This is what makes Down/space("x" retired)/"/" actually reach the field's Update.
 	ms.WithKeyMap(keys.HuhKeyMap())
 	if len(opts) > 0 {
 		ms = ms.Options(opts...)
@@ -715,10 +715,10 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		return m.updateMultiSelect(msg)
 	}
 	m.notice = ""
-	// T3-09: shift+d toggles direct mode — checked ahead of the switch below since
+	// shift+d toggles direct mode — checked ahead of the switch below since
 	// keys.Direct.Matches is the stateless write-binding test (rule 5's shift-vs-caps-lock
-	// distinction), not a string a switch case could match directly (mirrors deploy.Model.onKey,
-	// T3-08).
+	// distinction), not a string a switch case could match directly (mirrors deploy.Model.onKey's
+	// own gesture).
 	if keys.Direct.Matches(kmsg) {
 		return m.toggleDirect()
 	}
@@ -753,7 +753,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target, View: view}
 		}
 	case keys.Refresh.Matches(kmsg):
-		// T3-09: r/F5/ctrl+r rebuilds the plan at fresh origin — see RefreshMsg's own doc
+		// r/F5/ctrl+r rebuilds the plan at fresh origin — see RefreshMsg's own doc
 		// comment for why this only asks the root rather than fetching origin itself.
 		return m, func() tea.Msg { return RefreshMsg{} }
 	case keys.Diff.Matches(kmsg):
@@ -761,7 +761,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		m = m.refreshRight()
 		m.viewport.GotoTop() // two unrelated documents; a scroll offset from one hides the other's head
 		return m, nil
-	// P2-8 (T3 review): home/end on the impact pane (focusRight) — the multi-select's own
+	// home/end on the impact pane (focusRight) — the multi-select's own
 	// left-pane home/end already work through huh's own GotoTop/GotoBottom (keys.HuhKeyMap
 	// binds them to "home"/"end"), reached by falling out of this switch to
 	// updateMultiSelect's own forwarding below; the viewport gets no such keymap field
@@ -821,8 +821,8 @@ func (m Model) updateMultiSelect(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// toggleDirect is shift+d (T3-09, was m): behind a confirmation only when turning direct mode
-// ON — turning it back off is silent, mirroring deploy.Model's own toggleDirect (T3-08) and the
+// toggleDirect is shift+d (was m): behind a confirmation only when turning direct mode
+// ON — turning it back off is silent, mirroring deploy.Model's own toggleDirect and the
 // approved keymap's own "confirm when turning on" wording (the retired m gesture had confirmed
 // both directions, which the keymap never asked for). Never offered at all for a production
 // target: hidden from the footer/help (hints' own registry row) and, pressed anyway, a silent
@@ -1003,7 +1003,7 @@ func equalSets(a, b []string) bool {
 }
 
 // CapturesText implements app.Screen (via planScreen's thin delegate in internal/app/screen.go).
-// The root queries this before treating "q" as its own global quit key (round 5, finding 3).
+// The root queries this before treating "q" as its own global quit key.
 // huh.Select and huh.MultiSelect both support their own "/" filter-typing mode (GetFiltering),
 // but that mode — like Down/Up/Space navigation generally — is only reachable once
 // huh.Field.WithKeyMap has been called on the field. That normally happens automatically inside
@@ -1070,7 +1070,7 @@ func (m Model) layout() Model {
 	}
 	if m.multiSelect != nil {
 		m.multiSelect.WithWidth(m.leftWidth)
-		// T3-09: the greyed no-op section (leftBody's own NoOps loop, above Disabled's) takes
+		// the greyed no-op section (leftBody's own NoOps loop, above Disabled's) takes
 		// rows out of the multiSelect's own height budget exactly as Disabled's already did, or
 		// the left pane would overflow past what layout() budgeted for it.
 		extra := 0
@@ -1251,8 +1251,8 @@ func (m Model) totalsSection() string {
 	} else if capped > 0 {
 		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("migrations unknown for %d", capped)))
 	}
-	// T3-09 (v2·05b): "N image references, M files" — the plan's own version of deploy.scale's
-	// identical count (T3-08), over the same ticked set every other part of this line counts.
+	// (v2·05b): "N image references, M files" — the plan's own version of deploy.scale's
+	// identical count, over the same ticked set every other part of this line counts.
 	if refs, files := ImageRefStats(m.plan, ticked); refs > 0 {
 		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("%s, %s", plural(refs, "image reference"), plural(files, "file"))))
 	}
@@ -1289,14 +1289,14 @@ func (m Model) notes() string {
 		return m.styles.Notice.Render(ansi.Wordwrap(m.notice, inner, ""))
 	case m.state == stateReady && m.err == nil:
 		if skip := m.skipNotice(); skip != "" {
-			// T3-09 (UX-M17): a sentence, never a bare "!" marker.
+			// (UX-M17): a sentence, never a bare "!" marker.
 			return m.styles.Warn.Render(ansi.Wordwrap(skip, inner, ""))
 		}
 	}
 	return ""
 }
 
-// hints is the screen's own footer (T3-09), built through keys.Footer like every other
+// hints is the screen's own footer, built through keys.Footer like every other
 // migrated screen rather than a hand-joined string, so a narrow terminal drops the lowest-
 // priority keys first instead of wrapping or truncating (the audit doc's own Footer rules).
 func (m Model) hints() string {
@@ -1387,7 +1387,7 @@ func (m Model) leftBody() string {
 	if m.multiSelect != nil {
 		b.WriteString(m.multiSelect.View())
 	}
-	// T3-09 (UX-M17, v2·05b): rows already current — nothing to tick, since promoting them
+	// (UX-M17, v2·05b): rows already current — nothing to tick, since promoting them
 	// would write nothing (Row.NoOp) — shown greyed with the reason, "· <repo> · already
 	// current", the mockup's own wording. Listed before the unresolved rows below: a repo with
 	// nothing to write is not a failure the way an unresolved digest is.
@@ -1441,9 +1441,9 @@ func (m Model) impactBody() string {
 	var lines []string
 	lines = append(lines, m.styles.Title.Render(ansi.Truncate(strings.TrimPrefix(r.Repo, m.prefix), width, "…")))
 	lines = append(lines, ansi.Truncate(m.styles.Accent.Render(tagOrDigest(r.Old))+" → "+m.styles.Accent.Render(tagOrDigest(r.New)), width, "…"))
-	// T3-10: "image reference(s)", never "occurrence(s)" — the latter is this codebase's own
+	// "image reference(s)", never "occurrence(s)" — the latter is this codebase's own
 	// internal term (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an
-	// operator is about to press enter on (mirrors deploy.scale's identical wording, T3-08).
+	// operator is about to press enter on (mirrors deploy.scale's identical wording).
 	lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("%s · %s · digest from %s", plural(r.Count, "image reference"), plural(r.Files, "file"), r.Source), width, "")))
 	lines = append(lines, "")
 	mapped := m.histFn.Mapped == nil || m.histFn.Mapped(r.Repo)
@@ -1477,7 +1477,7 @@ func (m Model) impactBody() string {
 	if len(r.Warnings) > 0 {
 		lines = append(lines, "")
 		for _, w := range r.Warnings {
-			// T3-09 (UX-M17): a sentence, never a bare "!" marker.
+			// (UX-M17): a sentence, never a bare "!" marker.
 			lines = append(lines, m.styles.Warn.Render(ansi.Wrap(redact.Strings(w.Message), width, "")))
 		}
 	}

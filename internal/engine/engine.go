@@ -318,7 +318,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 			return false, last, err
 		}
 		if i == probedIdx {
-			// Same step the probe already observed above (round-6 regression: this doubled
+			// Same step the probe already observed above (regression: this doubled
 			// MergedStep's Observe — real remote/git work — on every
 			// findInFlight/promotions/resume --env call) — reuse that Observation.
 			last = StepStatus{Step: step.Name(), Observation: probed}
@@ -336,7 +336,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 				// unmerged), which is definitive and actionable. Committed or Pushed can Block
 				// after a completed promotion too — a branch recreated on origin at another
 				// sha — so a stop there, with the merge unverifiable, surfaces the probe's
-				// error rather than a stale step (Copilot on PRs #95 and #99).
+				// error rather than a stale step.
 				return false, StepStatus{Step: steps[mi].Name()}, fmt.Errorf("%s: observe: %w", steps[mi].Name(), probeErr)
 			}
 			return false, last, nil
@@ -404,7 +404,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // engine.Drive had itself already observed the very same step successfully as Waiting or
 // Blocked — surfaced as a plain error that Driver.Run's own retry classification read as
 // terminal and stopped polling on for good, unlike Drive's own Observe hitting the identical
-// shape of failure directly (Codex review, PR #50 round 4).
+// shape of failure directly.
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
 	var probeErr error

@@ -780,8 +780,7 @@ func buildTagsFunc(rc *config.RepoConfig, svc *service.Service) tags.BuildFunc {
 		var gitTagsFn tags.GitTagsFunc
 		if mapped {
 			// mapped is this call's own observed answer (GitTagsFunc's doc comment) — closed
-			// over as the value fc was actually built with (finding 3, round 2, carried over
-			// from the pre-split design): the caller (internal/app/tags.Model.onGitTagsLoaded)
+			// over as the value fc was actually built with: the caller (internal/app/tags.Model.onGitTagsLoaded)
 			// trusts THIS return, every call, over whatever BuildFunc's own static mapped
 			// result said when the picker was opened.
 			gitTagsFn = func(ctx context.Context) ([]forge.GitTag, bool, error) {

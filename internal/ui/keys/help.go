@@ -8,7 +8,7 @@ import (
 )
 
 // pair is one row of the v2·03 mockup's own 2×2 grid of groups: NAVIGATE beside ACT, VIEW
-// beside APP — laid out side by side (T3-04) rather than stacked, which is what let a
+// beside APP — laid out side by side rather than stacked, which is what let a
 // write-heavy screen's overlay (the matrix, with its restart/abandon bindings) overflow past
 // 24 rows when every group was simply one more block underneath the last.
 var pairs = [][2]struct {
@@ -30,7 +30,7 @@ const helpColWidth = 30
 // hand-formats it a second way.
 func HelpTitle(s Screen) string { return fmt.Sprintf("help · %s", s) }
 
-// HelpView renders the full-key overlay's BODY for one screen (T3-03): every binding On(s)
+// HelpView renders the full-key overlay's BODY for one screen every binding On(s)
 // lists, grouped under the mockup's own four headings, the "shift+ keys always ask before they
 // write" line whenever the screen has at least one Write binding, and one line naming whether
 // this run can tell a caps-lock letter from a real shift — recorded once at the root from
@@ -100,8 +100,8 @@ func groupBlock(title string, es []Entry) string {
 }
 
 // joinCols lays two already-built blocks side by side, left padded/truncated to width, joined
-// by a plain rule — HelpView's own column pairing (T3-04, v2·03), kept local rather than
-// reusing ui.Columns so this package's HelpView signature stays exactly what T3-01 shipped
+// by a plain rule — HelpView's own column pairing (v2·03), kept local rather than
+// reusing ui.Columns so this package's HelpView signature stays exactly what shipped
 // (no ui.Styles parameter to thread through call sites and tests that don't otherwise need
 // one just to draw an unstyled dialog body).
 func joinCols(left, right string, width int) string {
@@ -136,7 +136,7 @@ func padTrunc(s string, width int) string {
 
 // kbdLine is the one line HelpView always shows naming what this run's terminal reported: only
 // a terminal that both supports the Kitty keyboard protocol and was asked for flag 8
-// (ReportAllKeysAsEscapeCodes — the View sent every run, T3-01) can tell a caps-lock letter apart
+// (ReportAllKeysAsEscapeCodes — the View sent every run) can tell a caps-lock letter apart
 // from a real shift; every other terminal (the legacy path every session runs today unless that
 // flag was granted) reports both identically, so a bare capital counts as shift there
 // (Binding.Matches, point 4).

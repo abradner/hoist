@@ -123,7 +123,7 @@ func Keys[M any](m M, update UpdateFunc[M], keys ...string) M {
 // Key builds the tea.KeyPressMsg a terminal would send for k: a single character is itself,
 // with Text set the way a real press carries it; the names below are the special keys.
 //
-// "shift+<letter>" and "capslock+<letter>" (T3-01) build the two keys a legacy terminal cannot
+// "shift+<letter>" and "capslock+<letter>"  build the two keys a legacy terminal cannot
 // tell apart (both arrive as an uppercase byte with ModShift, since a plain letter is never
 // escape-encoded without the Kitty ReportAllKeysAsEscapeCodes enhancement) and the one a
 // protocol-capable, opted-in terminal reports distinctly (ModCapsLock alone, no ModShift) — see

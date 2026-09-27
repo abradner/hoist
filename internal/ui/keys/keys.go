@@ -174,7 +174,7 @@ var (
 	// shared navigation set), so neither is ever added to a Screen's registry row: a bonus
 	// muscle-memory alias a footer or the help overlay never advertises, built through this
 	// package only so no screen's viewport wiring calls key.NewBinding directly any more
-	// (T3-10, internal/copycheck's TestNoKeyNewBindingOutsideKeys).
+	// (internal/copycheck's TestNoKeyNewBindingOutsideKeys).
 	HalfPageDown = Binding{Name: "halfpagedown", Class: Spatial, Group: Navigate, Keys: []string{"ctrl+d"}, Show: "ctrl+d"}
 	HalfPageUp   = Binding{Name: "halfpageup", Class: Spatial, Group: Navigate, Keys: []string{"ctrl+u"}, Show: "ctrl+u"}
 )

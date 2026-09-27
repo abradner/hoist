@@ -57,7 +57,7 @@ var browserOpener = func(timeout time.Duration) func(url string) error {
 // general, even though today's one caller only ever passes a forge-returned PR URL (see
 // defaultOpenBrowser's own doc comment). rundll32's FileProtocolHandler entry point takes the
 // URL as a single opaque argument and never invokes a shell, so no such splitting can happen
-// (Copilot, PR #50 round 4). Any other GOOS falls back to xdg-open's Unix convention rather than
+// Any other GOOS falls back to xdg-open's Unix convention rather than
 // erroring outright, on the theory that a BSD or other Unix system hoist happens to run on is
 // more likely to have xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS
 // itself) is the seam wiring_test.go uses to exercise every branch on every OS, without a build
@@ -79,14 +79,14 @@ func browserCommand(goos, url string) (name string, args []string) {
 // in a package no heavier than browserCommand's dozen lines plus this one exec.Command call
 // already covers). Run, not Start-and-reap: the LAUNCHER (open/xdg-open/rundll32) is what this
 // call waits on, not the browser itself, which stays running long after the launcher — designed
-// to hand off and exit — has already returned. Round-4's original Start-and-reap shape (a
+// to hand off and exit — has already returned. An earlier Start-and-reap shape (a
 // startAndReap helper, since removed — its only caller was this function, and Run reaps the
 // launcher itself, no background goroutine needed) could not observe the launcher's own exit
 // status at all: cmd.Start() only errors if the binary itself couldn't even be found, and the
 // background goroutine reaping cmd.Wait() discarded whatever it returned, so a launcher that
 // started but then failed at runtime (no browser installed, a bad DISPLAY, xdg-open's own
 // failure) reported nil here — flight.OpenPRMsg's handler showed no notice at all, even though
-// nothing actually opened (Copilot review, PR #50). timeout (preferences.browser_launch_timeout,
+// nothing actually opened. timeout (preferences.browser_launch_timeout,
 // default 5s) bounds the wait so a genuinely wedged launcher cannot block the TUI's whole event
 // loop indefinitely — generous for what should normally be a near-instant fork+exec-and-return
 // (open/xdg-open/rundll32 are all designed as fire-and-forget dispatchers that hand off and exit

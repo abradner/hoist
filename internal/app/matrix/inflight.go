@@ -71,7 +71,7 @@ const minTableRows = 4
 
 // inflightPane renders the pane's own content for the rows the frame can give it, or "" when
 // there is nothing to show or no room even for the compact form (then inflightLine goes into
-// notes). T3-05: this is plain content now, drawn INSIDE the matrix's own frame as one more
+// notes) — this is plain content now, drawn INSIDE the matrix's own frame as one more
 // Section (View, below) rather than a separately-bordered ui.Box stacked under it — the
 // mockups' own "in flight · N" header line replaces the old box title, so what used to be the
 // box's own top/bottom border rows are two fewer rows this needs.
@@ -104,7 +104,7 @@ func (m Model) inflightPane(rows int) string {
 
 // paneTitle is the pane's own header row: "in flight · N" (v2·01a/b), left-aligned so a
 // caller that wants to add a right-aligned companion (a poll countdown, ticketed — see the
-// T3-05 report's own "uncomputable" list) has somewhere to put it without reflowing this.
+// report's own "uncomputable" list) has somewhere to put it without reflowing this.
 func (m Model) paneTitle(n int) string {
 	return m.styles.Title.Render(fmt.Sprintf("in flight · %d", n))
 }
@@ -181,7 +181,7 @@ func (m Model) expandedSections() []string {
 	return out
 }
 
-// paneMarker is the pane-row cursor (commit 1 of the T3-06 train): "▸ " styled through
+// paneMarker is the pane-row cursor (commit 1 of that redesign): "▸ " styled through
 // st.Cursor for the entry under m.paneCursor while focus is on the pane (Focus, grid.go's own
 // FocusPane), or two plain spaces otherwise — the same width either way, so a row's own text
 // never shifts depending on whether it happens to be selected. The marker is text, not only
@@ -199,7 +199,7 @@ func (m Model) paneMarker(i int) string {
 // will re-observe on its own (Summary.NextPoll, non-zero exactly when Waiting) — "" for anything
 // else, so a caller can append it unconditionally without an extra empty check of its own.
 // Rounded to the second so it does not repaint on sub-second jitter, mirroring flight.Model's
-// own actionSection countdown, the pane's counterpart once T3-06 lands.
+// own actionSection countdown, the pane's counterpart once that redesign landed.
 func (m Model) countdownText(s flight.Summary) string {
 	if s.NextPoll.IsZero() {
 		return ""
@@ -211,14 +211,14 @@ func (m Model) countdownText(s flight.Summary) string {
 	return fmt.Sprintf("next check in %s", remaining.Round(time.Second))
 }
 
-// approvalCopy was this pane's own local copy of the wording fix (T3-05, UX-H10) for a
-// promotion blocked on approval; T3-06 moved it into flight.ApprovalCopy (exported) once that
+// approvalCopy was this pane's own local copy of the wording fix (UX-H10) for a
+// promotion blocked on approval; the flight redesign moved it into flight.ApprovalCopy (exported) once that
 // package had its own PR to land the identical fix in, so the pane and flight.Model's own
 // actionSection render the same sentence from one place rather than two copies kept in step by
 // hand. Kept as a thin local alias rather than rewriting every call site in this file.
 func approvalCopy(s flight.Summary) (text, command string) { return flight.ApprovalCopy(s) }
 
-// styleStrip renders the step strip with the shared ui.Step glyph set (T3-05/T3-06: "one glyph
+// styleStrip renders the step strip with the shared ui.Step glyph set ("one glyph
 // set" — flight.RowState is the one mapping from a Row's Glyph to ui.StepState, shared with
 // flight.Summary.StepStrip) — derived from each Row's own Glyph rather than parsing
 // Summary.StepStrip()'s pre-rendered string, since the mapping needs the state, not the glyph

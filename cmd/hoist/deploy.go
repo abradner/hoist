@@ -81,7 +81,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// run for a plain dry run, whose only remaining check is "is repos[].github configured":
 	// a non-direct dry run opens no PR and derives no id, so demanding a forge identity
 	// refuses a read-only command for a reason that cannot apply to it — and `hoist plan
-	// --dry-run`, the same operation for a promotion, has never demanded one (Copilot, PR #70).
+	// --dry-run`, the same operation for a promotion, has never demanded one.
 	if *direct || !*dryRun {
 		if code := checkDirectPreflight("hoist deploy", eff, *direct, *confirmDirect, *env, stderr); code != 0 {
 			return code
@@ -119,7 +119,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	if *dryRun {
 		// The configured promotable list travels here as it does for `hoist plan`, so a deploy
 		// narrowed by --promotable does not call the operator's other first-party repos
-		// third-party in its Untouched section (issue #65, Copilot on PR #93).
+		// third-party in its Untouched section (issue #65).
 		var configured []string
 		if eff.cfg != nil {
 			configured = eff.cfg.Promotable

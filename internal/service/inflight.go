@@ -60,7 +60,7 @@ func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, ski
 
 // claimTarget is the one-in-flight-per-target-env claim: scan → engine.ClaimInFlight (via
 // FileStore.Claim, an atomic filesystem claim) → rescan while holding — preserved exactly from
-// cmd/hoist/promote.go's buildPromotionForConfirm (round-6 hardening). id is this promotion's own
+// cmd/hoist/promote.go's buildPromotionForConfirm (hardening). id is this promotion's own
 // deterministic id (already computed by the caller — engine.DeriveID), used only to skip itself
 // in each scan, so a resumed/retried promotion for the SAME id/target never conflicts with
 // itself.

@@ -73,7 +73,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// An explicitly supplied selector that normalises to nothing is refused rather than treated
 	// as "all". `--family "$FAMILY"` with the variable unset would otherwise restart every
 	// family in the env — the widest possible blast radius from what reads like a narrowing
-	// (Copilot, PR #81). An omitted flag still means all; only a given-but-empty one is an
+	// An omitted flag still means all; only a given-but-empty one is an
 	// error, which is a distinction fs.Visit can make and the value alone cannot.
 	families := splitFamilies(*family)
 	if sel.given["family"] && len(families) == 0 {

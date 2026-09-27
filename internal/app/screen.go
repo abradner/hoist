@@ -17,13 +17,13 @@ import (
 )
 
 // keyed is implemented by a screen adapter whose underlying screen has a stated row in
-// internal/ui/keys' registry (T3-03) — the root's own "?" and "l" key handling (app.go's
+// internal/ui/keys' registry  — the root's own "?" and "l" key handling (app.go's
 // Update) only fires for a top screen that implements this, so the help overlay never lists
-// keys a screen doesn't honour yet (the audit doc's T3-03 scope) and "l" never opens the
+// keys a screen doesn't honour yet (the audit doc's scope) and "l" never opens the
 // activity log from a screen that hasn't opted in. Every adapter embeds its package's Model by
 // value, so this is promoted automatically wherever the underlying Model itself exposes
 // KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own later PRs
-// (T3-04 onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
+// (onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
 type keyed interface{ KeyScreen() keys.Screen }
 
 // Screen is what the root drives. Screens are values: every method returns the updated
@@ -38,10 +38,10 @@ type Screen interface {
 	// letter key like "q" is text the operator is typing — a filter query, a huh field's own
 	// "/" filter — rather than a command. The root's global quit binding (app.go's Update)
 	// checks this before treating "q" as quit, and only forwards the key to the screen as
-	// usual when it's true; ctrl+c is unaffected and always quits (round 5, finding 3: the
-	// global binding used to run unconditionally, before any screen's own key handling ever
-	// saw the press, so typing "q" into the tag picker's filter box quit the whole program
-	// instead of typing). A screen with no such mode returns false unconditionally.
+	// usual when it's true; ctrl+c is unaffected and always quits (the global binding used to
+	// run unconditionally, before any screen's own key handling ever saw the press, so typing
+	// "q" into the tag picker's filter box quit the whole program instead of typing). A screen
+	// with no such mode returns false unconditionally.
 	CapturesText() bool
 }
 
@@ -249,7 +249,7 @@ func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }
 // KeyScreen (implementing keyed) is promoted from watch.Model's own method.
 
 // activityScreen adapts activity.Model. Pushed on top of whatever screen is current by l,
-// handled generically by the root for any screen that implements keyed (T3-03/T3-04: every
+// handled generically by the root for any screen that implements keyed: every
 // screen in this package now qualifies, the matrix included); read-only, so nothing beneath it
 // changes while it is open and esc lands back where it started.
 type activityScreen struct{ activity.Model }

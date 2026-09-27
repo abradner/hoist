@@ -42,12 +42,12 @@ import (
 // BackMsg asks whatever composes screens to pop this one.
 type BackMsg struct{}
 
-// RefreshMsg is r/F5/ctrl+r (T3-09): rebuild the diff at fresh origin. The screen has no way to
+// RefreshMsg is r/F5/ctrl+r rebuild the diff at fresh origin. The screen has no way to
 // fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection),
 // so this asks the root to run the matrix's own completion-triggered refresh
 // (requestMatrixRefresh, the same fetch F5 already runs there) and rebuild this screen once
 // matrix.RepoRefreshedMsg lands with the new *gitops.Repo — internal/app/app.go's own new case,
-// mirroring plan.RefreshMsg exactly (T3-09's own shared "r" path).
+// mirroring plan.RefreshMsg exactly (the screen's own shared "r" path).
 type RefreshMsg struct{}
 
 // StartMsg is the operator confirming the deploy. Mode mirrors plan.StartMsg's: ModePR opens
@@ -64,7 +64,7 @@ type StartMsg struct {
 	// set by the root's openDeploy from the same service.PlannedChange.View planFn returned) —
 	// carried through so the root's StartPromotion call re-checks freshness against the view
 	// THIS plan was built from, not whatever the service's current view has since become
-	// (t1-review.md P2 #6, mirroring plan.StartMsg.View).
+	// (mirroring plan.StartMsg.View).
 	View service.RepoView
 }
 
@@ -151,7 +151,7 @@ func (m Model) ResetStarting() Model {
 
 // newViewport is this screen's own scrolling body — the diff pane and the commit list alike —
 // bound to keys.ViewportKeyMap (P2-6 in the T3 review) rather than left on viewport.New()'s
-// bubbles-library default, which binds space to page: the T3-08 redesign retired space as a
+// bubbles-library default, which binds space to page: the redesign retired space as a
 // scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on
 // (T3 followup, group 2): the yaml diff's whole point is the digest, and a hard-truncated line
 // hides it past the pane's right edge — wrapping trades a taller line for a visible one.
@@ -212,7 +212,7 @@ func (m Model) WithNow(now func() time.Time) Model {
 // WithView records the service.RepoView the plan was actually built against (New's own caller,
 // openDeploy, gets this from the same service.PlannedChange planFn returned) — carried into
 // StartMsg.View so the root's StartPromotion call checks freshness against the view THIS plan
-// was built from (t1-review.md P2 #6).
+// was built from.
 func (m Model) WithView(v service.RepoView) Model {
 	m.view = v
 	return m
@@ -226,7 +226,7 @@ func (m Model) Target() string { return m.target }
 // handler reads this back the same way as Target, above.
 func (m Model) ImageRef() string { return m.image }
 
-// Reload is RefreshMsg's own rebuild (T3-09): the root calls this synchronously once it has
+// Reload is RefreshMsg's own rebuild the root calls this synchronously once it has
 // rebuilt pl against a fresh *gitops.Repo (mirroring openDeploy's own direct planFn call —
 // AGENTS.md §4.3's reasoning is about resolving a digest, and a deploy plan never resolves one,
 // the reference is caller-supplied), replacing the plan and the diff/commit views it feeds
@@ -276,7 +276,7 @@ func (m Model) scroll(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.notice = ""
-	// T3-08: shift+d toggles direct mode — checked ahead of the msg.String() switch below since
+	// shift+d toggles direct mode — checked ahead of the msg.String switch below since
 	// keys.Direct.Matches is the stateless write-binding test (rule 5's shift-vs-caps-lock
 	// distinction), not a string a switch case could match directly.
 	if keys.Direct.Matches(msg) {
@@ -309,7 +309,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			// The screen's entire promise is that the bytes are visible before anything is
 			// written. When RenderDiff failed there are no bytes on screen, so enter would
 			// confirm a write on the operator's behalf against something they were never
-			// shown — the one thing this screen exists to prevent (Copilot, PR #72). Esc back
+			// shown — the one thing this screen exists to prevent. Esc back
 			// and fix the cause; there is no way to force past it, deliberately.
 			m.notice = "cannot confirm a deploy whose diff could not be rendered — esc back and retry"
 			return m, nil
@@ -324,17 +324,17 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.showYAML = !m.showYAML
 		return m, nil
 	case "r", "f5", "ctrl+r":
-		// T3-09: rebuilds the diff at fresh origin — this screen has no way to fetch origin
+		// rebuilds the diff at fresh origin — this screen has no way to fetch origin
 		// itself (AGENTS.md §4.3), so it asks the root to run the matrix's own
 		// completion-triggered refresh and rebuild this screen once the fresh repo lands
-		// (RefreshMsg's own doc comment; mirrors plan.RefreshMsg exactly, T3-09's shared "r"
+		// (RefreshMsg's own doc comment; mirrors plan.RefreshMsg exactly, its shared "r"
 		// path).
 		return m, func() tea.Msg { return RefreshMsg{} }
 	}
 	return m.scroll(msg)
 }
 
-// toggleDirect is shift+d (T3-08, was m): behind a confirmation when turning direct mode ON,
+// toggleDirect is shift+d (was m): behind a confirmation when turning direct mode ON,
 // silent when turning it back off, and never offered at all for a production target — hidden
 // from the footer and the help overlay (hints/KeyScreen's own registry row), and, pressed
 // anyway, a plain no-op here too. That is politeness only (rule 5's own note): the actual,
@@ -356,8 +356,8 @@ func (m Model) toggleDirect() (Model, tea.Cmd) {
 	// WithKeyMap(keys.HuhKeyMap()) is not optional decoration: huh.NewConfirm leaves keymap
 	// zero-valued, and a zero key.Binding matches nothing, so a Confirm used standalone rather
 	// than inside a huh.Form ignores every keypress — without this y/n/←/→ all did nothing and
-	// this screen could not be switched to direct mode at all (Copilot, PR #72). keys.HuhKeyMap
-	// (T3-08, AGENTS.md §9 entry 6) rather than huh.NewDefaultKeyMap() directly, so this dialog's
+	// this screen could not be switched to direct mode at all. keys.HuhKeyMap
+	// (AGENTS.md §9 entry 6) rather than huh.NewDefaultKeyMap() directly, so this dialog's
 	// home/end and MultiSelect-toggle keys agree with every other huh field in the app.
 	m.confirm.WithKeyMap(keys.HuhKeyMap())
 	m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
@@ -428,7 +428,7 @@ func (m Model) layout() Model {
 	body := max(ui.BodyHeight(m.height, sections)-fixed, 3)
 	m.diff.SetWidth(inner)
 	m.diff.SetHeight(body)
-	// resized covers height too (T3-08), not just width: commitLines' own "↓ N more commits"
+	// resized covers height too, not just width: commitLines' own "↓ N more commits"
 	// trailer (v2·05a) is windowed to how many commit lines actually fit the box, so a height
 	// change — not only a width change — must re-render the content, or the trailer's count
 	// (and which commits are shown at all) goes stale the moment the terminal is resized taller
@@ -499,7 +499,7 @@ func (m Model) View() string {
 	// and tags'): the diff carries three lines of context from files this screen never chose,
 	// and the warnings, commit text and render errors are rendered verbatim — so a credential
 	// registered with pkg/redact would otherwise reach the terminal through the one screen
-	// that skipped it (Copilot, PR #72/#73). Applied once at the boundary rather than per
+	// that skipped it. Applied once at the boundary rather than per
 	// field, so a field added later cannot forget.
 	return redact.Strings(view)
 }
@@ -519,7 +519,7 @@ func (m Model) headerSection() string {
 	case m.production:
 		chip = m.styles.Production.Render(chip + " · production")
 	case m.mode == ModeDirect:
-		// T3-08 (v2·05a): the chip always also names the key that flips the mode, since shift+d
+		// (v2·05a): the chip always also names the key that flips the mode, since shift+d
 		// toggles either way — never a bare capital (rule 5): "shift+d PR" here, "shift+d
 		// direct" in the default (PR-mode) case below.
 		chip = m.styles.Warn.Render(chip) + m.styles.Dim.Render(" · shift+d PR")
@@ -568,7 +568,7 @@ func (m Model) summarySection() string {
 	}
 	if replacing := m.history.replacing(); replacing != "" {
 		if !m.history.Since.IsZero() {
-			// T3-08 (v2·05a): "declared", not "live" — this screen reads the manifest's own
+			// (v2·05a): "declared", not "live" — this screen reads the manifest's own
 			// age, never a cluster/Argo state (mirrors tags.Model's own declaredLine wording).
 			replacing += ", declared " + ui.Span(m.now().Sub(m.history.Since))
 		}
@@ -600,10 +600,10 @@ func tagOrDigest(r image.Ref) string {
 }
 
 // commitLines is the commit viewport's content: one line per commit, migration-carrying ones
-// marked, newest first as the delta lists them. T3-08 (v2·05a): windowed to what the viewport's
+// marked, newest first as the delta lists them. (v2·05a): windowed to what the viewport's
 // own box actually shows — commits.Height(), set by layout() before this is (re-)called — with
 // a right-aligned "↓ N more commits" trailer for the rest, mirroring tags.Model's own pane
-// convention (T3-07) rather than leaving the operator to scroll blind to find out how much is
+// convention rather than leaving the operator to scroll blind to find out how much is
 // below the fold. room<=0 (WithHistory runs before the root's first SetSize) shows every commit
 // unwindowed; layout's own resized guard re-renders once a real height is known.
 func (m Model) commitLines() string {
@@ -707,10 +707,10 @@ func (m Model) footerSection() string {
 	return ui.StatusBar(max(m.width-2, 1), left, right)
 }
 
-// hints is the screen's own footer (T3-08, v2·05a): enter deploys, d toggles yaml/commits when
+// hints is the screen's own footer (v2·05a): enter deploys, d toggles yaml/commits when
 // there is history to toggle with, shift+d offers direct mode except on a production target
 // (hidden entirely there, not merely refused — rule 5's "never offered"), ↑/↓ scroll, and esc
-// goes back to the tag picker underneath (T3-08: the picker stays on the stack now, so this is
+// goes back to the tag picker underneath (the picker stays on the stack now, so this is
 // no longer a return to the matrix).
 func (m Model) hints() string {
 	hints := []keys.Hint{{B: keys.Enter, Long: "enter deploy", Pri: 0}}
@@ -737,7 +737,7 @@ func (m Model) hints() string {
 func (m Model) KeyScreen() keys.Screen { return keys.ScrDeploy }
 
 // scale is the one-line summary of what will be written — the sentence an operator would say
-// out loud before pressing enter. "image reference(s)", never "occurrence(s)" (T3-08): the
+// out loud before pressing enter. "image reference(s)", never "occurrence(s)" the
 // latter is this codebase's own internal term for one image: scalar in one manifest
 // (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an operator is about
 // to press enter on.

@@ -15,7 +15,7 @@ import (
 )
 
 // EnsureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
-// decoding an older file leaves the field empty (round-1 review finding), and
+// decoding an older file leaves the field empty (review finding), and
 // ArgoRefreshedStep/ArgoSyncedStep both take their `len(apps) == 0` "no Argo Application in this
 // promotion's plan" success path on an empty ArgoApps — so an upgraded, already-in-flight
 // promotion could be reported complete having never actually checked the Application it edited.
@@ -43,7 +43,7 @@ import (
 // since Applications remain the primary concern, but it closes both gaps a legacy state can
 // have.
 //
-// s.EditApps gets the same treatment as a third, independent gap (round-2 review, PR #182): a
+// s.EditApps gets the same treatment as a third, independent gap (review, PR #182): a
 // state file saved any time between M5 and EditApps' own introduction has a populated ArgoApps
 // but a nil EditApps, since the two fields were computed together at construction from that
 // point on but ArgoApps alone before it — so "ArgoApps non-empty" cannot stand in for "EditApps
@@ -94,7 +94,7 @@ func EnsureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 // a path separator or ".." reaches outside the promotions directory (`../../etc/passwd`), or
 // sideways into the archive subdirectory (`archive/<real-id>`), letting `hoist resume`/`hoist
 // abandon` act on an archived or aged-out promotion `hoist promotions` never lists as live
-// (t1-review.md P3). Find refuses any id containing a path separator or ".." outright, and —
+// (P3). Find refuses any id containing a path separator or ".." outright, and —
 // once a state file does load — refuses one whose own ID does not match id, so a file that
 // happens to sit at the expected path but was never saved as this id (or was moved/archived
 // since) is treated as not found rather than silently acted on.
@@ -202,7 +202,7 @@ type Listed struct {
 	Unconfigured bool
 	// Archived is true when this same List call just archived this promotion (it was Done and
 	// older than ArchiveDoneOlderThan) — the CLI's own --archived listing needs this to avoid
-	// printing an archived-this-run promotion a second time (round-2 review finding, #181).
+	// printing an archived-this-run promotion a second time (review finding, #181).
 	Archived bool
 	// ArchiveErr is set when archiving was attempted (Done, past the retention window) but
 	// failed — the promotion is still reported Done, with the archive failure alongside it,

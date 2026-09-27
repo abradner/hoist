@@ -10,7 +10,7 @@ type row struct {
 }
 
 // table is the whole approved screen × key matrix, transcribed from the audit's own table.
-// Every screen in internal/app reads it through On/Has below (T3-01 through T3-10 finished the
+// Every screen in internal/app reads it through On/Has below (through finished the
 // migration); the tests in this file and each screen package's own TestRegistryKeysAreHonoured
 // (internal/app/matrix, plan, deploy, tags, flight, watch, restart, config, activity) hold it to
 // the audit's rules mechanically rather than by review (AGENTS.md §10 meta-rule 5).
@@ -88,12 +88,12 @@ var table = []row{
 	{ScrDeploy, End, "bottom"},
 	{ScrDeploy, CtrlC, "quit now"},
 
-	// tag picker (list). P2-7 (T3 review): Open ("o") was listed and shown in help but
+	// tag picker (list). Open ("o") was listed and shown in help but
 	// implemented nowhere in this package — no forge commit URL is plumbed into this screen at
 	// all (unlike flight's OpenPRMsg, which the root already threads through) — so it is
 	// delisted here rather than left as a dead row; wiring a real "open commit on forge" gesture
 	// is a real feature (a URL builder, a message, a root handler) and belongs in its own
-	// change, not this fixup pass. Home/End are implemented (moveCursor's own list, T3-07) and
+	// change, not this fixup pass. Home/End are implemented (moveCursor's own list) and
 	// now listed alongside them.
 	{ScrTags, Enter, "review tag → confirm"},
 	{ScrTags, Esc, "back"},
@@ -160,7 +160,7 @@ var table = []row{
 	{ScrRestart, Enter, "restart (confirms)"},
 	{ScrRestart, Esc, "back (keeps running)"},
 	{ScrRestart, Help, "help overlay"},
-	// P2-8 (T3 review): the design's own re-read row was missing entirely — implemented now
+	// the design's own re-read row was missing entirely — implemented now
 	// (Model.reread) rather than delisted, since Funcs.Read was already there to reuse.
 	{ScrRestart, Refresh, "re-read the cluster"},
 	{ScrRestart, Log, "activity log"},
@@ -191,7 +191,7 @@ var table = []row{
 	{ScrActivity, Down, "scroll"},
 	{ScrActivity, PgUp, "page"},
 	{ScrActivity, PgDn, "page"},
-	// P2-8 (T3 review): the design's own home/end row was missing on every viewport-backed
+	// the design's own home/end row was missing on every viewport-backed
 	// screen; implemented here (and on plan/deploy/watch/restart/matrix) rather than delisted,
 	// since every one of them already has a list or viewport to jump.
 	{ScrActivity, Home, "top"},

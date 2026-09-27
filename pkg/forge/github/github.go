@@ -124,7 +124,7 @@ func toPR(r prResponse) forge.PR {
 		Base:       r.Base.Ref,
 		Merged:     merged,
 		// Closed-without-merging: GitHub's "state" is "closed" but this PR never merged — a
-		// dead PR (round-9 finding: FindPR's own state=all query can return one of these, and a
+		// dead PR (finding: FindPR's own state=all query can return one of these, and a
 		// caller that adopts it as "found, therefore satisfied" would try to merge a PR whose
 		// merge call always 405s).
 		Closed:    r.State == "closed" && !merged,

@@ -148,7 +148,7 @@ func Compute(r *gitops.Repo, promotable []string, running Running) Table {
 }
 
 // Order reorders t's columns into the pipeline order envs.PipelineOrder derives from
-// envs.pairs (T3-04, UX-M9's own header-order companion): a promotion flows source-to-target,
+// envs.pairs (UX-M9's own header-order companion): a promotion flows source-to-target,
 // so the matrix should read that way left-to-right instead of alphabetically. Pure: every
 // Row's Cells is permuted along with Envs so index i in the result still means the same env
 // for both, and no cell's own content is touched.

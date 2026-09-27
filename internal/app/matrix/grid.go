@@ -8,7 +8,7 @@ import (
 	"github.com/abradner/hoist/internal/ui"
 )
 
-// grid.go is the matrix's own table renderer (T3-04, UX-M9): a cell cursor — one family row
+// grid.go is the matrix's own table renderer (UX-M9): a cell cursor — one family row
 // AND one env column intersecting at a single highlighted cell — is something a whole-row
 // highlight (the bubbles table.Model this replaces) cannot express, so the grid is drawn by
 // hand here instead. cells.go stays the pure derivation of what a cell says; grid.go is only
@@ -16,7 +16,7 @@ import (
 // promotion, drift or config.
 
 // Focus says which part of the matrix screen currently owns the cursor keys (tab moves it,
-// T3-04's own new binding): the grid itself, or the in-flight pane underneath it.
+// the screen's own new binding): the grid itself, or the in-flight pane underneath it.
 type Focus uint8
 
 const (
@@ -28,7 +28,7 @@ const (
 )
 
 // GridState is the grid renderer's own input beyond the Table text itself (the audit doc's
-// T3-04 shape): the cell cursor (Row, Col — Col is an index into Widths' env columns, i.e.
+// shape): the cell cursor (Row, Col — Col is an index into Widths' env columns, i.e.
 // Table.Envs, not into Widths itself, which carries one extra leading entry for FAMILY),
 // the vertical scroll Offset and how many data rows fit (Height), each column's fitted width
 // (Widths[0] is FAMILY; Widths[i+1] is Table.Envs[i]), and which side of the screen currently
@@ -83,7 +83,7 @@ func Grid(st ui.Styles, t Table, g GridState) []string {
 // the way a hand-drawn, fully self-bordered table would — Frame has no per-line notion of
 // "this row wants different corner glyphs", and giving it one is a bigger change than this
 // screen's own file scope, so the mockup-vs-golden diff notes this one cosmetically, never
-// fixes it by having the grid draw its own outer border (which would double it, T3-04's own
+// fixes it by having the grid draw its own outer border (which would double it, the screen's own
 // first attempt at this and the bug this comment now heads off).
 
 // headerCells is FAMILY plus every env's display name (Table.Envs — a caller wanting the

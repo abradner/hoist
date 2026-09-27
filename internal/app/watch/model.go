@@ -211,7 +211,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.body.GotoBottom()
 			return m, nil
 		case keys.Refresh.Matches(msg):
-			// P2-8 (T3 review): this matched only the literal string "r", so the registry's
+			// this matched only the literal string "r", so the registry's
 			// own F5/ctrl+r aliases (keys.Refresh.Keys) did nothing, though both are listed on
 			// the footer and help overlay.
 			if m.polling {
@@ -246,7 +246,7 @@ func (m Model) View() string {
 	return redact.Strings(view)
 }
 
-// footer renders through keys.Footer (T3-03) rather than a hand-built status bar, so this
+// footer renders through keys.Footer rather than a hand-built status bar, so this
 // screen's own row in internal/ui/keys' registry is what the operator actually sees — UX-H9:
 // the left side names the next poll countdown rather than the old "read-only · never
 // refreshes", which the audit flagged as claiming a mechanism ("never refreshes") this screen

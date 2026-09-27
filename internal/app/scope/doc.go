@@ -5,9 +5,10 @@
 // A screen is a value (AGENTS.md §4.8): esc, then reopening the same key, builds a brand new
 // Model rather than mutating the old one. That does not by itself stop the old instance's
 // outstanding tea.Cmd — a real network or cluster call fired from Init or a keypress keeps
-// running, and nothing in bubbletea reaches into a Cmd already in flight to cancel it (that is
-// a separate, later piece of work: an owned context.Context, not this package's job). Its result
-// message still arrives, is still routed to whichever screen is now on top by concrete type
+// running, and nothing in bubbletea reaches into a Cmd already in flight to cancel it on its
+// own; Scope (Open/Ctx/DoCtx, below) is this package's answer for a caller that wants a real
+// cancellable context.Context tied to the screen's own lifetime, not just a stale-result guard.
+// Its result message still arrives, is still routed to whichever screen is now on top by concrete type
 // (app.go's own default forward-to-top-screen case), and — because a new instance of the same
 // screen kind has since been pushed in the old one's place — can land on a Model that never
 // asked for it. plan.Model's loadedMsg racing a second p press and watch.Model's snapshotMsg

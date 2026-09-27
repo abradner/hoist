@@ -96,17 +96,17 @@ type Model struct {
 	notice            string
 	hint              string
 
-	// row/col is the cell cursor (T3-04, UX-M9): row indexes matrix.Rows, col indexes
+	// row/col is the cell cursor (UX-M9): row indexes matrix.Rows, col indexes
 	// matrix.Envs. Left/Right move col; Up/Down move row. offset is the grid's own vertical
 	// scroll position (the first visible row), kept so a row far down the table is scrolled
 	// into view rather than clipped.
 	row, col, offset int
-	// focus says whether the cursor keys act on the grid or the in-flight pane (tab, T3-04).
+	// focus says whether the cursor keys act on the grid or the in-flight pane (tab).
 	focus Focus
 	// paneCursor is which in-flight row is selected while focus is on the pane.
 	paneCursor int
 
-	// menu holds the action menu's own state (enter on the grid, T3-04): open, its items and
+	// menu holds the action menu's own state (enter on the grid): open, its items and
 	// its own cursor, and which cell it was opened for.
 	menuOpen            bool
 	menuItems           []MenuItem
@@ -140,15 +140,15 @@ type Model struct {
 	now         func() time.Time
 }
 
-// KeyScreen implements the root's keyed interface (T3-04): the matrix now has a stated row in
+// KeyScreen implements the root's keyed interface the matrix now has a stated row in
 // internal/ui/keys' registry, so the root's own "?" help overlay and "l" activity-log handling
-// apply to it exactly as they already do to watch/restart/config/activity (T3-03).
+// apply to it exactly as they already do to watch/restart/config/activity.
 func (m Model) KeyScreen() keys.Screen { return keys.ScrMatrix }
 
 // OpenPlanMsg is emitted when the operator asks to plan a promotion into Target (p, or the
 // action menu's own "promote into" item). Source is the one reverse pair (envs.pairs) found
 // for Target when exactly one exists; empty when there is none or several, in which case the
-// plan screen itself asks "promote into Target from…" (T3-04: promote now always goes by the
+// plan screen itself asks "promote into Target from…" (promote now always goes by the
 // TARGET the cursor is on, never a forced prompt for an arbitrary target — the retired P key's
 // own job).
 type OpenPlanMsg struct {
@@ -180,7 +180,7 @@ type OpenWatchMsg struct {
 
 // New builds the screen for a discovered repo. promotable lists the first-party image repo
 // prefixes (see Compute). envs is the repo's policy. drift is how the cluster is asked what
-// each env runs; nil never asks. Columns come in pipeline order (envs.pairs — T3-04) rather
+// each env runs; nil never asks. Columns come in pipeline order (envs.pairs) rather
 // than alphabetically, and the cell cursor starts on the first non-production column so a
 // fresh session never opens with the cursor already pointed at a write that asks for
 // approval. The model has no size until SetSize is called.
@@ -367,7 +367,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case keys.PgDn.Matches(msg):
 		return m.moveCursor(max(m.gridHeight(), 1)), nil
 	case keys.Home.Matches(msg):
-		// P2-8 (T3 review): the design's own home/end row was missing here. moveCursor's own
+		// the design's own home/end row was missing here. moveCursor's own
 		// clamp does the actual jump-to-first/last work, the same trick fitWidths' clamp and
 		// the plan screen's own Home/End case rely on: a delta at least as large in magnitude
 		// as the list always lands at the end it points to, on either cursor (row or pane).
@@ -430,7 +430,7 @@ func clamp(v, hi int) int {
 	return v
 }
 
-// toggleFocus moves the cursor keys between the grid and the in-flight pane (tab, T3-04). A
+// toggleFocus moves the cursor keys between the grid and the in-flight pane (tab). A
 // tab with nothing in flight does nothing — there is no pane to focus.
 func (m Model) toggleFocus() Model {
 	if len(m.inflight) == 0 {
@@ -571,7 +571,7 @@ func (m Model) doTag() (Model, tea.Cmd) {
 	}
 }
 
-// openMenu opens the action menu for the cell under the cursor (enter, T3-04).
+// openMenu opens the action menu for the cell under the cursor (enter).
 func (m Model) openMenu() (Model, tea.Cmd) {
 	fam, env := m.CurrentFamily(), m.CurrentEnv()
 	if env == "" {
@@ -761,7 +761,7 @@ const (
 )
 
 // View renders the frame: the subheader, the grid, the notes, the in-flight pane (inside the
-// frame, T3-05) and the footer, with the menu or a chooser dialog over it when one is open.
+// frame) and the footer, with the menu or a chooser dialog over it when one is open.
 func (m Model) View() string {
 	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		return fmt.Sprintf("window too small: %d×%d, hoist needs at least %d×%d", m.width, m.height, minWidth, minHeight)
@@ -778,7 +778,7 @@ func (m Model) View() string {
 		frame.Sections = append(frame.Sections, strings.Join(d, "\n"))
 	}
 	if pane := m.inflightPane(m.paneBudget()); pane != "" {
-		// T3-05: the in-flight pane is a Section of this SAME frame now, not a separate
+		// the in-flight pane is a Section of this SAME frame now, not a separate
 		// ui.Box stacked below it (Frame.Panes, retired) — the mockups draw it inside the one
 		// box, ending at the frame's own closing border.
 		frame.Sections = append(frame.Sections, pane)
@@ -805,7 +805,7 @@ func (m Model) View() string {
 }
 
 // subheader is the one-line row under the title: the promotable root, the base/context, and
-// (T3-05, 120-column layout) the env/family counts.
+// (120-column layout) the env/family counts.
 func (m Model) subheader() string {
 	line := displayRoot(m.repo.Root)
 	if m.base != "" && m.base != "main" {
@@ -946,7 +946,7 @@ const minCellWidth = 10
 // fitWidths shrinks the widest env columns, one cell at a time, until the grid fits width.
 // The family column keeps its natural width.
 //
-// P1-4 (T3 review): total must also count the "│" grid.go's own dataRow/ruleRow join every
+// total must also count the "│" grid.go's own dataRow/ruleRow join every
 // column with — one separator between each pair of columns, len(out)-1 of them — not just each
 // column's own text-plus-padding. Missing that made fitWidths believe a row fit when it was
 // actually len(out)-1 cells too wide, so the row Frame received was wider than the terminal;
@@ -1001,12 +1001,12 @@ func (m Model) stateWord(c Cell, env string) string {
 	return string(c.State)
 }
 
-// hasPane reports whether the in-flight pane occupies a Section at all (T3-05: it is one of
+// hasPane reports whether the in-flight pane occupies a Section at all (it is one of
 // Frame's own Sections now, not a separate Pane appended below the box — see View), so its own
 // inter-section rule has to be counted alongside the subheader's and the notes' whenever one is
 // present. It says nothing about whether the pane ultimately finds room to render non-empty at
 // the current height — paneBudget/inflightPane decide that — so a height too tight for even the
-// compact form is, at worst, one row off here; the same approximation the pre-T3-05 code lived
+// compact form is, at worst, one row off here; the same approximation the pre- code lived
 // with when the pane cost 0 rather than 1 extra rule row.
 func (m Model) hasPane() bool {
 	return len(m.inflight) > 0 || m.inflightErr != ""
@@ -1096,7 +1096,7 @@ func boolInt(b bool) int {
 // notes is the section under the grid: the transient notice or hint first, else what the
 // cluster said about the cursor's column, then the in-flight fold when the pane itself has no
 // room (paneBudget's own decision). The bubbles help.Model line this used to carry is retired
-// in T3-04 — the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
+// in  — the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
 func (m Model) notes() string {
 	lines := m.baseNotes()
 	if m.paneRows(m.paneBudget()) == 0 {
@@ -1282,7 +1282,7 @@ func displayRoot(root string) string {
 const selectedMarker = "▸ "
 const productionMarker = " ⚠"
 
-// statusBar is the matrix's own footer, through keys.Footer (T3-03/04): the env under the
+// statusBar is the matrix's own footer, through keys.Footer: the env under the
 // cursor on the left, the writes and verbs an operator is actually looking for the key of on
 // the right, in priority order so a narrow terminal drops the least useful first. The cursor's
 // own production marker (T3 followup, group 3) is productionMarker — the same "⚠" the header
@@ -1311,13 +1311,13 @@ func (m Model) statusBar() string {
 		{B: keys.Restart, Long: "shift+r restart", Short: "shift+r restart", Pri: 6},
 	}
 	// "tab in flight" is only true when there is an in-flight pane to focus (toggleFocus is a
-	// no-op otherwise, T3-04) — advertising it with nothing in flight is a hint for a key that
+	// no-op otherwise) — advertising it with nothing in flight is a hint for a key that
 	// does nothing (P2-13, T3 review).
 	if len(m.inflight) > 0 {
 		hints = append(hints, keys.Hint{B: keys.Tab, Long: "tab in flight", Short: "tab in flight", Pri: 7})
 	}
 	hints = append(hints, keys.Hint{B: keys.Quit, Long: "q quit", Short: "q quit", Pri: 0})
-	// help true: the root's own overlay (T3-03/04) — Footer appends "? help"/"? more" itself.
+	// help true: the root's own overlay — Footer appends "? help"/"? more" itself.
 	return keys.Footer(m.styles, m.width, status, hints, true)
 }
 

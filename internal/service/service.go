@@ -41,8 +41,8 @@ type Service struct {
 	// two such loads inside one running `hoist` unable to run at once — see AGENTS.md §8's
 	// deletion test: the matrix's own guard could be deleted without this directory becoming
 	// corruptible from those two callers, which is what makes it politeness rather than a
-	// second copy of the same enforcement. A `sync.Mutex` cannot reach across processes (P3 #8,
-	// t2-review.md): a separate `hoist` CLI invocation racing a running TUI session against the
+	// second copy of the same enforcement. A `sync.Mutex` cannot reach across processes: a
+	// separate `hoist` CLI invocation racing a running TUI session against the
 	// same clone is a DIFFERENT `Service` in a different process, with its own `refreshMu`, and
 	// is not covered by this at all — that race is still open (docs/repo-map.md's own risk
 	// register is where a fix for it would be tracked, not this comment).

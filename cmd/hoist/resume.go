@@ -33,7 +33,7 @@ func promotionsSettings(cfg *config.Config, kubeOverride string) service.Setting
 // boundedCommandContext gives runPromotions/runResume/runAbandon the same interruptible,
 // deadline-bounded context every one of them built by hand before this PR: talking to a real
 // forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate
-// (round-6 finding, applied to runPromotions and missed on runResume's --env path until this
+// (finding, applied to runPromotions and missed on runResume's --env path until this
 // unification).
 func boundedCommandContext(deadline time.Duration) (context.Context, context.CancelFunc) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -85,7 +85,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			// Named explicitly rather than folded into the bare message below: a --repo typo
 			// (repos[].github is owner/name, not the config entry's own name: or path:) would
 			// otherwise print identically to "you have no promotions at all", with nothing to
-			// suggest the filter itself might be the reason (round-2 review finding).
+			// suggest the filter itself might be the reason (review finding).
 			fmt.Fprintf(stdout, "hoist promotions: no promotions found for --repo %s\n", *repoFilter)
 			return 0
 		}
@@ -94,7 +94,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	}
 	// archivedThisRun tracks ids this same invocation just moved to the archive (Listed.Archived),
 	// so --archived's own listing below (which reads ArchiveDir fresh, after the loop) does not
-	// print one of them a second time — round-2 review finding.
+	// print one of them a second time — review finding.
 	archivedThisRun := map[string]bool{}
 	for _, l := range listed {
 		s := l.State
@@ -189,7 +189,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// Drive the mode this promotion actually is, not the one resume happens to know best. A
 	// direct promotion never pushed its branch and has no PR, so driving it through the PR-path
 	// steps would push the branch and open one — turning a deliberately PR-less deploy into a
-	// PR, with two real writes (Codex, PR #43). An earlier revision refused to resume these at
+	// PR, with two real writes. An earlier revision refused to resume these at
 	// all, on the belief that runResume could not reach envs.production for the gate; it can, so
 	// the honest fix is svc.Resume driving DirectSteps rather than declining (see its own doc
 	// comment).

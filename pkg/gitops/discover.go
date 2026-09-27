@@ -206,7 +206,7 @@ func readApps(root, appsRoot string) ([]ArgoApp, error) {
 			}
 			// The raw value is what checkRelative must see for its backslash refusal to
 			// mean the same thing on every host: ToSlash would rewrite a backslash on
-			// Windows before the check ever ran (Copilot on PR #99).
+			// Windows before the check ever ran.
 			if err := checkRelative(a.SourcePath); err != nil {
 				return nil, fmt.Errorf("%s: Application %q: spec.source.path %w", rel, a.Name, err)
 			}
@@ -574,7 +574,7 @@ func findUnmanaged(root, appsRoot string, managed map[string]ArgoApp) ([]string,
 // against the file's bytes instead — even by full reference — cannot do that: a file with two
 // occurrences of one image repo (a Deployment and its worker, the ordinary case) satisfies a
 // whole-file search on the strength of either one, so an occurrence repointed elsewhere reads as
-// unchanged (Codex, PR #167).
+// unchanged (#167).
 func OccurrencesIn(file string, b []byte) ([]Occurrence, error) {
 	docs, err := parseDocs(b)
 	if err != nil {

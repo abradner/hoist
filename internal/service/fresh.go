@@ -37,12 +37,12 @@ type freshInputs struct {
 // base itself — so a mismatch is only ever refused, never silently fixed):
 //
 //  1. Is cloneDir's disk clean relative to what its local base branch has actually committed?
-//     (This check's original, round-1 scope: an uncommitted local edit means the plan was built
+//     (This check's original scope: an uncommitted local edit means the plan was built
 //     from content nothing in git — local or origin — has ever recorded.)
 //  2. Does the local base branch's own committed content agree with origin/<base>'s CURRENT
 //     tip — fetched fresh by this function itself, first, via the same git.Git.FetchBranch
 //     direct mode's own publish step already calls? A stale remote-tracking ref used to be this
-//     function's own gap (round 5, finding 1: nothing ever fetched before this ran, so
+//     function's own gap (nothing ever fetched before this ran, so
 //     "as last fetched" was unbounded staleness, not a documented limitation) — closed here by
 //     never trusting a cached ref at all.
 //
@@ -50,7 +50,7 @@ type freshInputs struct {
 // own resolveBase prefers origin/<base> over the local branch of the same name whenever that ref
 // exists, full stop — it does not care whether local is behind, caught up, or itself ahead with
 // an unpushed commit. A previous revision of this function trusted local's bytes whenever local
-// was ahead of (or equal to) origin, which was exactly backwards (round 5, finding 2): an
+// was ahead of (or equal to) origin, which was exactly backwards: an
 // unpushed local commit changing a planned file is just as untrustworthy as origin having moved
 // independently, because the worktree this promotion actually commits into is seeded from origin,
 // not from that unpushed local content, regardless. A mismatch is refused unless it equals
@@ -69,8 +69,8 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 
 	// Fully qualified refs, not the short names: rev-parse takes any revision, so a tag
 	// named like the branch would otherwise pass as the local branch, and a tag named
-	// origin/<base> would pass as a remote-tracking ref no prune could ever remove (Copilot on
-	// PR #99). The tree reads below use the same qualified refs: `git ls-tree` resolves a short
+	// origin/<base> would pass as a remote-tracking ref no prune could ever remove. The tree
+	// reads below use the same qualified refs: `git ls-tree` resolves a short
 	// name by ref precedence too, under which a tag named like the branch wins, so a divergent
 	// tag "main" would otherwise have its tree compared instead of the branch's (issue #100).
 	// Only the messages keep the short names.
@@ -90,7 +90,7 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	// changes" — a safe refusal, but one that sent the operator looking for edits that did not
 	// exist when the real cause was a typo in --base or a branch never fetched (issue #34).
 	// onOrigin is FetchBranch's own answer from the remote, not the remote-tracking ref, which
-	// is a cached belief that outlives a branch deleted on origin (Copilot on PR #94).
+	// is a cached belief that outlives a branch deleted on origin.
 	if !onOrigin {
 		if originOK {
 			return fmt.Errorf("origin no longer has a branch %q (a stale %s remains in %s) — check the --base name, or prune with `git fetch --prune origin`, and re-run", base, originRef, cloneDir)

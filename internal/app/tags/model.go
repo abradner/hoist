@@ -185,12 +185,12 @@ type ageMsg struct {
 }
 
 // keyMap is the tag picker's own key set, sourced from the approved keymap (docs/audit's
-// "Screen × key" table, internal/ui/keys' registry) rather than invented locally. T3-07: enter
+// "Screen × key" table, internal/ui/keys' registry) rather than invented locally. enter
 // is the screen's one primary action (review the change → SelectedMsg); → opens the commit
 // reader, ← (Left, reading mode only) and tab move between the list and the commits; space is
 // no longer bound at all (rule 2: enter is always the primary), and the D/direct-commit gesture
 // retires from this screen entirely — direct mode is now a deploy-confirm-screen concern
-// (internal/app/deploy, T3-08), reached only after a tag has been reviewed.
+// (internal/app/deploy), reached only after a tag has been reviewed.
 type keyMap struct {
 	Up, Down, Left, Right, Filter, Review, Pane, Back, Reload key.Binding
 	// Home and End jump the commit-detail body to its ends (reading mode only) — replacing the
@@ -235,8 +235,8 @@ type Model struct {
 	// scope owns the ctx every listFn/metaFn/history call this instance ever makes (the
 	// commands close over scope.Ctx(), never context.Background() directly). scope.Close is
 	// called both explicitly — once the operator leaves this picker for good (Esc, a review
-	// selection, a confirmed direct-mode request; round-N finding, Codex P2, "cancel tag loads
-	// when leaving the picker") — and again by the root's own pop when this screen is actually
+	// selection, a confirmed direct-mode request — the fix for a stale tag load outliving the
+	// picker) — and again by the root's own pop when this screen is actually
 	// removed from the stack (AGENTS.md §4.8; safe to call more than once). Without it, a load
 	// already in flight when the picker closes keeps running to completion in the background
 	// even though its eventual result is already discarded by the generation guard above — for
@@ -532,8 +532,8 @@ func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
 	}
 	// This call's own observed answer (GitTagsFunc's doc comment) supersedes New's
 	// constructor-time guess: the config can say this image repo is mapped while the forge
-	// lookup this call made still comes back false at runtime (finding 3, round 2, carried
-	// over from the pre-split design) — m.mapped must reflect that unconditionally, on
+	// lookup this call made still comes back false at runtime — m.mapped must reflect that
+	// unconditionally, on
 	// success, whether or not msg.mapped itself is true, or a stale true guess would leave
 	// onRegTagsLoaded (if it runs later) treating an unmapped answer as mapped.
 	m.mapped = msg.mapped
@@ -660,7 +660,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Review):
 		return m.selectCurrent()
 	case key.Matches(msg, m.keys.Home):
-		// P2-7 (T3 review): the registry has always listed Home/End on this list ("top"/
+		// the registry has always listed Home/End on this list ("top"/
 		// "bottom"), but only updateReading's own commit-detail body handled them — the list
 		// itself had no case at all. moveCursor's own clamp (idx<0 -> 0) does the actual "jump
 		// to top" work; a delta at least as negative as the current index always lands there.
@@ -680,7 +680,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 }
 
 // reload discards this instance's loaded tags, deltas and age, and re-issues Init's own load
-// commands (T3-07's r/F5/ctrl+r "reload tags" row). generation is bumped exactly as a fresh
+// commands (its r/F5/ctrl+r "reload tags" row). generation is bumped exactly as a fresh
 // New would assign one, so any regTagsLoadedMsg/gitTagsLoadedMsg/metaLoadedMsg/historyMsg/ageMsg
 // still in flight from before the reload is discarded by the same stale-generation guard that
 // already protects a closed-and-reopened picker (regTagsLoadedMsg's own doc comment) — reload is
@@ -721,7 +721,7 @@ func newBodyViewport() viewport.Model {
 // updateReading handles the commit-detail view: ↑/↓ walk the commits (each one read from its
 // top), ← (and esc, its equivalent — rule 3: esc is always back) return to the list, and every
 // other key scrolls the body — PageUp/PageDown, ctrl+u/ctrl+d for half a page, home/end for the
-// ends (T3-07, replacing g/G, #120).
+// ends (replacing g/G, #120).
 func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Back), key.Matches(msg, m.keys.Left):
@@ -743,7 +743,7 @@ func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.body.GotoBottom()
 	default:
 		// Laid out on this copy first — View lays out its own, so the retained viewport
-		// would otherwise still be the zero-sized one New built (flight's log, Copilot #124).
+		// would otherwise still be the zero-sized one New built (the same gotcha as flight's log).
 		m = m.layoutReading()
 		var cmd tea.Cmd
 		m.body, cmd = m.body.Update(msg)
@@ -812,7 +812,7 @@ func (m Model) currentDelta() *migrate.Delta {
 }
 
 // CapturesText implements app.Screen (via tagsScreen's thin delegate in internal/app/screen.go).
-// The root queries this before treating "q" as its own global quit key (round 5, finding 3):
+// The root queries this before treating "q" as its own global quit key:
 // only the filter's own text-entry mode counts — the confirm dialog is a huh.Confirm (y/n/enter/
 // esc only; "q" was never meant to be typed there, so leaving it to the global quit key is fine).
 func (m Model) CapturesText() bool { return m.filtering }
@@ -844,9 +844,9 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 }
 
 // selectCurrent emits SelectedMsg for the cursor row — this screen's one primary action (rule
-// 2), reached only by enter. T3-07 retires the D/direct-commit gesture from this screen
+// 2), reached only by enter. retires the D/direct-commit gesture from this screen
 // entirely: reviewing a tag always goes to the deploy confirm screen now, and direct mode is
-// offered there instead (internal/app/deploy, T3-08), after the diff is already on screen.
+// offered there instead (internal/app/deploy), after the diff is already on screen.
 // SelectedMsg is never emitted until the current row's metadata (digest) has actually loaded —
 // a selection without a resolved digest would promote a tag hoist cannot yet pin, which
 // AGENTS.md principle 3 refuses at the manifest-write layer anyway; refusing it here just gives
@@ -862,7 +862,7 @@ func (m Model) selectCurrent() (Model, tea.Cmd) {
 		// MetaErr set means fetchVisible already tried this row and settled it as failed
 		// (its own doc comment: a failed row is never rescheduled) — "still loading" would be
 		// permanently wrong for it and would never self-correct, leaving the row silently
-		// unselectable with no operator-visible explanation (round-N finding). Only the absence
+		// unselectable with no operator-visible explanation. Only the absence
 		// of both MetaLoaded and MetaErr means a fetch is genuinely still in flight.
 		if r.MetaErr != nil {
 			m.notice = fmt.Sprintf("metadata for %s failed to load and will not be retried — hoist never writes an image it has no digest for", r.Tag)
@@ -907,7 +907,7 @@ func (m Model) updateFilter(msg tea.Msg) (Model, tea.Cmd) {
 		rows := m.filtered()
 		if IndexOf(rows, m.selectedTag) < 0 && len(rows) > 0 {
 			m.selectedTag = rows[0].Tag
-			m.commitIdx = 0 // a new tag's commits, so the cursor starts over (Copilot, #112)
+			m.commitIdx = 0 // a new tag's commits, so the cursor starts over
 		}
 		var fetchCmd tea.Cmd
 		m, fetchCmd = m.fetchVisible()
@@ -1096,7 +1096,7 @@ func (m Model) View() string {
 
 func (m Model) title() string { return fmt.Sprintf("hoist · tags · %s", m.target) }
 
-// KeyScreen implements the root's keyed interface (internal/app/screen.go). P2-7 (T3 review):
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
 // this always answered ScrTags, even while m.reading showed the commit-detail pane — so ? (the
 // help overlay) named the list's own keys (Right, Filter, Tab…) while none of them did
 // anything and the reader's actual keys (Home/End/PgUp/PgDn/Left/Enter) were nowhere on it.
@@ -1216,8 +1216,8 @@ func (m Model) stagingNote() string {
 		// staging env's committed tag STRINGS, and a tag is mutable — staging may have
 		// committed v1 when v1 meant one digest and the registry may point v1 at another now.
 		// Saying "v1 is committed there" would let that read as "this build went through
-		// staging", which this data cannot support (Copilot, PR #73; issue #74 for carrying
-		// the digests through and comparing those).
+		// staging", which this data cannot support (issue #74 tracks carrying the digests
+		// through and comparing those instead).
 		return base + fmt.Sprintf("; %s is the tag committed there — tags move, so this is not proof of the same build", tag)
 	default:
 		return base + fmt.Sprintf("; warning: %s (under the cursor) is not committed there — it has not been through %s",
@@ -1315,7 +1315,7 @@ func (m Model) tableSection() string {
 		}
 		b.WriteString("\n" + m.rowLine(widths, r))
 	}
-	// Finding 4 (round 5): for an unmapped repo, Created-based ordering (invariant 3's fallback)
+	// For an unmapped repo, Created-based ordering (invariant 3's fallback)
 	// is only actually established among rows fetchVisible has already loaded — AGENTS.md
 	// invariant 4's deliberate laziness (New's own doc comment) means a row outside every window
 	// the cursor has visited so far may never be fetched at all, so a genuinely newer tag sitting
@@ -1491,7 +1491,7 @@ func (m Model) paneSection() string {
 				text = m.styles.Selected.Render(ansi.Strip(text))
 			}
 		case "more":
-			// T3-07 (v2·06a): "↓ N more commits" sits flush right, mirroring the mockup's own
+			// (v2·06a): "↓ N more commits" sits flush right, mirroring the mockup's own
 			// rjust — a trailer naming what the pane's own room left out reads as a footnote,
 			// not another row of content.
 			pad := max(m.width-2-ansi.StringWidth(text), 0)
@@ -1554,7 +1554,7 @@ func (m Model) layoutReading() Model {
 
 // viewReading is the commit-detail view (mockup 08): subject and position, then the body and
 // the commit's migration files in a viewport — PageUp/PageDown, ctrl+u/ctrl+d and home/end
-// scroll it when the message is longer than the terminal (T3-07, replacing g/G, #120); ↑/↓
+// scroll it when the message is longer than the terminal (replacing g/G, #120); ↑/↓
 // move to the next commit, ← (or esc) back to the list.
 func (m Model) viewReading() string {
 	commits := m.currentCommits()
