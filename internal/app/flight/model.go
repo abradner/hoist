@@ -2,7 +2,6 @@ package flight
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -17,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -30,28 +30,30 @@ type PollDurations struct {
 	CI, Approval, Argo, Rollout, Deadline time.Duration
 }
 
-// DriveFunc advances a promotion by one poll iteration: it runs engine.Drive once (Drive
-// itself calls Act on whichever steps are not yet satisfied, in order, then returns at the
-// first step that is Waiting, Blocked, or erroring — see engine.Drive's own doc comment)
-// and re-derives every step's own standing with engine.Status, so the screen can render the
-// full step list rather than only wherever Drive stopped. err is non-nil only for a genuine
-// plumbing failure (Known bug classes: a 404/permissions hiccup on Checks or Comments,
-// mirroring cmd/hoist/drive.go's driveToCompletion) — Waiting, Blocked and "not yet acted
-// on" are never errors, they are read from statuses instead.
+// Driver is what this screen drives a promotion through, one poll (Step) at a time —
+// internal/service.Drive's own consumer-side interface, kept small and local rather than
+// imported wholesale so a test fakes it without building a real service.Driver. Step advances
+// the promotion by one engine.DriveStatus walk (see service.Driver.Step's own doc comment: one
+// walk against the world per call, not engine.Drive followed by a separate engine.Status) and
+// returns the resulting service.Tick; err is non-nil only for a genuine plumbing failure — never
+// ErrWaiting, never a *engine.BlockedError, both of which arrive as Tick.Waiting/Tick.Blocked
+// instead, exactly as this screen's own DriveFunc predecessor described. State returns the
+// Driver's own current state (used by cmd/hoist wiring, not by this screen, which keeps its own
+// state cache updated from each Tick); OverrideCINone sets CINoneOverride on the Driver's state
+// for the next Step call — see ApplyCINoneOverride below.
 //
-// cmd/hoist supplies the concrete function, closing over the real git.Git/forge.Forge
-// adaptors and whatever state-save path the CLI's own promote/resume commands already use —
-// the same shape plan.ResolveFunc uses to keep the plan screen ignorant of cluster/registry
-// adaptors (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule). This package therefore
-// never imports pkg/git, pkg/forge, or a state-persistence path; it takes and returns plain
-// engine.PromotionState values (not a pointer) so a tea.Cmd's goroutine never races the
-// model's own copy — see driveCmd. done and statuses mirror engine.Status's own return
-// shape exactly (a real implementation is expected to call engine.Drive then engine.Status
-// in turn) rather than making this package re-derive "is the promotion finished" from the
-// statuses slice by, say, checking whether the last entry names StepMerged — engine.Status
-// already answers that question and its short-circuit's own reasoning (see its doc
-// comment) lives in exactly one place.
-type DriveFunc func(ctx context.Context, s engine.PromotionState) (next engine.PromotionState, done bool, statuses []engine.StepStatus, err error)
+// cmd/hoist supplies the concrete implementation (service.Driver), closing over the real
+// git.Git/forge.Forge adaptors and whatever state-save path the CLI's own promote/resume
+// commands already use — the same shape plan.PlanFunc uses to keep the plan screen ignorant of
+// cluster/registry adaptors (AGENTS.md §4.8's "cmd/hoist owns the adapter" rule). This package
+// therefore never imports pkg/git or pkg/forge; it imports internal/service only for the plain
+// Tick value type Step returns (AGENTS.md §4.8, the service-design train's own decision: a
+// screen may import service for its value types, kept fakeable through this small interface).
+type Driver interface {
+	Step(ctx context.Context) (service.Tick, error)
+	State() engine.PromotionState
+	OverrideCINone()
+}
 
 // keyMap is this screen's own key vocabulary, on top of the root's global quit keys.
 type keyMap struct {
@@ -125,6 +127,13 @@ type driveResultMsg struct {
 	done     bool
 	statuses []engine.StepStatus
 	err      error
+	// retry and wait are Tick.Retry/Tick.Wait, carried through from the Step call that produced
+	// this result — the same retry classification and poll-interval computation
+	// engine.Retryable/engine.PollInterval already gave this screen, now made by the Driver
+	// itself (service.Driver.Step) rather than recomputed here from msg.err/m.rows (see
+	// onDriveResult and tickDelay's own doc comments).
+	retry bool
+	wait  time.Duration
 }
 
 // nextGen hands out a unique generation number to every flight.Model constructed by New,
@@ -148,8 +157,8 @@ type Model struct {
 	// of which step or error shape failed).
 	stopped bool
 
-	driveFn DriveFunc
-	poll    PollDurations
+	driver Driver
+	poll   PollDurations
 	// deadlineAt is the one absolute instant poll.Deadline names for this flight screen's
 	// entire drive, computed once here rather than re-derived per poll — see driveCmd's own
 	// doc comment for why a fresh per-call timeout would let the wait outlive the deadline
@@ -257,15 +266,15 @@ func (m Model) WithNow(now func() time.Time) Model {
 
 // New builds the flight screen for a promotion already at least identified (state.ID,
 // SourceEnv, TargetEnv — whatever the caller already has, typically fresh off the plan
-// screen's "start" flow or engine.LoadState on hoist resume). driveFn is nil in a read-only
+// screen's "start" flow or engine.LoadState on hoist resume). driver is nil in a read-only
 // context with nothing to drive: the screen still renders state and never ticks or
 // schedules a poll, and R shows a notice instead of calling nil.
-func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Model {
+func New(state engine.PromotionState, poll PollDurations, driver Driver) Model {
 	m := Model{
 		state:   state,
 		order:   OrderFor(state),
 		poll:    poll,
-		driveFn: driveFn,
+		driver:  driver,
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
 		keys:    defaultKeyMap(),
 		gen:     nextGen.Add(1),
@@ -287,9 +296,9 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		// would let the total wait outlive poll.Deadline indefinitely.
 		m.deadlineAt = time.Now().Add(poll.Deadline)
 	}
-	if driveFn != nil {
+	if driver != nil {
 		// Built once, here, and reused by every driveCmd call this instance ever makes — see
-		// Model.ctx's own doc comment. A read-only screen (driveFn nil) never calls driveCmd
+		// Model.ctx's own doc comment. A read-only screen (driver nil) never calls driveCmd
 		// and so never needs a cancelable context at all.
 		ctx := context.Background()
 		if m.deadlineAt.IsZero() {
@@ -299,7 +308,7 @@ func New(state engine.PromotionState, poll PollDurations, driveFn DriveFunc) Mod
 		}
 	}
 	m.rows = DeriveRows(m.order, false, nil) // every step "not yet reached" until the first poll lands
-	if driveFn != nil {
+	if driver != nil {
 		m.busy = true
 	}
 	return m
@@ -372,13 +381,13 @@ func (m Model) Busy() bool { return m.busy }
 // onDriveResult instead, the moment a real state lands and m.state.History becomes the
 // authoritative record of everything buildLog was covering for — never here, before the first
 // one has landed at all.
-func (m Model) AdoptBuilt(state engine.PromotionState, driveFn DriveFunc) (Model, tea.Cmd) {
+func (m Model) AdoptBuilt(state engine.PromotionState, driver Driver) (Model, tea.Cmd) {
 	m.building = false
 	m.state = state
 	m.order = OrderFor(state)
 	m.rows = DeriveRows(m.order, false, nil)
-	m.driveFn = driveFn
-	if driveFn == nil {
+	m.driver = driver
+	if driver == nil {
 		m.busy = false
 		return m, m.listenCmd()
 	}
@@ -461,7 +470,7 @@ func (m Model) Init() tea.Cmd {
 	if m.building {
 		return tea.Batch(m.spinner.Tick, m.listenCmd())
 	}
-	if m.driveFn == nil {
+	if m.driver == nil {
 		return nil
 	}
 	return tea.Batch(m.spinner.Tick, m.driveCmd())
@@ -487,14 +496,30 @@ func (m Model) Init() tea.Cmd {
 // fresh one per call is also what makes Cancel (above) actually able to interrupt a call already
 // in flight, not just whichever one happens to be constructed next.
 func (m Model) driveCmd() tea.Cmd {
-	driveFn, state, ctx := m.driveFn, m.state, m.ctx
+	return m.stepCmd(false)
+}
+
+// stepCmd is driveCmd's own shared shape, parameterized on whether to call the Driver's
+// OverrideCINone first — ApplyCINoneOverride's own re-drive (below) needs exactly one Step call
+// with the override already set before it runs, and building that as its own goroutine (rather
+// than setting the override synchronously on the Update call stack, then calling driveCmd) keeps
+// the set-then-step sequence atomic under the Driver's own mutex, with nothing else able to
+// interleave a concurrent Step between the two.
+func (m Model) stepCmd(overrideCINoneFirst bool) tea.Cmd {
+	driver, ctx := m.driver, m.ctx
 	gen := m.gen
-	if driveFn == nil {
+	if driver == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		next, done, statuses, err := driveFn(ctx, state)
-		return driveResultMsg{gen: gen, state: next, done: done, statuses: statuses, err: err}
+		if overrideCINoneFirst {
+			driver.OverrideCINone()
+		}
+		tick, err := driver.Step(ctx)
+		return driveResultMsg{
+			gen: gen, state: tick.State, done: tick.Done, statuses: tick.Statuses, err: err,
+			retry: tick.Retry, wait: tick.Wait,
+		}
 	}
 }
 
@@ -515,7 +540,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.buildLog = append(m.buildLog, buildLogLine{at: m.now(), text: msg.line})
 		return m, m.listenCmd()
 	case tickMsg:
-		if m.busy || m.done || m.stopped || m.driveFn == nil {
+		if m.busy || m.done || m.stopped || m.driver == nil {
 			return m, nil
 		}
 		m.busy = true
@@ -531,7 +556,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		// building is the one case busy alone doesn't already cover: NewBuilding sets busy
 		// true with driveFn still nil (nothing to drive yet), so the plain guard below would
 		// stop the spinner on its very first tick — building keeps it alive until AdoptBuilt.
-		if !m.building && (!m.busy || m.done || m.driveFn == nil) {
+		if !m.building && (!m.busy || m.done || m.driver == nil) {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -593,19 +618,20 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 	m.rows = DeriveRows(m.order, m.done, msg.statuses)
 	if msg.err != nil {
 		m.errNotice = redact.Strings(msg.err.Error())
-		if !engine.Retryable(msg.err) {
-			// A terminal failure — engine.Retryable (the same decision cmd/hoist/drive.go's own
-			// driveToCompletion makes) only retries a *engine.StepError on one of
-			// engine.RetryableStep's five steps (Known bug classes: a transient 404/permissions
-			// hiccup on Checks/Comments/an Argo or rollout Get); every other shape — a rejected
-			// push, a failed signing commit, ctx.DeadlineExceeded/Canceled included — is
-			// terminal there and returned immediately, never retried. Before this fix,
-			// onDriveResult scheduled another poll for literally any non-nil err, so this
-			// screen would silently repeat a terminal Act failure every ~2s until poll.Deadline
-			// elapsed instead of stopping and surfacing it as a real failure (Codex review, PR
-			// #50). R still lets the operator retry by hand (handleKey's own Reobserve case
-			// only gates on busy/done, not stopped) — mirroring hoist resume's "re-run to
-			// retry" convention for a promotion a killed process left mid-flight.
+		if !msg.retry {
+			// A terminal failure — msg.retry is Tick.Retry, the same engine.Retryable decision
+			// cmd/hoist/drive.go's own driveToCompletion makes, now made once by the Driver
+			// itself (service.Driver.Step) rather than recomputed here: only a *engine.StepError
+			// on one of engine.RetryableStep's five steps (Known bug classes: a transient
+			// 404/permissions hiccup on Checks/Comments/an Argo or rollout Get) retries; every
+			// other shape — a rejected push, a failed signing commit, ctx.DeadlineExceeded/
+			// Canceled included — is terminal and returned immediately, never retried. Before
+			// this fix, onDriveResult scheduled another poll for literally any non-nil err, so
+			// this screen would silently repeat a terminal Act failure every ~2s until
+			// poll.Deadline elapsed instead of stopping and surfacing it as a real failure
+			// (Codex review, PR #50). R still lets the operator retry by hand (handleKey's own
+			// Reobserve case only gates on busy/done, not stopped) — mirroring hoist resume's
+			// "re-run to retry" convention for a promotion a killed process left mid-flight.
 			m.stopped = true
 			return m, nil
 		}
@@ -615,16 +641,12 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		// an EARLIER, unrelated terminal stop (R bypasses the stopped gate — see its own
 		// comment above), m.stopped was still true from that prior stop, and the automatic
 		// tick this call schedules would immediately be suppressed by the same m.stopped gate
-		// (line ~229's busy||done||stopped||driveFn==nil check) the moment it fires — silently
+		// (line ~229's busy||done||stopped||driver==nil check) the moment it fires — silently
 		// breaking automatic re-polling from here on, even though this particular error is
 		// exactly the transient kind that's supposed to keep retrying on its own (Copilot
 		// review, PR #50 round 5).
 		m.stopped = false
-		var stepErr *engine.StepError
-		if errors.As(msg.err, &stepErr) {
-			return m, m.scheduleTickAfter(stepErr.Step)
-		}
-		return m, m.scheduleTick()
+		return m, m.scheduleTickIn(msg.wait)
 	}
 	m.errNotice = ""
 	m.stopped = false
@@ -635,12 +657,12 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		// Blocked is terminal until an operator resolves the underlying conflict out-of-band
 		// (a same-name branch already on origin with different content, a CI check that
 		// reported failed rather than pending, a rejected approval) — engine.BlockedError's
-		// own doc comment: "retrying will not help". cmd/hoist/wiring.go's DriveFunc
-		// deliberately never surfaces this as msg.err (Blocked is read from the statuses
-		// engine.Status produces, the same way Waiting already is — see DriveFunc's own
-		// comment), so msg.err == nil here and the terminal branch above never runs for it.
-		// Without this check, this screen would otherwise silently repeat the identical
-		// blocked observation and state save every ~2s until poll.Deadline elapsed, exactly
+		// own doc comment: "retrying will not help". service.Driver.Step deliberately never
+		// surfaces this as msg.err (Blocked is read from Tick.Blocked/the statuses it carries,
+		// the same way Waiting already is — see the Driver interface's own comment), so
+		// msg.err == nil here and the terminal branch above never runs for it. Without this
+		// check, this screen would otherwise silently repeat the identical blocked observation
+		// and state save every ~2s until poll.Deadline elapsed, exactly
 		// the "stuck polling a promotion nothing will unstick" failure the msg.err-driven
 		// terminal check above already exists to prevent for a StepError — Blocked just
 		// never goes through that path (Codex review, PR #50 round 4). R still lets the
@@ -649,7 +671,7 @@ func (m Model) onDriveResult(msg driveResultMsg) (Model, tea.Cmd) {
 		m.stopped = true
 		return m, nil
 	}
-	return m, m.scheduleTick()
+	return m, m.scheduleTickIn(msg.wait)
 }
 
 // renewDeadline rebuilds the drive context for another poll.Deadline from now (or an
@@ -668,40 +690,26 @@ func (m Model) renewDeadline() Model {
 	return m
 }
 
-// scheduleTick waits pollInterval's answer for whichever step is currently active before
-// firing the next poll (AGENTS.md invariant 4: the actual waiting lives in the caller's own
-// loop, never inside a Step's Act — this is that loop's TUI-driven twin).
-func (m Model) scheduleTick() tea.Cmd {
-	return tea.Tick(m.tickDelay(""), func(time.Time) tea.Msg { return tickMsg{} })
+// scheduleTickIn waits wait — Tick.Wait, the service.Driver's own engine.PollInterval
+// computation for whichever step it just stopped at (AGENTS.md invariant 4: the actual waiting
+// lives in the caller's own loop, never inside a Step's Act — this is that loop's TUI-driven
+// twin) — before firing the next poll. minTick's floor and the deadline cap are applied here,
+// at this screen's own boundary, exactly as tickDelay applied them before wait was computed by
+// the Driver: engine.PollInterval's raw answer (including a configured zero) is a screen-level
+// concern the Driver has no reason to know about, and a screen must never spin-tick on it (#59,
+// #61, minTick's own doc comment).
+func (m Model) scheduleTickIn(wait time.Duration) tea.Cmd {
+	return tea.Tick(m.capToDeadline(minTick(wait)), func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// scheduleTickAfter is scheduleTick for a retry after a Status error: Status returns only the
-// rows before the step whose Observe failed, so ActiveStep finds nothing and the interval
-// would fall back to the last step's — 2s against a 30s approval poll (#61). The failing
-// step is known from the error itself, and names the cadence.
-func (m Model) scheduleTickAfter(failed engine.StepName) tea.Cmd {
-	return tea.Tick(m.tickDelay(failed), func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-// tickDelay is the wait before the next poll: the configured interval for the active step
-// (or for failed, when given), capped at what is left of the deadline (#59) — a 1s deadline
-// with a 20s CI interval used to report 19s late. Never below zero; a passed deadline polls
-// at once so the deadline error surfaces instead of a sleep hiding it.
-func (m Model) tickDelay(failed engine.StepName) time.Duration {
-	phase := failed
-	if phase == "" {
-		if active, ok := ActiveStep(m.rows); ok {
-			phase = active
-		} else if len(m.order) > 0 {
-			phase = m.order[len(m.order)-1]
-		}
-	}
-	d := minTick(engine.PollInterval(engine.PollIntervals{
-		CI: m.poll.CI, Approval: m.poll.Approval, Argo: m.poll.Argo, Rollout: m.poll.Rollout,
-	}, phase))
+// capToDeadline is the deadline half of scheduleTickIn's own doc comment, split out so a test
+// can drive it directly on a duration rather than only indirectly through a tea.Tick's own
+// opaque delay: never below zero, and never longer than what is left of m.deadlineAt (#59) — a
+// 1s deadline with a 20s wait used to sleep the full 20s and report the deadline 19s late.
+func (m Model) capToDeadline(d time.Duration) time.Duration {
 	if !m.deadlineAt.IsZero() {
 		if left := m.deadlineAt.Sub(m.now()); left < d {
-			d = max(left, 0)
+			return max(left, 0)
 		}
 	}
 	return d
@@ -743,7 +751,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.notice = "no PR to open yet"
 		return m, nil
 	case key.Matches(msg, m.keys.Reobserve):
-		if m.driveFn == nil {
+		if m.driver == nil {
 			m.notice = "nothing to re-observe (read-only)"
 			return m, nil
 		}
@@ -766,7 +774,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// (the same stub state) — emitting AbortMsg here would hand a future handler
 		// nothing it could safely act on (PR #39 review finding #2: abort fired
 		// unconditionally, risking an empty-ID abort being mishandled downstream).
-		if m.driveFn == nil || m.state.ID == "" {
+		if m.driver == nil || m.state.ID == "" {
 			m.notice = "nothing to abort — this promotion isn't being driven yet"
 			return m, nil
 		}
@@ -776,7 +784,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Same emptiness guard as Abort above — a UI politeness check only, since the root's
 		// real handler re-observes and refuses authoritatively regardless (AbandonMsg's own
 		// doc comment).
-		if m.driveFn == nil || m.state.ID == "" {
+		if m.driver == nil || m.state.ID == "" {
 			m.notice = "nothing to abandon — this promotion isn't being driven yet"
 			return m, nil
 		}
@@ -904,18 +912,21 @@ func (m Model) confirmAbandonAgreed() bool {
 	return v
 }
 
-// ApplyCINoneOverride is what the root calls in answer to OverrideCINoneMsg: it sets
-// CINoneOverride on this screen's own copy of the state — the state every driveCmd hands to
-// DriveFunc, so the next engine.Drive's CIGreenStep.Observe reads it (and the drive's own
-// save persists it, exactly as `hoist resume --override-ci-none` does) — and re-drives at
-// once, the way R does. Only this screen's promotion is touched: no other state, file or
-// screen sees the flag. A read-only screen (driveFn nil) can record the wish but not act on
-// it, and says so. A busy or finished screen refuses before it records: the flag is only
-// ever acted on by the re-drive this method schedules, so recording it on a screen that
-// schedules none would carry an override no engine step ever reads — and the next R would
-// then apply it silently, without the c gesture that is meant to be the operator's decision.
+// ApplyCINoneOverride is what the root calls in answer to OverrideCINoneMsg: it re-drives at
+// once, the way R does, but with the Driver's OverrideCINone called first — off the Update call
+// stack, inside the same goroutine as the re-drive's own Step call (stepCmd(true)), so the
+// set-then-step sequence is atomic under the Driver's own mutex and nothing running on Update
+// ever blocks waiting for it. The next engine.DriveStatus walk's CIGreenStep.Observe reads the
+// flag once set (and its own save persists it, exactly as `hoist resume --override-ci-none`
+// does). Only this screen's promotion is touched: no other state, file or screen sees the flag.
+// A read-only screen (driver nil) has no Driver to record the wish on, so it records it on this
+// screen's own display copy instead and says it cannot act on it. A busy or finished screen
+// refuses before it does anything: the flag is only ever acted on by the re-drive this method
+// schedules, so recording it on a screen that schedules none would carry an override no engine
+// step ever reads — and the next R would then apply it silently, without the c gesture that is
+// meant to be the operator's decision.
 func (m Model) ApplyCINoneOverride() (Model, tea.Cmd) {
-	if m.driveFn == nil {
+	if m.driver == nil {
 		m.state.CINoneOverride = true
 		m.notice = "override recorded, but nothing is driving this promotion here (read-only) — run `hoist resume " + m.state.ID + " --override-ci-none`"
 		return m, nil
@@ -927,14 +938,13 @@ func (m Model) ApplyCINoneOverride() (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	m.state.CINoneOverride = true
 	m.stopped = false
 	if m.ctx != nil && m.ctx.Err() != nil {
 		m = m.renewDeadline()
 	}
 	m.notice = "treating no checks as green for this promotion — re-observing"
 	m.busy = true
-	return m, tea.Batch(m.driveCmd(), m.spinner.Tick)
+	return m, tea.Batch(m.stepCmd(true), m.spinner.Tick)
 }
 
 // SetSize records the terminal size. The log is a viewport sized to what the frame leaves

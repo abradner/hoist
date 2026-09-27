@@ -11,31 +11,47 @@ import (
 
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
 )
 
-// recordingDrive is a flight.DriveFunc that remembers the state each call received — the only
-// channel through which an override can reach engine.Drive and CIGreenStep. It answers the
-// way the real engine would under ci.none: prompt: Blocked on the ci.none reason until the
-// state carries CINoneOverride, satisfied after.
+// recordingDrive is a flight.Driver that remembers its own state each time Step is called — the
+// only channel through which an override can reach CIGreenStep's own contract in this fake. It
+// answers the way the real engine would under ci.none: prompt: Blocked on the ci.none reason
+// until the state carries CINoneOverride, satisfied after. state is the Driver's own state,
+// exactly as a real service.Driver holds one internally rather than taking it as a Step
+// parameter (see flight.Driver's own doc comment) — the test seeds it once, at construction.
 type recordingDrive struct {
 	mu      sync.Mutex
 	seen    []engine.PromotionState
 	blocked string
+	state   engine.PromotionState
 }
 
-func (r *recordingDrive) fn() flight.DriveFunc {
-	return func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.seen = append(r.seen, s)
-		obs := engine.Observation{Blocked: r.blocked}
-		if s.CINoneOverride {
-			obs = engine.Observation{Satisfied: true, Detail: "overridden"}
-		}
-		return s, false, []engine.StepStatus{{Step: engine.StepCIGreen, Observation: obs}}, nil
+func (r *recordingDrive) Step(context.Context) (service.Tick, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, r.state)
+	obs := engine.Observation{Blocked: r.blocked}
+	if r.state.CINoneOverride {
+		obs = engine.Observation{Satisfied: true, Detail: "overridden"}
 	}
+	return service.Tick{State: r.state, Statuses: []engine.StepStatus{{Step: engine.StepCIGreen, Observation: obs}}}, nil
 }
+
+func (r *recordingDrive) State() engine.PromotionState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state
+}
+
+func (r *recordingDrive) OverrideCINone() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state.CINoneOverride = true
+}
+
+func (r *recordingDrive) fn() flight.Driver { return r }
 
 // ciNoneBlocked is CIGreenStep's own ci.none=prompt reason, produced by the step rather than
 // copied, so the test fails if the wording drifts from what the flight screen recognises.
@@ -89,7 +105,7 @@ func (r *recordingDrive) last() (engine.PromotionState, int) {
 // — the next DriveFunc call carries CINoneOverride — and ignores a message naming any other
 // promotion, with a notice and no drive.
 func TestFlightOverrideCINoneMsgRedrivesThatPromotion(t *testing.T) {
-	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234")}
+	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234"), state: engine.PromotionState{ID: "abcd1234"}}
 	root := sized(t).(Model)
 	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, drv.fn())}
 	root = root.push(fs)

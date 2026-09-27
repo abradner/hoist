@@ -14,16 +14,16 @@ import (
 // no-op-with-notice, never opening the confirm dialog, when there is nothing real to abandon.
 func TestAbandonKeyNoticeWhenNotDriving(t *testing.T) {
 	cases := []struct {
-		name    string
-		state   engine.PromotionState
-		driveFn DriveFunc
+		name   string
+		state  engine.PromotionState
+		driver Driver
 	}{
 		{"nil driveFn, non-empty ID", fixtureState(), nil},
-		{"real driveFn, empty ID", engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"}, (&stubDrive{}).fn()},
+		{"real driveFn, empty ID", engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"}, (&stubDrive{}).fn(engine.PromotionState{SourceEnv: "app-staging", TargetEnv: "app-production"})},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(tc.state, PollDurations{}, tc.driveFn)
+			m := New(tc.state, PollDurations{}, tc.driver)
 			m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
 			m, cmd := m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
 			if cmd != nil {
@@ -46,7 +46,7 @@ func TestAbandonKeyRefusedOnADoneScreen(t *testing.T) {
 		st(engine.StepBranched, engine.Observation{Satisfied: true}),
 		st(engine.StepRolledOut, engine.Observation{Satisfied: true}),
 	}}
-	m := New(fixtureState(), PollDurations{}, drv.fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	m = runInit(t, m)
 	if !m.done {
 		t.Fatal("fixture precondition: the screen should be done")
@@ -68,7 +68,7 @@ func TestAbandonKeyRefusedOnADoneScreen(t *testing.T) {
 // back through GetValue, never a bool the widget's own Update happens to touch — driven only
 // through real keypresses, never by setting m.confirmAbandonValue directly.
 func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
-	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
 	if !m.confirmingAbandon {
 		t.Fatal("X did not open the confirmation")
@@ -87,7 +87,7 @@ func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
 	}
 
 	// The asymmetry that makes the above mean something: answering no must emit nothing.
-	n := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	n := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	n, _ = n.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
 	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if _, cmd := n.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
@@ -99,7 +99,7 @@ func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
 // round-3 fix: Esc leaves the dialog without answering it, rather than falling into huh's own
 // widget update (which swallows Esc).
 func TestAbandonEscClosesDialogWithoutEmitting(t *testing.T) {
-	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn()).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m := New(fixtureState(), PollDurations{}, (&stubDrive{}).fn(fixtureState())).SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
 	if !m.confirmingAbandon {
 		t.Fatal("fixture precondition: X should open the confirm dialog")

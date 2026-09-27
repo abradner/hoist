@@ -633,7 +633,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	a, _, argoErr := newArgo(eff.kubeContext)
 	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
-		Start:      buildStartPromotion(eff, r, viewDir, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr)),
+		Start:      buildStartPromotion(eff, r, viewDir, newGit, f, forgeErr, a, ro, errors.Join(argoErr, rolloutErr), cfg.Poll),
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,

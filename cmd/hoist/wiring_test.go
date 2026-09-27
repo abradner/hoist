@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/app"
+	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
@@ -66,20 +68,20 @@ func buildEffForFixture(t *testing.T, cfgPath string) effective {
 // own grace period hasn't elapsed yet on the very first call that reaches it (so the whole
 // pipeline can complete branch/commit/push/PR-open and the merge itself within one later call,
 // with no separate opportunity to react in between).
-func driveToDone(t *testing.T, clone string, driveFn func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error), start engine.PromotionState, maxIters int) engine.PromotionState {
+func driveToDone(t *testing.T, clone string, driveFn flight.Driver, start engine.PromotionState, maxIters int) engine.PromotionState {
 	t.Helper()
 	cur := start
 	var lastErr error
 	pushed := false
 	for i := 0; i < maxIters; i++ {
-		next, done, _, err := driveFn(context.Background(), cur)
-		cur = next
+		tick, err := driveFn.Step(context.Background())
+		cur = tick.State
 		lastErr = err
 		if !pushed && cur.CommitSHA != "" {
 			runGitHost(t, clone, "push", "-q", "origin", cur.CommitSHA+":refs/heads/"+cur.Base)
 			pushed = true
 		}
-		if done {
+		if tick.Done {
 			return cur
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -109,7 +111,7 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 	state, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("startPromotion: %v", err)
@@ -196,7 +198,7 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 
 	var mu sync.Mutex
 	var lines []string
@@ -280,7 +282,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse a conflicting in-flight promotion for the same env")
@@ -318,7 +320,7 @@ func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal with no github configured")
@@ -369,7 +371,7 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 	_, driveFn, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil {
 		t.Fatal("expected startPromotion to refuse an all-NoOp plan")
@@ -416,7 +418,7 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	}
 
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 	state1, driveFn1, err := start(context.Background(), plan, app.StartOpts{}, nil)
 	if err != nil {
 		t.Fatalf("first startPromotion call: %v", err)
@@ -516,7 +518,7 @@ func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, ro, cerr := tuiCluster(t)
-	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, f, nil, a, ro, cerr, config.PollConfig{})
 
 	state, _, err := start(context.Background(), plan, app.StartOpts{Direct: true, Confirmed: true}, nil)
 	if err != nil {
@@ -577,7 +579,7 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	}
 	a, ro, cerr := tuiCluster(t)
 	forgeErr := errors.New("gh: not logged in")
-	start := buildStartPromotion(eff, r, eff.repo, newGit, nil, forgeErr, a, ro, cerr)
+	start := buildStartPromotion(eff, r, eff.repo, newGit, nil, forgeErr, a, ro, cerr, config.PollConfig{})
 	_, _, err = start(context.Background(), plan, app.StartOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)

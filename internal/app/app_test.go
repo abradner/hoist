@@ -63,6 +63,49 @@ func testPlanFunc(promotable []string, envs config.EnvsConfig) plan.Func {
 	}
 }
 
+// fixedDriver is a flight.Driver whose Step always answers Done with the fixed state a test
+// configured — the app-layer fake for a Start/Resume closure that used to build a trivial
+// identity-echoing flight.DriveFunc (`return s, true, nil, nil`). A real Driver owns its own
+// state independently of what a caller passes each Step call (see flight.Driver's own doc
+// comment), so this fake's state is fixed at construction rather than threaded through. Every
+// current caller wants exactly this "done immediately, no error" shape; a test that needs
+// something else (an error, statuses, blocking) uses funcDriver below instead.
+type fixedDriver struct {
+	state engine.PromotionState
+}
+
+func driverAlways(state engine.PromotionState) flight.Driver {
+	return &fixedDriver{state: state}
+}
+
+func (d *fixedDriver) Step(context.Context) (service.Tick, error) {
+	return service.Tick{State: d.state, Done: true}, nil
+}
+func (d *fixedDriver) State() engine.PromotionState { return d.state }
+func (d *fixedDriver) OverrideCINone()              { d.state.CINoneOverride = true }
+
+// funcDriver adapts a plain Step function to flight.Driver, for a test whose fake needs a custom
+// body (calling a progress callback, blocking on ctx, counting calls) rather than a fixed
+// answer — the app-layer twin of internal/app/flight's own hungDrive/stubDrive test fakes.
+type funcDriver struct {
+	StepFunc     func(ctx context.Context) (service.Tick, error)
+	StateFunc    func() engine.PromotionState
+	OverrideFunc func()
+}
+
+func (f funcDriver) Step(ctx context.Context) (service.Tick, error) { return f.StepFunc(ctx) }
+func (f funcDriver) State() engine.PromotionState {
+	if f.StateFunc != nil {
+		return f.StateFunc()
+	}
+	return engine.PromotionState{}
+}
+func (f funcDriver) OverrideCINone() {
+	if f.OverrideFunc != nil {
+		f.OverrideFunc()
+	}
+}
+
 // sized returns the root model after Init and the first WindowSizeMsg, as a running
 // program would deliver them — no terminal involved. Promotion is the zero value: Start and
 // OpenURL both nil, matching a caller that hasn't wired cmd/hoist's real adaptors in yet (see
@@ -299,15 +342,12 @@ func TestStartMsgWithNoStartPromotionShowsNotice(t *testing.T) {
 func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	called := false
-	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		return s, true, nil, nil
-	}
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		if p.SourceEnv != "app-staging" || p.TargetEnv != "app-production" {
 			t.Errorf("startPromotion called with unexpected plan: %+v", p)
 		}
-		return wantState, stubDriveFn, nil
+		return wantState, driverAlways(wantState), nil
 	}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
@@ -351,20 +391,20 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // AdoptBuilt → driveCmd path, the same sequence a real cmd/hoist wiring drives — proving app.go
 // itself never closes the channel out from under a drive that is still going to use it.
 func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
 		// Preflight: exactly what buildStartPromotion's own report(...) calls do.
 		progress("checking your checkout against origin/main")
 		progress("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
-		return engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv},
-			func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-				// Drive: exactly what driveFuncFor's own wrapped save does — call the SAME
-				// progress closure the preflight above just used, from a call that only
-				// happens after the build goroutine that constructed it has already
-				// returned. This is the exact shape that panicked.
-				progress("branched: acted")
-				s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: "acted"})
-				return s, true, nil, nil
-			}, nil
+		s := engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv}
+		return s, funcDriver{StepFunc: func(context.Context) (service.Tick, error) {
+			// Drive: exactly what newDriverFor's own wrapped save does — call the SAME
+			// progress closure the preflight above just used, from a call that only
+			// happens after the build goroutine that constructed it has already
+			// returned. This is the exact shape that panicked.
+			progress("branched: acted")
+			s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: "acted"})
+			return service.Tick{State: s, Done: true}, nil
+		}}, nil
 	}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
@@ -400,7 +440,7 @@ func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 // mirrors TestDriveCmdStampsCurrentGen at the flight layer (internal/app/flight/model_test.go),
 // one layer up the stack, guarding the build step instead of the drive step.
 func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -428,11 +468,8 @@ func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
 // pushed or adopted.
 func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
-	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		return s, true, nil, nil
-	}
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
-		return wantState, stubDriveFn, nil
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+		return wantState, driverAlways(wantState), nil
 	}}
 	m := sizedWithPromotion(t, promo)
 
@@ -482,16 +519,13 @@ func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 	first := engine.PromotionState{ID: "first-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	second := engine.PromotionState{ID: "second-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
-	stubDriveFn := func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		return s, true, nil, nil
-	}
 	calls := 0
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		calls++
 		if calls == 1 {
-			return first, stubDriveFn, nil
+			return first, driverAlways(first), nil
 		}
-		return second, stubDriveFn, nil
+		return second, driverAlways(second), nil
 	}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
@@ -559,7 +593,7 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -610,7 +644,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -676,7 +710,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 	var got StartOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
@@ -707,7 +741,7 @@ func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 func TestStartMsgPRModeIsNotDirect(t *testing.T) {
 	var got StartOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
@@ -757,7 +791,7 @@ func TestPromotionBuiltMsgNilDriveFnShowsNotice(t *testing.T) {
 // pushed) rather than crashing.
 func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	wantErr := errors.New("promotion existing-id targeting app-production is still in flight (at pr-opened: open); run `hoist resume existing-id` instead of starting a second one")
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{}, nil, wantErr
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -788,7 +822,7 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 // flight.Model.driveCmd's own DriveFunc call, so this returns with ctx's deadline error instead
 // of the goroutine blocking indefinitely.
 func TestStartMsgBoundedByPollDeadline(t *testing.T) {
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		<-ctx.Done()
 		return engine.PromotionState{}, nil, ctx.Err()
 	}
@@ -825,7 +859,7 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 // startPromotion call's own context, not just its result.
 func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
 		return engine.PromotionState{}, nil, ctx.Err()
@@ -867,7 +901,7 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	firstErr := make(chan error, 1)
 	callCount := 0
-	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		callCount++
 		if callCount == 1 {
 			<-ctx.Done()
@@ -915,12 +949,12 @@ func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 	const total = 200 * time.Millisecond
 	const buildSleep = 150 * time.Millisecond // leaves ~50ms of the budget for drive
-	hungDrive := func(ctx context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+	hungDrive := funcDriver{StepFunc: func(ctx context.Context) (service.Tick, error) {
 		<-ctx.Done()
-		return s, false, nil, ctx.Err()
-	}
+		return service.Tick{}, ctx.Err()
+	}}
 	promo := Promotion{
-		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 			time.Sleep(buildSleep)
 			return engine.PromotionState{ID: "abcd1234"}, hungDrive, nil
 		},
@@ -969,7 +1003,7 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
 	const secret = "ghp_totallysecrettoken1234567890"
 	redact.Register(secret)
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{}, nil, fmt.Errorf("push failed: authentication using %s rejected", secret)
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -1149,11 +1183,11 @@ func TestFlightAbortMsgReturnsToMatrix(t *testing.T) {
 // AbortMsg actually cancels the popped screen's own drive context, not just its message.
 func TestFlightAbortMsgCancelsInFlightDriveCmd(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+	hung := funcDriver{StepFunc: func(ctx context.Context) (service.Tick, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
-		return engine.PromotionState{}, false, nil, ctx.Err()
-	}
+		return service.Tick{}, ctx.Err()
+	}}
 	root := sized(t).(Model)
 	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}
 	initCmd := fs.Init()
@@ -1184,11 +1218,11 @@ func TestFlightAbortMsgCancelsInFlightDriveCmd(t *testing.T) {
 // exact same gap.
 func TestFlightBackMsgCancelsInFlightDriveCmd(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
+	hung := funcDriver{StepFunc: func(ctx context.Context) (service.Tick, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
-		return engine.PromotionState{}, false, nil, ctx.Err()
-	}
+		return service.Tick{}, ctx.Err()
+	}}
 	root := sized(t).(Model)
 	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}
 	initCmd := fs.Init()
@@ -1546,7 +1580,7 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var got StartOpts
 			called := false
-			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 				called, got = true, opts
 				return engine.PromotionState{}, nil, nil
 			}}
@@ -1681,11 +1715,9 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 				{Step: engine.StepApproved, Observation: engine.Observation{Waiting: true}},
 			}, nil)}, nil
 		},
-		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.DriveFunc, error) {
+		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.Driver, error) {
 			resumed = id
-			return parked, func(_ context.Context, s engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-				return s, true, nil, nil
-			}, nil
+			return parked, driverAlways(parked), nil
 		},
 	}
 	r, err := gitops.Discover(fixtureRoot, "")

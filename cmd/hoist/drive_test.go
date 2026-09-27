@@ -11,12 +11,18 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
-	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
-	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/image"
-	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// runDriveForTest is driveToCompletion's own successor (service.Driver.Run) wired exactly as
+// promote.go/deploy.go/resume.go now wire it, kept as one helper here so this file's own
+// waiting/heartbeat tests (runHooksForCLI's actual consumers) read the same as before this
+// PR's replacement of the old direct driveToCompletion call.
+func runDriveForTest(ctx context.Context, steps []engine.Step, s *engine.PromotionState, poll config.PollConfig, stderr io.Writer) error {
+	d := service.NewDriver(steps, s, nil, pollIntervals(poll), service.DriverHooks{})
+	return d.Run(ctx, runHooksForCLI(stderr))
+}
 
 // TestPollIntervalsConvertsEveryKnob is the CLI-boundary regression: pollIntervals must carry
 // every one of config.PollConfig's four knobs into engine.PollIntervals unchanged — the actual
@@ -33,96 +39,6 @@ func TestPollIntervalsConvertsEveryKnob(t *testing.T) {
 	want := engine.PollIntervals{CI: 11 * time.Second, Approval: 22 * time.Second, Argo: 33 * time.Second, Rollout: 44 * time.Second}
 	if got != want {
 		t.Errorf("pollIntervals(%+v) = %+v, want %+v", poll, got, want)
-	}
-}
-
-// TestDriveToCompletionRetriesTransientRolloutErrors is engine.RetryableStep's sibling end-to-end
-// regression, exercising the actual loop rather than just the classification function: a
-// RolledOutStep whose Rollout.Deployment call always fails with a transient (non-ErrNotFound)
-// error must make driveToCompletion retry at poll.rollout until ctx's deadline elapses — never
-// abort on the first hiccup. The observable proof is the returned error's *type*: with the fix,
-// driveToCompletion keeps calling Drive until ctx.Done() fires, so the loop's own
-// context.DeadlineExceeded is what comes back; without it (retryableStep not listing
-// StepRolledOut), the very first *engine.StepError from Drive would be returned immediately
-// instead, after exactly one call to Rollout.Deployment.
-func TestDriveToCompletionRetriesTransientRolloutErrors(t *testing.T) {
-	ref, err := image.Parse("ghcr.io/example/app:v2@sha256:" + strings.Repeat("1", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &engine.PromotionState{
-		TargetEnv: "app-production",
-		MergeSHA:  "deadbeef",
-		Edits: []gitops.Edit{{
-			Occurrence: gitops.Occurrence{
-				File: "cluster/apps/app-production/app/deployment.yaml", Kind: "Deployment", Name: "app", Container: "app",
-			},
-			New: ref,
-		}},
-	}
-	ro := &rollout.Fake{DeploymentErr: errors.New("transient: connection reset")}
-	steps := []engine.Step{engine.RolledOutStep{Rollout: ro}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancel()
-	poll := config.PollConfig{Rollout: config.Duration(5 * time.Millisecond)}
-	err = driveToCompletion(ctx, steps, s, func(*engine.PromotionState) error { return nil }, poll, io.Discard)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want context.DeadlineExceeded (a transient rollout error must be retried until poll.deadline, not aborted on the first hiccup)", err)
-	}
-	if len(ro.Calls) < 2 {
-		t.Fatalf("Rollout.Deployment called %d time(s), want at least 2 (proves the retry loop actually retried instead of returning after one call)", len(ro.Calls))
-	}
-}
-
-// TestDriveToCompletionDoesNotRetryArgoRefreshNotFound is Copilot's PR #51 review finding:
-// ArgoRefreshedStep.Observe already Blocks cleanly the moment its own Get call reports
-// argo.ErrNotFound, so that race (an Application deleted or moved) never reaches this loop as a
-// plain StepError at all — but Act's own Refresh call can independently discover the SAME
-// absence (a race between Observe succeeding and Act running moments later), and Drive always
-// wraps an Act error as a plain *StepError, with no way for Act to produce a *BlockedError of
-// its own. Before isNotFoundErr, that StepError's step name (StepArgoRefreshed) was on the
-// retryable list unconditionally, so this raced-Refresh case silently retried every poll.argo
-// interval instead of reporting immediately — this proves it does not: the fake's Refresh call
-// count stays at exactly one, and the loop returns right away rather than running out the clock
-// on ctx's deadline.
-func TestDriveToCompletionDoesNotRetryArgoRefreshNotFound(t *testing.T) {
-	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
-	s := &engine.PromotionState{
-		TargetEnv:     "app-production",
-		MergeSHA:      "deadbeef",
-		ArgoNamespace: "argocd",
-		ArgoApps:      []string{"app-app-production"},
-		History:       []engine.HistoryEntry{{Step: engine.StepMerged, At: time.Now().Add(-time.Minute)}},
-	}
-	fake := &argo.Fake{RefreshErr: argo.ErrNotFound}
-	// Observe's own Get must succeed and report "not yet reconciled" (never Blocked/Satisfied)
-	// so Drive actually proceeds to call Act — the race this test exercises only exists on the
-	// path through Act, not the one Observe already guards on its own.
-	fake.SetStatus(app, argo.Status{ReconciledAt: time.Now().Add(-time.Hour)})
-	steps := []engine.Step{engine.ArgoRefreshedStep{Argo: fake}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	poll := config.PollConfig{Argo: config.Duration(5 * time.Millisecond)}
-	start := time.Now()
-	err := driveToCompletion(ctx, steps, s, func(*engine.PromotionState) error { return nil }, poll, io.Discard)
-	elapsed := time.Since(start)
-
-	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want an immediate terminal error, not a retry loop that ran out the deadline", err)
-	}
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("driveToCompletion took %s, want well under the 200ms deadline (a genuine ErrNotFound must not be retried)", elapsed)
-	}
-	refreshCalls := 0
-	for _, c := range fake.Calls {
-		if strings.HasPrefix(c, "Refresh ") {
-			refreshCalls++
-		}
-	}
-	if refreshCalls != 1 {
-		t.Fatalf("Refresh called %d time(s), want exactly 1 (a retry loop would call it again every poll.argo interval)", refreshCalls)
 	}
 }
 
@@ -156,7 +72,7 @@ func TestDriveToCompletionPrintsEachWaitingReasonOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 	poll := config.PollConfig{Approval: config.Duration(5 * time.Millisecond)}
-	err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut)
+	err := runDriveForTest(ctx, []engine.Step{step}, s, poll, &errOut)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
@@ -230,7 +146,7 @@ func TestDriveToCompletionHeartbeatsInsideALongPollSleep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
-	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+	if err := runDriveForTest(ctx, []engine.Step{step}, s, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 	if step.calls != 1 {
@@ -255,7 +171,7 @@ func TestDriveToCompletionDoesNotHeartbeatOnARetriedError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 	poll := config.PollConfig{Approval: config.Duration(time.Hour)}
-	if err := driveToCompletion(ctx, []engine.Step{step}, s, nil, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
+	if err := runDriveForTest(ctx, []engine.Step{step}, s, poll, &errOut); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 	if strings.Contains(errOut.String(), "still ci-green") || strings.Contains(errOut.String(), "hoist: ci-green:") {

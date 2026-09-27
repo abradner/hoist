@@ -49,8 +49,8 @@ import (
 // makes a signed commit possible at all), and checkNoMissingOccurrenceAtFreshBase's own
 // fresh-base check is a separate, later-timed freshness check unrelated to which content the
 // plan itself was built from.
-func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error) app.StartPromotionFunc {
-	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.DriveFunc, error) {
+func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Git, f forge.Forge, forgeErr error, a argo.Argo, ro rollout.Rollout, clusterErr error, poll config.PollConfig) app.StartPromotionFunc {
+	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
 		// report is progress with the nil check made once, here, rather than at every call
 		// site below — mirrors onWaiting's own nil-safety convention throughout
 		// internal/engine (a nil hook is exactly as valid as a real one, never a special
@@ -233,52 +233,30 @@ func buildStartPromotion(eff effective, r *gitops.Repo, viewDir string, g git.Gi
 		// caller narrowing it. Confirmed comes from the screen that ran the gesture.
 		steps := engine.StepsFor(s, g, f, a, ro, eff.cfg.Envs.Production, opts.Confirmed, onWaiting)
 
-		return *s, driveFuncFor(steps, save, progress), nil
+		return *s, newDriverFor(steps, s, save, poll, progress), nil
 	}
 }
 
-// driveFuncFor is the flight.DriveFunc both a confirmed plan and a resumed promotion drive
-// through: one engine.Drive, then engine.Status for the full step list. Waiting and Blocked
-// are read from statuses, not surfaced as err — see flight.DriveFunc's own doc comment. Any
-// other error from Drive (a plumbing hiccup on a retryable step, or a terminal Act/Observe
-// failure) is a genuine failure and is returned as err.
+// newDriverFor is the service.Driver both a confirmed plan and a resumed promotion drive
+// through — one engine.DriveStatus walk per Step call (service.Driver's own doc comment), in
+// place of the old driveFuncFor pair (engine.Drive then always engine.Status). It satisfies
+// flight.Driver directly: Step, State and OverrideCINone are exactly what that screen's own
+// interface needs, and cmd/hoist's own driving commands call Run for the rest.
 //
-// progress, when non-nil, turns engine.Drive's own per-step save calls into a live line the
+// progress, when non-nil, turns every step DriveStatus actually saves into a live line the
 // flight screen shows as it happens (defect C: previously the screen only learned anything
 // once a WHOLE Drive call returned — and Drive can walk through several already-satisfied or
 // newly-acted steps in one call before it stops, so a first drive that branches, commits,
 // pushes and opens a PR before hitting CI's own Waiting could render nothing at all for the
 // whole time that took). save's own persistence still happens on every call; progress is
-// layered on top of it, never instead of it. buildStartPromotion passes the operator's
-// preflight progress callback through unchanged so preflight and drive read as one log; the
-// TUI's resumed-promotion path (buildInFlightFuncs.Resume) has no progress channel wired yet
-// and passes nil here, same as before this change — its own live streaming is a natural,
-// separately-scoped followup once this lands.
-func driveFuncFor(steps []engine.Step, save func(*engine.PromotionState) error, progress func(string)) flight.DriveFunc {
-	if progress != nil {
-		wrapped := save
-		save = func(st *engine.PromotionState) error {
-			if n := len(st.History); n > 0 {
-				h := st.History[n-1]
-				progress(fmt.Sprintf("%s: %s", h.Step, h.Detail))
-			}
-			return wrapped(st)
-		}
-	}
-	return func(ctx context.Context, cur engine.PromotionState) (engine.PromotionState, bool, []engine.StepStatus, error) {
-		next := cur
-		driveErr := engine.Drive(ctx, steps, &next, save)
-		var outErr error
-		var blocked *engine.BlockedError
-		if driveErr != nil && !errors.Is(driveErr, engine.ErrWaiting) && !errors.As(driveErr, &blocked) {
-			outErr = driveErr
-		}
-		done, statuses, statusErr := engine.Status(ctx, steps, &next)
-		if statusErr != nil && outErr == nil {
-			outErr = statusErr
-		}
-		return next, done, statuses, outErr
-	}
+// layered on top of it, never instead of it (service.NewDriver's own DriverHooks.Progress).
+// buildStartPromotion passes the operator's preflight progress callback through unchanged so
+// preflight and drive read as one log; the TUI's resumed-promotion path
+// (buildInFlightFuncs.Resume) has no progress channel wired yet and passes nil here, same as
+// before this change — its own live streaming is a natural, separately-scoped followup once
+// this lands.
+func newDriverFor(steps []engine.Step, s *engine.PromotionState, save func(*engine.PromotionState) error, poll config.PollConfig, progress func(string)) *service.Driver {
+	return service.NewDriver(steps, s, save, pollIntervals(poll), service.DriverHooks{Progress: progress})
 }
 
 // buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10): List
@@ -309,7 +287,7 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			}
 			return out, nil
 		},
-		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.DriveFunc, error) {
+		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.Driver, error) {
 			states, err := engine.ListStates()
 			if err != nil {
 				return engine.PromotionState{}, nil, err
@@ -351,10 +329,10 @@ func buildInFlightFuncs(cfg *config.Config, kubeOverride string) app.InFlight {
 			// promotion through AllSteps would push its branch and open a PR. Confirmed is
 			// true because the state file exists only because the operator already confirmed.
 			steps := engine.StepsFor(s, newGit, f, a, ro, rc.Envs.Production, true, nil)
-			// No live progress channel wired for a resumed promotion yet — driveFuncFor's
-			// own doc comment names this as the scoped-out follow-up; nil here is unchanged
-			// from before this PR.
-			return *s, driveFuncFor(steps, save, nil), nil
+			// No live progress channel wired for a resumed promotion yet — newDriverFor's own
+			// doc comment names this as the scoped-out follow-up; nil here is unchanged from
+			// before this PR.
+			return *s, newDriverFor(steps, s, save, cfg.Poll, nil), nil
 		},
 	}
 }
