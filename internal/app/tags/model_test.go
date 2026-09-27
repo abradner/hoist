@@ -328,7 +328,7 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 
 func TestSpaceEmitsSelectedMsgOnceMetaLoaded(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
-	_, cmd := m.Update(uitest.Key("space"))
+	_, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
 		t.Fatal("expected a command")
 	}
@@ -429,7 +429,7 @@ func TestSelectCurrentDistinguishesFailedFromStillLoading(t *testing.T) {
 		t.Fatal("fixture precondition: v1's Config call must have failed")
 	}
 
-	m2, cmd := m.Update(uitest.Key("space"))
+	m2, cmd := m.Update(uitest.Key("enter"))
 	if cmd != nil {
 		t.Fatalf("space on a permanently-failed row must not emit a message (no digest to promote), got a command: %v", cmd())
 	}
@@ -465,10 +465,6 @@ func TestFilterNarrowsRowsAndResetsCursor(t *testing.T) {
 	}
 }
 
-// TestDirectKeyNotOfferedForProduction is the UI-side half of invariant 5: pressing D on a
-// production target must never open the confirm dialog or emit DirectRequestedMsg — it is a
-// politeness notice only, since internal/engine.DirectCommitGateStep is what actually enforces
-// this (see DirectRequestedMsg's own doc comment).
 // TestStagingMismatchNoteDoesNotClaimLiveState is finding 5's own regression test: the paired
 // staging env's own tag shown here comes from the gitops repo's committed manifest occurrence
 // (rows.StagingMismatch), never any live cluster/Argo read — this package has no such
@@ -563,86 +559,121 @@ func TestStagingNoteComparesCursorTagAgainstStaging(t *testing.T) {
 	}
 }
 
-func TestDirectKeyNotOfferedForProduction(t *testing.T) {
-	m := readyModel(t, "app-production", true, true)
+// TestEnterReviews is T3-07's own primary-action test (rule 2): enter is this screen's one
+// deliberate action, and it always emits SelectedMsg for the cursor row once metadata has
+// loaded — never a mode toggle, never conditional on focus. This is the test the mutant proof
+// in the PR body is run against: reverting onKey's Review case to match the old Read/space
+// split must make it fail.
+func TestEnterReviews(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	_, cmd := m.Update(uitest.Key("enter"))
+	if cmd == nil {
+		t.Fatal("enter must emit a command")
+	}
+	msg, ok := cmd().(SelectedMsg)
+	if !ok {
+		t.Fatalf("got %T, want SelectedMsg", cmd())
+	}
+	if msg.Tag != "v3" || msg.ImageRepo != "ghcr.io/example/app" || msg.Digest == "" {
+		t.Fatalf("SelectedMsg = %+v", msg)
+	}
+}
+
+// TestRightReadsLeftBack is T3-07's spatial-navigation test: → opens the commit reader for the
+// cursor tag, and ← (inside the reader) returns to the list — the pair rule 7 names as this
+// screen's own read/back gesture, replacing the old enter-reads/esc-backs split.
+func TestRightReadsLeftBack(t *testing.T) {
+	m := historyModel(t, fourteenAhead, liveAge34Days)
+	m, cmd := m.Update(uitest.Key("right"))
+	if cmd != nil {
+		t.Fatalf("→ must not emit a message, got %v", cmd())
+	}
+	if !m.reading {
+		t.Fatal("→ must open the commit reader")
+	}
+	m, cmd = m.Update(uitest.Key("left"))
+	if cmd != nil {
+		t.Fatalf("← must not emit a message, got %v", cmd())
+	}
+	if m.reading {
+		t.Fatal("← must return to the list, not leave the picker")
+	}
+}
+
+// TestSpaceUnbound is T3-07's own retirement test: space carried "review the change" before
+// this train and must now do nothing at all — enter is the only primary action (rule 1: a key
+// that does not apply on a screen is unbound there, never reused).
+func TestSpaceUnbound(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	before := m
+	m2, cmd := m.Update(uitest.Key("space"))
+	if cmd != nil {
+		t.Fatalf("space must be unbound, got a command: %v", cmd())
+	}
+	if m2.selectedTag != before.selectedTag || m2.reading != before.reading || m2.filtering != before.filtering {
+		t.Fatalf("space must not change any screen state: got %+v, want unchanged from %+v", m2, before)
+	}
+}
+
+// TestCapitalDUnbound is T3-07's own retirement test for the direct-commit gesture: D (shift+d
+// on a real keyboard) opened a confirm dialog and eventually emitted DirectRequestedMsg before
+// this train; both the type and every reference to it are gone, and the key itself is now a
+// plain unbound letter here — direct mode is the deploy confirm screen's own gesture now
+// (internal/app/deploy, T3-08).
+func TestCapitalDUnbound(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	before := m
 	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
 	if cmd != nil {
-		t.Fatalf("D on a production target produced a command: %v", cmd())
+		t.Fatalf("D must be unbound, got a command: %v", cmd())
 	}
-	if m2.confirming {
-		t.Fatal("D on a production target must not open the confirm dialog")
-	}
-	if !strings.Contains(m2.notice, "production") {
-		t.Fatalf("expected a notice explaining why, got %q", m2.notice)
+	if m2.notice != before.notice {
+		t.Fatalf("D must not set a notice — it is not offered, not refused: got %q", m2.notice)
 	}
 }
 
-// TestDirectKeyRequiresConfirmBeforeEmitting is invariant 5's keypress-then-confirm shape:
-// the keypress alone must not emit DirectRequestedMsg — only accepting the huh.Confirm does.
-func TestDirectKeyRequiresConfirmBeforeEmitting(t *testing.T) {
+// TestEscInFilterClearsOnly is T3-07's own filter test: esc while filtering clears the filter
+// and returns to browsing the (now unfiltered) list — it must never leave the screen entirely
+// (BackMsg), which is what plain esc does everywhere else this screen isn't already in a mode
+// of its own.
+func TestEscInFilterClearsOnly(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	if cmd != nil {
-		if _, ok := cmd().(DirectRequestedMsg); ok {
-			t.Fatal("the keypress alone must not emit DirectRequestedMsg")
-		}
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "v1" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	if !m.confirming {
-		t.Fatal("D on a non-production target should open the confirm dialog")
-	}
-
-	// Answered through the widget's own key, not by assigning the bool behind it: the field
-	// huh writes to lives on a superseded Model copy, so setting it here proved nothing about
-	// what an operator can actually do (Copilot, PR #72).
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected a command after confirming")
-	}
-	msg, ok := cmd().(DirectRequestedMsg)
-	if !ok {
-		t.Fatalf("got %T, want DirectRequestedMsg", cmd())
-	}
-	if msg.Tag != "v3" || msg.ImageRepo != "ghcr.io/example/app" {
-		t.Fatalf("DirectRequestedMsg = %+v", msg)
-	}
-}
-
-// TestDirectConfirmDeclineEmitsNothing: accepting the dialog after answering no (the
-// operator declined) must not emit DirectRequestedMsg.
-func TestDirectConfirmDeclineEmitsNothing(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd != nil {
-		t.Fatalf("declining should emit nothing, got %v", cmd())
-	}
-	if m.confirming {
-		t.Fatal("confirming should be cleared after enter, decline or not")
-	}
-}
-
-// TestEscDuringConfirmEmitsBackMsg is round-6's regression: the status bar advertises "esc
-// back" even while the direct-mode confirm dialog is open, but updateConfirm only ever
-// special-cased Enter — Esc fell straight into huh's own widget update and was silently
-// swallowed, trapping the operator in the confirm dialog with no way out via the advertised
-// key.
-func TestEscDuringConfirmEmitsBackMsg(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	if !m.confirming {
-		t.Fatal("D on a non-production target should open the confirm dialog")
+	if m.filterQuery != "v1" {
+		t.Fatalf("fixture precondition: filterQuery = %q, want v1", m.filterQuery)
 	}
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if cmd == nil {
-		t.Fatal("expected a command for Esc while confirming")
+	if cmd != nil {
+		t.Fatalf("esc in the filter must not leave the screen, got a command: %v", cmd())
 	}
-	if _, ok := cmd().(BackMsg); !ok {
-		t.Fatalf("got %T, want BackMsg", cmd())
+	if m.filtering || m.filterQuery != "" {
+		t.Fatalf("esc in the filter should clear it: filtering=%v query=%q", m.filtering, m.filterQuery)
 	}
-	if m.confirming {
-		t.Fatal("confirming should be cleared once Esc is handled")
+	if len(m.filtered()) != 3 {
+		t.Fatalf("clearing the filter should restore every row, got %d", len(m.filtered()))
+	}
+}
+
+// TestHomeEnd is T3-07's own rename of the old g/G reading-mode tests (rule 7: home/end are the
+// shared page-jump keys everywhere, replacing g/G) — see TestReadingScrollsALongBody in
+// history_test.go for the fuller scroll-position assertions; this one is the narrow "these are
+// the keys" regression.
+func TestHomeEnd(t *testing.T) {
+	m := historyModelOver(t, unsplitRepo(), longBody, liveAge34Days).SetSize(80, 24)
+	m = uitest.Keys(m, updateFn, "tab", "right")
+	if !m.reading {
+		t.Fatal("fixture precondition: → must open the commit")
+	}
+	m = uitest.Keys(m, updateFn, "end")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "body 100%") {
+		t.Fatalf("end must reach the end of the body:\n%s", v)
+	}
+	m = uitest.Keys(m, updateFn, "home")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "body line 01") {
+		t.Fatalf("home must return to the top:\n%s", v)
 	}
 }
 
@@ -873,18 +904,19 @@ func TestFetchCmdUsesModelsCancellableContext(t *testing.T) {
 	}
 }
 
-// TestEscCancelsPendingLoad, TestEscDuringConfirmCancelsPendingLoad,
-// TestSelectCurrentCancelsPendingLoad and TestConfirmedDirectRequestCancelsPendingLoad are
-// finding 8's own "leaving the picker" regression tests: every path that leaves this screen
-// for good (Esc outside the confirm dialog, Esc inside it, a plain Enter selection, and a
-// confirmed direct-mode request) must cancel the model's own context so a load still in
-// flight actually stops — for a mapped repo, ListFunc can walk Forge.Tags through up to 301
-// sequential GitHub requests, so an abandoned crawl left running would otherwise keep
-// consuming the API rate limit even though its eventual result is already discarded by the
-// generation guard. Each test calls m.scope.Close() indirectly, through the real key-handling code
-// path, and reads back m.scope.Ctx().Err() on the ORIGINAL model value — cancel's closure operates on
-// the shared underlying context regardless of which value-copy invoked it, so this proves the
-// call actually happened rather than merely that some copy's field looks right.
+// TestEscCancelsPendingLoad and TestSelectCurrentCancelsPendingLoad are finding 8's own
+// "leaving the picker" regression tests: every path that leaves this screen for good (Esc, and
+// a plain Enter selection) must cancel the model's own context so a load still in flight
+// actually stops — for a mapped repo, ListFunc can walk Forge.Tags through up to 301 sequential
+// GitHub requests, so an abandoned crawl left running would otherwise keep consuming the API
+// rate limit even though its eventual result is already discarded by the generation guard.
+// T3-07 retires the picker's own direct-mode gesture (and its own Esc-during-confirm and
+// confirmed-direct-request variants of this test along with it) — direct mode's own leave point
+// now lives on the deploy confirm screen (internal/app/deploy). Each test calls m.scope.Close()
+// indirectly, through the real key-handling code path, and reads back m.scope.Ctx().Err() on the
+// ORIGINAL model value — cancel's closure operates on the shared underlying context regardless
+// of which value-copy invoked it, so this proves the call actually happened rather than merely
+// that some copy's field looks right.
 func TestEscCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	if m.scope.Ctx().Err() != nil {
@@ -896,27 +928,12 @@ func TestEscCancelsPendingLoad(t *testing.T) {
 	}
 }
 
-func TestEscDuringConfirmCancelsPendingLoad(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	if !m.confirming {
-		t.Fatal("fixture precondition: D on a non-production target should open the confirm dialog")
-	}
-	if m.scope.Ctx().Err() != nil {
-		t.Fatal("fixture precondition: context must not be canceled yet")
-	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.scope.Ctx().Err() != context.Canceled {
-		t.Fatalf("Esc during the confirm dialog should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
-	}
-}
-
 func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	if m.scope.Ctx().Err() != nil {
 		t.Fatal("fixture precondition: context must not be canceled yet")
 	}
-	_, cmd := m.Update(uitest.Key("space"))
+	_, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
 		t.Fatal("expected a command")
 	}
@@ -928,41 +945,25 @@ func TestSelectCurrentCancelsPendingLoad(t *testing.T) {
 	}
 }
 
-func TestConfirmedDirectRequestCancelsPendingLoad(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	if m.scope.Ctx().Err() != nil {
-		t.Fatal("fixture precondition: context must not be canceled yet")
-	}
-	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected a command")
-	}
-	if _, ok := cmd().(DirectRequestedMsg); !ok {
-		t.Fatalf("got %T, want DirectRequestedMsg", cmd())
-	}
-	if m.scope.Ctx().Err() != context.Canceled {
-		t.Fatalf("confirming a direct commit should cancel the model's own load context, got Err()=%v", m.scope.Ctx().Err())
-	}
-}
-
 // TestViewGolden snapshots the ready screen at both harness sizes with a mapped,
 // non-production target — deterministic fixed data, no real registry/forge call.
 func TestViewGolden(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
 		m := readyModel(t, "app-staging", true, false).SetSize(size[0], size[1])
 		got := ansi.Strip(m.View())
-		for _, want := range []string{"ghcr.io/example/app  →  app-staging", "v1", "v2", "v3", "D direct", "no commit history"} {
+		for _, want := range []string{"ghcr.io/example/app  →  app-staging", "v1", "v2", "v3", "enter review", "no commit history"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("view lacks %q:\n%s", want, got)
 			}
 		}
+		if strings.Contains(got, "D direct") || strings.Contains(got, "direct") {
+			t.Errorf("T3-07 retired the direct-commit gesture from this screen entirely:\n%s", got)
+		}
 		uitest.Golden(t, "tags", m.View(), size[0], size[1])
 	}
-	// The production form: the chip, the staging note, no D.
+	// The production form: the chip, the staging note.
 	m := readyModel(t, "app-production", true, true).SetSize(80, 24)
-	if got := ansi.Strip(m.View()); !strings.Contains(got, "production") || strings.Contains(got, "D direct") {
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "production") {
 		t.Errorf("production view:\n%s", got)
 	}
 	uitest.Golden(t, "tags-production", m.View(), 80, 24)
@@ -1007,43 +1008,6 @@ func TestViewGroupsTagsByClass(t *testing.T) {
 	}
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "digest tags") || !strings.Contains(v, "moving tags") {
 		t.Fatalf("a filtered window opening mid-group still names its groups:\n%s", v)
-	}
-}
-
-// TestDirectGestureCompletesThroughRealInput is the regression test for a gesture that had
-// never worked: huh.NewConfirm leaves its keymap zero-valued, and a zero key.Binding matches
-// nothing, so a Confirm used standalone (rather than inside a huh.Form, which installs the
-// keymap itself) ignored y, n and the arrows alike. The D path could therefore not be
-// completed by any real operator — and every test covering it set the bool behind the widget's
-// back, which is exactly why the whole package was green while the feature was unreachable
-// (Copilot, PR #72).
-//
-// Driven only through keypresses for that reason: nothing here may touch m.confirmValue.
-func TestDirectGestureCompletesThroughRealInput(t *testing.T) {
-	m := readyModel(t, "app-staging", true, false)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	if !m.confirming {
-		t.Fatal("D did not open the confirmation")
-	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("y then enter produced no command: the confirmation never saw the keypress")
-	}
-	if _, ok := cmd().(DirectRequestedMsg); !ok {
-		t.Fatalf("y then enter emitted %T, want DirectRequestedMsg", cmd())
-	}
-	if m2.confirming {
-		t.Error("the confirmation should be closed after enter")
-	}
-
-	// The asymmetry that makes the above mean something: answering no must emit nothing, so
-	// this cannot pass by the confirmation being bypassed entirely.
-	n := readyModel(t, "app-staging", true, false)
-	n, _ = n.Update(tea.KeyPressMsg{Code: 'D', Text: "D"})
-	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if _, cmd := n.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
-		t.Errorf("answering no must not start a direct promotion, got %v", cmd())
 	}
 }
 
@@ -1096,5 +1060,48 @@ func TestCredentialErrorIsWrappedSoEveryClauseIsVisible(t *testing.T) {
 		if w := len([]rune(line)); w > 100 {
 			t.Errorf("line is %d wide, wider than the terminal:\n%q", w, line)
 		}
+	}
+}
+
+// TestErrorWrapsNotTruncates is T3-07's own mockup-shaped error test (v2·06c): the credential
+// chain error wraps across lines rather than being cut with an ellipsis or clipped to the
+// terminal width, the footer offers r to retry (reload) rather than only esc, and r actually
+// does retry — a second regTagsCmd is issued and, once it succeeds, the error clears.
+func TestErrorWrapsNotTruncates(t *testing.T) {
+	const msg = "could not list tags: ghcr.io answered 403 (denied) for every credential source tried: env, keychain, cluster"
+	var calls int
+	m := New("ghcr.io/example/app", "app-staging", Options{
+		RegTags: func(context.Context) ([]string, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New(msg)
+			}
+			return []string{"v1"}, nil
+		},
+		Meta: fixedMetas(map[string]registry.ImageMeta{"v1": {Digest: "sha256:" + strings.Repeat("1", 64)}}),
+	})
+	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+	m = drain(m, m.Init())
+	if m.err == nil {
+		t.Fatal("fixture precondition: the picker should be in its error state")
+	}
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "…") || strings.Contains(v, "...") {
+		t.Fatalf("the error must wrap across lines, never truncate with an ellipsis:\n%s", v)
+	}
+	for _, line := range strings.Split(v, "\n") {
+		if w := len([]rune(line)); w > 80 {
+			t.Errorf("line is %d wide, wider than the terminal:\n%q", w, line)
+		}
+	}
+	if !strings.Contains(v, "r retry") {
+		t.Fatalf("the error footer must offer r to retry (v2·06c):\n%s", v)
+	}
+	m = uitest.Keys(m, updateFn, "r")
+	if m.err != nil {
+		t.Fatalf("r must actually retry: err = %v", m.err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (r reissued the load)", calls)
 	}
 }

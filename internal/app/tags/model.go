@@ -12,13 +12,13 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
@@ -118,24 +118,6 @@ type SelectedMsg struct {
 	HistoryNote   string
 }
 
-// DirectRequestedMsg is emitted only once the operator has completed the keypress + huh.
-// Confirm gesture AGENTS.md invariant 5 requires — never on the keypress alone, and never for
-// a production target (the 'D' key is not offered at all when Production is true — see
-// keyMap/onKey). This message is UI-side politeness only, exactly like plan.Model's own
-// modeLabel/skipNotice: the actual, unbypassable enforcement lives in
-// internal/engine.DirectCommitGateStep, which independently refuses a production env even if
-// this screen (or any future caller) got this message wrong (invariant 5's "not UI-only
-// gating").
-type DirectRequestedMsg struct {
-	ImageRepo, Tag, Digest string
-	// Target, as on SelectedMsg.
-	Target        string
-	Delta         *migrate.Delta
-	Declared      *Declared
-	DeclaredSince time.Time
-	HistoryNote   string
-}
-
 // nextGeneration hands out this process's next tag-picker generation id. Package-level and
 // monotonically increasing (never reused, never reset) so that every Model instance New ever
 // constructs — for the same image repo or a different one — gets a value no other instance,
@@ -202,27 +184,35 @@ type ageMsg struct {
 	err error
 }
 
+// keyMap is the tag picker's own key set, sourced from the approved keymap (docs/audit's
+// "Screen × key" table, internal/ui/keys' registry) rather than invented locally. T3-07: enter
+// is the screen's one primary action (review the change → SelectedMsg); → opens the commit
+// reader, ← (Left, reading mode only) and tab move between the list and the commits; space is
+// no longer bound at all (rule 2: enter is always the primary), and the D/direct-commit gesture
+// retires from this screen entirely — direct mode is now a deploy-confirm-screen concern
+// (internal/app/deploy, T3-08), reached only after a tag has been reviewed.
 type keyMap struct {
-	Up, Down, Filter, Direct, Review, Read, Pane, Back key.Binding
-	// Top and Bottom jump the commit-detail body to its ends (reading mode only).
-	Top, Bottom key.Binding
+	Up, Down, Left, Right, Filter, Review, Pane, Back, Reload key.Binding
+	// Home and End jump the commit-detail body to its ends (reading mode only) — replacing the
+	// old g/G (rule 7: home/end are the shared page-jump keys).
+	Home, End key.Binding
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "move")),
-		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Direct: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "direct commit")),
-		// Space reviews the change (opens the confirm screen); enter reads the commit under
-		// the cursor. Inspecting is the cheap default and moving toward a write takes a
-		// different, deliberate key (docs/tui/mockups.html, screen 02).
-		Review: key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "review the change")),
-		Read:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "read commit")),
-		Pane:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "commits")),
-		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Top:    key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "top of the body")),
-		Bottom: key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "end of the body")),
+		Up:     keys.Up.Bubbles(),
+		Down:   keys.Down.Bubbles(),
+		Left:   keys.Left.Bubbles(),
+		Right:  keys.Right.Bubbles(),
+		Filter: keys.Filter.Bubbles(),
+		// Review is the screen's primary action (enter), matching rule 2. Reading a commit
+		// moves to → (Right) — inspecting is spatial, not the write-adjacent primary.
+		Review: keys.Enter.Bubbles(),
+		Pane:   keys.Tab.Bubbles(),
+		Back:   keys.Esc.Bubbles(),
+		Reload: keys.Refresh.Bubbles(),
+		Home:   keys.Home.Bubbles(),
+		End:    keys.End.Bubbles(),
 	}
 }
 
@@ -313,14 +303,6 @@ type Model struct {
 	filtering   bool
 	filterInput textinput.Model
 	filterQuery string
-
-	confirming    bool
-	confirmDirect *huh.Confirm
-	// confirmValue is huh's write target only. It is NOT read to decide anything: Value takes
-	// the address of a field in whichever Model copy built the widget, and every Update since
-	// has returned a new copy, so this field on the current model stays at whatever it was
-	// initialised to no matter what the operator typed. confirmAgreed asks the widget instead.
-	confirmValue bool
 
 	spinner spinner.Model
 	notice  string
@@ -623,23 +605,10 @@ func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
-	// filtering keeps its own Esc handling (clears the filter, stays on this screen) — checked
-	// first, unaffected by the confirm fix below.
+	// filtering keeps its own Esc handling (clears the filter only, stays on this screen) —
+	// checked first, ahead of every other mode.
 	if m.filtering {
 		return m.updateFilter(msg)
-	}
-	// confirming previously fell straight into updateConfirm, which only ever handled Enter —
-	// Esc was silently swallowed by huh's own widget update, trapping the operator in the
-	// confirm dialog despite the status bar's own "esc back" hint (round-3 finding). Checked
-	// here, before updateConfirm, so Esc actually leaves — matching how a key press this
-	// screen doesn't otherwise special-case already falls through to Back below.
-	if m.confirming {
-		if key.Matches(msg, m.keys.Back) {
-			m.confirming = false
-			m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
-			return m, func() tea.Msg { return BackMsg{} }
-		}
-		return m.updateConfirm(msg)
 	}
 	if m.reading {
 		return m.updateReading(msg)
@@ -659,6 +628,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.filterInput.SetValue(m.filterQuery)
 		m.filterInput.CursorEnd()
 		return m, m.filterInput.Focus()
+	case key.Matches(msg, m.keys.Reload):
+		return m.reload()
 	case key.Matches(msg, m.keys.Pane):
 		if m.focus == focusTags && len(m.currentCommits()) > 0 {
 			m.focus = focusCommits
@@ -678,24 +649,41 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.moveCursor(1)
-	case key.Matches(msg, m.keys.Read):
+	case key.Matches(msg, m.keys.Right):
 		if len(m.currentCommits()) == 0 {
-			m.notice = "no commit to read here — space reviews the change"
+			m.notice = "no commit to read here — enter reviews the change"
 			return m, nil
 		}
 		m.reading = true
 		m.body.GotoTop()
 		return m, nil
 	case key.Matches(msg, m.keys.Review):
-		return m.selectCurrent(false)
-	case key.Matches(msg, m.keys.Direct):
-		if m.production {
-			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
-			return m, nil
-		}
-		return m.selectCurrent(true)
+		return m.selectCurrent()
 	}
 	return m, nil
+}
+
+// reload discards this instance's loaded tags, deltas and age, and re-issues Init's own load
+// commands (T3-07's r/F5/ctrl+r "reload tags" row). generation is bumped exactly as a fresh
+// New would assign one, so any regTagsLoadedMsg/gitTagsLoadedMsg/metaLoadedMsg/historyMsg/ageMsg
+// still in flight from before the reload is discarded by the same stale-generation guard that
+// already protects a closed-and-reopened picker (regTagsLoadedMsg's own doc comment) — reload is
+// not a new Model instance, but it needs the identical discrimination for the commands it
+// discards without cancelling (scope.Scope has no per-command cancel, only Close for the whole
+// instance).
+func (m Model) reload() (Model, tea.Cmd) {
+	m.generation = nextGeneration.Add(1)
+	m.state = stateLoading
+	m.err = nil
+	m.regTags, m.regTagsLoaded = nil, false
+	m.gitTags, m.gitTagsLoaded = nil, false
+	m.rows = nil
+	m.selectedTag = ""
+	m.cursorMoved = false
+	m.deltas = map[string]history.State{}
+	m.age, m.ageErr, m.ageKnown = migrate.LineAge{}, nil, false
+	m.notice = ""
+	return m, m.Init()
 }
 
 // newBodyViewport is the commit-detail viewport with only the paging keys bound: ↑/↓ (and
@@ -713,12 +701,13 @@ func newBodyViewport() viewport.Model {
 	return v
 }
 
-// updateReading handles the commit-detail view: ↑/↓ walk the commits (each one read from
-// its top), esc returns to the list, and every other key scrolls the body — PageUp/PageDown,
-// ctrl+u/ctrl+d for half a page, g/G for the ends (#120).
+// updateReading handles the commit-detail view: ↑/↓ walk the commits (each one read from its
+// top), ← (and esc, its equivalent — rule 3: esc is always back) return to the list, and every
+// other key scrolls the body — PageUp/PageDown, ctrl+u/ctrl+d for half a page, home/end for the
+// ends (T3-07, replacing g/G, #120).
 func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Back):
+	case key.Matches(msg, m.keys.Back), key.Matches(msg, m.keys.Left):
 		m.reading = false
 	case key.Matches(msg, m.keys.Up):
 		m.commitIdx = max(m.commitIdx-1, 0)
@@ -728,11 +717,11 @@ func (m Model) updateReading(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.body.GotoTop()
 	case key.Matches(msg, m.keys.Review):
 		m.reading = false
-		return m.selectCurrent(false)
-	case key.Matches(msg, m.keys.Top):
+		return m.selectCurrent()
+	case key.Matches(msg, m.keys.Home):
 		m = m.layoutReading()
 		m.body.GotoTop()
-	case key.Matches(msg, m.keys.Bottom):
+	case key.Matches(msg, m.keys.End):
 		m = m.layoutReading()
 		m.body.GotoBottom()
 	default:
@@ -837,13 +826,15 @@ func (m Model) moveCursor(delta int) (Model, tea.Cmd) {
 	return m, tea.Batch(fetch, m.historyCmd(m.selectedTag))
 }
 
-// selectCurrent emits SelectedMsg or, once the operator has confirmed, opens the huh.Confirm
-// gesture direct mode requires (invariant 5's keypress-then-confirm shape) before a
-// DirectRequestedMsg is ever emitted. Neither message is emitted until the current row's
-// metadata (digest) has actually loaded — a selection without a resolved digest would promote
-// a tag hoist cannot yet pin, which AGENTS.md principle 3 refuses at the manifest-write layer
-// anyway; refusing it here just gives an earlier, clearer notice.
-func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
+// selectCurrent emits SelectedMsg for the cursor row — this screen's one primary action (rule
+// 2), reached only by enter. T3-07 retires the D/direct-commit gesture from this screen
+// entirely: reviewing a tag always goes to the deploy confirm screen now, and direct mode is
+// offered there instead (internal/app/deploy, T3-08), after the diff is already on screen.
+// SelectedMsg is never emitted until the current row's metadata (digest) has actually loaded —
+// a selection without a resolved digest would promote a tag hoist cannot yet pin, which
+// AGENTS.md principle 3 refuses at the manifest-write layer anyway; refusing it here just gives
+// an earlier, clearer notice.
+func (m Model) selectCurrent() (Model, tea.Cmd) {
 	rows := m.filtered()
 	idx := IndexOf(rows, m.selectedTag)
 	if idx < 0 {
@@ -869,68 +860,12 @@ func (m Model) selectCurrent(direct bool) (Model, tea.Cmd) {
 		m.notice = fmt.Sprintf("still reading %s's commits — try again in a moment", r.Tag)
 		return m, nil
 	}
-	if !direct {
-		m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
-		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
-		since, note := m.declaredSince(), m.historyNote()
-		return m, func() tea.Msg {
-			return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared, DeclaredSince: since, HistoryNote: note}
-		}
+	m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
+	tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
+	since, note := m.declaredSince(), m.historyNote()
+	return m, func() tea.Msg {
+		return SelectedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared, DeclaredSince: since, HistoryNote: note}
 	}
-	m.confirming = true
-	m.confirmValue = false
-	verb := fmt.Sprintf("Commit %s directly to %s's base branch — no PR, no review? This is only offered for non-production envs.", r.Tag, m.target)
-	m.confirmDirect = huh.NewConfirm().Title(verb).Value(&m.confirmValue)
-	// WithKeyMap is not optional decoration: huh.NewConfirm leaves keymap zero-valued, and a
-	// zero key.Binding matches nothing, so a Confirm used standalone (rather than inside a
-	// huh.Form, which installs the keymap itself) ignores every keypress. Without it y/n/←/→
-	// all did nothing and this gesture could not be completed at all by a real operator —
-	// only by a test reaching past the widget to set the bool (Copilot, PR #72).
-	m.confirmDirect.WithKeyMap(huh.NewDefaultKeyMap())
-	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmDirect.WithWidth(m.dialogWidth())
-	return m, tea.Batch(m.confirmDirect.Init(), m.confirmDirect.Focus())
-}
-
-func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
-	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
-		m.confirming = false
-		if !m.confirmAgreed() {
-			return m, nil
-		}
-		rows := m.filtered()
-		idx := IndexOf(rows, m.selectedTag)
-		if idx < 0 {
-			return m, nil
-		}
-		r := rows[idx]
-		m.scope.Close() // leaving the picker for good — see the scope field's own doc comment.
-		tag, digest, delta, declared := r.Tag, r.Meta.Digest, m.currentDelta(), m.declared
-		since, note := m.declaredSince(), m.historyNote()
-		return m, func() tea.Msg {
-			return DirectRequestedMsg{ImageRepo: m.imageRepo, Tag: tag, Digest: digest, Target: m.target, Delta: delta, Declared: declared, DeclaredSince: since, HistoryNote: note}
-		}
-	}
-	f, cmd := m.confirmDirect.Update(msg)
-	// Keep whatever the widget returned: huh's own Update is where the operator's y/n lands,
-	// and its accessor is the only honest reading of it (see confirmValue's own comment).
-	if c, ok := f.(*huh.Confirm); ok {
-		m.confirmDirect = c
-	}
-	return m, cmd
-}
-
-// confirmAgreed is the operator's actual answer, read from the widget rather than from the
-// bool huh was pointed at. The pointer form (Value(&m.confirmValue)) captures a field in a
-// Model copy that Update immediately supersedes, so reading the field made the D gesture
-// unreachable through real input: y then enter emitted nothing at all, and the tests that
-// covered it assigned the field directly and so could never have caught it (Copilot, PR #72).
-func (m Model) confirmAgreed() bool {
-	if m.confirmDirect == nil {
-		return false
-	}
-	v, _ := m.confirmDirect.GetValue().(bool)
-	return v
 }
 
 func (m Model) updateFilter(msg tea.Msg) (Model, tea.Cmd) {
@@ -1109,22 +1044,13 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 // SetSize lays the screen out to width × height.
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
-	if m.confirmDirect != nil {
-		m.confirmDirect.WithWidth(m.dialogWidth())
-	}
 	m.filterInput.SetWidth(max(width-14, 10))
 	return m
 }
 
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
-
-// SetStyles applies the palette (and its dark/light flag to huh's own Charm theme —
-// AGENTS.md §4.7: a component's own theming is not a layout library).
+// SetStyles applies the palette.
 func (m Model) SetStyles(s ui.Styles) Model {
 	m.styles = s
-	if m.confirmDirect != nil {
-		m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	}
 	return m
 }
 
@@ -1148,13 +1074,13 @@ func (m Model) View() string {
 	default:
 		out = m.viewReady()
 	}
-	if m.confirming && m.confirmDirect != nil {
-		out = ui.Dialog(m.styles, out, "direct commit", m.confirmDirect.View(), m.width, m.height)
-	}
 	return redact.Strings(out)
 }
 
-func (m Model) title() string { return "hoist · deploy" }
+func (m Model) title() string { return fmt.Sprintf("hoist · tags · %s", m.target) }
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
+func (m Model) KeyScreen() keys.Screen { return keys.ScrTags }
 
 // metaSection is the frame's first section: the repo and target, what the env declares
 // today and for how long, the staging note, and the filter line.
@@ -1297,7 +1223,16 @@ func (m Model) viewErr() string {
 	// "HOIST_GHCR_TOKEN is not set" and never reaches "cluster: not configured", which is the
 	// clause that tells them what to fix.
 	body := m.styles.Notice.Render(wrapError(m.err.Error(), max(m.width-2, 20)))
-	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), body}, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("esc back"))}.Render(m.styles, m.width, m.height)
+	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), body}, Footer: m.errFooter()}.Render(m.styles, m.width, m.height)
+}
+
+// errFooter is the error state's own footer (v2·06c): r retries (reload), esc goes back.
+func (m Model) errFooter() string {
+	hints := []keys.Hint{
+		{B: keys.Refresh, Long: "r retry", Pri: 1},
+		{B: keys.Esc, Long: "esc back", Pri: -1},
+	}
+	return keys.Footer(m.styles, m.width, "", hints, true)
 }
 
 // wrapError breaks an error across lines at its own clause separators first, then at spaces,
@@ -1314,7 +1249,8 @@ func wrapError(msg string, width int) string {
 }
 
 func (m Model) viewLoading() string {
-	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), m.spinner.View() + " listing tags…"}, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("esc back"))}.Render(m.styles, m.width, m.height)
+	hints := []keys.Hint{{B: keys.Esc, Long: "esc back", Pri: -1}}
+	return ui.Frame{Title: m.title(), Sections: []string{m.metaSection(), m.spinner.View() + " listing tags…"}, Footer: keys.Footer(m.styles, m.width, "", hints, true)}.Render(m.styles, m.width, m.height)
 }
 
 func (m Model) viewReady() string {
@@ -1529,7 +1465,13 @@ func (m Model) paneSection() string {
 			if marker == "▸ " {
 				text = m.styles.Selected.Render(ansi.Strip(text))
 			}
-		case "more", "gap", "wait":
+		case "more":
+			// T3-07 (v2·06a): "↓ N more commits" sits flush right, mirroring the mockup's own
+			// rjust — a trailer naming what the pane's own room left out reads as a footnote,
+			// not another row of content.
+			pad := max(m.width-2-ansi.StringWidth(text), 0)
+			text = m.styles.Dim.Render(strings.Repeat(" ", pad) + text)
+		case "gap", "wait":
 			text = m.styles.Dim.Render(text)
 		}
 		out = append(out, text)
@@ -1586,8 +1528,9 @@ func (m Model) layoutReading() Model {
 }
 
 // viewReading is the commit-detail view (mockup 08): subject and position, then the body and
-// the commit's migration files in a viewport — PageUp/PageDown, ctrl+u/ctrl+d and g/G scroll
-// it when the message is longer than the terminal (#120); ↑/↓ move to the next commit.
+// the commit's migration files in a viewport — PageUp/PageDown, ctrl+u/ctrl+d and home/end
+// scroll it when the message is longer than the terminal (T3-07, replacing g/G, #120); ↑/↓
+// move to the next commit, ← (or esc) back to the list.
 func (m Model) viewReading() string {
 	commits := m.currentCommits()
 	if len(commits) == 0 || m.commitIdx >= len(commits) {
@@ -1596,17 +1539,34 @@ func (m Model) viewReading() string {
 	}
 	m = m.layoutReading()
 	sections := []string{m.readingHead(commits[m.commitIdx], len(commits)), m.body.View()}
-	return ui.Frame{Title: "hoist · deploy · commit", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render("↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back"))}.Render(m.styles, m.width, m.height)
+	return ui.Frame{Title: fmt.Sprintf("hoist · tags · %s · commit", m.target), Sections: sections, Footer: m.readingFooter()}.Render(m.styles, m.width, m.height)
 }
 
+// readingFooter is the commit-detail view's own footer (ScrTagsReader's registry row).
+func (m Model) readingFooter() string {
+	hints := []keys.Hint{
+		{B: keys.Up, Long: "↑/↓ switch commit", Short: "↑/↓", Pri: 3},
+		{B: keys.PgUp, Long: "pgup/pgdn scroll", Short: "pgup/pgdn", Pri: 2},
+		{B: keys.Home, Long: "home/end scroll ends", Short: "home/end", Pri: 4},
+		{B: keys.Enter, Long: "enter review the change", Short: "enter review", Pri: 1},
+		{B: keys.Left, Long: "← back to the list", Short: "← back", Pri: 0},
+	}
+	return keys.Footer(m.styles, m.width, "", hints, true)
+}
+
+// footer is the tag list's own footer (v2·06a).
 func (m Model) footer() string {
-	help := "↑/↓ move · / filter · space review the change"
+	hints := []keys.Hint{
+		{B: keys.Enter, Long: "enter review " + m.selectedTag, Short: "enter review", Pri: 0},
+	}
 	if len(m.currentCommits()) > 0 {
-		help = "↑/↓ move · tab commits · enter read commit · space review the change"
+		hints = append(hints, keys.Hint{B: keys.Right, Long: "→ read commit", Short: "→ read", Pri: 3})
 	}
-	if !m.production {
-		help += " · D direct"
-	}
-	help += " · esc back"
-	return ui.StatusBar(m.width, "", m.styles.Hint.Render(help))
+	hints = append(hints,
+		keys.Hint{B: keys.Filter, Long: "/ filter", Pri: 2},
+		keys.Hint{B: keys.Refresh, Long: "r reload", Pri: 4},
+		keys.Hint{B: keys.Log, Long: "l activity", Pri: 5},
+		keys.Hint{B: keys.Esc, Long: "esc back", Pri: -1},
+	)
+	return keys.Footer(m.styles, m.width, "", hints, true)
 }

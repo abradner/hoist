@@ -1,4 +1,4 @@
-╭─ hoist · deploy · commit ────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · tags · app-production · commit ─────────────────────────────────────────────────────────╮
 │77c0ffe   db: add index on events.created_at                                                      │
 │3 of 14 in v3 · not in v1 · dev · 11 days ago                                                     │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -27,4 +27,4 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-                           ↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back
+           ↑/↓ · pgup/pgdn scroll · home/end · enter review the change · ← back to the list · ? help

@@ -1,4 +1,4 @@
-╭─ hoist · deploy ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · tags · app-production ──────────────────────────────────────────────────────────────────────────────────────╮
 │ghcr.io/example/app  →  app-production   production                                                                   │
 │app-production declares  v1 · 111111111111 and v0 — split; commits are counted from v1 · since 4 weeks ago            │
 │note: app-staging (paired staging)'s committed manifest tag is v3; v3 is the tag committed there — tags move, so this │
@@ -35,6 +35,6 @@
 │  aaaaaaa  older change                                                                                               │
 │  bbbbbbb  older change                                                                                               │
 │  ccccccc  older change                                                                                               │
-│…8 more                                                                                                               │
+│                                                                                                      ↓ 8 more commits│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                         ↑/↓ move · tab commits · enter read commit · space review the change · esc back
+                                  enter review v3 · → read commit · / filter · r reload · l activity · esc back · ? help

@@ -1,0 +1,10 @@
+╭─ hoist · tags · app-staging ─────────────────────────────────────────────────╮
+│ghcr.io/example/app  →  app-staging                                           │
+│app-staging declares  v1                                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│could not list tags: ghcr.io answered 403 (denied) for every credential source│
+│tried: env, keychain, cluster                                                 │
+│gh's own token cannot read packages. Add a token with read:packages to        │
+│GHCR_TOKEN, or point registries[].cluster at the pull secret.                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                                                     r retry · esc back · ? help

@@ -112,7 +112,7 @@ func Summary(d migrate.Delta, cursor, declared, target string) string {
 }
 
 // Lines renders a pane's lines for one delta: the head, then up to room-1 commits windowed
-// so that the commit at index at is among them, with "…N earlier" and "…N more" trailers for
+// so that the commit at index at is among them, with "↑ N earlier commits" and "↓ N more commits" trailers for
 // what the window leaves out. A gap — no app repo, an unresolved revision, a forge error — is
 // one sentence. room is the lines available; the head always fits. at is -1 for no cursor.
 func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, room, at int) []Line {
@@ -135,7 +135,7 @@ func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, ro
 	}
 	start, end := window(n, room-1, at)
 	if start > 0 {
-		lines = append(lines, Line{Text: fmt.Sprintf("…%d earlier", start), Role: "more", Index: -1})
+		lines = append(lines, Line{Text: fmt.Sprintf("↑ %d earlier commits", start), Role: "more", Index: -1})
 	}
 	for i := start; i < end; i++ {
 		c := d.Commits[i]
@@ -146,13 +146,16 @@ func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, ro
 		lines = append(lines, Line{Text: fmt.Sprintf("%s  %s", ShortSHA(c.SHA), c.Subject), Role: role, Index: i})
 	}
 	if end < n {
-		lines = append(lines, Line{Text: fmt.Sprintf("…%d more", n-end), Role: "more", Index: -1})
+		// T3-07 (v2·06a): "↓ N more commits", right-aligned by the caller (tags.Model's own
+		// paneSection) — this is the same trailer plan.Model's own history section renders too
+		// (room=200 there, so it rarely fires), kept as one wording rather than two.
+		lines = append(lines, Line{Text: fmt.Sprintf("↓ %d more commits", n-end), Role: "more", Index: -1})
 	}
 	return lines
 }
 
 // window picks [start, end) of n commits for room lines, keeping index at visible: the
-// trailers ("…N earlier", "…N more") each take a line when present. A cursor past what the
+// trailers ("↑ N earlier commits", "↓ N more commits") each take a line when present. A cursor past what the
 // first page shows used to vanish, while enter opened a commit the operator never saw.
 func window(n, room, at int) (start, end int) {
 	if room <= 0 {

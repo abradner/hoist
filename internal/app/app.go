@@ -797,13 +797,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, false, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
-	case tags.DirectRequestedMsg:
-		// DirectRequestedMsg is only emitted after the picker's own keypress + huh.Confirm
-		// gesture (tags.DirectRequestedMsg's doc comment), so the confirm screen opens already
-		// in direct mode rather than making the operator repeat the gesture. It still shows
-		// the diff first: the gesture chose a mode, not a change.
-		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, true, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
+		// T3-07/T3-08: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
+		// is gone); the deploy confirm screen offers shift+d itself now, once the diff is
+		// already on screen, so there is only ever one path in here.
+		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
 	case deploy.StartMsg:
 		direct := msg.Mode == deploy.ModeDirect
 		view := msg.View
@@ -1301,7 +1298,7 @@ func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 // WarnDeployIntoProduction itself now, so the confirm screen and the PR body it later renders
 // agree with the CLI's dry run by construction (service:Plan, PR B) rather than by both callers
 // remembering to attach it.
-func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h deploy.History) (tea.Model, tea.Cmd) {
+func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
 	ctx, cancel := scope.Timeout(scope.Resolve)
 	defer cancel()
@@ -1311,9 +1308,6 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h 
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
-	if direct {
-		ds = deployScreen{ds.WithDirectMode()}
-	}
 	m = m.pop() // the picker has done its job
 	m = m.push(ds)
 	return m, ds.Init()
