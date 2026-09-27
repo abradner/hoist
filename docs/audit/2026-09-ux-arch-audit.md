@@ -233,8 +233,11 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
 
 ### Rules
 
-1. **One meaning per key, on every screen.** A key that does not apply on a screen is unbound
-   there, never reused for something else.
+1. **One semantic class per key, across every screen.** `enter` is always the screen's primary
+   action, `esc` is always back, and the arrow keys are always spatial movement — what "primary"
+   or "back" resolves to on a given screen varies (rules 2 and 3 say how), but the key's *class*
+   never does. A letter key carries one meaning on every screen it is bound on. A key that does
+   not apply on a screen is unbound there, never reused for something else.
 2. **`enter` is the screen's primary action.** On a confirm screen that is the write, and it
    stays unshifted because the confirm screen *is* the deliberate step (the diff is on it). A
    screen whose job is watching (flight, watch, config) has no primary action, so `enter` is
@@ -249,10 +252,44 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
    repeatedly to back out quits the app the moment the matrix is reached. `esc` is already
    back, so one key for one meaning. `ctrl+c` always quits at once as the escape hatch. On the
    way out it prints the ids still in flight and `hoist resume <id>`.
-5. **Capitals are writes and only writes.** `R` restart, `X` abandon, `D` direct-mode toggle,
-   `C` treat "no checks" as green. Every capital is followed by a confirmation (a dialog or the
-   confirm screen). So `P`, `C`-for-config, flight's `R` re-observe and the `G`
-   (bottom) navigation key retire.
+5. **Writes use the shift modifier, and only writes do.** `shift+r` restart, `shift+x` abandon,
+   `shift+d` direct-mode toggle, `shift+c` treat "no checks" as green. `shift+d` does not itself
+   commit anything — it flips which mode the confirm screen's own `enter` will write in — but the
+   write it gates is real, so it carries the modifier along with the keys that write directly.
+   Displayed as `shift+<key>`
+   everywhere a key is shown — footers, the help overlay, docs — never as the bare capital letter,
+   because a capital in a footer reads as "press this letter" and invites the caps-lock press
+   that a legacy terminal cannot tell apart from shift (see "Modifier" below). Every write is
+   still followed by a confirmation (a dialog or the confirm screen) — that confirmation, not the
+   key, is the actual safety; the modifier only keeps a write from firing on an unmodified
+   letter someone was typing for another reason. So `shift+p`, `shift+c`-for-config, flight's
+   `shift+r` re-observe and the `G` (bottom) navigation key retire.
+
+   **Modifier.** hoist requests no keyboard enhancements today (no screen sets
+   `tea.View.KeyboardEnhancements`; verified against `charm.land/bubbletea/v2` v2.0.9 — see T3
+   below), so every terminal runs the legacy path: a printable letter arrives as a single byte,
+   and ultraviolet's decoder (`decoder.go`'s `parseUtf8`) sets `ModShift` on it whenever the byte
+   is uppercase — the terminal never tells hoist *why* the byte is uppercase. `shift+c` and
+   caps-lock-then-`c` produce the identical `Key{Code: 'c', Text: "C", Mod: ModShift}` on every
+   terminal in this state, keyboard-enhancement-capable or not, because the enhancement was never
+   asked for. This is true today on kitty, WezTerm, Ghostty, foot, and recent iTerm2 exactly as
+   much as on Terminal.app, Termius (iOS), and a default SSH/tmux session — the terminal's own
+   capability is irrelevant until hoist opts in. Only a terminal that (a) supports the Kitty
+   keyboard protocol and (b) is asked for `KeyboardEnhancements.ReportAllKeysAsEscapeCodes` (which
+   hoist does not currently request) can report a real, separate `ModCapsLock` bit distinct from
+   `ModShift` (`decoder.go`'s `fromKittyMod`, bits `kittyShift`/`kittyCapsLock`) — and note that
+   `KeyPressMsg.String()` still prefers `Key.Text` ("C") over the modifier-qualified keystroke, so
+   even bubbles' `key.Matches(msg, key.WithKeys("shift+c"))` never fires for a printable letter;
+   only reading `msg.Key().Mod.Contains(tea.ModShift)` directly (with `ModCapsLock` excluded)
+   distinguishes shift from caps lock, and only on that opted-in, protocol-capable path.
+   Principle 1: hoist does not claim a mechanism it does not run. So: matching stays "the
+   uppercase letter" everywhere (`key.WithKeys("C")`, unchanged from today) — legacy terminals
+   have no other signal, and asking every screen to special-case an enhancement most sessions
+   (SSH, tmux, Termius) will never grant is not worth it for a signal the confirmation screen
+   already makes safe. If T3 later opts into `ReportAllKeysAsEscapeCodes` for the matrix and finds
+   it does not regress non-kitty terminals (Termius, Terminal.app, tmux defaults), the write
+   bindings can additionally require `Mod.Contains(ModShift) && !Mod.Contains(ModCapsLock)` on
+   that path without changing what is displayed — but that is future work, not this amendment.
 6. **One verb per concept.** `r` refresh (the cluster, the repo, or the promotion's remote,
    whichever the screen shows), with `F5` and `ctrl+r` as aliases wherever `r` is bound. `o`
    opens in the browser. `d` toggles diff/yaml. `w` watch. `l` activity log. `?` help overlay.
@@ -276,10 +313,10 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
 | `p` | promote **into** the cursor column (source from the reverse pair, else asks) | promote into | · | · | · | · | · | · | · | · |
 | `t` | deploy a tag (tag picker for the cell) | deploy a tag | · | · | · | · | · | · | · | · |
 | `w` | watch the cell's family | watch | · | · | · | watch this promotion's family and target | · | · | · | · |
-| `R` | restart the cell's family → restart screen | restart | · | · | · | · | · | · | · | · |
-| `X` | abandon the in-flight row (confirm) | · | · | · | · | abandon (confirm) | · | · | · | · |
-| `D` | · | · | toggle direct mode (confirm when turning on; never offered for production) | same | · | · | · | · | · | · |
-| `C` | · | · | · | · | · | treat "no checks" as green (confirm; only when offered) | · | · | · | · |
+| `shift+r` | restart the cell's family → restart screen | restart | · | · | · | · | · | · | · | · |
+| `shift+x` | abandon the in-flight row (confirm) | · | · | · | · | abandon (confirm) | · | · | · | · |
+| `shift+d` | · | · | toggle direct mode (confirm when turning on; never offered for production) | same | · | · | · | · | · | · |
+| `shift+c` | · | · | · | · | · | treat "no checks" as green (confirm; only when offered) | · | · | · | · |
 | `e` | · | · | override the hovered repo's digest (input dialog) | · | · | · | · | · | · | · |
 | `space` | · | · | tick / untick repo | · | · | · | · | · | · | · |
 | `/` | · | · | filter | · | filter | · | · | · | · | · |
@@ -301,10 +338,11 @@ Decisions the rules left open:
   menu lists the shortcut next to each item, so the menu teaches the shortcuts.
 - **Digest override is `e`** ("edit the digest"). It is not a remote write (it rebuilds the
   plan), so it is lowercase. `o` is open-in-browser everywhere.
-- **Config is `c`**. It is a read, so it is lowercase. `C` is the ci.none override, a write, on flight.
+- **Config is `c`**. It is a read, so it is lowercase. `shift+c` is the ci.none override, a
+  write, on flight.
 - **Re-attaching to a drive** is `enter` on the in-flight pane (`tab` focuses it), or the
   action menu's "resume in-flight" item when the cell's env has one. `r` is refresh only.
-- **`P` retires.** "Promote into this env from a different source" is an action menu item.
+- **`shift+p` retires.** "Promote into this env from a different source" is an action menu item.
   When the cursor column has no reverse pair, `p` asks for the source.
 
 ### Migration checklist (old → new)
@@ -321,28 +359,31 @@ Decisions the rules left open:
 | matrix | `P` promote to… | retired → action menu "promote into <env> from…" | rule 5 |
 | matrix | `d` deploy a tag | `t` deploy a tag | UX-H4 |
 | matrix | `C` config | `c` config | rule 5 |
+| matrix | `R` restart the cell's family → restart screen | `shift+r` restart the cell's family → restart screen | rule 5 |
 | matrix | `h/l` column aliases | retired (`←/→` only) | rule 7 |
-| matrix | — | `tab` focus the in-flight pane; `X` abandon from the pane | — |
+| matrix | — | `tab` focus the in-flight pane; `shift+x` abandon from the pane | — |
 | plan | `x` toggle repo | `space` toggle repo | UX-H4 |
-| plan | `m` direct mode | `D` direct mode | UX-M6 |
+| plan | `m` direct mode | `shift+d` direct mode | UX-M6 |
 | plan | `o` digest override | `e` digest override | UX-H4 |
 | plan | — | `r` rebuild at fresh origin | FB-H1 |
-| deploy | `m` direct mode | `D` direct mode | UX-M6 |
+| deploy | `m` direct mode | `shift+d` direct mode | UX-M6 |
 | deploy | `space` scroll | `pgdn` / `↓` | UX-H4 |
 | deploy | `esc` → matrix | `esc` → picker (the picker stays on the stack) | UX-M7, FB-L7 |
 | tags | `space` review the change | `enter` review the change | UX-M5 |
 | tags | `enter` read commit | `→` read commit (`←` back) | UX-M5, FB-L8 |
-| tags | `D` + confirm → direct deploy | retired; `D` on the deploy confirm | UX-M6 |
+| tags | `D` + confirm → direct deploy | retired; `shift+d` on the deploy confirm | UX-M6 |
 | tags | `esc` in the D dialog leaves the picker | retired with `D`; every dialog closes on esc | UX-M8 |
-| tags | `g/G` top/bottom | `home/end` | rule 5 |
+| tags | `g/G` top/bottom | `home/end` | rule 7 |
 | tags | — | `r` reload, `o` open commit | — |
 | flight | `esc` back to the confirm screen + **cancel drive** | `esc` → matrix, drive keeps running (T2) | UX-H6, FB-H2 |
 | flight | `x` abort (stop watching) | retired: esc already leaves without stopping | FB-L2 |
+| flight | `X` + confirm → abandon | `shift+x` abandon (confirm) | rule 5 |
 | flight | `R` re-observe | `r` re-observe | UX-H4 |
-| flight | `c` ci.none override | `C` ci.none override | rule 5 |
+| flight | `c` ci.none override | `shift+c` ci.none override | rule 5 |
 | flight | `G` log bottom | `end` | rule 5 |
 | flight | — | `w` watch | UX keypress table |
 | watch | `r` poll now | `r` (same key, "refresh" wording); footer shows `next poll in Ns` | UX-H9 |
+| config | `g/G` top/bottom | `home/end` (`internal/app/config/model.go:30-31`) | rule 7 |
 | restart | `esc` pops silently mid-rollout | `esc` pops; notice "rollout continues" | FB-L3 |
 
 ### `internal/parity` impact
@@ -350,14 +391,23 @@ Decisions the rules left open:
 The registry cites keys in its `TUI:` strings, and it parses the navigation messages the root
 switches on. The T3 keymap PR updates these rows in the same change:
 
-- **Key text changes:** "promote" (`p`/`P` → `p` + menu), "direct mode" (`m`/`D` → `D`),
+- **Key text changes:** "promote" (`p`/`P` → `p` + menu), "direct mode" (`m`/`D` → `shift+d`),
   "deploy" (`d`, `space` → `t`, `enter`), "resume" (`r` → `enter` on the pane), "re-observe"
-  (`R` → `r`), "digest override" (`o` → `e`), "ci.none override" (`c` → `C`), "config" (`C` → `c`).
+  (`R` → `r`), "digest override" (`o` → `e`), "ci.none override" (`c` → `shift+c`), "config"
+  (`C` → `c`).
 - **Rows removed or reshaped:** "stop watching a promotion" (`flight.AbortMsg x`). Its TUI
   side becomes "esc from flight; the drive keeps running in the session" (T2), still two-sided
   with the CLI's ctrl-c.
 - **New navigation messages** that need rows: flight → watch (`w`), the matrix action menu if
   it is a root-handled message, and the help overlay if the root owns it. Keeping the menu and
   the overlay inside the matrix and `internal/ui` avoids new root cases.
-- **Keymap test (T3):** the `internal/ui/keys` registry asserts no key has two meanings across
-  screens, so rule 1 is enforced by a test rather than by review (AGENTS.md §10 meta-rule 5).
+- **Keymap test (T3):** the `internal/ui/keys` registry asserts every key resolves to at most one
+  semantic class (primary / back / spatial) across screens, and that a letter key means the same
+  thing on every screen it is bound on, so rule 1 is enforced by a test rather than by review
+  (AGENTS.md §10 meta-rule 5).
+- **One write-binding helper (T3):** `internal/ui/keys` builds every write binding through one
+  constructor that takes keys `"shift+c"` and, on the legacy input path, `"C"` (see "Modifier"
+  above — the uppercase letter is what a legacy terminal actually sends for both shift and caps
+  lock, and hoist runs the legacy path everywhere today), and whose help text always renders
+  `"shift+c"`. A test asserts no footer or help string in the built binaries shows a bare capital
+  write key.
