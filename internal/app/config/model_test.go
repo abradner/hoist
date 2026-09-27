@@ -81,12 +81,12 @@ func TestPageDownScrollsALongConfig(t *testing.T) {
 	if v := m.View(); strings.Contains(v, "line-00") || !strings.Contains(v, "line-20") {
 		t.Fatalf("pgdown did not move past the first page:\n%s", v)
 	}
-	m = uitest.Keys(m, update, "G")
+	m = uitest.Keys(m, update, "end")
 	if v := m.View(); !strings.Contains(v, "line-59") {
-		t.Fatalf("G did not reach the end:\n%s", v)
+		t.Fatalf("end did not reach the end:\n%s", v)
 	}
-	m = uitest.Keys(m, update, "g")
+	m = uitest.Keys(m, update, "home")
 	if v := m.View(); !strings.Contains(v, "registries:") {
-		t.Fatalf("g did not return to the top:\n%s", v)
+		t.Fatalf("home did not return to the top:\n%s", v)
 	}
 }

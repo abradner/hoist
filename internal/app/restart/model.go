@@ -21,6 +21,7 @@ import (
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -88,8 +89,12 @@ const (
 	stateFailed
 )
 
-// BackMsg asks whatever composes screens to pop this one.
-type BackMsg struct{}
+// BackMsg asks whatever composes screens to pop this one. RollingContinues is set when esc was
+// pressed while a restart the operator just confirmed was still starting or rolling (FB-L3): the
+// screen is leaving, but the restart itself is not — it is a live cluster operation, not a
+// drive this package can cancel — so the root adds the activity entry naming that instead of the
+// screen silently vanishing mid-roll with nothing left to say so.
+type BackMsg struct{ RollingContinues bool }
 
 // Every message below is returned wrapped as scope.Result[T] (Init/start/tick/observe), so a
 // result an earlier instance of this screen asked for — a different family's plan, an already
@@ -295,7 +300,8 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "esc":
-		return m, func() tea.Msg { return BackMsg{} }
+		continuing := m.state == stateStarting || m.state == stateRolling
+		return m, func() tea.Msg { return BackMsg{RollingContinues: continuing} }
 	case "enter":
 		if m.state != stateConfirm {
 			return m, nil
@@ -306,7 +312,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			// say yes on purpose.
 			m.confirmV = false
 			m.confirm = huh.NewConfirm().
-				Title(fmt.Sprintf("Restart %d Deployment(s) in %s? It is a production env.", len(m.plan.Targets), m.env))
+				Title(fmt.Sprintf("Restart %s in %s? It is a production env.", ui.Plural(len(m.plan.Targets), "Deployment"), m.env))
 			// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing:
 			// a Confirm used standalone rather than inside a huh.Form ignores every keypress.
 			m.confirm.WithKeyMap(huh.NewDefaultKeyMap())
@@ -397,7 +403,7 @@ func (m Model) render() Model {
 	case stateReading:
 		b.WriteString(m.styles.Dim.Render("reading " + m.env + "…"))
 	default:
-		fmt.Fprintf(&b, "%s\n", m.styles.Title.Render(fmt.Sprintf("%d Deployment(s) in %s", len(m.plan.Targets), m.env)))
+		fmt.Fprintf(&b, "%s\n", m.styles.Title.Render(fmt.Sprintf("%s in %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env)))
 		for _, st := range m.plan.Targets {
 			mark := " "
 			switch {
@@ -446,12 +452,27 @@ func (m Model) View() string {
 	if m.notice != "" {
 		sections = append(sections, m.styles.Notice.Render(ansi.Wrap(m.notice, max(m.width-2, 20), "")))
 	}
-	view := ui.Frame{Title: "hoist · restart", Sections: sections, Footer: ui.StatusBar(m.width, "", m.styles.Hint.Render(m.hint()))}.Render(m.styles, m.width, m.height)
+	title := fmt.Sprintf("hoist · restart · %s/%s", m.family, m.env)
+	view := ui.Frame{Title: title, Sections: sections, Footer: m.footer()}.Render(m.styles, m.width, m.height)
 	if m.confirm != nil {
 		view = ui.Dialog(m.styles, view, "production", m.confirm.View(), m.width, m.height)
 	}
 	return redact.Strings(view)
 }
+
+// footer renders through keys.Footer (T3-03), matching the screen's own row in
+// internal/ui/keys' registry rather than a hand-built hint string.
+func (m Model) footer() string {
+	hints := []keys.Hint{{B: keys.Log, Long: "l activity", Pri: 2}}
+	if m.state == stateConfirm {
+		hints = append(hints, keys.Hint{B: keys.Enter, Long: "enter restart", Pri: 1})
+	}
+	hints = append(hints, keys.Hint{B: keys.Esc, Long: "esc back", Pri: 0})
+	return keys.Footer(m.styles, m.width, "", hints, true)
+}
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
+func (m Model) KeyScreen() keys.Screen { return keys.ScrRestart }
 
 func (m Model) headerSection() string {
 	left := m.styles.Title.Render(m.env) + " / " + m.styles.Title.Render(m.family)
@@ -483,23 +504,6 @@ func (m Model) stateWord() string {
 		return "all rolled"
 	default:
 		return "failed"
-	}
-}
-
-func (m Model) hint() string {
-	switch m.state {
-	case stateReading:
-		return "reading… · esc back"
-	case stateConfirm:
-		return "enter restart · esc back"
-	case stateStarting:
-		return "starting… · esc back"
-	case stateRolling:
-		return "rolling… · esc back"
-	case stateDone:
-		return "all rolled · esc back"
-	default:
-		return "esc back"
 	}
 }
 

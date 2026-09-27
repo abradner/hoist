@@ -229,6 +229,55 @@ func TestEscAsksToBePopped(t *testing.T) {
 	}
 }
 
+// TestEscDuringRollingSaysRollingContinues is FB-L3's own regression: esc while a restart the
+// operator already confirmed is still starting or rolling must say so on its way out
+// (BackMsg.RollingContinues), since the restart itself is a live cluster operation this package
+// cannot cancel — the screen leaving is not the restart stopping. Prove a new test can fail
+// (AGENTS.md §8): reverting RollingContinues to always false makes this fail for the right
+// reason (checked by hand before this landed).
+func TestEscDuringRollingSaysRollingContinues(t *testing.T) {
+	m := ready(t, &fakeFuncs{plan: onePlan()}, false)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // stateStarting
+	if m.state != stateStarting {
+		t.Fatalf("setup: state = %v, want stateStarting", m.state)
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	back, ok := cmd().(BackMsg)
+	if !ok {
+		t.Fatalf("esc emitted %T, want BackMsg", cmd())
+	}
+	if !back.RollingContinues {
+		t.Error("esc while starting must set RollingContinues")
+	}
+
+	m, _ = m.Update(scope.Result[startedMsg]{From: m.scope.ID, V: startedMsg{at: time.Now().UTC()}})
+	if m.state != stateRolling {
+		t.Fatalf("setup: state = %v, want stateRolling", m.state)
+	}
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	back, ok = cmd().(BackMsg)
+	if !ok {
+		t.Fatalf("esc emitted %T, want BackMsg", cmd())
+	}
+	if !back.RollingContinues {
+		t.Error("esc while rolling must set RollingContinues")
+	}
+}
+
+// TestEscBeforeStartDoesNotSayRollingContinues is the above's own control: esc from the plain
+// confirm state (nothing started yet) must not claim a rollout is continuing.
+func TestEscBeforeStartDoesNotSayRollingContinues(t *testing.T) {
+	m := ready(t, &fakeFuncs{plan: onePlan()}, false)
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	back, ok := cmd().(BackMsg)
+	if !ok {
+		t.Fatalf("esc emitted %T, want BackMsg", cmd())
+	}
+	if back.RollingContinues {
+		t.Error("esc before a restart even started must not say RollingContinues")
+	}
+}
+
 func TestRestartGolden(t *testing.T) {
 	f := &fakeFuncs{plan: onePlan()}
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
@@ -238,7 +287,7 @@ func TestRestartGolden(t *testing.T) {
 	// The production dialog sits over the list.
 	m := ready(t, f, true).SetSize(80, 24)
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if v := m.View(); !strings.Contains(v, "It is a production env") || !strings.Contains(v, "Deployment(s) in app-staging") {
+	if v := m.View(); !strings.Contains(v, "It is a production env") || !strings.Contains(v, "1 Deployment in app-staging") {
 		t.Fatalf("dialog must sit over the screen:\n%s", v)
 	}
 	uitest.Golden(t, "restart-confirm", m.View(), 80, 24)

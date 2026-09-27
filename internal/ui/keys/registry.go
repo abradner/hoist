@@ -127,7 +127,7 @@ var table = []row{
 	// watch
 	{ScrWatch, Esc, "back"},
 	{ScrWatch, Help, "help overlay"},
-	{ScrWatch, Refresh, "poll now"},
+	{ScrWatch, Refresh, "refresh"},
 	{ScrWatch, Log, "activity log"},
 	{ScrWatch, Up, "scroll"},
 	{ScrWatch, Down, "scroll"},

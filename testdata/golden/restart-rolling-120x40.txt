@@ -1,7 +1,7 @@
-╭─ hoist · restart ────────────────────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · restart · web/app-staging ──────────────────────────────────────────────────────────────────────────────────╮
 │app-staging / web                                                                                            … rolling│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│1 Deployment(s) in app-staging                                                                                        │
+│1 Deployment in app-staging                                                                                           │
 │                                                                                                                      │
 │ … web  1 replica(s) · RollingUpdate · last restart: never restarted this way                                         │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the             │
@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                                                     rolling… · esc back
+                                                                                          l activity · esc back · ? help

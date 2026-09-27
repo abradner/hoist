@@ -1,21 +1,5 @@
-╭─ hoist · watch · web/app-staging ────────────────────────────────────────────────────────────────────────────────────╮
-│app-staging / web · web-app-staging                                                         polled just now · every 5s│
-├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│sync OutOfSync   health Progressing   revision 0123456789ab   operation Running   reconciled 2m ago                   │
-│                                                                                                                      │
-│Deployment web  rolling · 2 replica(s)                                                                                │
-│    Waiting for deployment "web" rollout to finish: 1 of 2 updated replicas are available...                          │
-│    container web=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  │
-│                                                                                                                      │
-│Deployment web-worker  rolling · 1 replica(s)                                                                         │
-│    Waiting for deployment "web-worker" rollout to finish: 0 of 1 updated replicas are available...                   │
-│    initContainer                                                                                                     │
-│      migrate=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb      │
-│    container                                                                                                         │
-│      worker=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb       │
-│                                                                                                                      │
-│Job web-migrate                                                                                                       │
-│    active=1 succeeded=0 failed=0                                                                                     │
+╭─ hoist · activity · 1 entries ───────────────────────────────────────────────────────────────────────────────────────╮
+│just now  info  something happened                                                                                    │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -25,6 +9,21 @@
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                             ╭─ help · activity ───────╮                                              │
+│                                             │NAVIGATE                 │                                              │
+│                                             │esc      back            │                                              │
+│                                             │↑        scroll          │                                              │
+│                                             │↓        scroll          │                                              │
+│                                             │pgup     page            │                                              │
+│                                             │pgdn     page            │                                              │
+│                                             │APP                      │                                              │
+│                                             │ctrl+c   quit now        │                                              │
+│                                             │                         │                                              │
+│                                             │a capital counts as shift│                                              │
+│                                             ╰─────────────────────────╯                                              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +36,5 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-next poll in 5s                                                               r refresh · l activity · esc back · ? help
+1 entries                                                                                              esc back · ? help
+something happened · l: activity (1)                                                                                    

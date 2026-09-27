@@ -2031,7 +2031,11 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 // so typing "q" into the tag picker's filter box quit the whole program instead of landing in
 // the filter query. Drives the real app-wiring path (matrix.OpenTagsMsg through app.Model.Update,
 // like TestDeployNewThreadsRealStagingTag above), opens the filter with "/", then types "q".
-func TestQuitKeyTypedIntoTagsFilterDoesNotQuit(t *testing.T) {
+// TestQStillTypesIntoFilter is T3-03's own name for this regression (round 5, finding 3): q
+// unbound everywhere but the matrix must still fall through to a screen mid-text-entry rather
+// than being swallowed as the "unbound" hint gesture — a filter query typing "q" is text, not a
+// key press asking about quitting.
+func TestQStillTypesIntoFilter(t *testing.T) {
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
 		t.Fatal(err)
@@ -2255,6 +2259,64 @@ func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
 	}
 	if v := plain(tm); !strings.Contains(v, "hoist · restart") {
 		t.Errorf("the screen should name the operation:\n%s", v)
+	}
+}
+
+// TestRestartEscNotesRolloutContinues is FB-L3's own root-level regression: esc while a confirmed
+// restart is still starting must leave the activity log naming that the rollout continues
+// (apprestart.BackMsg.RollingContinues, restart/model.go's own doc comment), rather than the
+// screen just vanishing with no record of anything having been asked for at all. Prove a new
+// test can fail (AGENTS.md §8): removing the `if msg.RollingContinues` branch in app.go's own
+// apprestart.BackMsg case makes this fail for the right reason (checked by hand before landing).
+func TestRestartEscNotesRolloutContinues(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		p := restart.Plan{Env: env}
+		for _, n := range names {
+			p.Targets = append(p.Targets, rollout.DeploymentStatus{
+				Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate",
+			})
+		}
+		return p, nil
+	}
+	// Do never actually returns within the test — esc fires before its command is ever run, so
+	// the screen's own state is still stateStarting (start()'s own synchronous transition) the
+	// moment BackMsg is emitted, exactly the window FB-L3 is about.
+	do := func(ctx context.Context, _ restart.Plan, _ time.Time) ([]string, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) { return nil, nil }
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
+		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Millisecond})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+	tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd != nil {
+		tm, cmd = tm.Update(cmd())
+		if cmd != nil {
+			tm, _ = tm.Update(cmd())
+		}
+	}
+	if _, ok := tm.(Model).stack[len(tm.(Model).stack)-1].(restartScreen); !ok {
+		t.Fatalf("setup: top screen is %T, want the restart screen", tm.(Model).stack[len(tm.(Model).stack)-1])
+	}
+
+	// enter: not production, so this starts immediately (restart.Model.onKey's own m.start()).
+	tm, startCmd := tm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_ = startCmd // deliberately never run — see do's own comment above
+
+	tm, backCmd := tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if backCmd != nil {
+		tm, _ = tm.Update(backCmd())
+	}
+	if _, ok := tm.(Model).stack[len(tm.(Model).stack)-1].(matrixScreen); !ok {
+		t.Fatalf("esc should pop back to the matrix; top is %T", tm.(Model).stack[len(tm.(Model).stack)-1])
+	}
+	if v := plain(tm); !strings.Contains(v, "rollout continues") {
+		t.Errorf("the activity row should name that the rollout continues:\n%s", v)
 	}
 }
 
@@ -3110,5 +3172,338 @@ func TestKeyboardEnhancementsRecorded(t *testing.T) {
 	}
 	if !m.(Model).kbd.SupportsAllKeysAsEscapeCodes() {
 		t.Error("Model did not record the terminal's KeyboardEnhancementsMsg")
+	}
+}
+
+// openWatchScreenForTest pushes the watch screen with an immediate, non-blocking snapshot —
+// T3-03's own help-overlay and l-from-anywhere tests need a real keyed screen on top of the
+// matrix, not the matrix itself.
+func openWatchScreenForTest(t *testing.T) tea.Model {
+	t.Helper()
+	build := func(family, env string) (watch.Funcs, error) {
+		return watch.Funcs{
+			Read: func(context.Context) (watch.Snapshot, error) {
+				return watch.Snapshot{App: family + "-" + env, Namespace: env}, nil
+			},
+			Interval: time.Hour, // no tick within the test's own lifetime
+			Now:      time.Now,
+		}, nil
+	}
+	var tm tea.Model = sized(t).(Model).WithWatch(build)
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	tm, cmd := tm.Update(matrix.OpenWatchMsg{Family: "counta", Target: "app-production"})
+	if cmd != nil {
+		// Runs the immediate first poll (Init's own doc comment: "hoist watch --once is this
+		// screen's first paint") synchronously and stops — the resulting command is watch's own
+		// tea.Tick-based poll cadence (Interval, deliberately an hour above), which would sleep
+		// for real if this called it too, unlike drainTags' own generic loop.
+		tm, _ = tm.Update(cmd())
+	}
+	if _, ok := tm.(Model).stack[len(tm.(Model).stack)-1].(watchScreen); !ok {
+		t.Fatalf("setup: top screen is %T, want the watch screen", tm.(Model).stack[len(tm.(Model).stack)-1])
+	}
+	return tm
+}
+
+// TestInFlightIDsNamesEveryTrackedPromotion: cmd/hoist's own main.go prints these with their
+// `hoist resume <id>` line once the program actually quits (keymap rule 4). Control: a fresh
+// root with nothing running names none.
+func TestInFlightIDsNamesEveryTrackedPromotion(t *testing.T) {
+	m := sized(t).(Model)
+	if ids := m.InFlightIDs(); len(ids) != 0 {
+		t.Fatalf("a fresh root should track nothing: got %v", ids)
+	}
+
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		return engine.PromotionState{ID: "abcd1234"}, driverAlways(engine.PromotionState{ID: "abcd1234"}), nil
+	}}
+	mm := sizedWithPromotion(t, promo).(Model)
+	tm, cmd := mm.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	attached, _ := attach(t, tm.(Model), cmd)
+	if ids := attached.InFlightIDs(); len(ids) != 1 || ids[0] != "abcd1234" {
+		t.Fatalf("InFlightIDs() = %v, want [abcd1234]", ids)
+	}
+}
+
+// TestQuitOnlyFromMatrix is the audit keymap's own rule 4, proven at the root: q quits (with a
+// confirm if a drive is running — already covered by TestQuitWithRunningDriveAsksFirst) only
+// when the matrix is the only screen on the stack; anywhere else it is unbound and raises the
+// transient hint instead, taking its own row out of the top screen exactly the way the activity
+// row does (§9 entry 10) — never appended past the bottom, always exactly one row, at row
+// height-1. Prove a new test can fail (AGENTS.md §8): dropping the `if _, onMatrix :=
+// m.top().(matrixScreen); onMatrix` guard in app.go's own "q" case (so every screen quits again)
+// makes this fail for the right reason (checked by hand before landing).
+func TestQuitOnlyFromMatrix(t *testing.T) {
+	// From the matrix: q quits.
+	if _, cmd := press(t, sized(t), tea.KeyPressMsg{Code: 'q', Text: "q"}); cmd == nil {
+		t.Fatal("q on the matrix produced no command")
+	} else if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("q on the matrix yields %T, want tea.QuitMsg", cmd())
+	}
+
+	// From the watch screen: q never quits, and raises the hint on its own row.
+	for _, size := range []struct{ w, h int }{{80, 24}, {120, 40}} {
+		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+			tm := openWatchScreenForTest(t)
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+			if cmd != nil {
+				if _, ok := cmd().(tea.QuitMsg); ok {
+					t.Fatal("q on the watch screen quit the program")
+				}
+			}
+			lines := strings.Split(ansi.Strip(tm.(Model).View().Content), "\n")
+			if len(lines) != size.h {
+				t.Fatalf("view is %d lines on a %d-row terminal, want exactly %d", len(lines), size.h, size.h)
+			}
+			last := lines[len(lines)-1]
+			if !strings.Contains(last, "q quits from the matrix") || !strings.Contains(last, "esc goes back") {
+				t.Errorf("row %d (height-1) should carry the hint; got:\n%s", len(lines)-1, last)
+			}
+			if !strings.Contains(strings.Join(lines[:len(lines)-1], "\n"), "app-production") {
+				t.Error("the watch screen is gone from above the hint row")
+			}
+		})
+	}
+}
+
+// TestQuitHintClearsOnNextKey: the hint is transient — Model.hint's own doc comment — clearing
+// unconditionally at the top of the very next keypress, whatever that key is.
+func TestQuitHintClearsOnNextKey(t *testing.T) {
+	tm := openWatchScreenForTest(t)
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if !strings.Contains(plain(tm), "q quits from the matrix") {
+		t.Fatalf("setup: q should have raised the hint:\n%s", plain(tm))
+	}
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if strings.Contains(plain(tm), "q quits from the matrix") {
+		t.Errorf("the hint should have cleared on the next key:\n%s", plain(tm))
+	}
+}
+
+// TestHelpOverlayGoldens: the overlay's own rendered shape for every screen this PR migrated,
+// at both terminal sizes every screen is goldened at (AGENTS.md §4.8) — compared by hand against
+// the approved v2·03 mockup's structure (NAVIGATE/ACT/VIEW/APP columns, the "shift+ keys always
+// ask" line) in this PR's own report, since no mockup fixture exists for these four screens
+// (train3-design.md's T3-03 scope: only help-matrix, in T3-04, gets a mockup diff).
+func TestHelpOverlayGoldens(t *testing.T) {
+	sizes := []struct{ w, h int }{{80, 24}, {120, 40}}
+
+	t.Run("watch", func(t *testing.T) {
+		for _, size := range sizes {
+			tm := openWatchScreenForTest(t)
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+			uitest.Golden(t, "help-watch", tm.(Model).View().Content, size.w, size.h)
+		}
+	})
+
+	t.Run("config", func(t *testing.T) {
+		r, err := gitops.Discover(fixtureRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, size := range sizes {
+			var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil, apprestart.Funcs{}).
+				WithConfigView("/tmp/hoist/config.yaml", true, "repos: []\n")
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tm, _ = tm.Update(matrix.OpenConfigMsg{})
+			tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+			uitest.Golden(t, "help-config", tm.(Model).View().Content, size.w, size.h)
+		}
+	})
+
+	t.Run("activity", func(t *testing.T) {
+		for _, size := range sizes {
+			tm := sized(t).(Model).note(activity.Info, "something happened", "", "")
+			var tmodel tea.Model = tm
+			tmodel, _ = tmodel.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tmodel, _ = tmodel.Update(matrix.OpenActivityMsg{})
+			tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+			uitest.Golden(t, "help-activity", tmodel.(Model).View().Content, size.w, size.h)
+		}
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+			p := restart.Plan{Env: env}
+			for _, n := range names {
+				p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+			}
+			return p, nil
+		}
+		r, err := gitops.Discover(fixtureRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, size := range sizes {
+			var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
+				apprestart.Funcs{Read: read, Interval: time.Millisecond})
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: max(size.w, 300), Height: size.h})
+			tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+			tm = drainTags(tm, cmd)
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+			uitest.Golden(t, "help-restart", tm.(Model).View().Content, size.w, size.h)
+		}
+	})
+}
+
+// TestHelpOverlayOnEveryKeyedScreen: ? opens the overlay for every screen this PR migrated
+// (watch, restart, config, activity) — each keyed via internal/app/screen.go's own KeyScreen
+// adapters — and esc returns to the identical view underneath. Prove a new test can fail
+// (AGENTS.md §8): removing a screen's own KeyScreen() method (so it no longer implements keyed)
+// makes ? do nothing for it, failing this test for the right reason (checked by hand on the
+// watch screen before landing).
+func TestHelpOverlayOnEveryKeyedScreen(t *testing.T) {
+	t.Run("watch", func(t *testing.T) {
+		tm := openWatchScreenForTest(t)
+		before := plain(tm)
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+		opened := plain(tm)
+		if opened == before {
+			t.Fatal("? did not change the view")
+		}
+		if !strings.Contains(opened, "help · watch") {
+			t.Errorf("the overlay should name its own screen:\n%s", opened)
+		}
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+		if got := plain(tm); got != before {
+			t.Errorf("esc should return to the identical view:\nbefore:\n%s\nafter:\n%s", before, got)
+		}
+	})
+
+	t.Run("config", func(t *testing.T) {
+		r, err := gitops.Discover(fixtureRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil, apprestart.Funcs{}).
+			WithConfigView("/tmp/hoist/config.yaml", true, "repos: []\n")
+		tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+		tm, _ = tm.Update(matrix.OpenConfigMsg{})
+		before := plain(tm)
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+		if !strings.Contains(plain(tm), "help · config") {
+			t.Errorf("the overlay should name its own screen:\n%s", plain(tm))
+		}
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+		if got := plain(tm); got != before {
+			t.Errorf("esc should return to the identical view:\nbefore:\n%s\nafter:\n%s", before, got)
+		}
+	})
+
+	t.Run("activity", func(t *testing.T) {
+		tm := sized(t).(Model).note(activity.Info, "something happened", "", "")
+		var tmodel tea.Model = tm
+		tmodel, _ = tmodel.Update(tea.WindowSizeMsg{Width: width, Height: height})
+		tmodel, _ = tmodel.Update(matrix.OpenActivityMsg{})
+		before := plain(tmodel)
+		tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+		if !strings.Contains(plain(tmodel), "help · activity") {
+			t.Errorf("the overlay should name its own screen:\n%s", plain(tmodel))
+		}
+		tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+		if got := plain(tmodel); got != before {
+			t.Errorf("esc should return to the identical view:\nbefore:\n%s\nafter:\n%s", before, got)
+		}
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+			p := restart.Plan{Env: env}
+			for _, n := range names {
+				p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+			}
+			return p, nil
+		}
+		r, err := gitops.Discover(fixtureRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
+			apprestart.Funcs{Read: read, Interval: time.Millisecond})
+		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+		tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+		tm = drainTags(tm, cmd)
+		if _, ok := tm.(Model).stack[len(tm.(Model).stack)-1].(restartScreen); !ok {
+			t.Fatalf("setup: top screen is %T, want the restart screen", tm.(Model).stack[len(tm.(Model).stack)-1])
+		}
+		before := plain(tm)
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+		if !strings.Contains(plain(tm), "help · restart") {
+			t.Errorf("the overlay should name its own screen:\n%s", plain(tm))
+		}
+		tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+		if got := plain(tm); got != before {
+			t.Errorf("esc should return to the identical view:\nbefore:\n%s\nafter:\n%s", before, got)
+		}
+	})
+}
+
+// TestEscInHelpClosesOnlyHelp: with the overlay open, esc closes only it — the screen
+// underneath is exactly what it was before ? was pressed, never popped itself.
+func TestEscInHelpClosesOnlyHelp(t *testing.T) {
+	tm := openWatchScreenForTest(t)
+	before := plain(tm)
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	if !tm.(Model).helpOpen {
+		t.Fatal("setup: ? should have opened the overlay")
+	}
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if tm.(Model).helpOpen {
+		t.Error("esc should have closed the overlay")
+	}
+	if n := len(tm.(Model).stack); n != 2 {
+		t.Fatalf("esc in the overlay popped a screen: stack has %d, want 2 (matrix + watch)", n)
+	}
+	if got := plain(tm); got != before {
+		t.Errorf("the screen underneath should be unchanged:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	// Every other key but esc/?/enter is swallowed while the overlay is open — ctrl+c still quits.
+	tm2, _ := tm.(Model).Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	tm2, cmd := tm2.(Model).Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if cmd != nil {
+		t.Error("a swallowed key inside the overlay should produce no command")
+	}
+	if !tm2.(Model).helpOpen {
+		t.Error("an unrelated key should not have closed the overlay")
+	}
+	_, cmd = tm2.(Model).Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c should still quit while the overlay is open")
+	}
+}
+
+// TestLOpensActivityFromWatch: l opens the activity log from the watch screen (the proposed
+// keymap's "l activity log everywhere"), handled generically at the root for any keyed screen
+// rather than a per-screen message (train3-design.md's own scope note).
+func TestLOpensActivityFromWatch(t *testing.T) {
+	tm := openWatchScreenForTest(t).(Model).note(activity.Info, "something happened", "", "")
+	var tmodel tea.Model = tm
+	tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	stack := tmodel.(Model).stack
+	if _, ok := stack[len(stack)-1].(activityScreen); !ok {
+		t.Fatalf("l did not open the activity screen; top is %T", stack[len(stack)-1])
+	}
+	if !strings.Contains(plain(tmodel), "something happened") {
+		t.Errorf("the activity screen should show the log:\n%s", plain(tmodel))
+	}
+}
+
+// TestWatchFooterNoContradiction: UX-H9's own acceptance check, at the root — the watch
+// screen's footer never claims both "never refreshes" (it polls on a cadence) and a "poll now"
+// verb that duplicates r's own "refresh" meaning everywhere else in the app.
+func TestWatchFooterNoContradiction(t *testing.T) {
+	tm := openWatchScreenForTest(t)
+	v := plain(tm)
+	if strings.Contains(v, "never refreshes") {
+		t.Errorf("the watch footer should not claim it never refreshes:\n%s", v)
+	}
+	if strings.Contains(v, "poll now") {
+		t.Errorf("the watch footer should say refresh, not poll now:\n%s", v)
+	}
+	if !strings.Contains(v, "r refresh") {
+		t.Errorf("the watch footer should offer r refresh:\n%s", v)
 	}
 }

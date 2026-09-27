@@ -1,4 +1,4 @@
-╭─ /home/me/.config/hoist/config.yaml ─────────────────────────────────────────╮
+╭─ hoist · config · /home/me/.config/hoist/config.yaml ────────────────────────╮
 │repos:                                                                        │
 │    - name: my-gitops                                                         │
 │      path: ~/src/my-gitops                                                   │
@@ -21,4 +21,4 @@
 │    ci: 20s                                                                   │
 │    approval: 30s                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-read-only · op refs redacted        ↑/↓ pgup/pgdn ctrl+u/d g/G scroll · esc back
+read-only · op refs reda… home top · end bottom · l activity · esc back · ? help

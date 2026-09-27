@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 )
 
 // BackMsg is emitted on esc; the root pops the screen (internal/app/app.go, matrix.OpenActivityMsg
@@ -124,11 +125,15 @@ func (m Model) layout() Model {
 // View renders the frame: the title, the log in its viewport, and the footer.
 func (m Model) View() string {
 	m = m.layout()
-	left := m.styles.Status.Render(fmt.Sprintf("%d entries", m.log.Len()))
-	right := m.styles.Hint.Render("↑/↓ pgup/pgdn ctrl+u/d scroll · esc back")
+	status := fmt.Sprintf("%d entries", m.log.Len())
+	title := fmt.Sprintf("hoist · activity · %s", status)
+	hints := []keys.Hint{{B: keys.Esc, Long: "esc back", Pri: 0}}
 	return ui.Frame{
-		Title:    "activity",
+		Title:    title,
 		Sections: []string{m.body.View()},
-		Footer:   ui.StatusBar(m.width, left, right),
+		Footer:   keys.Footer(m.styles, m.width, status, hints, true),
 	}.Render(m.styles, m.width, m.height)
 }
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
+func (m Model) KeyScreen() keys.Screen { return keys.ScrActivity }

@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
@@ -167,12 +169,30 @@ type Model struct {
 	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes (T3-01) — flag 8, the one Kitty-protocol
 	// feature that can report a caps-lock letter as ModCapsLock distinct from ModShift
 	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
-	// records whether the terminal granted it). No screen reads this yet: its one use is a
-	// single line in T3-03's help overlay ("caps lock ignored" vs "a capital counts as
-	// shift"), never passed down into any value-typed screen (train3-design.md's own "needs
-	// your decision", resolved as: match without tracking state per-screen, record once here
-	// for that one line instead).
+	// records whether the terminal granted it). Its one use is a single line in T3-03's help
+	// overlay ("caps lock ignored" vs "a capital counts as shift"), never passed down into any
+	// value-typed screen (train3-design.md's own "needs your decision", resolved as: match
+	// without tracking state per-screen, record once here for that one line instead).
 	kbd tea.KeyboardEnhancementsMsg
+
+	// helpOpen/helpScreen are the root's own "?" overlay (T3-03): opened only for a top screen
+	// that implements keyed (KeyScreen), drawn with ui.Dialog over whatever is underneath.
+	// helpScreen is fixed at the moment the overlay opens, not re-read from the stack on every
+	// keypress, so the overlay's own content cannot change out from under the operator while it
+	// is up (nothing on the stack changes while it is open anyway — every key but esc/?/enter is
+	// swallowed).
+	helpOpen   bool
+	helpScreen keys.Screen
+
+	// hint is the transient "q quits from the matrix · esc goes back" row (train3-design.md's
+	// own T3-03 decision): unlike the activity row (Model.activity), it is not an entry in the
+	// log — it is cleared unconditionally at the top of every keypress, so it survives exactly
+	// one more key after the one that set it, then disappears whether or not that next key did
+	// anything else. It shares the activity row's own screen-space mechanism (View, below): both
+	// take their row OUT of the top screen via ui.NoticeLinesStyled, never appended past it
+	// (§9 entry 10) — hint simply takes priority over the activity row while it is set, since
+	// only one bottom row exists on the terminal's last line.
+	hint string
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -389,6 +409,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one layer down, TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit's own shape).
 			return m.updateQuitConfirm(msg)
 		}
+		if m.helpOpen {
+			return m.updateHelp(msg)
+		}
+		// The transient q hint (Model.hint's own doc comment) clears at the top of every
+		// keypress, before this one is otherwise processed — "clears on the next key" means
+		// exactly that, including a repeated q, which simply clears the old hint and sets an
+		// identical new one in the same call.
+		m.hint = ""
 		// Unlike the old transient notice, the activity row is never cleared by a keypress here
 		// — only a newer entry replaces it, or opening the log (l) dismisses it (Model.activity's
 		// own doc comment, TestNoticeSurvivesKeypress).
@@ -396,20 +424,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			// Immediate, no confirm, regardless of what is running: promotion state is durable
 			// (AGENTS.md §4.1) and `hoist resume` recovers whatever this interrupts (Train 2
-			// design's own operator decision).
+			// design's own operator decision). cmd/hoist's own main.go prints every id still in
+			// flight and its `hoist resume <id>` line once the program actually exits (keymap
+			// rule 4) — nothing more happens here than asking to quit.
 			return m, tea.Quit
 		case "q":
-			// Round 5, finding 3: this used to quit unconditionally, before the top screen's
-			// own key handling ever saw the press — so typing "q" into the tag picker's filter
-			// (or a huh field's own "/" filter, plan.Model.CapturesText) quit the whole program
-			// instead of typing. Falls through to the normal forward-to-screen code below
-			// whenever the top screen reports it's mid-text-entry; ctrl+c above is unaffected
-			// and always quits.
+			// Audit keymap rule 4: q quits only from the matrix, and only when it is the only
+			// screen on the stack (matrix always sits at stack index 0 — screen.go's own
+			// invariant — so "top is the matrix" and "the stack holds only the matrix" are the
+			// same condition). Anywhere else q is unbound: it shows the transient hint rather
+			// than doing anything, unless the top screen is mid-text-entry, in which case the
+			// letter falls through to it untouched (round 5, finding 3's own guard, unchanged).
 			if !m.capturesText() {
-				if m.sess.AnyRunning() {
-					return m.openQuitConfirm()
+				if _, onMatrix := m.top().(matrixScreen); onMatrix {
+					if m.sess.AnyRunning() {
+						return m.openQuitConfirm()
+					}
+					return m, tea.Quit
 				}
-				return m, tea.Quit
+				m.hint = "q quits from the matrix · esc goes back"
+				return m, nil
+			}
+		case "?":
+			// The help overlay (T3-03): only for a top screen with a stated row in
+			// internal/ui/keys' registry (keyed), and never while it's mid-text-entry — a filter
+			// query typing "?" is not asking for help.
+			if !m.capturesText() {
+				if s, ok := m.top().(keyed); ok {
+					m.helpOpen = true
+					m.helpScreen = s.KeyScreen()
+					return m, nil
+				}
+			}
+		case "l":
+			// The activity log, from any screen that has opted into the registry (keyed) —
+			// generic root-level handling, not a per-screen message (train3-design.md's own
+			// "the root intercepts ?, l and q as keys, not as *Msgs"). The matrix's own l
+			// (matrix.OpenActivityMsg, below) still handles itself: matrixScreen does not
+			// implement keyed yet (that lands in T3-04), so this never double-fires for it.
+			if !m.capturesText() {
+				if _, ok := m.top().(keyed); ok {
+					if _, already := m.top().(activityScreen); !already {
+						as := activityScreen{activity.New(m.activity, time.Now)}
+						m = m.push(as)
+						return m, as.Init()
+					}
+				}
 			}
 		}
 	case matrix.DriftMsg:
@@ -634,7 +694,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case matrix.OpenRestartMsg:
 		return m.openRestart(msg.Family, msg.Target)
 	case apprestart.BackMsg:
-		return m.pop(), nil
+		// FB-L3: esc while a confirmed restart is still starting or rolling leaves the screen,
+		// but not the restart itself — it is a live cluster operation this package cannot cancel
+		// — so the activity log gets a line naming that instead of the screen just vanishing
+		// mid-roll with nothing left to say so.
+		m = m.pop()
+		if msg.RollingContinues {
+			m = m.note(activity.Info, "rollout continues", "", "")
+		}
+		return m, nil
 	case matrix.OpenWatchMsg:
 		return m.openWatch(msg.Family, msg.Target)
 	case watch.BackMsg:
@@ -978,8 +1046,28 @@ func (m Model) activityStyle() lipgloss.Style {
 	}
 }
 
-// View renders the top screen in the alternate screen buffer, with the root's own activity row
-// (bottomLine, above) on the terminal's last row when there is at least one entry.
+// bottomText and bottomStyle pick which one row the terminal's last line shows (see Model.hint's
+// own doc comment): the transient q hint takes priority over the activity row while it is set,
+// since only one such row exists on screen at a time — never both at once, and never the hint
+// added as its own activity.Entry (T3-03's own decision: it is not a record of anything that
+// happened, only a momentary correction).
+func (m Model) bottomText() string {
+	if m.hint != "" {
+		return m.hint
+	}
+	return m.bottomLine()
+}
+
+func (m Model) bottomStyle() lipgloss.Style {
+	if m.hint != "" {
+		return m.styles.Warn
+	}
+	return m.activityStyle()
+}
+
+// View renders the top screen in the alternate screen buffer, with the root's own bottom row
+// (bottomText/bottomStyle, above — the transient q hint, or else the activity row) on the
+// terminal's last row when there is one to show.
 //
 // The row's own line is taken OUT of the screen above rather than appended after it. Every
 // screen draws through ui.Frame.Render, which emits exactly `height` lines, so a row merely
@@ -993,7 +1081,7 @@ func (m Model) activityStyle() lipgloss.Style {
 // TestNoticeSurvivesKeypress) — it only goes away once the log itself is empty, which never
 // happens once the first entry lands.
 func (m Model) View() tea.View {
-	notice := ui.NoticeLinesStyled(m.activityStyle(), m.bottomLine(), m.width)
+	notice := ui.NoticeLinesStyled(m.bottomStyle(), m.bottomText(), m.width)
 	content := ""
 	if n := len(m.stack); n > 0 {
 		top := m.stack[n-1]
@@ -1007,6 +1095,9 @@ func (m Model) View() tea.View {
 	}
 	if len(notice) > 0 {
 		content += "\n" + strings.Join(notice, "\n")
+	}
+	if m.helpOpen {
+		content = ui.Dialog(m.styles, content, keys.HelpTitle(m.helpScreen), keys.HelpView(m.helpScreen, m.kbd), m.width, m.height)
 	}
 	if m.quitConfirming && m.quitConfirm != nil {
 		content = ui.Dialog(m.styles, content, "quit hoist?", m.quitConfirm.View(), m.width, m.height)
@@ -1286,6 +1377,48 @@ func (m Model) matrixRepo() *gitops.Repo {
 		}
 	}
 	return nil
+}
+
+// top returns the screen currently on top of the stack, or nil when the stack is empty (never
+// true in practice once New has run — the matrix always sits at index 0 — but every caller here
+// treats a nil result the same as "nothing to defer to", matching capturesText's own convention).
+func (m Model) top() Screen {
+	if len(m.stack) == 0 {
+		return nil
+	}
+	return m.stack[len(m.stack)-1]
+}
+
+// updateHelp handles every key while the help overlay is open: esc, ? and enter all close it
+// (train3-design.md's T3-03 scope); ctrl+c still quits immediately, exactly as it does
+// everywhere else; every other key is swallowed rather than reaching the screen underneath,
+// so the overlay behaves like a real modal rather than a transparent one that happens to also
+// draw a box.
+func (m Model) updateHelp(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "?", "enter":
+		m.helpOpen = false
+		return m, nil
+	}
+	return m, nil
+}
+
+// InFlightIDs lists every promotion id this session still tracks, sorted — cmd/hoist's own
+// main.go prints these with their `hoist resume <id>` line once the program has actually quit
+// (keymap rule 4: "on the way out it prints the ids still in flight"), so an operator who quit
+// past a running drive (q's own confirm, or ctrl+c's immediate exit) is told exactly how to pick
+// each one back up rather than having to remember or reconstruct it.
+func (m Model) InFlightIDs() []string {
+	var ids []string
+	for _, snap := range m.sess.Live() {
+		if snap.ID != "" {
+			ids = append(ids, snap.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // capturesText reports whether the top screen is currently mid-text-entry (see Screen.

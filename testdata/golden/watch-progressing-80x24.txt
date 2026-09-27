@@ -1,4 +1,4 @@
-╭─ hoist · watch ──────────────────────────────────────────────────────────────╮
+╭─ hoist · watch · web/app-staging ────────────────────────────────────────────╮
 │app-staging / web · web-app-staging                 polled just now · every 5s│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │sync OutOfSync   health Progressing   revision 0123456789ab   operation       │
@@ -21,4 +21,4 @@
 │      worker=ghcr.io/example/web:v1.5.0@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
 │      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-read-only · never refreshes                   r poll now · ↑/↓ scroll · esc back
+next poll in 5s                       r refresh · l activity · esc back · ? help
