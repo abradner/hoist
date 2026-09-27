@@ -315,7 +315,7 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	}
 	// A shorter poll.deadline than the fixture's default (not the fixture's own 10s, which would
 	// make this test needlessly slow), and poll.argo widened to LARGER than that deadline so
-	// driveToCompletion's outer loop calls engine.Drive exactly once and is then purely sleeping
+	// Driver.Run's outer loop calls engine.Drive exactly once and is then purely sleeping
 	// when ctx's deadline fires.
 	//
 	// That one-call shape is what keeps the phase asserted below deterministic. This test cares

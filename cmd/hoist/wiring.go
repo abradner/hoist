@@ -7,13 +7,11 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/abradner/hoist/internal/app"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/matrix"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
@@ -21,103 +19,21 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// buildStartPromotion adapts internal/service.StartPromotion into an app.StartPromotionFunc the
-// TUI can call without importing pkg/git, pkg/forge, pkg/argo, pkg/rollout or internal/config
-// itself (AGENTS.md §4.8) — the same shape buildResolveFunc already gives the plan screen. svc is
-// the one, session-lifetime Service runTUI builds; StartPromotion itself now does everything this
-// adaptor used to assemble by hand (the freshness check, the forge/Argo/rollout adaptors, the
-// claim-then-rescan, the state save and its release, and — new in this PR, the fix
-// AGENTS.md's own design doc for this train calls out as its trust-boundary reason for existing
-// — the production direct-commit gate, called BEFORE any of that rather than only inside the
-// first Drive step that happened to run after the claim and the initial save).
-//
-// Repo and View are left nil on the request below, which is what fixes the boot-frozen-repo
-// defect this adaptor used to have (FB-M1): StartPromotion reads svc.Repo() ITSELF, at call
-// time, rather than trusting whatever *gitops.Repo/viewDir this closure was built with back at
-// TUI boot — so an Argo Application renamed since boot, or a repo view F5 has refreshed since,
-// is what the Argo Application lookup and the freshness check actually see.
-func buildStartPromotion(svc *service.Service) app.StartPromotionFunc {
-	return func(ctx context.Context, p gitops.Plan, opts app.StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
-		var onWaiting func()
-		if progress != nil {
-			// onWaiting carries the "waiting for signing approval" wait into the drive, the
-			// same callback preflight reports progress through — so preflight and drive read
-			// as one log (defect B).
-			onWaiting = func() { progress("waiting for signing approval") }
-		}
-		d, err := svc.StartPromotion(ctx, service.StartRequest{
-			Plan: p,
-			Mode: service.Mode{Direct: opts.Direct, Confirmed: opts.Confirmed},
-		}, service.Hooks{Progress: progress, OnWaiting: onWaiting})
-		if err != nil {
-			return engine.PromotionState{}, nil, err
-		}
-		return d.State(), d, nil
-	}
-}
-
-// buildInFlightFuncs is the TUI's `hoist promotions` and `hoist resume <id>` (M10), now a thin
-// adapter over svc.List/svc.Resume (internal/service/promotions.go) — the same re-observation
-// both the CLI's runPromotions/runResume and the matrix's in-flight pane now share, rather than
-// two separately-maintained loops that could (and once did, per the aggregate review of stack
-// #137) disagree about the very same state file. svc's own Settings.KubeOverride is what both
-// List's re-observation and Resume's drive open their Argo/rollout adaptors against — set once
-// at construction (runTUI), the operator's explicit --kube-context (#105) when given, else each
-// promotion's own repo's kube.context, so one TUI session runs against one cluster throughout.
-func buildInFlightFuncs(svc *service.Service) app.InFlight {
-	if svc == nil || svc.Settings().Config == nil {
-		return app.InFlight{}
-	}
-	return app.InFlight{
-		List: func(ctx context.Context) ([]flight.Summary, error) {
-			listed, err := svc.List(ctx, service.ListOpts{})
-			if err != nil {
-				return nil, err
-			}
-			out := make([]flight.Summary, 0, len(listed))
-			for _, l := range listed {
-				out = append(out, summaryFor(l))
-			}
-			return out, nil
-		},
-		Resume: func(ctx context.Context, id string) (engine.PromotionState, flight.Driver, error) {
-			// No live progress channel wired for a resumed promotion before this PR
-			// (FB-M2) — svc.Resume's own DriverHooks{Progress: ...} now gives the flight
-			// screen the same per-step progress a freshly started promotion already had.
-			d, err := svc.Resume(ctx, id, service.ResumeOpts{})
-			if err != nil {
-				return engine.PromotionState{}, nil, err
-			}
-			return d.State(), d, nil
-		},
-	}
-}
-
-// summaryFor turns one service.Listed into the flight.Summary the in-flight pane renders —
-// Unconfigured and Err both become a Summary whose own Err names why re-observation could not
-// happen at all (never dropped), exactly as observeForList's pre-move wording did.
-func summaryFor(l service.Listed) flight.Summary {
-	switch {
-	case l.Unconfigured:
-		return flight.Summarize(l.State, false, nil, fmt.Errorf("repo %s is not in the config file", l.State.RepoFullName))
-	case l.Err != nil:
-		return flight.Summarize(l.State, false, nil, l.Err)
-	default:
-		return flight.Summarize(l.State, l.Done, l.Statuses, nil)
-	}
-}
-
-// buildPollDurations translates config.PollConfig's CI/Approval/Deadline into
+// buildPollDurations translates config.PollConfig's CI/Approval/Argo/Rollout/Deadline into
 // flight.PollDurations — the plain-value shape the flight screen actually needs (AGENTS.md
 // §4.8: the screen never imports internal/config itself). All five are translated now that the
 // screen drives the Argo and rollout steps too; it previously stopped at Merged, so poll.argo
-// and poll.rollout had no analogue to carry (issue #64).
+// and poll.rollout had no analogue to carry (issue #64). The CI/Approval/Argo/Rollout four are
+// the identical conversion pollIntervals (drive.go) makes for engine.PollIntervals — reused here
+// rather than a third hand-copy of the same four fields, plus Deadline, which flight.PollDurations
+// carries and engine.PollIntervals does not.
 func buildPollDurations(poll config.PollConfig) flight.PollDurations {
+	pi := pollIntervals(poll)
 	return flight.PollDurations{
-		CI:       time.Duration(poll.CI),
-		Approval: time.Duration(poll.Approval),
-		Argo:     time.Duration(poll.Argo),
-		Rollout:  time.Duration(poll.Rollout),
+		CI:       pi.CI,
+		Approval: pi.Approval,
+		Argo:     pi.Argo,
+		Rollout:  pi.Rollout,
 		Deadline: time.Duration(poll.Deadline),
 	}
 }
@@ -242,7 +158,7 @@ func buildWatchFunc(r *gitops.Repo, a argo.Argo, ro rollout.Rollout, clusterErr 
 
 // buildRestartFuncs adapts internal/restart's core into the plain function values the restart
 // screen takes, so internal/app never reaches for pkg/rollout or a kubeconfig itself
-// (AGENTS.md §4.8) — the same shape buildResolveFunc and buildTagsFunc already give the plan
+// (AGENTS.md §4.8) — the same shape svc.Plan and buildTagsFunc already give the plan
 // and picker screens.
 //
 // A zero Funcs when the cluster could not be reached: the screen's own Read is then nil, and

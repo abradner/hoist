@@ -171,12 +171,29 @@ promoted, so nothing is misreported (decided in issue #12).
 
 ### 4.3 `pkg/` is activity-shaped
 
-`pkg/*` packages never import `internal/`, never import a workflow engine, and expose functions of
-the shape `func(ctx, In) (Out, error)` with JSON-serialisable inputs and outputs that contain **no
-secrets** — credentials are resolved inside the adaptor from env, keychain, cluster or `op`. *Why:*
-the same functions must be wrappable as Temporal activities by `github.com/abradner/workflow`
-without change, and that library's boundary rule is that nothing secret or unbounded crosses a
-workflow/activity edge.
+`pkg/*` packages never import `internal/`, never import a workflow engine, and their calls take
+JSON-serialisable inputs and return JSON-serialisable outputs that contain **no secrets** —
+credentials are resolved inside the adaptor from env, keychain, cluster or `op`. Correcting an
+earlier claim here: this used to say every `pkg/*` package "expose[s] functions of the shape
+`func(ctx, In) (Out, error)`" — true of `pkg/gitops`, `pkg/resolve`, `pkg/redact` and `pkg/image`,
+but not of `pkg/git`, `pkg/forge`, `pkg/argo`, `pkg/rollout` or `pkg/registry`, each of which
+exposes a stateful client *interface* (`git.Git`, `forge.Forge`, `argo.Argo`, `rollout.Rollout`,
+`registry.Registry`) built once and called several times — a git worktree, a forge session, a
+kube client all carry connection state a bare function per call would have to rebuild every time.
+The activity-shaped constraint that actually matters — no secrets crossing the boundary, JSON-
+serialisable in/out, no `internal/` import — holds for both shapes; only the bare-function-per-call
+description was too narrow. *Why:* the same calls must be wrappable as Temporal activities by
+`github.com/abradner/workflow` without change, and that library's boundary rule is that nothing
+secret or unbounded crosses a workflow/activity edge.
+
+`internal/service` sits above `pkg/` and `internal/engine`, as the one use-case layer both the CLI
+(`cmd/hoist`) and the TUI (`internal/app`) call for planning, starting, listing, resuming and
+abandoning a promotion (§4.8's service-layer bullet) — it is where activity-shaped `pkg/` clients
+and `internal/engine`'s step machinery get composed into one call per use case. `pkg/` still never
+imports `internal/`, `internal/service` included: `internal/service/imports_test.go` enforces both
+directions (`pkg/...` never depends on `hoist/internal`, and `internal/service` never depends on
+`internal/app` or a bubbletea package), so the layering stays a build-checked fact, not a
+convention someone has to remember.
 
 ### 4.4 Public surfaces carry no cluster identity
 
@@ -263,11 +280,31 @@ no rule stated for any of them:
 - **The matrix keeps a column cursor** (`matrix.Model.col`, moved by Left/Right) so "current env"
   is real state (`CurrentEnv()`), not a value only derivable from the table's row cursor — a
   promotion is planned from an env, not a family, and the two cursors are independent.
-- **`cmd/hoist` owns the adapter from CLI options to the TUI's resolve function**
-  (`buildResolveFunc` in `cmd/hoist/main.go`): the plan screen's `ResolveFunc` type lives in
-  `internal/app/plan` and knows nothing of `resolutionOptions` or `runResolution`; only `cmd/hoist`
-  is allowed to know both sides, so a screen's own package still never imports `config` or
-  `registry` policy, only the plain function type it calls.
+- **`internal/service` is the one use-case layer both faces call; the root depends on the
+  narrow `app.Service` interface, not on `*service.Service` itself.** Superseded (2026-09, the
+  service-design train's PR F): this bullet used to read "`cmd/hoist` owns the adapter from CLI
+  options to the TUI's resolve function (`buildResolveFunc` in `cmd/hoist/main.go`): the plan
+  screen's `ResolveFunc` type lives in `internal/app/plan` and knows nothing of
+  `resolutionOptions` or `runResolution`; only `cmd/hoist` is allowed to know both sides, so a
+  screen's own package still never imports `config` or `registry` policy, only the plain function
+  type it calls." That was true when `cmd/hoist` was the only place a promotion's use-case logic
+  (planning, starting, listing, resuming, abandoning) lived — every non-trivial operation needed
+  its own hand-adapted function type per screen. `internal/service` (`Plan`, `StartPromotion`,
+  `List`, `Resume`, `Abandon`, `RefreshRepo`, `Repo`) now holds that logic once, for both the CLI
+  and the TUI, and `internal/app.Service` (`internal/app/service.go`) is the narrow, consumer-side
+  interface the root (`app.Model`) depends on — `*service.Service` satisfies it directly, and a
+  test fakes it with a plain struct. `cmd/hoist` still owns constructing the real `*service.Service`
+  (`serviceDeps`, `settingsFor`) and still adapts what has no service-layer home yet — history,
+  tags, watch, restart, drift remain plain function types built in `cmd/hoist/wiring.go`, per this
+  same rule, until they migrate too. A screen may import `internal/service` for its plain value
+  types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) — this keeps `flight.Driver`
+  and `plan.Func` small, local, and fakeable without pulling in the whole client-cache type — but
+  never `internal/app` itself, keeping "a screen never imports `app`" intact. Correcting an
+  adjacent claim this bullet's old wording relied on: "a screen never imports `config`" was
+  already false before this change and stays false — `internal/app/plan`, `internal/app/matrix`,
+  `internal/app/tags` and `internal/app/deploy` all import `internal/config` for
+  `config.EnvsConfig` (production/pairs), which they need to render directly rather than through
+  a translated plain value; only `registry`/`resolve` *policy* stays out of a screen's package.
 - **A screen that shows launcher-owned text takes plain values, not a function.** Codified
   from the config screen (#104, Arc 2): when what a screen displays is a string the launcher
   already holds (the redacted config text and its path), the root takes it through

@@ -30,7 +30,7 @@ func TestDeriveRowsNotYetStarted(t *testing.T) {
 }
 
 // TestDeriveRowsMidCIWaiting: branch/commit/push/PR done, CI waiting — the shape the CLI's
-// own driveToCompletion loop sees mid-poll while checks are still running.
+// own Driver.Run loop sees mid-poll while checks are still running.
 func TestDeriveRowsMidCIWaiting(t *testing.T) {
 	statuses := []engine.StepStatus{
 		st(engine.StepBranched, engine.Observation{Satisfied: true, Detail: "worktree present"}),

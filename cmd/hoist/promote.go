@@ -107,16 +107,6 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
 	}
-	// Plan prepends resolve.Warnings itself now (service.Plan's own doc comment) — runPlan and
-	// the TUI plan screen go through the identical call, so a pods/manifest digest disagreement
-	// can never reach one and not the other again (AGENTS.md §4's Divergences, item 10).
-	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
-	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
-		return exitFailure
-	}
-	plan := pc.Plan
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
@@ -124,6 +114,18 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
+
+	// Plan prepends resolve.Warnings itself now (service.Plan's own doc comment) — runPlan and
+	// the TUI plan screen go through the identical call, so a pods/manifest digest disagreement
+	// can never reach one and not the other again (AGENTS.md §4's Divergences, item 10). It runs
+	// under the same signal/deadline ctx as everything after it, so ^C or the poll deadline can
+	// interrupt resolution too, not just the drive that follows it.
+	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
+	if err != nil {
+		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
+		return exitFailure
+	}
+	plan := pc.Plan
 
 	waited := false
 	onWaiting := func() {
@@ -171,7 +173,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 	return exitFailure, true
 }
 
-// reportDriveResult renders driveToCompletion's outcome the same way for hoist promote and
+// reportDriveResult renders Driver.Run's outcome the same way for hoist promote and
 // hoist resume: the branch/commit/PR/merge summary on success, the specific messages
 // AGENTS.md's "waiting for signing approval" / ErrWaiting / ctx deadline / Blocked cases call
 // for, and the redact.Strings final boundary for anything else (Finding B: a step's Act error

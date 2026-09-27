@@ -111,8 +111,8 @@ func TestProgressChannelCloseStopsListening(t *testing.T) {
 	}
 }
 
-// TestAdoptBuiltTransitionsToDriving: once cmd/hoist's StartPromotionFunc actually returns a
-// real PromotionState and DriveFunc, AdoptBuilt is what turns this same screen instance into
+// TestAdoptBuiltTransitionsToDriving: once svc.StartPromotion actually returns a
+// real PromotionState and Driver, AdoptBuilt is what turns this same screen instance into
 // a normal, driving one — building clears, buildLog clears (state.History is authoritative
 // from here), and the returned command actually drives (proven by running it and checking the
 // stub was called, not merely that a non-nil command came back — a command that does nothing

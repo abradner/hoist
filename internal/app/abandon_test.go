@@ -29,11 +29,10 @@ func (f hungDriveFunc) OverrideCINone()                                {}
 // abandonFn as a command; once that resolves, the notice reports the outcome.
 func TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn(t *testing.T) {
 	var gotID string
-	root := sized(t).(Model)
-	root = root.WithAbandon(func(_ context.Context, id string) error {
+	root := sizedWithService(t, &fakeService{AbandonFn: func(_ context.Context, id string) error {
 		gotID = id
 		return nil
-	})
+	}}, Promotion{}).(Model)
 	root = root.push(flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, nil)})
 	if n := len(root.stack); n != 2 {
 		t.Fatalf("setup: stack has %d screens after pushing flight, want 2", n)
@@ -47,23 +46,7 @@ func TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("AbandonMsg produced no command — the real abandonFn was never called")
 	}
-	msg := cmd()
-	if bm, ok := msg.(tea.BatchMsg); ok {
-		// listInFlight's own relist command is nil here (no WithInFlight wired), so tea.Batch
-		// filters it out — but stay robust to a future change that wires one in too.
-		for _, c := range bm {
-			if c == nil {
-				continue
-			}
-			if r, ok := c().(abandonResultMsg); ok {
-				msg = r
-			}
-		}
-	}
-	res, ok := msg.(abandonResultMsg)
-	if !ok {
-		t.Fatalf("command produced %#v, want abandonResultMsg", msg)
-	}
+	res := abandonResultFrom(t, cmd)
 	if res.err != nil {
 		t.Fatalf("abandonResultMsg.err = %v, want nil", res.err)
 	}
@@ -82,10 +65,9 @@ func TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn(t *testing.T) {
 // implementation refusing an already-landed promotion) surfaces as a notice, never a panic or a
 // silently-dropped error.
 func TestFlightAbandonMsgFailureShowsNotice(t *testing.T) {
-	root := sized(t).(Model)
-	root = root.WithAbandon(func(context.Context, string) error {
+	root := sizedWithService(t, &fakeService{AbandonFn: func(context.Context, string) error {
 		return errors.New("abcd1234 has already landed; abandoning is not a rollback")
-	})
+	}}, Promotion{}).(Model)
 	root = root.push(flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, nil)})
 
 	tm, cmd := root.Update(flight.AbandonMsg{ID: "abcd1234"})
@@ -93,16 +75,38 @@ func TestFlightAbandonMsgFailureShowsNotice(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("AbandonMsg produced no command")
 	}
-	res, ok := cmd().(abandonResultMsg)
-	if !ok {
-		t.Fatalf("command produced %#v, want abandonResultMsg", cmd())
-	}
+	res := abandonResultFrom(t, cmd)
 
 	tm2, _ := root.Update(res)
 	root = tm2.(Model)
 	if !strings.Contains(root.notice, "abandon abcd1234 failed") || !strings.Contains(root.notice, "not a rollback") {
 		t.Errorf("notice = %q, want it to report the real failure", root.notice)
 	}
+}
+
+// abandonResultFrom extracts the abandonResultMsg from doAbandon's own command — a
+// tea.Batch(relistCmd, abandonCmd) whose relistCmd is only nil when svc.List itself is nil
+// (never true for a *fakeService, since List defaults to an empty listing rather than nil —
+// fakeservice_test.go's own doc comment on List explains why), so the two-command batch shape
+// must always be handled here, not just optionally.
+func abandonResultFrom(t *testing.T, cmd tea.Cmd) abandonResultMsg {
+	t.Helper()
+	msg := cmd()
+	if bm, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range bm {
+			if c == nil {
+				continue
+			}
+			if r, ok := c().(abandonResultMsg); ok {
+				msg = r
+			}
+		}
+	}
+	res, ok := msg.(abandonResultMsg)
+	if !ok {
+		t.Fatalf("command produced %#v, want abandonResultMsg", msg)
+	}
+	return res
 }
 
 // TestFlightAbandonMsgWithoutHandlerShowsNotice mirrors startPromotion/openURL's own nil
@@ -144,8 +148,7 @@ func TestFlightAbandonMsgWaitsForBusyDriveCmdBeforeAbandoning(t *testing.T) {
 		gotErr <- ctx.Err()
 		return service.Tick{}, ctx.Err()
 	})
-	root := sized(t).(Model)
-	root = root.WithAbandon(func(context.Context, string) error { return nil })
+	root := sizedWithService(t, &fakeService{AbandonFn: func(context.Context, string) error { return nil }}, Promotion{}).(Model)
 	fs := flightScreen{flight.New(engine.PromotionState{ID: "abcd1234"}, flight.PollDurations{}, hung)}
 	initCmd := fs.Init()
 	if initCmd == nil {

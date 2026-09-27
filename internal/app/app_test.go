@@ -112,19 +112,38 @@ func (f funcDriver) OverrideCINone() {
 // TestStartMsgWithNoStartPromotionShowsNotice and TestFlightOpenPRMsgShowsNotice below).
 func sized(t *testing.T) tea.Model {
 	t.Helper()
-	return sizedWithPromotion(t, Promotion{})
+	return sizedWithPromotion(t, testPromo{})
 }
 
 // sizedWithPromotion is sized's general form, for tests that need a fake Start/OpenURL wired
 // in without cmd/hoist's own pkg/git/pkg/forge adaptors (this package must never import
-// those — AGENTS.md §4.8).
-func sizedWithPromotion(t *testing.T, promo Promotion) tea.Model {
+// those — AGENTS.md §4.8). promo is the test-only testPromo (fakeservice_test.go): the old
+// Promotion.Start field, deleted from app.go's own Promotion in the Service-seam refactor, lives
+// on here so every existing fixture keeps its exact shape — only the wrapping type's name
+// changed. Start (if set) becomes the fakeService driving app.Service.StartPromotion.
+func sizedWithPromotion(t *testing.T, promo testPromo) tea.Model {
+	t.Helper()
+	// A zero testPromo (promo.Start == nil) must still leave m.svc == nil — the "not wired up"
+	// convention every unwired-adaptor test in this file asserts against (a non-nil *fakeService
+	// with a nil startFn would panic instead of degrading to a notice the moment
+	// plan.StartMsg/deploy.StartMsg reached svc.StartPromotion).
+	var svc Service
+	if promo.Start != nil {
+		svc = &fakeService{startFn: promo.Start}
+	}
+	return sizedWithService(t, svc, Promotion{Poll: promo.Poll, OpenURL: promo.OpenURL, OpenPRMode: promo.OpenPRMode})
+}
+
+// sizedWithService is sizedWithPromotion's underlying general form, for tests that need to
+// drive List/Resume/Abandon through a *fakeService directly (the in-flight pane, abandon)
+// rather than only Start/OpenURL.
+func sizedWithService(t *testing.T, svc Service, promo Promotion) tea.Model {
 	t.Helper()
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{}), promo, nil, apprestart.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{}), svc, promo, nil, apprestart.Funcs{})
 	_ = m.Init()
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -309,10 +328,10 @@ func TestPromotePushesPlanScreen(t *testing.T) {
 	}
 }
 
-// TestStartMsgWithNoStartPromotionShowsNotice: a caller that hasn't wired a real
-// StartPromotionFunc in (Promotion{} zero value, sized's own default) must show a clear notice
-// on confirm rather than pushing a broken flight screen or panicking on a nil call — the same
-// nil-adaptor convention plan.ResolveFunc and flight.OpenPRMsg's OpenURL already use.
+// TestStartMsgWithNoStartPromotionShowsNotice: a caller that hasn't wired a Service in (a nil
+// svc, sized's own default) must show a clear notice on confirm rather than pushing a broken
+// flight screen or panicking on a nil call — the same nil-adaptor convention plan.Func and
+// flight.OpenPRMsg's OpenURL already use.
 func TestStartMsgWithNoStartPromotionShowsNotice(t *testing.T) {
 	m := sized(t)
 	before := len(m.(Model).stack)
@@ -330,19 +349,19 @@ func TestStartMsgWithNoStartPromotionShowsNotice(t *testing.T) {
 }
 
 // TestStartMsgBuildsFlightScreenOnSuccess: plan.StartMsg dispatches the wired
-// StartPromotionFunc off the Update call stack (it can talk to a real git remote/forge, so it
-// must not run directly inside Update — mirrors plan.ResolveFunc's own loadCmd), and a
+// svc.StartPromotion off the Update call stack (it can talk to a real git remote/forge, so it
+// must not run directly inside Update — mirrors plan.Func's own loadCmd), and a
 // successful promotionBuiltMsg then pushes the flight screen with the real state and
-// DriveFunc it returned — no more nil, no more a bare {SourceEnv, TargetEnv}. The fake driveFn
-// is a trivial non-nil stub, never nil: a real StartPromotionFunc success always builds one
-// (wiring.go's buildStartPromotion never returns a nil driveFn alongside a nil error), and a
+// Driver it returned — no more nil, no more a bare {SourceEnv, TargetEnv}. The fake driveFn
+// is a trivial non-nil stub, never nil: a real svc.StartPromotion success always builds one
+// (production svc.StartPromotion never returns a nil Drive alongside a nil error), and a
 // nil driveFn here would now hit the promotionBuiltMsg nil-driveFn guard (Copilot's PR #50
 // finding — see TestPromotionBuiltMsgNilDriveFnShowsNotice) instead of exercising this test's
 // actual subject, the successful push.
 func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		if p.SourceEnv != "app-staging" || p.TargetEnv != "app-production" {
 			t.Errorf("startPromotion called with unexpected plan: %+v", p)
@@ -391,8 +410,8 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // AdoptBuilt → driveCmd path, the same sequence a real cmd/hoist wiring drives — proving app.go
 // itself never closes the channel out from under a drive that is still going to use it.
 func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
-		// Preflight: exactly what buildStartPromotion's own report(...) calls do.
+	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
+		// Preflight: exactly what svc.StartPromotion's own Hooks.Progress calls do.
 		progress("checking your checkout against origin/main")
 		progress("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
 		s := engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv}
@@ -440,7 +459,7 @@ func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 // mirrors TestDriveCmdStampsCurrentGen at the flight layer (internal/app/flight/model_test.go),
 // one layer up the stack, guarding the build step instead of the drive step.
 func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -468,7 +487,7 @@ func TestPromotionBuiltMsgStampsCurrentBuildGen(t *testing.T) {
 // pushed or adopted.
 func TestStalePromotionBuiltMsgFromBackedOutPlanIsDropped(t *testing.T) {
 	wantState := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return wantState, driverAlways(wantState), nil
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -520,7 +539,7 @@ func TestStalePromotionBuiltMsgFromSupersededStartMsgIsDropped(t *testing.T) {
 	first := engine.PromotionState{ID: "first-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	second := engine.PromotionState{ID: "second-request", SourceEnv: "app-staging", TargetEnv: "app-production"}
 	calls := 0
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		calls++
 		if calls == 1 {
 			return first, driverAlways(first), nil
@@ -593,7 +612,7 @@ func TestStartMsgFiltersToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -644,7 +663,7 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 	}
 	var gotPlan gitops.Plan
 	called := false
-	promo := Promotion{Start: func(_ context.Context, p gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called = true
 		gotPlan = p
 		return engine.PromotionState{ID: "abcd1234"}, nil, nil
@@ -691,26 +710,23 @@ func TestStartMsgFiltersWarningsToTickedRepos(t *testing.T) {
 }
 
 // TestStartMsgRefusesDirectModeNotWired is PR #50 review finding #3: direct mode's real
-// step-selection machinery (M6/PR #43's engine.DirectCommitStep) is not present on this
-// branch — buildStartPromotion (cmd/hoist/wiring.go) always builds engine.AllSteps regardless
-// of what the operator chose, and StartPromotionFunc's signature carries no Mode at all. A
-// StartMsg confirmed with Mode: plan.ModeDirect must therefore never reach startPromotion —
-// silently driving PR mode instead would mean the confirm screen told the operator "commit
-// straight to the branch, no PR" and then opened one anyway.
-// A direct-mode confirm reaches the start function AS direct. The TUI used to refuse this
-// outright, because nothing downstream could honour it: StartPromotionFunc had no way to carry
-// the choice, and buildStartPromotion always built the PR step list. Confirming would have told
-// the operator "commit straight to the branch, no PR" and then opened a PR — so refusing was
-// the honest option at the time. StartOpts carries it now, and AllDirectSteps honours it.
+// step-selection machinery (M6/PR #43's engine.DirectCommitStep) was not present on the
+// original branch this test was written against — the TUI's start adaptor of the day always
+// built engine.AllSteps regardless of what the operator chose, and its call signature carried
+// no Mode at all. A StartMsg confirmed with Mode: plan.ModeDirect must therefore never reach
+// startPromotion as anything but direct — silently driving PR mode instead would mean the
+// confirm screen told the operator "commit straight to the branch, no PR" and then opened one
+// anyway. A direct-mode confirm reaches the start function AS direct: startOpts carries it, and
+// service.Mode/AllDirectSteps honour it in production.
 //
 // Confirmed rides along with Direct because reaching ModeDirect already required the plan
 // screen's own keypress-then-huh.Confirm gesture, which is exactly what
 // engine.DirectCommitGateStep asks Confirmed to attest — and the gate re-derives the production
 // refusal independently regardless.
 func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
-	var got StartOpts
+	var got startOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, opts startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
@@ -730,18 +746,18 @@ func TestStartMsgCarriesDirectModeThrough(t *testing.T) {
 		t.Fatal("startPromotion was never called for a direct-mode confirm")
 	}
 	if !got.Direct {
-		t.Error("StartOpts.Direct = false for a ModeDirect confirm: the promotion would open a PR the operator declined")
+		t.Error("startOpts.Direct = false for a ModeDirect confirm: the promotion would open a PR the operator declined")
 	}
 	if !got.Confirmed {
-		t.Error("StartOpts.Confirmed = false: the gate would refuse a gesture the operator actually completed")
+		t.Error("startOpts.Confirmed = false: the gate would refuse a gesture the operator actually completed")
 	}
 }
 
 // The PR path must not accidentally inherit direct mode.
 func TestStartMsgPRModeIsNotDirect(t *testing.T) {
-	var got StartOpts
+	var got startOpts
 	called := false
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, opts startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		called, got = true, opts
 		return engine.PromotionState{}, nil, nil
 	}}
@@ -791,7 +807,7 @@ func TestPromotionBuiltMsgNilDriveFnShowsNotice(t *testing.T) {
 // pushed) rather than crashing.
 func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	wantErr := errors.New("promotion existing-id targeting app-production is still in flight (at pr-opened: open); run `hoist resume existing-id` instead of starting a second one")
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{}, nil, wantErr
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -822,11 +838,11 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 // flight.Model.driveCmd's own DriveFunc call, so this returns with ctx's deadline error instead
 // of the goroutine blocking indefinitely.
 func TestStartMsgBoundedByPollDeadline(t *testing.T) {
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		<-ctx.Done()
 		return engine.PromotionState{}, nil, ctx.Err()
 	}
-	promo := Promotion{Start: hung, Poll: flight.PollDurations{Deadline: 20 * time.Millisecond}}
+	promo := testPromo{Start: hung, Poll: flight.PollDurations{Deadline: 20 * time.Millisecond}}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
 	_, cmd := m.Update(msg)
@@ -859,12 +875,12 @@ func TestStartMsgBoundedByPollDeadline(t *testing.T) {
 // startPromotion call's own context, not just its result.
 func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 	gotErr := make(chan error, 1)
-	hung := func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	hung := func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		<-ctx.Done()
 		gotErr <- ctx.Err()
 		return engine.PromotionState{}, nil, ctx.Err()
 	}
-	promo := Promotion{Start: hung}
+	promo := testPromo{Start: hung}
 	m := sizedWithPromotion(t, promo)
 	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}}
 	m, cmd := m.Update(msg)
@@ -901,7 +917,7 @@ func TestBackingOutCancelsOutstandingBuild(t *testing.T) {
 func TestSupersedingStartMsgCancelsPreviousBuild(t *testing.T) {
 	firstErr := make(chan error, 1)
 	callCount := 0
-	promo := Promotion{Start: func(ctx context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		callCount++
 		if callCount == 1 {
 			<-ctx.Done()
@@ -953,8 +969,8 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 		<-ctx.Done()
 		return service.Tick{}, ctx.Err()
 	}}
-	promo := Promotion{
-		Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{
+		Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 			time.Sleep(buildSleep)
 			return engine.PromotionState{ID: "abcd1234"}, hungDrive, nil
 		},
@@ -1003,7 +1019,7 @@ func TestFlightScreenSharesBuildDeadlineWithDrive(t *testing.T) {
 func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
 	const secret = "ghp_totallysecrettoken1234567890"
 	redact.Register(secret)
-	promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, _ StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+	promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 		return engine.PromotionState{}, nil, fmt.Errorf("push failed: authentication using %s rejected", secret)
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -1039,7 +1055,7 @@ func TestFlightOpenPRMsgShowsNotice(t *testing.T) {
 // the "not wired yet" notice.
 func TestFlightOpenPRMsgCallsOpenURL(t *testing.T) {
 	var got string
-	promo := Promotion{OpenURL: func(url string) error {
+	promo := testPromo{OpenURL: func(url string) error {
 		got = url
 		return nil
 	}}
@@ -1056,7 +1072,7 @@ func TestFlightOpenPRMsgCallsOpenURL(t *testing.T) {
 // TestFlightOpenPRMsgShowsErrorFromOpenURL: a real OpenURL that fails (no browser found, the
 // operator's platform has none) must surface the error as a notice rather than swallow it.
 func TestFlightOpenPRMsgShowsErrorFromOpenURL(t *testing.T) {
-	promo := Promotion{OpenURL: func(_ string) error {
+	promo := testPromo{OpenURL: func(_ string) error {
 		return errors.New("no such browser")
 	}}
 	m := sizedWithPromotion(t, promo)
@@ -1072,7 +1088,7 @@ func TestFlightOpenPRMsgShowsErrorFromOpenURL(t *testing.T) {
 // yet" notice display mode has no use for.
 func TestFlightOpenPRMsgDisplayModeNeverCallsOpenURL(t *testing.T) {
 	called := false
-	promo := Promotion{
+	promo := testPromo{
 		OpenPRMode: "display",
 		OpenURL:    func(_ string) error { called = true; return nil },
 	}
@@ -1094,7 +1110,7 @@ func TestFlightOpenPRMsgDisplayModeNeverCallsOpenURL(t *testing.T) {
 // to launch into) must still show the URL, not the generic "not wired yet" notice launch/both
 // modes fall back to for that case.
 func TestFlightOpenPRMsgDisplayModeWorksWithNilOpenURL(t *testing.T) {
-	promo := Promotion{OpenPRMode: "display"}
+	promo := testPromo{OpenPRMode: "display"}
 	m := sizedWithPromotion(t, promo)
 	m = openPR(t, m)
 	v := plain(m)
@@ -1110,7 +1126,7 @@ func TestFlightOpenPRMsgDisplayModeWorksWithNilOpenURL(t *testing.T) {
 // text even when the launch itself succeeds — the whole point of "both" over plain "launch" is
 // a copy/paste fallback that exists unconditionally, not only on failure.
 func TestFlightOpenPRMsgBothModeShowsURLOnSuccess(t *testing.T) {
-	promo := Promotion{
+	promo := testPromo{
 		OpenPRMode: "both",
 		OpenURL:    func(_ string) error { return nil },
 	}
@@ -1125,7 +1141,7 @@ func TestFlightOpenPRMsgBothModeShowsURLOnSuccess(t *testing.T) {
 // name the URL (so the operator can act on it manually) alongside the launch error, not just
 // the bare error a plain "launch" mode shows.
 func TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure(t *testing.T) {
-	promo := Promotion{
+	promo := testPromo{
 		OpenPRMode: "both",
 		OpenURL:    func(_ string) error { return errors.New("no such browser") },
 	}
@@ -1344,7 +1360,7 @@ func TestDeployConfirmScreenCarriesTheProductionWarning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, testPlanFunc([]string{"ghcr.io/"}, envs), Promotion{}, nil, apprestart.Funcs{})
+		var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, testPlanFunc([]string{"ghcr.io/"}, envs), nil, Promotion{}, nil, apprestart.Funcs{})
 		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 		tm, _ = tm.Update(tags.SelectedMsg{
 			ImageRepo: "ghcr.io/example/web",
@@ -1484,7 +1500,7 @@ func TestDeployNewThreadsRealStagingTag(t *testing.T) {
 		}
 		return false, regTagsFn, nil, metaFn
 	}
-	m := New(r, []string{"ghcr.io/"}, envs, nil, Promotion{}, tagsFn, apprestart.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, envs, nil, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
@@ -1520,7 +1536,7 @@ func TestQuitKeyTypedIntoTagsFilterDoesNotQuit(t *testing.T) {
 		}
 		return false, regTagsFn, nil, metaFn
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, tagsFn, apprestart.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, tagsFn, apprestart.Funcs{})
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
@@ -1578,9 +1594,9 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 		{"direct mode", deploy.ModeDirect, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var got StartOpts
+			var got startOpts
 			called := false
-			promo := Promotion{Start: func(_ context.Context, _ gitops.Plan, opts StartOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+			promo := testPromo{Start: func(_ context.Context, _ gitops.Plan, opts startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
 				called, got = true, opts
 				return engine.PromotionState{}, nil, nil
 			}}
@@ -1600,10 +1616,10 @@ func TestDeployStartMsgStartsAPromotionWithItsMode(t *testing.T) {
 				t.Fatal("startPromotion was never called for a confirmed deploy")
 			}
 			if got.Direct != tc.wantDirect {
-				t.Errorf("StartOpts.Direct = %v, want %v", got.Direct, tc.wantDirect)
+				t.Errorf("startOpts.Direct = %v, want %v", got.Direct, tc.wantDirect)
 			}
 			if got.Confirmed != tc.confirmed {
-				t.Errorf("StartOpts.Confirmed = %v, want %v", got.Confirmed, tc.confirmed)
+				t.Errorf("startOpts.Confirmed = %v, want %v", got.Confirmed, tc.confirmed)
 			}
 		})
 	}
@@ -1655,7 +1671,7 @@ func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
 		}
 		return p, nil
 	}
-	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil,
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
 		apprestart.Funcs{Read: read, Interval: time.Millisecond})
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 	tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
@@ -1703,17 +1719,17 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	resumed := ""
 	parked := engine.PromotionState{ID: "5pr6sd333t", SourceEnv: "app-staging", TargetEnv: "app-production",
 		PR: &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}}
-	inFlight := InFlight{
-		List: func(context.Context) ([]flight.Summary, error) {
+	inFlight := fakeInFlight{
+		List: func(context.Context) ([]service.Listed, error) {
 			listed++
-			return []flight.Summary{flight.Summarize(parked, false, []engine.StepStatus{
+			return []service.Listed{{State: parked, Done: false, Statuses: []engine.StepStatus{
 				{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}},
 				{Step: engine.StepCommitted, Observation: engine.Observation{Satisfied: true}},
 				{Step: engine.StepPushed, Observation: engine.Observation{Satisfied: true}},
 				{Step: engine.StepPROpened, Observation: engine.Observation{Satisfied: true}},
 				{Step: engine.StepCIGreen, Observation: engine.Observation{Satisfied: true}},
 				{Step: engine.StepApproved, Observation: engine.Observation{Waiting: true}},
-			}, nil)}, nil
+			}}}, nil
 		},
 		Resume: func(_ context.Context, id string) (engine.PromotionState, flight.Driver, error) {
 			resumed = id
@@ -1724,7 +1740,7 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{}).WithInFlight(inFlight)
+	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, svcWithInFlight(inFlight), Promotion{}, nil, apprestart.Funcs{})
 	var m tea.Model = root
 	init := root.Init()
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -1815,7 +1831,7 @@ func openPR(t *testing.T, m tea.Model) tea.Model {
 // called until that command runs, so a slow browser cannot block the event loop (#56).
 func TestFlightOpenPRLaunchesOutsideUpdate(t *testing.T) {
 	calls := 0
-	m := sizedWithPromotion(t, Promotion{OpenURL: func(string) error { calls++; return nil }})
+	m := sizedWithPromotion(t, testPromo{OpenURL: func(string) error { calls++; return nil }})
 	_, cmd := m.Update(flight.OpenPRMsg{URL: "https://example.invalid/pr/1"})
 	if cmd == nil {
 		t.Fatal("OpenPRMsg must return the launch as a command")
@@ -1853,7 +1869,7 @@ func TestWithDriftMarksEveryEnvPendingUntilItAnswers(t *testing.T) {
 	drift := func(_ context.Context, _ string) (map[string][]image.Ref, error) {
 		return map[string][]image.Ref{}, nil
 	}
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, Promotion{}, nil, apprestart.Funcs{}).WithDrift(drift)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil, apprestart.Funcs{}).WithDrift(drift)
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	if v := plain(tm); !strings.Contains(v, "… asking the cluster what") {
@@ -1993,5 +2009,25 @@ func TestNoticeTooLongForTheTerminalIsCapped(t *testing.T) {
 	}
 	if !strings.Contains(lines[len(lines)-1], "…") {
 		t.Errorf("a capped notice must mark its overflow with an ellipsis; last line:\n%s", lines[len(lines)-1])
+	}
+}
+
+// TestSummaryForUnconfiguredRepoNamesWhyAndCannotReobserve pins the orphan-state coverage lost
+// when cmd/hoist/inflight_test.go's TestBuildInFlightFuncsListsAndNamesTheUnobservable was
+// deleted (t1-review.md P1 #2): a service.Listed for a repo that has since left the config file
+// must still turn into a flight.Summary whose Err names "not in the config file" (never dropped,
+// never a bare "unconfigured" with no reason) and whose Verdict reads "cannot re-observe" —
+// exactly as cmd/hoist's old observeForList wording did.
+func TestSummaryForUnconfiguredRepoNamesWhyAndCannotReobserve(t *testing.T) {
+	listed := service.Listed{
+		State:        engine.PromotionState{ID: "orphan01", RepoFullName: "someone/else"},
+		Unconfigured: true,
+	}
+	sum := summaryFor(listed)
+	if !strings.Contains(sum.Err, "not in the config file") {
+		t.Fatalf("summaryFor(Unconfigured).Err = %q, want it to contain %q", sum.Err, "not in the config file")
+	}
+	if v := sum.Verdict(); v != "cannot re-observe" {
+		t.Fatalf("summaryFor(Unconfigured).Verdict() = %q, want %q", v, "cannot re-observe")
 	}
 }
