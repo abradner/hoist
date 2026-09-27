@@ -10,8 +10,8 @@ type row struct {
 }
 
 // table is the whole approved screen × key matrix, transcribed from the audit's own table.
-// Every screen in internal/app reads it through On/Has below (T3-01 through T3-10 finished the
-// migration); the tests in this file and each screen package's own TestRegistryKeysAreHonoured
+// Every screen in internal/app reads it through On/Has below; the tests in this file and each
+// screen package's own TestRegistryKeysAreHonoured
 // (internal/app/matrix, plan, deploy, tags, flight, watch, restart, config, activity) hold it to
 // the audit's rules mechanically rather than by review (AGENTS.md §10 meta-rule 5).
 var table = []row{

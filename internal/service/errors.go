@@ -13,7 +13,7 @@ import (
 // for. It carries plain fields rather than one canonical message because the CLI's own wording
 // (which names the deployed ref for a deploy) and the TUI's (which never has, for a deploy —
 // see wiring.go's old buildStartPromotion) have never agreed word for word; unifying that text
-// is out of this PR's scope (it is not one of the design's own listed divergences), so each
+// is out of scope here, so each
 // caller still builds its own final line from these fields. Error() gives a reasonable default
 // for a caller that only wants *a* message — the TUI's own notice line uses exactly it today.
 type AlreadyCurrentError struct {

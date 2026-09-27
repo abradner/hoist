@@ -27,7 +27,7 @@ import (
 
 // ResumeMsg asks the root to re-drive one in-flight promotion on the flight screen (r, or
 // enter on the pane) — the TUI's `hoist resume <id>`. Build carries the session.Controller
-// BuildID for an entry still Building (P1 #2): ID is empty until a real promotion id exists, so
+// BuildID for an entry still Building: ID is empty until a real promotion id exists, so
 // re-attaching to it before then has nothing else to key by — the root re-attaches by Build
 // directly (session.Controller.BuildSnapshot) rather than calling Resume with an empty id, which
 // would fail to find anything and, worse, would have started a second drive had Resume("")
@@ -119,8 +119,8 @@ func (m Model) paneRows(rows int) int {
 }
 
 // paneID is the identity a pane line shows: the real promotion id once one exists, or a
-// placeholder for a still-Building live entry (flight.Summary.ID is empty until then, P3 #1/P1
-// #2 — an empty string rendered bare read as a layout bug, not "no id yet").
+// placeholder for a still-Building live entry (flight.Summary.ID is empty until then — an
+// empty string rendered bare read as a layout bug, not "no id yet").
 func paneID(s flight.Summary) string {
 	if s.ID == "" {
 		return "(starting)"
@@ -149,8 +149,8 @@ func (m Model) expandedSections() []string {
 		}
 		head := m.styles.Accent.Render(paneID(s)) + "   " + m.styles.Title.Render(pair(s)) + m.styles.Dim.Render("   "+started)
 		if s.Live {
-			// This session is driving it right now — never true for a listing-only entry
-			// (Train 2 design PR 3): distinguish that from "re-observed, last seen here".
+			// This session is driving it right now — never true for a listing-only entry:
+			// distinguish that from "re-observed, last seen here".
 			head += "  " + m.styles.Warn.Render("driving")
 		}
 		head = m.paneMarker(i) + head

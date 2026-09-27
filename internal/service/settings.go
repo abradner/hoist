@@ -11,7 +11,7 @@ import (
 // boundary — cmd/hoist's own settingsFor builds it from the effective flag/config precedence
 // selectRepo already computes; the TUI shares the exact same struct rather than rebuilding an
 // equivalent one, which is what let the two faces' kube-context fallback drift into five
-// separate copies (AGENTS.md's Divergences).
+// separate copies.
 type Settings struct {
 	RepoDir, AppsRoot string
 	Base              string

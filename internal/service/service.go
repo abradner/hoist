@@ -36,7 +36,7 @@ type Service struct {
 	// (index.lock contention, a worktree registration torn between the two). The TUI's own
 	// matrix already avoids issuing two concurrent asks (askRepoRefresh's
 	// refreshingRepo/refreshAgain coalescing), but that is UI-level politeness, not the actual
-	// guarantee: a completion-triggered refresh (Train 2 design PR 4) and an F5 the operator
+	// guarantee: a completion-triggered refresh and an F5 the operator
 	// presses in the same instant both reach LoadRepo directly, and this mutex is what makes
 	// two such loads inside one running `hoist` unable to run at once — see AGENTS.md §8's
 	// deletion test: the matrix's own guard could be deleted without this directory becoming

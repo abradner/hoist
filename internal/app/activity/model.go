@@ -20,8 +20,7 @@ import (
 type BackMsg struct{}
 
 // keyMap is this screen's own key vocabulary on top of the viewport's own paging bindings
-// (newViewport). Home/End (P2-8, T3 review) jump the log to its ends — the design's own row
-// for this screen, missing until now.
+// (newViewport). Home/End jump the log to its ends, a row this screen was missing until now.
 type keyMap struct {
 	Back      key.Binding
 	Home, End key.Binding
@@ -131,8 +130,8 @@ func (m Model) layout() Model {
 }
 
 // pluralEntries is ui.Plural's own "%ss" rule corrected for entry's irregular plural
-// ("entries", never "entrys") — the one noun on this screen ui.Plural cannot be used for as-is
-// (P2-13, T3 review: this always read "N entries", even "1 entries").
+// ("entries", never "entrys") — the one noun on this screen ui.Plural cannot be used for as-is:
+// this always read "N entries", even "1 entries", before this fix.
 func pluralEntries(n int) string {
 	if n == 1 {
 		return "1 entry"

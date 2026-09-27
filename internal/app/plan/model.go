@@ -43,8 +43,8 @@ const (
 
 // Func builds one gitops.Plan through internal/service's own Plan — the identical builder
 // `hoist plan`/`hoist promote`/`hoist deploy` use, so a plan built for this screen and one built
-// for the CLI's dry run can never silently diverge again (AGENTS.md §4's "Divergences", item
-// 10). cmd/hoist supplies it as svc.Plan, wrapping whichever cluster and registry adaptors the
+// for the CLI's dry run can never silently diverge again. cmd/hoist supplies it as svc.Plan,
+// wrapping whichever cluster and registry adaptors the
 // selected repo's config calls for — so this package never opens a cluster or registry
 // connection itself (AGENTS.md §4.3) and never imports cmd (AGENTS.md §4.8). It always talks to
 // a cluster/registry when resolution is configured, so model.go calls it only from inside a
@@ -259,10 +259,10 @@ func (m Model) ResetStarting() Model {
 	return m
 }
 
-// newViewport is the impact pane's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in
-// the T3 review) rather than left on viewport.New()'s bubbles-library default — which binds
+// newViewport is the impact pane's own scrolling body, bound to keys.ViewportKeyMap
+// rather than left on viewport.New()'s bubbles-library default — which binds
 // space/f/b to page and bare "d"/"u" to half-page, none of it shown anywhere and "d" already
-// meaning "toggle yaml diff" on this screen. SoftWrap is on (T3 followup, group 2): the yaml
+// meaning "toggle yaml diff" on this screen. SoftWrap is on: the yaml
 // diff's whole point is the digest, and a hard-truncated line hides it past the pane's right
 // edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
@@ -317,9 +317,9 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 // Close cancels this screen's outstanding history and load requests. Called by the root's own
 // pop/truncate the moment this screen is actually removed from the stack (AGENTS.md §4.8) —
 // never by this package itself any more: Enter hands off to the building screen without
-// removing this one (m.start's own design, Train 2 design PR 2), and cancelling here on Enter
+// removing this one (m.start's own design), and cancelling here on Enter
 // used to strand every not-yet-loaded delta if that build then failed and the building screen
-// popped back to a plan screen whose history could never load again (FB-M3).
+// popped back to a plan screen whose history could never load again.
 func (m Model) Close() { m.scope.Close() }
 
 // WithNow fixes the clock relative dates are worded against (tests).
@@ -582,9 +582,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		if keys.Esc.Matches(msg) && !m.confirming && !m.overriding && !m.filtering() {
-			// No cancel here any more (FB-M3): the root's own pop, triggered by this BackMsg,
+			// No cancel here any more: the root's own pop, triggered by this BackMsg,
 			// calls Close on this screen the moment it is actually removed from the stack —
-			// see Close's own doc comment. P1-2: while a huh field's own filter is open, esc
+			// see Close's own doc comment. While a huh field's own filter is open, esc
 			// belongs to the widget (it closes the filter, not the screen) — see filtering's
 			// own doc comment.
 			return m, func() tea.Msg { return BackMsg{} }
@@ -632,8 +632,8 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 
 // filtering reports whether the currently-active huh field has its own filter box open (the
 // operator typed "/"), for the field whichever state the screen is in owns. While it is true,
-// every key — esc included — belongs to the widget, never to this screen's own key handling
-// (P1-2 in the T3 review): a probe found "/" then "r" firing plan.RefreshMsg, "/" then enter
+// every key — esc included — belongs to the widget, never to this screen's own key handling:
+// a probe found "/" then "r" firing plan.RefreshMsg, "/" then enter
 // firing plan.StartMsg (starting the promotion), and esc popping the whole screen instead of
 // just closing the filter.
 func (m Model) filtering() bool {
@@ -648,7 +648,7 @@ func (m Model) filtering() bool {
 }
 
 func (m Model) updateSelectEnv(msg tea.Msg) (Model, tea.Cmd) {
-	// P1-2: while the select's own filter is open (the operator typed "/"), every key —
+	// While the select's own filter is open (the operator typed "/"), every key —
 	// including enter — belongs to the widget's filter box, never to this screen's own
 	// enter-confirms-the-choice handling below. Without this check, enter while filtering
 	// could confirm the still-highlighted pre-filter option instead of accepting the filter
@@ -707,7 +707,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	// P1-2: while the multi-select's own filter is open, every key belongs to it — r, d, e,
+	// While the multi-select's own filter is open, every key belongs to it — r, d, e,
 	// shift+d and enter must never reach this screen's own switch below (a probe found "/"
 	// then "r" firing plan.RefreshMsg and "/" then enter firing plan.StartMsg, which starts
 	// the promotion while the operator was still typing a filter query).
@@ -795,7 +795,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // updateMultiSelect forwards msg to the multi-select field unconditionally and resyncs
-// m.ticked/the diff from it — the tail of updateReady's own handling, factored out so P1-2's
+// m.ticked/the diff from it — the tail of updateReady's own handling, factored out so the
 // filtering short-circuit above can reach it directly without falling through the switch that
 // owns r/d/e/enter/tab when the filter isn't open.
 func (m Model) updateMultiSelect(msg tea.Msg) (Model, tea.Cmd) {
@@ -1020,7 +1020,7 @@ func (m Model) CapturesText() bool {
 	case m.state == stateReady && m.overriding:
 		return true // the o dialog's input takes every character, q included
 	case m.state == stateReady && m.confirming:
-		// P3 (T3 review): the shift+d direct-mode confirm is a huh.Confirm, not a text field,
+		// The shift+d direct-mode confirm is a huh.Confirm, not a text field,
 		// but this was still false while it was open — so ? and l (both gated on
 		// !CapturesText() at the root) opened the help overlay or the activity log OVER the
 		// dialog instead of being swallowed by it, the same class of bug the o dialog's own

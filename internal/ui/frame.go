@@ -16,9 +16,8 @@ import (
 // construction rather than by counting.
 //
 // A screen's View is `ui.Frame{...}.Render(styles, width, height)`; a sub-pane inside a
-// section (the in-flight panel under the matrix, T3-05 — moved inside the frame's own
-// Sections, retiring the earlier separate Panes field below the box) is Box, the same thing
-// without a footer.
+// section (the in-flight panel under the matrix) is Box, the same thing without a footer —
+// it lives inside the frame's own Sections rather than a separate Panes field below the box.
 type Frame struct {
 	Title    string
 	Sections []string

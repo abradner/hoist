@@ -51,8 +51,8 @@ import (
 // terms, discovering the repo only once for whichever of the two repairs this state actually
 // needs.
 //
-// Moved unchanged from cmd/hoist/resume.go's ensureArgoApps, and exported (it moved unexported
-// in the design's own first draft) because both List and Resume in this file call it, and a
+// Moved unchanged from cmd/hoist/resume.go's ensureArgoApps, and exported because both List and
+// Resume in this file call it, and a
 // resume_test.go's own legacy-state regression coverage needs it directly too.
 func EnsureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 	needsApps := len(s.ArgoApps) == 0 && len(s.Edits) > 0
@@ -190,7 +190,7 @@ func (s *Service) FindInFlightForEnv(ctx context.Context, env string) (*engine.P
 // be built, EnsureArgoApps failed, or the re-observation itself errored (already redacted —
 // AGENTS.md §4.10); otherwise Statuses is engine.Status's own full per-step walk and Last is its
 // final entry (the CLI only ever prints Last; the matrix's pane needs every entry to draw
-// per-step glyphs — see risk 8 in the design doc this PR implements: engine.Status is used here,
+// per-step glyphs. engine.Status is used here,
 // not engine.ObserveAll, specifically so one walk serves both, and Last is derived from its own
 // final entry rather than a second, separate ObserveAll call).
 type Listed struct {
@@ -345,8 +345,8 @@ type ResumeOpts struct {
 //     independently of Confirmed (AGENTS.md §4.5), so resuming can never reach an env the
 //     original run would have been refused.
 func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, error) {
-	// Honours ctx eagerly, unlike the TUI's own pre-move Resume adapter (design doc Divergence
-	// 6: it built a state and Driver even against an already-cancelled context) — a caller that
+	// Honours ctx eagerly, unlike the TUI's own pre-move Resume adapter (it built a state and
+	// Driver even against an already-cancelled context) — a caller that
 	// cancelled before calling Resume should never see it start building a state at all.
 	if err := ctx.Err(); err != nil {
 		return nil, err

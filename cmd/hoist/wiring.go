@@ -128,11 +128,11 @@ func runLauncher(timeout time.Duration, name string, args ...string) error {
 // (readWatchSnapshot) at the same cadence (watchInterval). It never calls Refresh: the Func
 // closes over readWatchSnapshot only, and the screen package cannot name argo.Argo at all.
 //
-// Every read below goes through svc, not a boot-time capture (Train 2 design PR 7): the Argo
+// Every read below goes through svc, not a boot-time capture: the Argo
 // and rollout clients come from svc.Argo/svc.Rollout, which cache only on success (service.go's
 // own doc comment) — a cluster that could not be reached when the TUI opened is retried on the
 // very next w, never wedged for the rest of the session — and the repo comes from svc.Repo(),
-// the service's own current view, so a family an F5 refresh (or a landed promotion, PR 4) just
+// the service's own current view, so a family an F5 refresh (or a landed promotion) just
 // added is visible the moment w is pressed rather than only after a restart. The returned
 // BuildFunc is never nil: a cluster that cannot be reached is reported as the real client error
 // from the call that failed, not as a generic "none is configured" the operator cannot act on
@@ -179,7 +179,7 @@ func buildWatchFunc(svc *service.Service, kubeContext, argoNamespace string, pol
 // and picker screens.
 //
 // Each of Read/Do/Observe asks svc.Rollout(kubeContext) itself, at call time, rather than
-// closing over a client built once at boot (Train 2 design PR 7): a boot-time cluster failure
+// closing over a client built once at boot: a boot-time cluster failure
 // is retried on R exactly as buildWatchFunc's is, since svc.Rollout only memoizes a success.
 // The returned Funcs is never the zero value; a cluster that cannot be reached surfaces as the
 // real error from whichever call needed it, and the root shows that instead of a generic "none

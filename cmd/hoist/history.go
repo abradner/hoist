@@ -32,7 +32,7 @@ import (
 // svc.RegistryFor exactly as buildTagsFunc does, so both adaptors pick the same registries[]
 // entry the identical way (F4) rather than each re-deriving it.
 //
-// repoRoot and blameRef are no longer captured once at boot (Train 2 design PR 7): every
+// repoRoot and blameRef are no longer captured once at boot: every
 // LiveAge call reads svc.Repo(), the service's own current view, through historyAdaptor.blame
 // below, which memoises the resolved HEAD per view directory so an F5 refresh that lands mid-
 // session is picked up by the very next LiveAge call rather than only after a restart, while a
@@ -113,8 +113,8 @@ type historyAdaptor struct {
 }
 
 // blame answers the checkout root and the ref LiveAge should blame, read from svc.Repo()'s
-// CURRENT view every call (Train 2 design PR 7) rather than a value captured once at TUI boot —
-// a repo view an F5 refresh (or a landed promotion, PR 4) just replaced is picked up
+// CURRENT view every call rather than a value captured once at TUI boot —
+// a repo view an F5 refresh (or a landed promotion) just replaced is picked up
 // immediately. For a RepoFromOrigin view, RepoView.SHA is already the exact HEAD that view's
 // directory was checked out to (repo.go's own doc comment), so no git call is needed at all; for
 // a RepoFromClone view (no configured repo, or origin unreachable) HEAD is read via

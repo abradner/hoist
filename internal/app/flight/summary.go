@@ -32,7 +32,7 @@ type Summary struct {
 	// Live is true when this Summary was built from this session's own session.Controller entry
 	// (app.go's summaryForSnapshot) rather than purely from a fresh listing (summaryFor) — the
 	// pane's own way to say "hoist itself is driving this, right now" versus "re-observed, last
-	// seen at this state" (Train 2 design PR 3's own "the pane marks drives running here").
+	// seen at this state" — the pane marks drives running here.
 	Live bool
 	// Build identifies the session.Controller entry this Summary was built from
 	// (summaryForSnapshot, app.go) — the only handle a still-Building entry has, since Summarize
@@ -70,8 +70,7 @@ func Summarize(s engine.PromotionState, done bool, statuses []engine.StepStatus,
 // RowState maps a Row's own Glyph string to the shared ui.StepState enum (internal/ui/glyph.go)
 // — the one place that translation happens, so every step strip in this app (this package's own
 // compact StepStrip, and the matrix's in-flight pane) reads the same five states off the same
-// Row data rather than each drawing its own glyph set (AGENTS.md §9's "one glyph set" note,
-// P2-13 in the T3 review).
+// Row data rather than each drawing its own glyph set (AGENTS.md §9's "one glyph set" note).
 func RowState(r Row) ui.StepState {
 	switch r.Glyph {
 	case GlyphDone:
@@ -90,7 +89,7 @@ func RowState(r Row) ui.StepState {
 // StepStrip is the whole pipeline on one line: "✓ branch ✓ commit ✓ push ✓ PR #103 ◐ CI ⏸
 // approval · merge · argo refresh · argo sync · rollout" — ui.StepGlyph's own set,
 // retiring this package's former ●/◍/✗/○ strip glyphs, which duplicated rows.go's own Glyph
-// characters under a third, inconsistent set (P2-13, T3 review). The PR step names its number
+// characters under a third, inconsistent set. The PR step names its number
 // once one exists.
 func (s Summary) StepStrip() string {
 	parts := make([]string, 0, len(s.Rows))

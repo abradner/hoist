@@ -41,8 +41,8 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 }
 
 // Preflight is StartPromotion's own early gate, called before any freshness check, claim or
-// state save — this is the trust-boundary fix this PR exists for (AGENTS.md's own design doc,
-// Divergence 5): the CLI has always run its identical checkDirectPreflight before ever building a
+// state save — this is the trust-boundary fix unifying on StartPromotion closes: the CLI has
+// always run its identical checkDirectPreflight before ever building a
 // worktree or a claim, but the TUI's own buildStartPromotion only ever reached
 // engine.DirectCommitGateStep once Drive itself first ran the step — AFTER the claim and the
 // initial state save. Calling the identical gate here, first, closes that gap for both faces

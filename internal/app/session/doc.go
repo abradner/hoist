@@ -12,7 +12,7 @@
 //
 // # Design
 //
-// Controller is a value type (D1 of the Train 2 design this PR implements): every state change
+// Controller is a value type: every state change
 // happens inside Update or one of Controller's own methods, each returning a new Controller
 // rather than mutating one in place, exactly as internal/app/matrix.Model and
 // internal/app/plan.Model already do (AGENTS.md §4.8). Bubble Tea keeps only whatever a model's

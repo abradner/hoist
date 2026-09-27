@@ -14,8 +14,8 @@ import (
 
 // Driver is what Controller drives one entry's promotion through — internal/service.Drive's own
 // consumer-side interface, narrowed to exactly what a poll needs (mirrors
-// internal/app/flight.Driver's identical narrowing, one layer up, before the wiring PR that
-// follows this one replaces that screen's own copy with this one — see design doc D3).
+// internal/app/flight.Driver's identical narrowing, one layer up, before the wiring that
+// follows replaces that screen's own copy with this one).
 // *service.Driver, returned by Backend.StartPromotion/Resume as a service.Drive, satisfies it
 // directly (a superset interface always does); a test fakes it without building a real
 // service.Driver.
@@ -98,7 +98,7 @@ type LogLine struct {
 // and After so nothing here ever sleeps or races real wall-clock time.
 type Config struct {
 	// Deadline bounds one build+drive's whole ctx, shared between the StartPromotion/Resume call
-	// and every Step call that follows it (one ctx per drive, D1's own rule — the time the build
+	// and every Step call that follows it (one ctx per drive — the time the build
 	// itself took counts against the same budget the drive polls against, never a fresh window
 	// per Step call, mirroring flight.Model's own deadlineAt one layer up).
 	Deadline time.Duration
@@ -202,8 +202,8 @@ type Change struct {
 	// Snap is the entry's own last snapshot, populated only for a Change whose entry Update
 	// removes from Controller in the very same call (ChangeDone, ChangeAbandoned) — every other
 	// kind leaves the entry live, so a caller can always get a fresher one straight from
-	// Controller.Snapshot/BuildSnapshot instead. Without this, a mirroring screen (the wiring PR
-	// that follows this one, D3) would have nothing left to mirror the instant a promotion
+	// Controller.Snapshot/BuildSnapshot instead. Without this, a mirroring screen (the wiring
+	// that follows) would have nothing left to mirror the instant a promotion
 	// finishes: BuildSnapshot(build) already returns false by the time the Change reaches it,
 	// since withoutEntry has already run, and the screen would be frozen one step short of the
 	// true final state forever.
@@ -288,7 +288,7 @@ type entry struct {
 }
 
 // Controller is the value type that owns every drive this session package tracks — see doc.go's
-// own "Design" section (D1): every state change happens inside Update or one of Controller's own
+// own "Design" section: every state change happens inside Update or one of Controller's own
 // methods, each of which returns a new Controller. Its two maps (entries, byID) are always
 // replaced with a maps.Clone'd copy before either is written to, so an older Controller value —
 // a stale screen copy, a test's "before" snapshot — never observes a write a newer one made
@@ -502,7 +502,7 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 	c = c.withEntry(e)
 	backend := c.backend
 	resumeCmd := func() tea.Msg {
-		// Hooks{Progress, OnWaiting} — the design's own FB-M2 fix: a resumed drive now reports
+		// Hooks{Progress, OnWaiting} fixes FB-M2: a resumed drive now reports
 		// live log lines exactly as a freshly started one already did (service.Resume's own doc
 		// comment on ResumeOpts.Hooks).
 		d, err := backend.Resume(ctx, id, service.ResumeOpts{Hooks: startHooks(ch)})
@@ -775,7 +775,7 @@ func (c Controller) Live() []Snapshot {
 
 // AnyRunning reports whether at least one tracked entry is actually in progress — Building,
 // Stepping, or Waiting, or an Abandoning entry whose Backend.Abandon call has actually been
-// dispatched (abandonIssued) — the root's own q-with-drives-running gate (Train 2 design PR 3). A
+// dispatched (abandonIssued) — the root's own q-with-drives-running gate. A
 // Stopped entry (a Blocked step or a terminal, non-retryable error — R/Poke re-arms it) or one
 // still Abandoning but not yet abandonIssued (waiting on a busy Step to notice its ctx was
 // cancelled — nothing has actually been dispatched to the forge/cluster yet) does not, by itself,

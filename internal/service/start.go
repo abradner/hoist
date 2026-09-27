@@ -63,7 +63,7 @@ type StartRequest struct {
 	Plan gitops.Plan
 	Mode Mode
 	// Repo is the discovered GitOps repo ArgoAppNames/EditApps read from. nil reads s.Repo().Repo
-	// AT CALL TIME, not when this request was built — the design's own FB-M1 fix: the TUI's old
+	// AT CALL TIME, not when this request was built — this fixes FB-M1: the TUI's old
 	// buildStartPromotion closed over a boot-time *gitops.Repo that F5 never updated, so an Argo
 	// Application renamed after boot was still looked up under its stale name. The CLI passes its
 	// own freshly discovered repo here instead, since a one-shot process only ever discovers once
@@ -77,7 +77,7 @@ type StartRequest struct {
 	View *RepoView
 	// Fresh carries the digests/reasons this plan was actually resolved with, for direct mode's
 	// own fresh-base occurrence check (checkFreshBase). nil recovers them from Plan.Edits instead
-	// — Divergence 8's TUI rule, unchanged: a filtered, ticked-down plan has no single resolution
+	// — the TUI's rule, unchanged: a filtered, ticked-down plan has no single resolution
 	// behind it any more.
 	Fresh *freshInputs
 }
@@ -154,27 +154,25 @@ func (s *Service) newState(id, branch, worktreeDir string, p gitops.Plan, mode M
 // StartPromotion takes a confirmed plan the rest of the way to a drivable promotion: preflight,
 // freshness, the one-in-flight claim, the first durable state save and the claim's release, all
 // in one place — the CLI's own runPromote/runDeploy and the TUI's own buildStartPromotion used to
-// each assemble this sequence by hand, in two different orders (AGENTS.md's own design doc,
-// Divergences 1/2/3/4/5), which is what let the TUI reach engine.DirectCommitGateStep only after
-// its own claim and save (Divergence 5) and let the two faces restore the claim/save order and
-// the preflight order differently (Divergences 1 and 4). This function is the one, canonical
+// each assemble this sequence by hand, in two different orders, which is what let the TUI reach
+// engine.DirectCommitGateStep only after its own claim and save, and let the two faces run the
+// claim/save order and the preflight order differently. This function is the one, canonical
 // order both faces now call through:
 //
 //	Preflight → freshness (by View) → [direct] fresh-base occurrence check → no-op
 //	(*AlreadyCurrentError) → forge identity → ArgoAppNames/EditApps → Argo/Rollout(KubeContext) →
 //	claimTarget → newState (Direct set) → Store.Save → release → Driver.
 //
-// Two behaviour changes fall out of unifying on this order (documented in the design doc as
-// accepted divergences, not defects):
+// Two behaviour changes fall out of unifying on this order (accepted divergences, not defects):
 //
 //  1. The claim is now released only after the state's first successful save lands (the TUI's own
-//     order, Divergence 1) — the CLI used to release inside its save wrapper's own closure, which
+//     order) — the CLI used to release inside its save wrapper's own closure, which
 //     is observably the same EXCEPT when Drive's very first Observe fails before its own first
 //     save: a state file now remains in that case (Phase ""), blocking the env until `resume`/
 //     `abandon` — already true for the TUI before this change.
 //  2. A direct no-op whose origin has an occurrence the local checkout has never seen is now
 //     refused with that specific error, on both faces, rather than the TUI's old "already
-//     current" (Divergence 4: the fresh-base check now always runs before the no-op check, the
+//     current" (the fresh-base check now always runs before the no-op check, the
 //     CLI's own order).
 func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks) (Drive, error) {
 	p := req.Plan
@@ -219,7 +217,7 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	}
 
 	// Direct mode's own additional gap ("base-advanced-with-new-occurrence"):
-	// this runs BEFORE the no-op check below (the CLI's own historical order, Divergence 4) so an
+	// this runs BEFORE the no-op check below (the CLI's own historical order) so an
 	// unseen origin occurrence is refused outright rather than reported as "already current" on
 	// either face.
 	if req.Mode.Direct {
@@ -282,7 +280,7 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	state := s.newState(id, branch, worktreeDir, p, req.Mode, argoApps, editApps)
 
 	// Both faces on main released the claim when the first save failed (TUI: wiring.go's
-	// release() on a SaveState error; CLI: promote.go's deferred release). Divergence 1 unifies
+	// release() on a SaveState error; CLI: promote.go's deferred release). This unifies
 	// on the TUI's order (explicit initial save, then release on success), and that order still
 	// releases on failure: a failed save leaves nothing durable for a future FindInFlight scan
 	// to find, so holding the claim would block the target env until an operator deletes the

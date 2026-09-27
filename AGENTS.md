@@ -1012,7 +1012,7 @@ test lives** (if one exists).
    `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `internal/service/inflight_test.go`
    (#165, #166).
 12. **A background effect owned by a screen dies with the screen.** What happened: before the
-   session controller existed (Train 2 design, FB-H2), the flight screen owned its own driver, ctx
+   session controller existed (FB-H2), the flight screen owned its own driver, ctx
    and tick chain — so leaving it (Esc) had to cancel that ctx or leak the goroutine, and "leaving"
    and "stopping the promotion" were the same code path by construction. That coupling was never a
    deliberate choice about what Esc should MEAN; it was a consequence of where the state happened
@@ -1024,8 +1024,8 @@ test lives** (if one exists).
    giving the screen the only reference to it means popping the screen is the only way anything
    else ever finds out the drive existed. Rule: a background effect that must outlive navigation is
    owned by something above every screen that can navigate — here,
-   `internal/app/session.Controller` (a value on the ROOT model, D1 of the Train 2 design) — and a
-   screen only ever mirrors a `Snapshot` of it (D3); popping a screen changes what is drawn, never
+   `internal/app/session.Controller` (a value on the ROOT model) — and a
+   screen only ever mirrors a `Snapshot` of it; popping a screen changes what is drawn, never
    what is running. `x` (the
    screen's own "stop watching" key) is retired entirely once `esc` already means exactly that and
    nothing more. Regression tests: `TestEscFromFlightLeavesDriveRunning`,
@@ -1035,7 +1035,7 @@ test lives** (if one exists).
    wait for a busy Step, and R's refusal while it waits, be answered correctly by the controller
    alone, with no screen involved at all) — all in `internal/app` and `internal/app/flight`.
 13. **A legacy terminal cannot tell shift from caps lock, and `key.Matches` cannot tell either
-   even when a terminal can.** What happened: the T3 keymap audit set out to display every write
+   even when a terminal can.** What happened: the keymap audit set out to display every write
    binding as `shift+r` rather than a bare `R`, on the theory that hoist could simply match
    `key.WithKeys("shift+r")`. It cannot: `bubbletea/v2` requests no keyboard enhancement by
    default, so a printable letter arrives as one byte and ultraviolet's decoder sets `ModShift`
@@ -1060,7 +1060,7 @@ test lives** (if one exists).
    `TestWriteMatches` in `internal/ui/keys/keys_test.go` covers all seven cases (legacy shift,
    legacy bare capital, kitty shift, kitty caps lock alone — rejected, kitty shift+caps lock,
    lower case — rejected, ctrl+shift — rejected); `TestNoBareCapital` asserts no `Show`, `Desc`
-   or rendered footer in the registry shows a bare capital letter. Addendum (T3 review P1-1):
+   or rendered footer in the registry shows a bare capital letter. Addendum, found in a later review:
    requesting `ReportAllKeysAsEscapeCodes` alone (flag 8) without also requesting
    `ReportAlternateKeys` (flag 4) and `ReportAssociatedText` sends a Kitty-protocol terminal no
    shifted-key or text component for punctuation — a decoder then upper-cases the base rune, a
@@ -1071,7 +1071,7 @@ test lives** (if one exists).
    `ReportAllKeysAsEscapeCodes | ReportAlternateKeys | ReportAssociatedText` — every render
    (`app.go`'s `View`); a terminal that doesn't support the request, or doesn't grant it, simply
    never sends a `KeyboardEnhancementsMsg` back, so a legacy terminal is unaffected either way.
-   Regression tests (T3 followup, group 5 — the test named here previously,
+   Regression tests (the test named here previously,
    `TestKittyShiftedPunctuationNeedsAlternateKeys`, decodes the raw pre-fix byte sequence directly
    against ultraviolet's decoder with no flag requested at all, so it documents the bug's shape
    but cannot fail from a regression in what `View` requests; it is not the gate): the actual gate

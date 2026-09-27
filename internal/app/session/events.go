@@ -12,8 +12,8 @@ import (
 // unexported method — see doc.go's own "Design" section for why: internal/parity's own parser
 // only ever looks for `case pkg.XMsg` in internal/app/app.go, and treating this package's
 // internal plumbing as a navigation message the operator can trigger would need a parity row
-// naming something that plumbs nowhere (Train 2 design doc, decision D2). The wiring PR that
-// follows this one adds exactly one `case session.Event:` to that switch; nothing outside this
+// naming something that plumbs nowhere. The wiring that
+// follows adds exactly one `case session.Event:` to that switch; nothing outside this
 // package ever needs to construct or type-switch on one of the concrete types below.
 type Event interface {
 	sessionEvent()

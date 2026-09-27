@@ -150,10 +150,10 @@ func (m Model) ResetStarting() Model {
 }
 
 // newViewport is this screen's own scrolling body — the diff pane and the commit list alike —
-// bound to keys.ViewportKeyMap (P2-6 in the T3 review) rather than left on viewport.New()'s
+// bound to keys.ViewportKeyMap rather than left on viewport.New()'s
 // bubbles-library default, which binds space to page: the redesign retired space as a
-// scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on
-// (T3 followup, group 2): the yaml diff's whole point is the digest, and a hard-truncated line
+// scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on:
+// the yaml diff's whole point is the digest, and a hard-truncated line
 // hides it past the pane's right edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
 	v := viewport.New()

@@ -136,7 +136,7 @@ type Model struct {
 	notice string
 	// refused is true only for New's own construction-time misconfiguration refusal (Do
 	// without Observe) — a wiring mistake a re-read could never fix, unlike a stateFailed set
-	// later by a real Read call's own error, which "r" (P2-8, T3 review) is allowed to retry.
+	// later by a real Read call's own error, which "r" is allowed to retry.
 	refused bool
 	// done is which Deployments have finished rolling, kept on the model rather than anywhere
 	// package-level: two of these screens can exist at once (two envs), and shared mutable
@@ -154,7 +154,7 @@ type Model struct {
 }
 
 // busyMarker renders alongside the state word while busy() is true — reading, starting or
-// rolling (#PR8/FB-M7's own list): before this, none of those three states carried any visible
+// rolling (FB-M7's own list): before this, none of those three states carried any visible
 // sign that they were doing anything rather than having quietly wedged (the same "is this still
 // alive" question flight.Model's own spinner already answers for a promotion in flight). A
 // bubbles/v2 spinner.Model was tried here first and never actually animated: Init/start/the
@@ -173,8 +173,8 @@ func (m Model) busy() bool {
 	return m.state == stateReading || m.state == stateStarting || m.state == stateRolling
 }
 
-// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
-// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds bare
+// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap
+// rather than left on viewport.New()'s bubbles-library default, which binds bare
 // "d" to half-page down — the registry lists "d" as unbound on this screen.
 func newViewport() viewport.Model {
 	v := viewport.New()
@@ -482,8 +482,8 @@ func (m Model) render() Model {
 // imageParenPluralPrefix is pkg/rollout's own literal shape for the unpinned-image concern
 // (DeploymentStatus.GracefulRestartConcerns, "unpinned image(s) <list>: <reason>") — pkg/rollout
 // is activity-shaped (§4.3) and cannot import internal/ui.Plural itself, so this screen, the one
-// place that renders the concern, corrects the plural at the TUI render point instead (P2-13,
-// T3 review: this always read "image(s)", even for exactly one). Built by concatenation, not as
+// place that renders the concern, corrects the plural at the TUI render point instead — this
+// always read "image(s)", even for exactly one, before this fix. Built by concatenation, not as
 // one literal, so it names the string to fix without itself tripping
 // internal/copycheck's TestNoParenPlural, which scans for exactly this shape in a literal this
 // package actually renders.
@@ -547,7 +547,7 @@ func (m Model) headerSection() string {
 	left := m.styles.Title.Render(m.env) + " / " + m.styles.Title.Render(m.family)
 	word := m.stateWord()
 	if m.busy() {
-		// #PR8/FB-M7: reading/starting/rolling are the three states an operator has no way to
+		// FB-M7: reading/starting/rolling are the three states an operator has no way to
 		// tell apart from a wedged screen without this — the same question flight.Model's own
 		// spinner answers for a promotion in flight.
 		word = busyMarker + " " + word

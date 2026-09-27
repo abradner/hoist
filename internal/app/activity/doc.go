@@ -1,6 +1,6 @@
 // Package activity is the root's own record of what has happened this session — every
 // promotion started, landed, blocked or failed, every abandon, every browser-launch outcome —
-// kept as an append-only, capped Log (AGENTS.md §4.8, Train 2 design PR9) rather than the
+// kept as an append-only, capped Log (AGENTS.md §4.8) rather than the
 // single transient "notice" string app.Model carried before this package existed.
 //
 // The old convention (app.Model.notice) showed exactly one message, cleared unconditionally on

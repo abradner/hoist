@@ -45,10 +45,8 @@
 // instance through Mirror, driven by the root's own apply(app.go) routing session.Change
 // values by BuildID. A screen requests a step (flight.ReobserveMsg, OverrideCINoneMsg,
 // AbandonMsg) rather than taking one, so nothing about driving a promotion is owned by
-// whichever screen instance happens to be showing it. Today (Train 2's wiring PR) the root
-// still stops that entry's drive when its screen is popped (Esc calls session.Controller.Stop
-// or CancelBuild, x calls Stop) — deliberately unchanged behaviour, so this PR is wiring only.
-// A later PR in the same train lets a drive outlive its screen and re-attach on demand,
-// which this shape is what makes possible: the Controller, not the screen, already owns the
-// ctx and the goroutine.
+// whichever screen instance happens to be showing it. Esc leaves the drive running and only
+// stops mirroring it onto a screen; x (AbandonMsg) is the one gesture that actually cancels it.
+// A drive outlives its screen and re-attaches on demand, since the Controller, not the screen,
+// owns the ctx and the goroutine.
 package app
