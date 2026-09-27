@@ -123,6 +123,12 @@ type Model struct {
 	// stopped mirrors session.Stopped: a Blocked step or a terminal (non-retryable) error —
 	// R (ReobserveMsg) still lets the operator retry by hand.
 	stopped bool
+	// abandoning mirrors session.Abandoning: an Abandon has already been asked for and is either
+	// waiting on a busy Step to notice its cancelled ctx or has its Backend.Abandon call already
+	// outstanding. X is refused while this is true — the operator has already confirmed once, and
+	// a second confirm-and-fire would race a second Backend.Abandon against the first rather than
+	// just being redundant.
+	abandoning bool
 	// busy mirrors the entry's own Busy: a Step call (or the initial Start/Resume) is currently
 	// outstanding, so the spinner animates and R/X/c are refused until it clears.
 	busy bool
@@ -233,6 +239,7 @@ func (m Model) Mirror(s session.Snapshot) Model {
 	m.busy = s.Busy
 	m.done = s.Done
 	m.stopped = s.Phase == session.Stopped
+	m.abandoning = s.Phase == session.Abandoning
 	m.deadlineAt = s.DeadlineAt
 	m.nextPoll = s.NextPoll
 
@@ -387,6 +394,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		if m.done {
 			m.notice = "this promotion has already landed — abandoning is not a rollback"
+			return m, nil
+		}
+		if m.abandoning {
+			m.notice = "abandon already in progress"
 			return m, nil
 		}
 		return m.openConfirmAbandon()
@@ -805,8 +816,10 @@ func (m Model) hint() string {
 	h := "R re-observe · l log · esc back"
 	// Offering X on a finished promotion just refuses (handleKey's own guard: "abandoning is
 	// not a rollback"), the same reasoning "o open PR" already applies below for a promotion
-	// with no PR yet — a key that only ever leads to a notice is not worth advertising.
-	if !m.done {
+	// with no PR yet — a key that only ever leads to a notice is not worth advertising. Same for
+	// one already Abandoning: the operator has already confirmed once, and re-offering the key
+	// invites the exact second confirm-and-fire this fix closes off at the controller too.
+	if !m.done && !m.abandoning {
 		h = "X abandon · " + h
 	}
 	if m.offersCINoneOverride() {

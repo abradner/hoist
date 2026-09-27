@@ -340,6 +340,112 @@ func TestAbandonWaitsForBusyStepThenAbandonsOnce(t *testing.T) {
 	}
 }
 
+// TestAbandonTwiceWhileBusyWaitCallsBackendOnce: a second Abandon while the first is still
+// waiting for a busy Step to notice its cancelled ctx (the flight screen offering X again before
+// the entry has actually left Abandoning — see internal/app/flight's own guard) must not schedule
+// a second abandonWaitMsg chain: onAbandonWait's own dispatch of Backend.Abandon is guarded only
+// by e.busy and the attempt count, not by abandonIssued, so two independent wait chains racing the
+// same busy-clearing step would both eventually dispatch abandonCmd. The fix is Abandon itself
+// refusing to do anything once the entry is already Abandoning.
+func TestAbandonTwiceWhileBusyWaitCallsBackendOnce(t *testing.T) {
+	now := fixedClock(time.Now())
+	var calls []string
+	drive := &fakeDrive{id: "promo-1", calls: &calls} // always Waiting
+	abandoned := 0
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd) // entry is now busy
+
+	c2, abandonWaitCmd := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonWaitCmd == nil {
+		t.Fatal("first Abandon while busy produced no wait command")
+	}
+
+	// Second X, still mid-wait: must be a pure no-op.
+	c3, secondCmd := h.c.Abandon("promo-1")
+	h.c = c3
+	if secondCmd != nil {
+		t.Fatal("Abandon while already Abandoning (mid-wait) scheduled another command")
+	}
+
+	h, _ = hop(h, stepCmd1) // the busy step returns; entry is no longer busy
+	h, abandonRunCmd := hop(h, abandonWaitCmd)
+	h = h.drain(abandonRunCmd)
+
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.entries[build]; ok {
+		t.Fatal("entry still tracked after a successful abandon")
+	}
+}
+
+// TestAbandonTwiceWhileBackendCallInFlightCallsOnce: a second Abandon issued while the first's
+// own Backend.Abandon call is already dispatched (but not yet resolved) must also be a no-op —
+// the exact "closing the PR / deleting branch and state twice" case the finding named.
+func TestAbandonTwiceWhileBackendCallInFlightCallsOnce(t *testing.T) {
+	now := fixedClock(time.Now())
+	drive := &fakeDrive{id: "promo-1", steps: []service.Tick{
+		{State: engine.PromotionState{ID: "promo-1"}, Waiting: true, Wait: time.Second},
+	}}
+	abandoned := 0
+	backend := &fakeBackend{
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return drive, nil
+		},
+		abandonFn: func(context.Context, string) ([]string, error) {
+			abandoned++
+			return nil, nil
+		},
+	}
+	c := New(backend, testConfig(now))
+
+	c, build, cmd, err := c.Start(service.StartRequest{}, "staging", "prod")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h := harness{c: c}
+	h, stepCmd1 := started(h, cmd)
+	h, _ = hop(h, stepCmd1) // step returns Waiting; entry is idle (not busy)
+
+	c2, abandonCmd1 := h.c.Abandon("promo-1")
+	h.c = c2
+	if abandonCmd1 == nil {
+		t.Fatal("first Abandon on an idle entry produced no command")
+	}
+
+	// Second X while the first's Backend.Abandon call is outstanding (abandonCmd1 not yet run).
+	c3, secondCmd := h.c.Abandon("promo-1")
+	h.c = c3
+	if secondCmd != nil {
+		t.Fatal("Abandon while already Abandoning (backend call in flight) scheduled another command")
+	}
+
+	h = h.drain(abandonCmd1)
+
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.entries[build]; ok {
+		t.Fatal("entry still tracked after a successful abandon")
+	}
+}
+
 // TestAbandonTimeoutProceeds: a busy step that never notices cancellation must not wedge
 // Abandon forever — once Config.AbandonTimeout elapses, Backend.Abandon runs anyway.
 func TestAbandonTimeoutProceeds(t *testing.T) {

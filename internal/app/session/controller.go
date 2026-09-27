@@ -637,6 +637,15 @@ func (c Controller) Abandon(id string) (Controller, tea.Cmd) {
 		return c, nil
 	}
 	e := c.entries[build]
+	if e.phase == Abandoning || e.abandoning {
+		// Already on its way out — a second X (or a re-observe racing the same key) must not
+		// schedule another abandonWaitMsg chain or a second Backend.Abandon call while the first
+		// is still outstanding. The flight screen's own guard (handleKey's Abandon case) refuses
+		// this before it ever reaches here, but this is the authoritative check (AGENTS.md §8,
+		// the deletion test): deleting the screen's guard should only make the notice ruder, never
+		// make a second abandon possible.
+		return c, nil
+	}
 	if e.cancel != nil {
 		e.cancel()
 	}

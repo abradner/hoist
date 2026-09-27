@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 )
@@ -54,6 +55,36 @@ func TestAbandonKeyRefusedOnADoneScreen(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "already landed") {
 		t.Errorf("view missing the already-landed notice:\n%s", m.View())
+	}
+}
+
+// TestAbandonKeyRefusedWhileAlreadyAbandoning: the operator has already confirmed X once — a
+// second X while the entry is still winding down (waiting for a busy Step to notice its
+// cancelled ctx, or with Backend.Abandon already dispatched) must not reopen the confirm dialog
+// and emit a second AbandonMsg, which internal/app/session.Controller.Abandon would otherwise
+// turn into a second Backend.Abandon call (closing the PR / deleting the branch and state twice).
+func TestAbandonKeyRefusedWhileAlreadyAbandoning(t *testing.T) {
+	snap := stepping(fixtureState(), false, []engine.StepStatus{
+		st(engine.StepBranched, engine.Observation{Satisfied: true}),
+	})
+	snap.Phase = session.Abandoning
+	snap.Busy = false
+	m := NewAttached(snap, PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	if !m.abandoning {
+		t.Fatal("fixture precondition: the screen should mirror Abandoning")
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	if cmd != nil {
+		t.Fatal("X produced a command while already abandoning")
+	}
+	if m.confirmingAbandon {
+		t.Fatal("X opened the confirm dialog while already abandoning")
+	}
+	if !strings.Contains(m.View(), "already in progress") {
+		t.Errorf("view missing the already-abandoning notice:\n%s", m.View())
+	}
+	if strings.Contains(m.hint(), "X abandon") {
+		t.Errorf("hint still advertises X while already abandoning: %q", m.hint())
 	}
 }
 
