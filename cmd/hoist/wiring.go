@@ -218,13 +218,15 @@ func buildRestartFuncs(svc *service.Service, kubeContext string, poll config.Pol
 // buildRefreshRepoFunc is F5's own re-read of origin (matrix.RefreshRepoFunc), adapted from
 // svc.RefreshRepo (internal/service/repo.go) — the same refreshRepoView + gitops.Discover pair
 // runTUI's own boot does, through the one Service both share, so the matrix and a plan built
-// moments later never disagree about which origin/<base> either was reading.
+// moments later never disagree about which origin/<base> either was reading. The returned rev
+// is view.SHA — "" when the fetch fell back to the clone — so F5's own success note (#PR8) can
+// name the exact tip it just read.
 func buildRefreshRepoFunc(svc *service.Service) matrix.RefreshRepoFunc {
-	return func(ctx context.Context) (*gitops.Repo, error) {
+	return func(ctx context.Context) (*gitops.Repo, string, error) {
 		view, err := svc.RefreshRepo(ctx)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return view.Repo, nil
+		return view.Repo, view.SHA, nil
 	}
 }

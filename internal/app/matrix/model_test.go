@@ -314,9 +314,9 @@ func TestRefreshKeyAlsoRefreshesTheRepo(t *testing.T) {
 	refreshed.Root = "refreshed-repo"
 	called := false
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
-		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) {
 			called = true
-			return refreshed, nil
+			return refreshed, "abc123", nil
 		})
 	m = m.SetSize(80, 24)
 	if strings.Contains(ansi.Strip(m.View()), "refreshed-repo") {
@@ -330,6 +330,59 @@ func TestRefreshKeyAlsoRefreshesTheRepo(t *testing.T) {
 	}
 	if !strings.Contains(ansi.Strip(m.View()), "refreshed-repo") {
 		t.Errorf("view does not reflect the refreshed repo's root after F5:\n%s", ansi.Strip(m.View()))
+	}
+}
+
+// TestF5SuccessNote is Train 2 design PR 8's own answer to "did F5 actually do anything" — a
+// generic completed-with-no-visible-change refresh reads exactly like a dead key (AGENTS.md §9
+// entry 10's own lesson about a notice nobody can tell landed). While the refresh is
+// outstanding the notes section names it ("re-reading origin/<base>…", checked directly via
+// askRepoRefresh rather than a drained keypress, the same reasoning
+// TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped's own doc comment gives: draining would
+// hide the very state this test exists to see); once RepoRefreshedMsg lands with a non-empty
+// Rev, the note names the base and a short sha instead.
+func TestF5SuccessNote(t *testing.T) {
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) {
+			return fixture(), "0123456789abcdef", nil
+		}).
+		WithRun("main", "").
+		SetSize(80, 24)
+
+	m, cmd := m.askRepoRefresh()
+	if cmd == nil {
+		t.Fatal("setup: askRepoRefresh issued no command")
+	}
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "re-reading origin/main…") {
+		t.Errorf("view while the refresh is outstanding:\n%s\nwant \"re-reading origin/main…\"", got)
+	}
+
+	m, _ = m.Update(cmd())
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "origin/main re-read · 0123456789ab") {
+		t.Errorf("view after the refresh landed:\n%s\nwant the success note naming the base and a short sha", got)
+	}
+	if strings.Contains(ansi.Strip(m.View()), "re-reading") {
+		t.Error("the in-progress note must not survive past the refresh landing")
+	}
+}
+
+// TestMatrixRefreshingGolden is TestF5SuccessNote's own visible shape at both harness sizes:
+// the in-progress "re-reading origin/<base>…" note, in the frame, at exactly the size a real
+// terminal would show it — never a substring check alone (AGENTS.md §9 entry 10's own lesson:
+// a notice's SHAPE, not just its text, is what a Contains check cannot catch a regression in).
+func TestMatrixRefreshingGolden(t *testing.T) {
+	f := func(_ context.Context) (*gitops.Repo, string, error) { return fixture(), "abc123", nil }
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
+			WithRefreshRepo(f).
+			WithRun("main", "").
+			SetStyles(ui.NewStyles(true)).
+			SetSize(size[0], size[1])
+		m, cmd := m.askRepoRefresh()
+		if cmd == nil {
+			t.Fatal("setup: askRepoRefresh issued no command")
+		}
+		uitest.Golden(t, "matrix-refreshing", m.View(), size[0], size[1])
 	}
 }
 
@@ -355,8 +408,8 @@ func TestWithRepoToEmptyRepoDoesNotPanic(t *testing.T) {
 // error as a notice, never a silent drop.
 func TestRefreshRepoFailureKeepsTheOldRepo(t *testing.T) {
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
-		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
-			return nil, errors.New("dial tcp: no route to host")
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) {
+			return nil, "", errors.New("dial tcp: no route to host")
 		})
 	m = m.SetSize(80, 24)
 
@@ -380,9 +433,9 @@ func TestRefreshRepoFailureKeepsTheOldRepo(t *testing.T) {
 func TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped(t *testing.T) {
 	var calls int
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
-		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) {
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) {
 			calls++
-			return fixture(), nil
+			return fixture(), "", nil
 		})
 
 	m, cmd1 := m.askRepoRefresh()
@@ -411,7 +464,7 @@ func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
 	stale.Root = "stale-repo"
 
 	m1 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
-		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) { return stale, nil })
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) { return stale, "", nil })
 	_, cmd1 := m1.askRepoRefresh()
 	if cmd1 == nil {
 		t.Fatal("setup: m1's askRepoRefresh issued no command")
@@ -419,7 +472,7 @@ func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
 
 	// A later Model instance draws a later generation from the same shared counter.
 	m2 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
-		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, error) { return fixture(), nil }).
+		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) { return fixture(), "", nil }).
 		SetSize(80, 24)
 	m2, cmd2 := m2.askRepoRefresh()
 	if cmd2 == nil {
@@ -445,7 +498,7 @@ func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
 // re-issue, never a queue of more).
 func TestRefreshesNeverOverlap(t *testing.T) {
 	var inflight, maxInflight, calls int32
-	fn := func(_ context.Context) (*gitops.Repo, error) {
+	fn := func(_ context.Context) (*gitops.Repo, string, error) {
 		n := atomic.AddInt32(&inflight, 1)
 		defer atomic.AddInt32(&inflight, -1)
 		atomic.AddInt32(&calls, 1)
@@ -455,7 +508,7 @@ func TestRefreshesNeverOverlap(t *testing.T) {
 				break
 			}
 		}
-		return fixture(), nil
+		return fixture(), "", nil
 	}
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).WithRefreshRepo(fn)
 

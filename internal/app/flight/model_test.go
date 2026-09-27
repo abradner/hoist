@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
@@ -395,6 +396,54 @@ func TestSpinnerStopsWhenNotBusy(t *testing.T) {
 			t.Error("spinner.TickMsg after done produced a command")
 		}
 	})
+}
+
+// TestCountdownHandsOffWithTheSpinner is PR 8's own regression test for the two tick chains
+// bridging a Busy<->Waiting transition that happens through a background Mirror call (with no
+// Init in between — mirrorAttached's own doc comment in app.go): the spinner's own delivered
+// tick is what notices m.waiting() has become true and starts the countdown chain instead of
+// just stopping (model.go's own Update doc comment on the handoff), and the countdown's own
+// delivered tick symmetrically restarts the spinner once a poll has made the entry busy again.
+func TestCountdownHandsOffWithTheSpinner(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC) }
+	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).WithNow(now)
+	if !m.busy {
+		t.Fatal("setup: expected busy = true")
+	}
+
+	// A background Mirror (not through Init) moves the entry from Busy to Waiting.
+	waiting := stepping(fixtureState(), false, nil)
+	waiting.Busy = false
+	waiting.NextPoll = now().Add(5 * time.Second)
+	m = m.Mirror(waiting)
+	if m.busy || !m.waiting() {
+		t.Fatal("setup: expected busy = false, waiting = true after Mirror")
+	}
+
+	// The spinner tick that was already scheduled while busy is what has to notice this and
+	// start the countdown chain — nothing else will, since Mirror itself issues no command.
+	// cmd() itself is scope.After's real tea.Tick(1s, ...), so this only reads the handoff
+	// message's own type/stamp rather than invoking it (which would just sleep a second).
+	_, cmd := m.Update(spinner.TickMsg{})
+	if cmd == nil {
+		t.Fatal("spinner.TickMsg while newly waiting produced no command — the countdown chain never starts")
+	}
+	tickMsg := scope.Result[countdownTick]{From: m.tickID}
+	if scope.Foreign(m.tickID, tickMsg) {
+		t.Fatalf("the handoff command's own message does not belong to this screen: %#v", tickMsg)
+	}
+
+	// A poll fires (another background Mirror, busy again) before the countdown tick above is
+	// delivered to Update — the countdown chain now has to notice and hand back to the spinner.
+	busyAgain := stepping(fixtureState(), false, nil)
+	m = m.Mirror(busyAgain)
+	if !m.busy {
+		t.Fatal("setup: expected busy = true after the second Mirror")
+	}
+	_, cmd2 := m.Update(tickMsg)
+	if cmd2 == nil {
+		t.Fatal("the countdown tick while busy again produced no command — the spinner chain never restarts")
+	}
 }
 
 // TestViewFixedSize checks View() at a fixed 100x30 terminal across a few step-states: mid-

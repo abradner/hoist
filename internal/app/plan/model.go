@@ -230,10 +230,30 @@ type Model struct {
 	mode   string
 	notice string
 
+	// starting is set the instant Enter emits StartMsg and never cleared by this screen on its
+	// own (#PR8, FB-L4): a second Enter before the root has reacted at all would otherwise emit
+	// a second StartMsg, and while session.Controller's own same-target refusal is the actual
+	// enforcement against a second drive ever starting (AGENTS.md §8's deletion test — deleting
+	// this field would only bring back a confusing "already in flight" notice flash, never a
+	// second real start), there is no reason to manufacture that refusal on purpose every time
+	// an operator's Enter key repeats. ResetStarting is the root's own undo for the one case
+	// this screen cannot see for itself: a build that failed outright, popping the building
+	// screen back to this same instance with nothing else changed (popBuildFailed, app.go) —
+	// without it, Enter would stay silently dead on a confirm screen the operator is looking
+	// straight at.
+	starting bool
+
 	styles        ui.Styles
 	keys          keyMap
 	width, height int
 	leftWidth     int
+}
+
+// ResetStarting clears the one-shot Enter guard starting sets — see its own doc comment. The
+// root calls this after popping a failed build back onto this same screen instance.
+func (m Model) ResetStarting() Model {
+	m.starting = false
+	return m
 }
 
 // New builds the plan screen for one source env. target is the configured pair for source
@@ -587,10 +607,16 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		m.buildOverride(r.Repo)
 		return m, tea.Batch(m.overrideInput.Init(), m.overrideInput.Focus())
 	case key.Matches(kmsg, m.keys.Enter):
+		if m.starting {
+			// #PR8/FB-L4: a repeated Enter before the root has reacted at all — see starting's
+			// own doc comment.
+			return m, nil
+		}
 		if len(m.ticked) == 0 {
 			m.notice = "nothing ticked to promote"
 			return m, nil
 		}
+		m.starting = true
 		ticked := append([]string(nil), m.ticked...)
 		plan, outcome, mode, source, target, view := m.plan, m.outcome, m.mode, m.source, m.target, m.view
 		// No cancel here (FB-M3): this screen stays under the building screen Enter pushes

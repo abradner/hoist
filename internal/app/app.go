@@ -259,6 +259,15 @@ func (m Model) start(req service.StartRequest, source, target string) (Model, te
 	m.sess = sess
 	if err != nil {
 		m.notice = startErrorNotice(err)
+		// A refusal this immediate (ErrNoBackend, ErrTargetBusy) never gets as far as a
+		// flightScreen for popBuildFailed to pop and reset — the plan/deploy screen that just
+		// set its own one-shot Enter guard (#PR8/FB-L4) is still the top of the stack right now,
+		// so it is reset here instead, or Enter would stay silently dead on it.
+		if top := len(m.stack) - 1; top >= 0 {
+			if sr, ok := m.stack[top].(startResetter); ok {
+				m.stack[top] = sr.ResetStarting()
+			}
+		}
 		return m, nil
 	}
 	m = m.popIfBuilding()
@@ -693,6 +702,13 @@ func (m Model) requestMatrixRefresh() (Model, tea.Cmd) {
 	return m, cmd
 }
 
+// startResetter is implemented by a screen adapter that sets its own one-shot Enter guard
+// before emitting a StartMsg (planScreen, deployScreen — #PR8/FB-L4, plan.Model.starting's own
+// doc comment): popBuildFailed below clears it on whichever screen a failed build pops back
+// onto, since nothing else would — that screen's own guard has no way to know the build it
+// started has since failed.
+type startResetter interface{ ResetStarting() Screen }
+
 // popBuildFailed removes the preflight flightScreen a Start/Resume call's own failure leaves
 // with nothing to mirror onto, and shows why.
 func (m Model) popBuildFailed(build session.BuildID, err error) Model {
@@ -701,6 +717,11 @@ func (m Model) popBuildFailed(build session.BuildID, err error) Model {
 			if _, b := fs.Attached(); b == build {
 				m = m.pop()
 			}
+		}
+	}
+	if top := len(m.stack) - 1; top >= 0 {
+		if sr, ok := m.stack[top].(startResetter); ok {
+			m.stack[top] = sr.ResetStarting()
 		}
 	}
 	m.notice = fmt.Sprintf("could not start promotion: %v", err)

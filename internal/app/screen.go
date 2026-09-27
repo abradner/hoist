@@ -81,6 +81,10 @@ func (s planScreen) SetStyles(st ui.Styles) Screen {
 // (envSelect or multiSelect) is currently active — see plan.Model.CapturesText's own doc comment.
 func (s planScreen) CapturesText() bool { return s.Model.CapturesText() }
 
+// ResetStarting implements startResetter (app.go's own popBuildFailed): clears plan.Model's
+// one-shot Enter guard once a failed build has popped back to this same instance.
+func (s planScreen) ResetStarting() Screen { return planScreen{s.Model.ResetStarting()} }
+
 // flightScreen adapts flight.Model the same way. It is pushed on top of the plan screen
 // when the operator confirms a plan (plan.StartMsg, handled in app.go's own start()), and on
 // top of the matrix when resuming one already on disk (matrix.ResumeMsg). It is a pure mirror
@@ -151,6 +155,10 @@ func (s deployScreen) SetSize(width, height int) Screen {
 func (s deployScreen) SetStyles(st ui.Styles) Screen {
 	return deployScreen{s.Model.SetStyles(st)}
 }
+
+// ResetStarting implements startResetter (app.go's own popBuildFailed): clears deploy.Model's
+// one-shot Enter guard once a failed build has popped back to this same instance.
+func (s deployScreen) ResetStarting() Screen { return deployScreen{s.Model.ResetStarting()} }
 
 // restartScreen adapts restart.Model. Pushed on top of the matrix by R, and unlike the deploy
 // path the matrix stays beneath it: a restart is small and repeatable, and backing out should
