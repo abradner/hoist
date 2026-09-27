@@ -139,7 +139,7 @@ func TestAbandonEscClosesDialogWithoutEmitting(t *testing.T) {
 
 // TestCapslockXDoesNothing proves the write-binding matcher (keys.Abandon, a Write-class
 // Binding) rejects a caps-lock letter with no shift held on a protocol-capable terminal — the
-// combination Binding.Matches' own point 3 exists for (train3-design.md's "Matches for a write
+// combination Binding.Matches' own point 3 exists for (the audit doc's "Matches for a write
 // binding"). Without this rule a caps-lock typo would fire the identical destructive gesture a
 // deliberate shift+x does.
 func TestCapslockXDoesNothing(t *testing.T) {

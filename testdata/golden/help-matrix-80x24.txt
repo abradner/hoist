@@ -1,24 +1,24 @@
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│repo · base main                                                              │
-├──────╭─ help · matrix ───────────────────────────────────────────────╮───────┤
-│──────│NAVIGATE                       │ ACT                           │──────…│
-│ FAMIL│esc      close the menu or ove │ enter    open the action menu │      …│
-│──────│↑        move row              │ p        promote into the curs│──────…│
-│ ▸ cou│↓        move row              │ t        deploy a tag (tag pic│  pinn…│
-│ marke│←        move column           │ w        watch the cell's fami│  pinn…│
-│ tempo│→        move column           │ shift+r  restart the cell's fa│extern…│
-│ web  │pgup     page                  │ shift+x  abandon the in-flight│   spl…│
-│      │pgdn     page                  │                               │      …│
-│      │tab      table ⇄ in-flight pan │                               │      …│
-│      │VIEW                           │ APP                           │      …│
-│      │r        re-read the cluster a │ q        quit (confirm if a pr│      …│
-│      │o        open the PR of the in │ ctrl+c   quit now, printing wh│      …│
-│      │c        config view           │                               │      …│
-│      │l        activity log          │                               │      …│
-│      │                                                               │      …│
-│      │shift+ keys always ask before they write                       │      …│
-│      │                                                               │      …│
-│      │a capital counts as shift                                      │      …│
-│      ╰───────────────────────────────────────────────────────────────╯      …│
-╰──────────────────────────────────────────────────────────────────────────────╯
-        actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+│repo ·╭─ help · matrix ───────────────────────────────────────────────╮       │
+├──────│NAVIGATE                       │ ACT                           │───────┤
+│──────│esc      close menu/overlay    │ enter    open menu / flight   │───────│
+│ FAMIL│↑        move row              │ p        promote into column  │       │
+│──────│↓        move row              │ t        deploy a tag         │───────│
+│ ▸ cou│←        move column           │ w        watch family         │pinned │
+│ marke│→        move column           │ shift+r  restart family (asks)│pinned │
+│ tempo│pgup     page                  │ shift+x  abandon row (asks)   │ternal │
+│ web  │pgdn     page                  │                               │ split │
+│      │home     top                   │                               │       │
+│      │end      bottom                │                               │       │
+│      │tab      table/flight pane     │                               │       │
+│      │VIEW                           │ APP                           │       │
+│      │r        re-read cluster/repo  │ q        quit (asks if busy)  │       │
+│      │o        open PR (chooser)     │ ctrl+c   quit, print flight   │       │
+│      │c        config view           │                               │       │
+│      │l        activity log          │                               │       │
+│      │                                                               │       │
+│      │shift+ keys always ask before they write                       │       │
+│      │                                                               │       │
+│      │a capital counts as shift                                      │       │
+╰──────╰───────────────────────────────────────────────────────────────╯───────╯
+  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more

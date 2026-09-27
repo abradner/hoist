@@ -27,7 +27,7 @@ const (
 	FocusPane
 )
 
-// GridState is the grid renderer's own input beyond the Table text itself (train3-design.md's
+// GridState is the grid renderer's own input beyond the Table text itself (the audit doc's
 // T3-04 shape): the cell cursor (Row, Col — Col is an index into Widths' env columns, i.e.
 // Table.Envs, not into Widths itself, which carries one extra leading entry for FAMILY),
 // the vertical scroll Offset and how many data rows fit (Height), each column's fitted width

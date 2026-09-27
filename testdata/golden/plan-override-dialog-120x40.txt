@@ -4,7 +4,7 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ counta  v202601151010 → v202602201200    │counta                                                                │
 │┃   ✓ marketing  → sha-1a2b3c4d5e6f708192a3b4c…│v202601151010 → v202602201200                                         │
-│┃   ✓ ! web  v202601010101 → v202602150930     │3 occurrences · 2 files · digest from manifest                        │
+│┃   ✓ ! web  v202601010101 → v202602150930     │3 image references · 2 files · digest from manifest                   │
 │┃                                              │                                                                      │
 │┃                                              │no commit history — ghcr.io/example/counta has no app repo in         │
 │┃                                              │repos[].apps                                                          │

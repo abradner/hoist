@@ -354,6 +354,74 @@ func TestEscReturnsToMatrix(t *testing.T) {
 	}
 }
 
+// TestFilterSwallowsRefreshAndEnter is P1-2 from the T3 review: a probe found that "/" then
+// "r" fired plan.RefreshMsg, and "/" then enter fired plan.StartMsg — starting the promotion —
+// while the operator was still typing a filter query into the multi-select. Every key while
+// GetFiltering() is true must reach the widget instead of this screen's own switch.
+func TestFilterSwallowsRefreshAndEnter(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m = uitest.Keys(m, updateFn, "/")
+	if m.multiSelect == nil || !m.multiSelect.GetFiltering() {
+		t.Fatal("test setup: \"/\" did not open the multi-select's filter")
+	}
+
+	m, cmd := m.Update(uitest.Key("r"))
+	if cmd != nil {
+		if _, isRefresh := cmd().(RefreshMsg); isRefresh {
+			t.Error("\"r\" while filtering must not emit RefreshMsg")
+		}
+	}
+	if !m.multiSelect.GetFiltering() {
+		t.Fatal("\"r\" unexpectedly closed the filter")
+	}
+
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		if _, isStart := cmd().(StartMsg); isStart {
+			t.Error("enter while filtering must not emit StartMsg — it must accept the filter text instead")
+		}
+	}
+}
+
+// TestFilterSwallowsEsc is P1-2's other half: esc while the filter is open must close only the
+// filter, never pop the whole screen back to the matrix (no BackMsg).
+func TestFilterSwallowsEsc(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m = uitest.Keys(m, updateFn, "/")
+	if m.multiSelect == nil || !m.multiSelect.GetFiltering() {
+		t.Fatal("test setup: \"/\" did not open the multi-select's filter")
+	}
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if cmd != nil {
+		if _, isBack := cmd().(BackMsg); isBack {
+			t.Error("esc while filtering must not emit BackMsg — it should close only the filter")
+		}
+	}
+}
+
+// TestFilterOnEnvSelectSwallowsEnter is the same P1-2 fix for the env/source huh.Select prompt
+// (updateSelectEnv), the other place a filter can be open.
+func TestFilterOnEnvSelectSwallowsEnter(t *testing.T) {
+	r := discoverFixture(t)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	if m.state != stateSelectEnv {
+		t.Fatalf("state = %v, want stateSelectEnv (source unset)", m.state)
+	}
+	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
+	m = uitest.Keys(m, updateFn, "/")
+	if m.envSelect == nil || !m.envSelect.GetFiltering() {
+		t.Fatal("test setup: \"/\" did not open the select's filter")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.state != stateSelectEnv {
+		t.Error("enter while filtering the env select must not confirm the prompt")
+	}
+	if m.status != "" {
+		t.Errorf("enter while filtering must not start loading, got status %q", m.status)
+	}
+}
+
 // TestEnterEmitsStartMsg: confirming a plan with at least one ticked repo emits StartMsg
 // naming the plan, outcome, mode, ticked set and envs — the root's cue to push
 // internal/app/flight (AGENTS.md §4.8: a screen requests navigation by emitting its own
@@ -460,11 +528,27 @@ func TestFilterModeEngagesAndCapturesText(t *testing.T) {
 	if !m.CapturesText() {
 		t.Fatal("CapturesText should be true while the multiSelect is filtering")
 	}
-	// Esc is deliberately not exercised here: this screen's own Update treats Esc as its Back
-	// key unconditionally, before ever consulting CapturesText or forwarding to the active
-	// field (unlike tags.Model, which checks m.filtering first) — a pre-existing gap outside
-	// this fix's scope (WithKeyMap wiring, not Esc routing), so filtering here can only be
-	// closed by typing enter, not by asserting an esc-driven exit this screen doesn't support.
+	// Esc now closes only the filter (P1-2, T3 review fixup) rather than popping the whole
+	// screen — see TestFilterSwallowsEsc for that gesture; this test's own job stops at proving
+	// CapturesText tracks GetFiltering, not at re-proving esc routing a sibling test already
+	// covers.
+}
+
+// TestCapturesTextWhileConfirming is P3 from the T3 review: CapturesText stayed false while
+// the shift+d direct-mode confirm dialog was open, even though it is exactly the class of
+// "something else is now capturing input" state the o dialog's own case above exists for — a
+// huh.Confirm rather than a text field, but the root gates both "?" (help overlay) and "l"
+// (activity log) on !CapturesText() before ever reaching this screen, so "?"/"l" opened OVER
+// the confirm dialog instead of being swallowed by it.
+func TestCapturesTextWhileConfirming(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m, _ = m.Update(uitest.Key("shift+d"))
+	if !m.confirming {
+		t.Fatal("test setup: shift+d did not open the confirm dialog")
+	}
+	if !m.CapturesText() {
+		t.Error("CapturesText should be true while the direct-mode confirm dialog is open")
+	}
 }
 
 // TestDownMovesMultiSelectCursor proves the same WithKeyMap wiring reaches ordinary
@@ -820,5 +904,50 @@ func TestLoadedMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	}
 	if got.state != stateLoading || len(got.rows) != 0 {
 		t.Fatalf("a foreign loadedMsg was accepted onto a screen that never asked for it: state=%v rows=%d", got.state, len(got.rows))
+	}
+}
+
+// TestHomeEndScrollTheImpactPane is P2-8 from the T3 review: the design's own home/end row was
+// missing on the impact pane (focusRight); the multi-select's own left-pane home/end (via
+// huh's GotoTop/GotoBottom) already worked and is not re-tested here.
+func TestHomeEndScrollTheImpactPane(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m = uitest.Keys(m, updateFn, "tab") // focusLeft -> focusRight
+	if m.focus != focusRight {
+		t.Fatal("test setup: tab did not move focus to the impact pane")
+	}
+	m.viewport.SetContent(strings.Repeat("line\n", 60))
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !m.viewport.AtBottom() {
+		t.Error("end did not scroll the impact pane to the bottom")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if !m.viewport.AtTop() {
+		t.Error("home did not scroll the impact pane to the top")
+	}
+}
+
+// TestSpaceNoLongerScrollsTheImpactPane is P2-6 from the T3 review: the impact pane's viewport
+// was left on viewport.New()'s bubbles-library default keymap, which binds space to page
+// down — this screen uses space for a different, unrelated gesture (tick/untick a repo, on the
+// multi-select, focusLeft), and the impact pane (focusRight) has no space binding of its own at
+// all.
+func TestSpaceNoLongerScrollsTheImpactPane(t *testing.T) {
+	m := readyModel(t, config.EnvsConfig{})
+	m = uitest.Keys(m, updateFn, "tab") // focusLeft -> focusRight
+	if m.focus != focusRight {
+		t.Fatal("test setup: tab did not move focus to the impact pane")
+	}
+	m.viewport.SetContent(strings.Repeat("line\n", 60))
+
+	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	if got := m2.viewport.YOffset(); got != 0 {
+		t.Errorf("space scrolled the impact pane: YOffset=%d, want 0", got)
+	}
+	// Positive control: pgdown must still scroll.
+	m3, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := m3.viewport.YOffset(); got == 0 {
+		t.Error("pgdown did not scroll the impact pane — the positive control is broken")
 	}
 }

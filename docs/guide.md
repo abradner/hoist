@@ -44,7 +44,7 @@ always asks the pods alone.
 │ sidecar     v1            pinned  v1           pinned                        │
 │ thirdparty  7           external  8          external  8   external          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env a                          p promote • d deploy • r resume • ? help • q quit
+  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
 ```
 
 The words:
@@ -185,8 +185,8 @@ this promotion's own family and target on the read-only watch screen (the same v
 matrix opens for a cell) — it asks which family first when the promotion touches more than one.
 `esc` leaves this screen — it stops *watching* only; the drive itself keeps running exactly as it
 was (branch, commit, push, PR, merge, Argo, rollout — whatever step is next still happens), and
-`enter`/`r` on the matrix's in-flight pane below re-attaches to the exact same running drive
-later, never starting a second one. `shift+x` (a write, kept out of reach of a mistyped key)
+`tab` to focus the matrix's own in-flight pane below, then `enter` on the row, re-attaches to the
+exact same running drive later, never starting a second one. `shift+x` (a write, kept out of reach of a mistyped key)
 *abandons* it instead: behind a confirm, it retires the state file and, if it opened a PR, closes
 it and deletes the branch. It refuses outright if the promotion has already landed — abandoning is
 not a rollback, so a landed one needs `hoist deploy` or a fresh promotion to undo, not a
@@ -287,7 +287,7 @@ gates.
 
 ## Restart a family
 
-`shift+r` on a cell (a legacy terminal's bare capital `R` still works — there is no way for it
+`shift+r` on a cell (a legacy terminal's bare capital R still works — there is no way for it
 to tell that apart from shift), or:
 
 ```bash

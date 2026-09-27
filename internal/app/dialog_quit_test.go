@@ -146,6 +146,41 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 // TestQuitKeys already covers that shape on a boot-time root with no backend at all; this control
 // re-proves it on a root that HAS a backend wired but nothing in flight, so the two cases can't be
 // confused.
+// TestHelpDoesNotOpenOverThePlanConfirmDialog is P3 from the T3 review: plan.Model.CapturesText
+// stayed false while the shift+d direct-mode confirm was open, and the root gates "?" (help
+// overlay) and "l" (activity log) on !capturesText() before ever reaching the top screen — so
+// both opened OVER the dialog instead of being swallowed by it. Same fixture-building shape as
+// TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit above, for the shift+d dialog instead of
+// the o dialog.
+func TestHelpDoesNotOpenOverThePlanConfirmDialog(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planFn := plan.Func(func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, []string{"ghcr.io/"}, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	})
+	pm := plan.New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", planFn, history.Funcs{})
+	pm = uitest.Drain(pm, pm.Init(), plan.Model.Update)
+	root := sized(t).(Model).push(planScreen{pm})
+	var tm tea.Model = root
+	tm, _ = pressRoot(tm, "shift+d")
+	if !strings.Contains(plain(tm), "Switch to direct mode") {
+		t.Fatalf("setup: shift+d did not open the direct-mode confirm dialog:\n%s", plain(tm))
+	}
+	tm, _ = pressRoot(tm, "?")
+	if tm.(Model).helpOpen {
+		t.Error("\"?\" opened the help overlay over the confirm dialog")
+	}
+	if got := plain(tm); !strings.Contains(got, "Switch to direct mode") {
+		t.Errorf("the confirm dialog should still be drawn after \"?\":\n%s", got)
+	}
+}
+
 func TestQuitWithRunningDriveAsksFirst(t *testing.T) {
 	gotErr := make(chan error, 1)
 	hung := funcDriver{

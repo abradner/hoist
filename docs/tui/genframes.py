@@ -1119,7 +1119,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 # T3-01: `genframes.py --txt` writes the plain-text render of every v2 frame (FRAMES, above,
 # populated as a side effect of building the mockup HTML above) to docs/tui/frames/, one file
 # per frame, so a later redesign PR can `diff -u` its own golden against the approved mockup
-# without eyeballing HTML (train3-design.md, "How goldens get compared to mockups"). It writes
+# without eyeballing HTML (the audit doc, "How goldens get compared to mockups"). It writes
 # only those files — never mockups.html — so a normal run (no flag) is unaffected and a --txt
 # run leaves no stray files beyond docs/tui/frames/*.txt.
 if "--txt" in sys.argv:

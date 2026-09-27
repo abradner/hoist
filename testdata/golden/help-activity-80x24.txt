@@ -1,6 +1,5 @@
-╭─ hoist · activity · 1 entries ───────────────────────────────────────────────╮
+╭─ hoist · activity · 1 entry ─────────────────────────────────────────────────╮
 │just now  info  something happened                                            │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │
@@ -11,6 +10,8 @@
 │      │↓        scroll                │                               │       │
 │      │pgup     page                  │                               │       │
 │      │pgdn     page                  │                               │       │
+│      │home     top                   │                               │       │
+│      │end      bottom                │                               │       │
 │      │                               │ APP                           │       │
 │      │                               │ ctrl+c   quit now             │       │
 │      │                                                               │       │
@@ -18,7 +19,6 @@
 │      ╰───────────────────────────────────────────────────────────────╯       │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-1 entries                                                      esc back · ? help
+1 entry                                                        esc back · ? help
 something happened · l: activity (1)                                            

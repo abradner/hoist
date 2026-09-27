@@ -123,12 +123,22 @@ type Model struct {
 	width, height int
 }
 
+// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
+// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds
+// space/f/b to page and bare "d"/"u" to half-page — none of it shown on this screen's footer
+// or help overlay.
+func newViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = keys.ViewportKeyMap()
+	return v
+}
+
 // New builds the screen for one family in one env. Nothing is read until Init runs.
 func New(family, env string, funcs Funcs, styles ui.Styles) Model {
 	if funcs.Now == nil {
 		funcs.Now = time.Now
 	}
-	return Model{styles: styles, funcs: funcs, family: family, env: env, scope: scope.Open(), body: viewport.New()}
+	return Model{styles: styles, funcs: funcs, family: family, env: env, scope: scope.Open(), body: newViewport()}
 }
 
 // Init takes the first snapshot — `hoist watch --once` is this screen's first paint.
@@ -191,10 +201,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.polling = true
 		return m, m.poll()
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "esc":
+		switch {
+		case keys.Esc.Matches(msg):
 			return m, func() tea.Msg { return BackMsg{} }
-		case "r":
+		case keys.Home.Matches(msg):
+			m.body.GotoTop()
+			return m, nil
+		case keys.End.Matches(msg):
+			m.body.GotoBottom()
+			return m, nil
+		case keys.Refresh.Matches(msg):
+			// P2-8 (T3 review): this matched only the literal string "r", so the registry's
+			// own F5/ctrl+r aliases (keys.Refresh.Keys) did nothing, though both are listed on
+			// the footer and help overlay.
 			if m.polling {
 				return m, nil
 			}
@@ -406,7 +425,7 @@ func workloadState(w Workload) string {
 	if w.Kind != "Deployment" {
 		return ""
 	}
-	replicas := fmt.Sprintf("%d replica(s)", w.Replicas)
+	replicas := ui.Plural(int(w.Replicas), "replica")
 	switch {
 	case w.DeadlineExceeded:
 		return "deadline exceeded · " + replicas

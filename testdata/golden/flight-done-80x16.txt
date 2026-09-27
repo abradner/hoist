@@ -1,8 +1,8 @@
 ╭─ hoist · promotion · done ───────────────────────────────────────────────────╮
 │abcd1234   app-staging → app-production                     started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│● branch  ● commit  ● push  ● PR #103  ● CI  ● approval  ● merge              │
-│● argo refresh  ● argo sync  ● rollout                                        │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ✓ approval  ✓ merge              │
+│✓ argo refresh  ✓ argo sync  ✓ rollout                                        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │done                                                                          │
 ├──────────────────────────────────────────────────────────────────────────────┤

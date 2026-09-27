@@ -34,7 +34,7 @@ func TestSummarizeParkedOnApproval(t *testing.T) {
 	if s.ID != "5pr6sd333t" || s.Source != "app-staging" || s.Target != "app-production" || s.PR.Number != 103 {
 		t.Fatalf("identity = %+v", s)
 	}
-	if got := s.StepStrip(); got != "● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge  ○ argo refresh  ○ argo sync  ○ rollout" {
+	if got := s.StepStrip(); got != "✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge  · argo refresh  · argo sync  · rollout" {
 		t.Fatalf("strip = %q", got)
 	}
 	if got := s.Verdict(); got != "blocked on approval" {
@@ -66,13 +66,13 @@ func TestSummarizeOtherShapes(t *testing.T) {
 	}
 	// Done.
 	done := Summarize(st, true, []engine.StepStatus{sat(engine.StepRolledOut)}, nil)
-	if done.Verdict() != "done" || strings.Contains(done.StepStrip(), "○") {
+	if done.Verdict() != "done" || strings.Contains(done.StepStrip(), "·") {
 		t.Errorf("done = %q / %q", done.Verdict(), done.StepStrip())
 	}
 	// Direct: the direct step order, no PR step at all.
 	st.Direct = true
 	direct := Summarize(st, false, []engine.StepStatus{sat(engine.StepDirectGate), sat(engine.StepBranched), {Step: engine.StepCommitted}}, nil)
-	if strip := direct.StepStrip(); strings.Contains(strip, "PR") || !strings.Contains(strip, "● gate") || !strings.HasSuffix(strip, "○ rollout") {
+	if strip := direct.StepStrip(); strings.Contains(strip, "PR") || !strings.Contains(strip, "✓ gate") || !strings.HasSuffix(strip, "· rollout") {
 		t.Errorf("direct strip = %q", strip)
 	}
 	if direct.Verdict() != "at commit" {
@@ -83,7 +83,7 @@ func TestSummarizeOtherShapes(t *testing.T) {
 	if failed.Verdict() != "cannot re-observe" || !strings.Contains(failed.Err, "403") {
 		t.Errorf("failed = %+v", failed)
 	}
-	if strings.Contains(failed.StepStrip(), "●") {
+	if strings.Contains(failed.StepStrip(), "✓") {
 		t.Errorf("a failed observation must not claim any step done: %q", failed.StepStrip())
 	}
 }

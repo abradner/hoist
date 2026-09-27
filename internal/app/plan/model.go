@@ -259,6 +259,16 @@ func (m Model) ResetStarting() Model {
 	return m
 }
 
+// newViewport is the impact pane's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in
+// the T3 review) rather than left on viewport.New()'s bubbles-library default — which binds
+// space/f/b to page and bare "d"/"u" to half-page, none of it shown anywhere and "d" already
+// meaning "toggle yaml diff" on this screen.
+func newViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = keys.ViewportKeyMap()
+	return v
+}
+
 // New builds the plan screen. T3-04 retires the old "P forces a prompt" gesture: p on the
 // matrix always names a Target (the cursor's column), and Source is either the one
 // unambiguous reverse pair or "" — in which case this screen prompts "promote into <target>
@@ -281,7 +291,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		target:     target,
 		mode:       ModePR,
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Line)),
-		viewport:   viewport.New(),
+		viewport:   newViewport(),
 		deltas:     map[string]history.State{},
 		overrides:  map[string]image.Ref{},
 		styles:     ui.NewStyles(true),
@@ -349,7 +359,11 @@ func (m *Model) buildEnvSelect() {
 		}
 		sel = sel.Options(opts...)
 	} else {
-		m.err = fmt.Errorf("no other env to promote %s to", m.source)
+		// T3-10 (UX-M18's own convention, matrix's emptyView): name what to check, not just
+		// what failed — hoist discovers envs from Argo CD Application wrappers under the apps
+		// root, so a repo with only one is either genuinely single-env or looking in the wrong
+		// place.
+		m.err = fmt.Errorf("no other env to promote %s to — check repos[].envs.pairs and apps_root in the config, or --apps-root/--repo if this looked in the wrong place", m.source)
 	}
 	m.envSelect = sel
 }
@@ -368,7 +382,7 @@ func (m *Model) buildSourceSelect() {
 		}
 		sel = sel.Options(opts...)
 	} else {
-		m.err = fmt.Errorf("no other env to promote into %s from", m.target)
+		m.err = fmt.Errorf("no other env to promote into %s from — check repos[].envs.pairs and apps_root in the config, or --apps-root/--repo if this looked in the wrong place", m.target)
 	}
 	m.envSelect = sel
 }
@@ -564,10 +578,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		if keys.Esc.Matches(msg) && !m.confirming && !m.overriding {
+		if keys.Esc.Matches(msg) && !m.confirming && !m.overriding && !m.filtering() {
 			// No cancel here any more (FB-M3): the root's own pop, triggered by this BackMsg,
 			// calls Close on this screen the moment it is actually removed from the stack —
-			// see Close's own doc comment.
+			// see Close's own doc comment. P1-2: while a huh field's own filter is open, esc
+			// belongs to the widget (it closes the filter, not the screen) — see filtering's
+			// own doc comment.
 			return m, func() tea.Msg { return BackMsg{} }
 		}
 	}
@@ -611,7 +627,42 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 	return m.refreshRight(), m.historyCmds()
 }
 
+// filtering reports whether the currently-active huh field has its own filter box open (the
+// operator typed "/"), for the field whichever state the screen is in owns. While it is true,
+// every key — esc included — belongs to the widget, never to this screen's own key handling
+// (P1-2 in the T3 review): a probe found "/" then "r" firing plan.RefreshMsg, "/" then enter
+// firing plan.StartMsg (starting the promotion), and esc popping the whole screen instead of
+// just closing the filter.
+func (m Model) filtering() bool {
+	switch m.state {
+	case stateSelectEnv:
+		return m.envSelect != nil && m.envSelect.GetFiltering()
+	case stateReady:
+		return m.multiSelect != nil && m.multiSelect.GetFiltering()
+	default:
+		return false
+	}
+}
+
 func (m Model) updateSelectEnv(msg tea.Msg) (Model, tea.Cmd) {
+	// P1-2: while the select's own filter is open (the operator typed "/"), every key —
+	// including enter — belongs to the widget's filter box, never to this screen's own
+	// enter-confirms-the-choice handling below. Without this check, enter while filtering
+	// could confirm the still-highlighted pre-filter option instead of accepting the filter
+	// text, and esc would fall through to huh's own Update, which on a Select swallows esc
+	// silently rather than closing the screen — so forwarding it here is also what keeps a
+	// dialog-level esc from being mistaken for "no-op" instead of "closes the filter".
+	if m.envSelect.GetFiltering() {
+		_, cmd := m.envSelect.Update(msg)
+		if v, ok := m.envSelect.GetValue().(string); ok {
+			if m.selectingSource {
+				m.source = v
+			} else {
+				m.target = v
+			}
+		}
+		return m, cmd
+	}
 	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
 		if m.selectingSource {
 			if m.source == "" {
@@ -652,6 +703,13 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	kmsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return m, nil
+	}
+	// P1-2: while the multi-select's own filter is open, every key belongs to it — r, d, e,
+	// shift+d and enter must never reach this screen's own switch below (a probe found "/"
+	// then "r" firing plan.RefreshMsg and "/" then enter firing plan.StartMsg, which starts
+	// the promotion while the operator was still typing a filter query).
+	if m.multiSelect != nil && m.multiSelect.GetFiltering() {
+		return m.updateMultiSelect(msg)
 	}
 	m.notice = ""
 	// T3-09: shift+d toggles direct mode — checked ahead of the switch below since
@@ -700,6 +758,17 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		m = m.refreshRight()
 		m.viewport.GotoTop() // two unrelated documents; a scroll offset from one hides the other's head
 		return m, nil
+	// P2-8 (T3 review): home/end on the impact pane (focusRight) — the multi-select's own
+	// left-pane home/end already work through huh's own GotoTop/GotoBottom (keys.HuhKeyMap
+	// binds them to "home"/"end"), reached by falling out of this switch to
+	// updateMultiSelect's own forwarding below; the viewport gets no such keymap field
+	// (bubbles' viewport.KeyMap has none), so it needs its own case here.
+	case keys.Home.Matches(kmsg) && m.focus == focusRight:
+		m.viewport.GotoTop()
+		return m, nil
+	case keys.End.Matches(kmsg) && m.focus == focusRight:
+		m.viewport.GotoBottom()
+		return m, nil
 	case keys.Tab.Matches(kmsg):
 		if m.focus == focusLeft {
 			m.focus = focusRight
@@ -719,6 +788,14 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
 	}
+	return m.updateMultiSelect(msg)
+}
+
+// updateMultiSelect forwards msg to the multi-select field unconditionally and resyncs
+// m.ticked/the diff from it — the tail of updateReady's own handling, factored out so P1-2's
+// filtering short-circuit above can reach it directly without falling through the switch that
+// owns r/d/e/enter/tab when the filter isn't open.
+func (m Model) updateMultiSelect(msg tea.Msg) (Model, tea.Cmd) {
 	if m.multiSelect == nil {
 		return m, nil
 	}
@@ -939,6 +1016,13 @@ func (m Model) CapturesText() bool {
 		return m.envSelect != nil && m.envSelect.GetFiltering()
 	case m.state == stateReady && m.overriding:
 		return true // the o dialog's input takes every character, q included
+	case m.state == stateReady && m.confirming:
+		// P3 (T3 review): the shift+d direct-mode confirm is a huh.Confirm, not a text field,
+		// but this was still false while it was open — so ? and l (both gated on
+		// !CapturesText() at the root) opened the help overlay or the activity log OVER the
+		// dialog instead of being swallowed by it, the same class of bug the o dialog's own
+		// case above exists to prevent.
+		return true
 	case m.state == stateReady && !m.confirming && m.focus == focusLeft:
 		return m.multiSelect != nil && m.multiSelect.GetFiltering()
 	default:
@@ -1211,14 +1295,14 @@ func (m Model) notes() string {
 
 // hints is the screen's own footer (T3-09), built through keys.Footer like every other
 // migrated screen rather than a hand-joined string, so a narrow terminal drops the lowest-
-// priority keys first instead of wrapping or truncating (train3-design.md's own Footer rules).
+// priority keys first instead of wrapping or truncating (the audit doc's own Footer rules).
 func (m Model) hints() string {
 	switch {
 	case m.state == stateSelectEnv:
 		return keys.Footer(m.styles, m.width, "", []keys.Hint{
 			{B: keys.Up, Long: "↑/↓ choose", Short: "↑/↓", Pri: 1},
 			{B: keys.Enter, Long: "enter confirm", Pri: 0},
-			{B: keys.Esc, Long: "esc back", Short: "esc", Pri: -1},
+			{B: keys.Esc, Long: "esc back", Pri: -1},
 		}, true)
 	case m.state == stateLoading:
 		return keys.Footer(m.styles, m.width, "", []keys.Hint{{B: keys.Esc, Long: "esc back", Pri: -1}}, true)
@@ -1231,17 +1315,17 @@ func (m Model) hints() string {
 	hints := []keys.Hint{
 		{B: keys.Enter, Long: "enter promote", Pri: 0},
 		{B: keys.Space, Long: "space tick", Pri: 1},
-		{B: keys.Diff, Long: "d yaml", Short: "d", Pri: 2},
-		{B: keys.Edit, Long: "e edit digest", Short: "e", Pri: 3},
+		{B: keys.Diff, Long: "d yaml", Pri: 2},
+		{B: keys.Edit, Long: "e edit digest", Short: "e digest", Pri: 3},
 	}
 	if !m.envs.IsProduction(m.target) {
 		hints = append(hints, keys.Hint{B: keys.Direct, Long: "shift+d direct", Pri: 4})
 	}
 	hints = append(hints,
-		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r", Pri: 5},
+		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r fresh", Pri: 5},
 		keys.Hint{B: keys.Tab, Long: "tab pane", Pri: 6},
 		keys.Hint{B: keys.Log, Long: "l activity", Pri: 7},
-		keys.Hint{B: keys.Esc, Long: "esc back", Short: "esc", Pri: -1},
+		keys.Hint{B: keys.Esc, Long: "esc back", Pri: -1},
 	)
 	return keys.Footer(m.styles, m.width, "", hints, true)
 }
@@ -1354,7 +1438,10 @@ func (m Model) impactBody() string {
 	var lines []string
 	lines = append(lines, m.styles.Title.Render(ansi.Truncate(strings.TrimPrefix(r.Repo, m.prefix), width, "…")))
 	lines = append(lines, ansi.Truncate(m.styles.Accent.Render(tagOrDigest(r.Old))+" → "+m.styles.Accent.Render(tagOrDigest(r.New)), width, "…"))
-	lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("%s · %s · digest from %s", plural(r.Count, "occurrence"), plural(r.Files, "file"), r.Source), width, "")))
+	// T3-10: "image reference(s)", never "occurrence(s)" — the latter is this codebase's own
+	// internal term (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an
+	// operator is about to press enter on (mirrors deploy.scale's identical wording, T3-08).
+	lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("%s · %s · digest from %s", plural(r.Count, "image reference"), plural(r.Files, "file"), r.Source), width, "")))
 	lines = append(lines, "")
 	mapped := m.histFn.Mapped == nil || m.histFn.Mapped(r.Repo)
 	if m.histFn.Delta == nil {

@@ -4,7 +4,8 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │┃   ✓ marketi…  → sha-1a2b3c4d5e6f  │orders                                   │
 │┃ > ✓ orders  → v2026022012         │v2026011510 → v2026022012                │
-│┃   ✓ web  → v2026021509            │1 occurrence · 1 file · digest from pods │
+│┃   ✓ web  → v2026021509            │1 image reference · 1 file · digest from │
+│┃                                   │pods                                     │
 │┃                                   │                                         │
 │┃                                   │v2026022012 is 18 commits ahead of       │
 │┃                                   │v2026011510 · migrations not tracked for │
@@ -17,8 +18,7 @@
 │┃                                   │                                         │
 │┃                                   │                                         │
 │┃                                   │                                         │
-│┃                                   │                                         │
 │  · worker · already current        │                                         │
 │                                    │                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-   enter promote · space tick · d · e · r · tab pane · l activity · esc · ? help
+    enter promote · space tick · d yaml · e digest · r fresh · esc back · ? more

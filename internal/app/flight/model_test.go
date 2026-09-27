@@ -578,4 +578,25 @@ func TestLogScrollsByKeypress(t *testing.T) {
 	}
 }
 
+// TestDUnboundDoesNotScrollTheLog is P2-6 from the T3 review: the log viewport was left on
+// viewport.New()'s bubbles-library default keymap, which binds bare "d" to half-page down —
+// this screen has no diff key, and the registry lists "d" as unbound here, but the default
+// paged the log anyway.
+func TestDUnboundDoesNotScrollTheLog(t *testing.T) {
+	s := fixtureState()
+	for i := 0; i < 60; i++ {
+		s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
+	}
+	m := NewAttached(stepping(s, false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if m.log.YOffset() != 0 {
+		t.Errorf("\"d\" scrolled the log: offset=%d, want 0", m.log.YOffset())
+	}
+	// Positive control: down must still scroll, so the assertion above is a real gesture gap.
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.log.YOffset() != 1 {
+		t.Error("down did not scroll the log — the positive control is broken")
+	}
+}
+
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }

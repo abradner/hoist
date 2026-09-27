@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │3 image references in 1 file · digest dddddddddddd · verified before commit   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-enter deploy · shift+d direct · ↑/↓ · r · l activity · esc back to tags · ? help
+  enter deploy · shift+d direct · ↑/↓ · r fresh · l activity · esc back · ? help

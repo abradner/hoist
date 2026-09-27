@@ -2,21 +2,21 @@
 │app-production / counta · counta-app-production     polled just now · every 1h│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │sync (none)   health (none)   revision (none)   operation (none)              │
-│  reconciled never                                                            │
-│      ╭─ help · watch ────────────────────────────────────────────────╮       │
+│  reco╭─ help · watch ────────────────────────────────────────────────╮       │
 │      │NAVIGATE                       │                               │       │
 │      │esc      back                  │                               │       │
 │      │↑        scroll                │                               │       │
 │      │↓        scroll                │                               │       │
 │      │pgup     page                  │                               │       │
 │      │pgdn     page                  │                               │       │
+│      │home     top                   │                               │       │
+│      │end      bottom                │                               │       │
 │      │VIEW                           │ APP                           │       │
 │      │r        refresh               │ ctrl+c   quit now             │       │
 │      │l        activity log          │                               │       │
 │      │                                                               │       │
 │      │a capital counts as shift                                      │       │
 │      ╰───────────────────────────────────────────────────────────────╯       │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

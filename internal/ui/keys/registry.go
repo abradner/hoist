@@ -10,21 +10,23 @@ type row struct {
 }
 
 // table is the whole approved screen × key matrix, transcribed from the audit's own table.
-// No screen reads this yet (T3-01's own scope note); the tests below hold it to the audit's
-// rules mechanically rather than by review (AGENTS.md §10 meta-rule 5).
+// Every screen in internal/app reads it through On/Has below (T3-01 through T3-10 finished the
+// migration); the tests in this file and each screen package's own TestRegistryKeysAreHonoured
+// (internal/app/matrix, plan, deploy, tags, flight, watch, restart, config, activity) hold it to
+// the audit's rules mechanically rather than by review (AGENTS.md §10 meta-rule 5).
 var table = []row{
 	// matrix
-	{ScrMatrix, Enter, "open the action menu for the cell; on the in-flight pane, open flight"},
-	{ScrMatrix, Esc, "close the menu or overlay, else nothing"},
-	{ScrMatrix, Quit, "quit (confirm if a promotion is driving)"},
+	{ScrMatrix, Enter, "open menu / flight"},
+	{ScrMatrix, Esc, "close menu/overlay"},
+	{ScrMatrix, Quit, "quit (asks if busy)"},
 	{ScrMatrix, Help, "help overlay"},
-	{ScrMatrix, Refresh, "re-read the cluster and the repo"},
-	{ScrMatrix, Open, "open the PR of the in-flight row (chooser if several)"},
-	{ScrMatrix, Promote, "promote into the cursor column (source from the reverse pair, else asks)"},
-	{ScrMatrix, Tag, "deploy a tag (tag picker for the cell)"},
-	{ScrMatrix, Watch, "watch the cell's family"},
-	{ScrMatrix, Restart, "restart the cell's family → restart screen"},
-	{ScrMatrix, Abandon, "abandon the in-flight row (confirm)"},
+	{ScrMatrix, Refresh, "re-read cluster/repo"},
+	{ScrMatrix, Open, "open PR (chooser)"},
+	{ScrMatrix, Promote, "promote into column"},
+	{ScrMatrix, Tag, "deploy a tag"},
+	{ScrMatrix, Watch, "watch family"},
+	{ScrMatrix, Restart, "restart family"},
+	{ScrMatrix, Abandon, "abandon row"},
 	{ScrMatrix, Config, "config view"},
 	{ScrMatrix, Log, "activity log"},
 	{ScrMatrix, Up, "move row"},
@@ -33,11 +35,13 @@ var table = []row{
 	{ScrMatrix, Right, "move column"},
 	{ScrMatrix, PgUp, "page"},
 	{ScrMatrix, PgDn, "page"},
-	{ScrMatrix, Tab, "table ⇄ in-flight pane"},
-	{ScrMatrix, CtrlC, "quit now, printing what is in flight"},
+	{ScrMatrix, Home, "top"},
+	{ScrMatrix, End, "bottom"},
+	{ScrMatrix, Tab, "table/flight pane"},
+	{ScrMatrix, CtrlC, "quit, print flight"},
 
 	// action menu
-	{ScrMenu, Enter, "run the highlighted item"},
+	{ScrMenu, Enter, "run highlighted item"},
 	{ScrMenu, Esc, "close"},
 	{ScrMenu, Help, "help overlay"},
 	{ScrMenu, Promote, "promote into"},
@@ -52,10 +56,10 @@ var table = []row{
 	{ScrPlan, Enter, "start promotion"},
 	{ScrPlan, Esc, "back"},
 	{ScrPlan, Help, "help overlay"},
-	{ScrPlan, Refresh, "rebuild the plan at fresh origin"},
+	{ScrPlan, Refresh, "rebuild from origin"},
 	{ScrPlan, Diff, "toggle yaml diff"},
-	{ScrPlan, Direct, "toggle direct mode (confirm to turn on; never offered for production)"},
-	{ScrPlan, Edit, "override the hovered repo's digest (input dialog)"},
+	{ScrPlan, Direct, "direct mode"},
+	{ScrPlan, Edit, "override digest"},
 	{ScrPlan, Space, "tick / untick repo"},
 	{ScrPlan, Filter, "filter"},
 	{ScrPlan, Tab, "repos ⇄ impact pane"},
@@ -64,31 +68,40 @@ var table = []row{
 	{ScrPlan, Down, "move"},
 	{ScrPlan, PgUp, "page"},
 	{ScrPlan, PgDn, "page"},
+	{ScrPlan, Home, "top"},
+	{ScrPlan, End, "bottom"},
 	{ScrPlan, CtrlC, "quit now"},
 
 	// deploy confirm
 	{ScrDeploy, Enter, "start deploy"},
 	{ScrDeploy, Esc, "back to the picker"},
 	{ScrDeploy, Help, "help overlay"},
-	{ScrDeploy, Refresh, "rebuild the diff at fresh origin"},
+	{ScrDeploy, Refresh, "rebuild from origin"},
 	{ScrDeploy, Diff, "toggle yaml diff"},
-	{ScrDeploy, Direct, "toggle direct mode (confirm to turn on; never offered for production)"},
+	{ScrDeploy, Direct, "direct mode"},
 	{ScrDeploy, Log, "activity log"},
 	{ScrDeploy, Up, "scroll"},
 	{ScrDeploy, Down, "scroll"},
 	{ScrDeploy, PgUp, "page"},
 	{ScrDeploy, PgDn, "page"},
+	{ScrDeploy, Home, "top"},
+	{ScrDeploy, End, "bottom"},
 	{ScrDeploy, CtrlC, "quit now"},
 
-	// tag picker (list)
-	{ScrTags, Enter, "review this tag → deploy confirm"},
+	// tag picker (list). P2-7 (T3 review): Open ("o") was listed and shown in help but
+	// implemented nowhere in this package — no forge commit URL is plumbed into this screen at
+	// all (unlike flight's OpenPRMsg, which the root already threads through) — so it is
+	// delisted here rather than left as a dead row; wiring a real "open commit on forge" gesture
+	// is a real feature (a URL builder, a message, a root handler) and belongs in its own
+	// change, not this fixup pass. Home/End are implemented (moveCursor's own list, T3-07) and
+	// now listed alongside them.
+	{ScrTags, Enter, "review tag → confirm"},
 	{ScrTags, Esc, "back"},
 	{ScrTags, Help, "help overlay"},
 	{ScrTags, Refresh, "reload tags"},
-	{ScrTags, Open, "open the commit under the cursor on the forge"},
 	{ScrTags, Filter, "filter"},
 	{ScrTags, Tab, "list ⇄ commits"},
-	{ScrTags, Right, "open the commit reader"},
+	{ScrTags, Right, "open commit reader"},
 	{ScrTags, Log, "activity log"},
 	{ScrTags, Up, "move"},
 	{ScrTags, Down, "move"},
@@ -96,26 +109,32 @@ var table = []row{
 	{ScrTags, End, "bottom"},
 	{ScrTags, CtrlC, "quit now"},
 
-	// tag picker's commit reader pane
+	// tag picker's commit reader pane. P2-7/8: Open delisted for the same reason as ScrTags'
+	// own row above; Tab was listed ("commits ⇄ list") but updateReading's own switch has no
+	// case for it — reading a commit has no second pane to tab to — so it is delisted too.
+	// Esc, Enter, Home and End ARE handled (updateReading: Back/Left, Review, Home, End) but
+	// were missing from this row entirely; listed now.
+	{ScrTagsReader, Esc, "back to the list"},
 	{ScrTagsReader, Left, "back to the list"},
+	{ScrTagsReader, Enter, "review tag → confirm"},
 	{ScrTagsReader, Help, "help overlay"},
-	{ScrTagsReader, Open, "open the commit on the forge"},
-	{ScrTagsReader, Tab, "commits ⇄ list"},
 	{ScrTagsReader, Up, "switch commit"},
 	{ScrTagsReader, Down, "switch commit"},
 	{ScrTagsReader, PgUp, "scroll body"},
 	{ScrTagsReader, PgDn, "scroll body"},
+	{ScrTagsReader, Home, "top"},
+	{ScrTagsReader, End, "bottom"},
 	{ScrTagsReader, CtrlC, "quit now"},
 
 	// flight
-	{ScrFlight, Esc, "back to the matrix, drive keeps running"},
+	{ScrFlight, Esc, "back (keeps running)"},
 	{ScrFlight, Help, "help overlay"},
 	{ScrFlight, Refresh, "re-observe now"},
 	{ScrFlight, Open, "open the PR"},
-	{ScrFlight, Watch, "watch this promotion's family and target"},
-	{ScrFlight, Abandon, "abandon (confirm)"},
-	{ScrFlight, CINone, "treat \"no checks\" as green (confirm; only when offered)"},
-	{ScrFlight, Log, "activity log (this promotion's lines first)"},
+	{ScrFlight, Watch, "watch family/target"},
+	{ScrFlight, Abandon, "abandon"},
+	{ScrFlight, CINone, "no checks ok"},
+	{ScrFlight, Log, "log (mine first)"},
 	{ScrFlight, Up, "scroll log"},
 	{ScrFlight, Down, "scroll log"},
 	{ScrFlight, PgUp, "page"},
@@ -133,17 +152,24 @@ var table = []row{
 	{ScrWatch, Down, "scroll"},
 	{ScrWatch, PgUp, "page"},
 	{ScrWatch, PgDn, "page"},
+	{ScrWatch, Home, "top"},
+	{ScrWatch, End, "bottom"},
 	{ScrWatch, CtrlC, "quit now"},
 
 	// restart
-	{ScrRestart, Enter, "restart (production: confirm dialog)"},
-	{ScrRestart, Esc, "back (a rollout in progress continues, and the screen says so)"},
+	{ScrRestart, Enter, "restart (confirms)"},
+	{ScrRestart, Esc, "back (keeps running)"},
 	{ScrRestart, Help, "help overlay"},
+	// P2-8 (T3 review): the design's own re-read row was missing entirely — implemented now
+	// (Model.reread) rather than delisted, since Funcs.Read was already there to reuse.
+	{ScrRestart, Refresh, "re-read the cluster"},
 	{ScrRestart, Log, "activity log"},
 	{ScrRestart, Up, "scroll"},
 	{ScrRestart, Down, "scroll"},
 	{ScrRestart, PgUp, "page"},
 	{ScrRestart, PgDn, "page"},
+	{ScrRestart, Home, "top"},
+	{ScrRestart, End, "bottom"},
 	{ScrRestart, CtrlC, "quit now"},
 
 	// config: a static read, no re-read verb (AGENTS.md §4.8)
@@ -165,6 +191,11 @@ var table = []row{
 	{ScrActivity, Down, "scroll"},
 	{ScrActivity, PgUp, "page"},
 	{ScrActivity, PgDn, "page"},
+	// P2-8 (T3 review): the design's own home/end row was missing on every viewport-backed
+	// screen; implemented here (and on plan/deploy/watch/restart/matrix) rather than delisted,
+	// since every one of them already has a list or viewport to jump.
+	{ScrActivity, Home, "top"},
+	{ScrActivity, End, "bottom"},
 	{ScrActivity, CtrlC, "quit now"},
 }
 

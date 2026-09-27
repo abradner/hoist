@@ -4,7 +4,7 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ counta  v202601151010 → v9               │counta                                                                │
 │┃   ✓ marketing  → sha-1a2b3c4d5e6f708192a3b4c…│v202601151010 → v9                                                    │
-│┃   ✓ ! web  v202601010101 → v202602150930     │3 occurrences · 2 files · digest from override                        │
+│┃   ✓ ! web  v202601010101 → v202602150930     │3 image references · 2 files · digest from override                   │
 │┃                                              │                                                                      │
 │┃                                              │no commit history — ghcr.io/example/counta has no app repo in         │
 │┃                                              │repos[].apps                                                          │
@@ -37,4 +37,4 @@
 │┃                                              │                                                                      │
 │┃                                              │                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-    enter promote · space tick · d yaml · e edit digest · shift+d direct · r · tab pane · l activity · esc back · ? help
+   enter promote · space tick · d yaml · e digest · shift+d direct · r fresh · tab pane · l activity · esc back · ? help

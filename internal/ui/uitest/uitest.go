@@ -187,3 +187,27 @@ func Key(k string) tea.KeyPressMsg {
 	}
 	return tea.KeyPressMsg{Code: r[0], Text: k}
 }
+
+// KeyFor converts a keys.Binding's own Show text (e.g. "↑", "pgdn", "shift+r", "r", "enter") —
+// exactly what a footer or the help overlay renders — into the tea.KeyPressMsg a real terminal
+// would send for it. internal/ui/keys' registry-driven "does every screen honour its own row"
+// walk tests (one per screen, TestRegistryKeysAreHonoured) are this function's one reason to
+// exist: they iterate keys.On(screen) and need to press each Binding.Show, and Key itself only
+// parses a bare arrow/page name ("up", "pgdown"), not the glyph or the "pgdn" spelling a Binding
+// actually shows.
+func KeyFor(show string) tea.KeyPressMsg {
+	switch show {
+	case "↑":
+		return Key("up")
+	case "↓":
+		return Key("down")
+	case "←":
+		return Key("left")
+	case "→":
+		return Key("right")
+	case "pgdn":
+		return Key("pgdown")
+	default:
+		return Key(show)
+	}
+}

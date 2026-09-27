@@ -193,6 +193,17 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
+// newViewport is the log pane's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
+// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds bare "d"
+// to half-page down — this screen has no diff key, but the registry lists "d" as unbound here,
+// and the bubbles default paged the log out from under an operator who pressed it expecting
+// nothing to happen.
+func newViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = keys.ViewportKeyMap()
+	return v
+}
+
 // NewAttached builds the flight screen already attached to one session.Controller entry — the
 // TUI's only way to construct this screen (Train 2 design, D3): the root calls it once, right
 // after session.Controller.Start/Resume hands back a BuildID, and every later change reaches this
@@ -205,7 +216,7 @@ func NewAttached(s session.Snapshot, poll PollDurations) Model {
 	m := Model{
 		spinner: spinner.New(spinner.WithSpinner(spinner.Line)),
 		now:     time.Now,
-		log:     viewport.New(),
+		log:     newViewport(),
 		styles:  ui.NewStyles(true),
 		tickID:  scope.New(),
 	}
@@ -382,7 +393,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.updateConfirmAbandon(msg)
 	}
 	if m.choosingFamily {
-		if keys.Esc.Matches(msg) {
+		// P3 (T3 review): esc while the chooser's own "/" filter is open must close only the
+		// filter — huh's own Update handles that — not the whole chooser; checked before the
+		// unconditional close below, the mirror of updateFamilyChooser's own enter-while-
+		// filtering guard just below it.
+		if keys.Esc.Matches(msg) && (m.familyChooser == nil || !m.familyChooser.GetFiltering()) {
 			m.choosingFamily = false
 			return m, nil
 		}

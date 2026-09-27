@@ -22,7 +22,7 @@ const (
 )
 
 // StepGlyph returns the one glyph set every step strip in this app should use (T3-02,
-// train3-design.md): ✓ done, ◐ active, · pending, ✗ failed, ⏸ waiting. It retires the older,
+// the audit doc): ✓ done, ◐ active, · pending, ✗ failed, ⏸ waiting. It retires the older,
 // inconsistent ●/◍/○/⟳ glyphs different screens picked independently — AGENTS.md §9's own
 // "one glyph set" note — though no screen switches to it in this PR (T3-02's own acceptance
 // check: `git grep -n '"[●◍○⟳]"' internal/ui` must stay empty, since that's the new set's own
@@ -67,7 +67,7 @@ func (st Styles) Step(s StepState, label string) string {
 
 // Plural renders a count with a word that only takes a bare "s" — "1 Deployment", "2
 // Deployments" — replacing every screen's own "Deployment(s)" (AGENTS.md §9,
-// train3-design.md's UX-L2) with one place that gets English right for both n=1 and n=0
+// the audit doc's UX-L2) with one place that gets English right for both n=1 and n=0
 // ("0 Deployments", never "0 Deployment(s)").
 func Plural(n int, one string) string {
 	if n == 1 {

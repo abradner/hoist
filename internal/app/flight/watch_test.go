@@ -77,6 +77,32 @@ func TestWChoosesWhenSeveralFamilies(t *testing.T) {
 	}
 }
 
+// TestWChooserEscWhileFilteringClosesOnlyTheFilter is P3 from the T3 review: esc while the
+// chooser's own "/" filter was open closed the WHOLE chooser (the same unconditional-esc bug
+// P1-2 fixed on the plan screen's own multi-select), instead of huh's own "clear the filter"
+// behaviour. Positive control: esc with no filter open still closes the chooser, exactly as
+// TestWChoosesWhenSeveralFamilies's own esc case proves.
+func TestWChooserEscWhileFilteringClosesOnlyTheFilter(t *testing.T) {
+	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m = withEdits(m, "app-production", "web", "worker")
+	m, _ = m.Update(uitest.Key("w"))
+	if !m.choosingFamily {
+		t.Fatal("test setup: w with several families did not raise the chooser")
+	}
+	m, _ = m.Update(uitest.Key("/"))
+	if m.familyChooser == nil || !m.familyChooser.GetFiltering() {
+		t.Fatal("test setup: \"/\" did not open the chooser's own filter")
+	}
+
+	m, cmd := m.Update(uitest.Key("esc"))
+	if !m.choosingFamily {
+		t.Error("esc while filtering closed the whole chooser, not just the filter")
+	}
+	if cmd != nil {
+		t.Errorf("esc while filtering produced a command: %#v", cmd())
+	}
+}
+
 // TestWWithNoFamilyShowsNotice: nothing computed from Edits yet (Building, or a state whose
 // plan carries none) — w says so rather than opening a chooser over nothing or guessing a
 // family.

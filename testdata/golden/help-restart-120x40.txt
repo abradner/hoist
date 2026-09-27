@@ -3,28 +3,28 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │2 Deployments in app-production                                                                                       │
 │                                                                                                                      │
-│   counta  1 replica(s) · RollingUpdate · last restart: never restarted this way                                      │
+│   counta  1 replica · RollingUpdate · last restart: never restarted this way                                         │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the             │
 │       replacement fails                                                                                              │
 │     ! no readiness probe: a new pod counts as available the moment it starts, before it can serve                    │
 │                                                                                                                      │
-│   counta-worker  1 replica(s) · RollingUpdate · last restart: never restarted this way                               │
+│   counta-worker  1 replica · RollingUpdate · last restart: never restarted this way                                  │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the             │
-│       replacement fails                                                                                              │
-│     ! no readiness probe: a new pod counts as available the moment it starts, before it can serve                    │
-│                          ╭─ help · restart ──────────────────────────────────────────────╮                           │
-│                          │NAVIGATE                       │ ACT                           │                           │
-│                          │esc      back (a rollout in pr │ enter    restart (production: │                           │
+│       replacement fails  ╭─ help · restart ──────────────────────────────────────────────╮                           │
+│     ! no readiness probe:│NAVIGATE                       │ ACT                           │n serve                    │
+│                          │esc      back (keeps running)  │ enter    restart (confirms)   │                           │
 │                          │↑        scroll                │                               │                           │
 │                          │↓        scroll                │                               │                           │
 │                          │pgup     page                  │                               │                           │
 │                          │pgdn     page                  │                               │                           │
+│                          │home     top                   │                               │                           │
+│                          │end      bottom                │                               │                           │
 │                          │VIEW                           │ APP                           │                           │
-│                          │l        activity log          │ ctrl+c   quit now             │                           │
+│                          │r        re-read the cluster   │ ctrl+c   quit now             │                           │
+│                          │l        activity log          │                               │                           │
 │                          │                                                               │                           │
 │                          │a capital counts as shift                                      │                           │
 │                          ╰───────────────────────────────────────────────────────────────╯                           │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

@@ -37,4 +37,4 @@
 │┃                                              │     spec:                                                            │
 │┃                                              │       containers:                                                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-    enter promote · space tick · d yaml · e edit digest · shift+d direct · r · tab pane · l activity · esc back · ? help
+   enter promote · space tick · d yaml · e digest · shift+d direct · r fresh · tab pane · l activity · esc back · ? help

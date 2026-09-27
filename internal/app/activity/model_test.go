@@ -28,6 +28,24 @@ func TestViewGolden(t *testing.T) {
 	}
 }
 
+// TestHomeEndScrollBody is P2-8 from the T3 review: the design's own home/end row was missing
+// on this viewport-backed screen.
+func TestHomeEndScrollBody(t *testing.T) {
+	log := Log{}
+	for i := 0; i < 40; i++ {
+		log = log.Add(Entry{At: fixedAt, Kind: Info, Text: "entry"})
+	}
+	m := New(log, func() time.Time { return fixedAt }).SetStyles(ui.NewStyles(true)).SetSize(80, 10)
+	m, _ = m.Update(uitest.Key("end"))
+	if !m.body.AtBottom() {
+		t.Error("end did not scroll the body to the bottom")
+	}
+	m, _ = m.Update(uitest.Key("home"))
+	if !m.body.AtTop() {
+		t.Error("home did not scroll the body to the top")
+	}
+}
+
 func TestEscEmitsBackMsg(t *testing.T) {
 	m := newFixture().SetSize(80, 24)
 	_, cmd := m.Update(uitest.Key("esc"))

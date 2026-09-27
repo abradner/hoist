@@ -403,3 +403,53 @@ func TestCommitSubjectsUseTheWidthTheRootSetsAfterHistory(t *testing.T) {
 		t.Fatalf("commit subjects truncated to the pre-SetSize width:\n%s", v)
 	}
 }
+
+// TestHomeEndScrollTheActivePane is P2-8 from the T3 review: the design's own home/end row was
+// missing on this screen — checked against both panes (yaml diff and commit history), since
+// which viewport "home"/"end" should reach depends on m.showYAML.
+func TestHomeEndScrollTheActivePane(t *testing.T) {
+	m := fixture(t, config.EnvsConfig{}).SetSize(40, 6)
+	m.diff.SetContent(strings.Repeat("line\n", 40))
+	m.commits.SetContent(strings.Repeat("line\n", 40))
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !m.diff.AtBottom() {
+		t.Error("end did not scroll the diff pane to the bottom")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if !m.diff.AtTop() {
+		t.Error("home did not scroll the diff pane to the top")
+	}
+
+	m.showYAML = false
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !m.commits.AtBottom() {
+		t.Error("end did not scroll the commits pane to the bottom")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if !m.commits.AtTop() {
+		t.Error("home did not scroll the commits pane to the top")
+	}
+}
+
+// TestSpaceNoLongerScrollsTheDiff is P2-6 from the T3 review: the diff/commits viewports were
+// left on viewport.New()'s bubbles-library default keymap, which binds space to page down — a
+// gesture the T3-08 redesign retired on this screen (nothing on the footer or help overlay
+// mentions it) but that kept working anyway because nothing ever overrode the default.
+func TestSpaceNoLongerScrollsTheDiff(t *testing.T) {
+	m := fixture(t, config.EnvsConfig{}).SetSize(40, 6) // narrow and short: the diff overflows
+	m.diff.SetContent(strings.Repeat("line\n", 40))
+	before := m.diff.YOffset()
+
+	m2, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
+	if got := m2.diff.YOffset(); got != before {
+		t.Errorf("space scrolled the diff: YOffset %d -> %d, want unchanged", before, got)
+	}
+
+	// Positive control: pgdown must still scroll, so the assertion above is a real gesture
+	// gap and not a viewport that stopped scrolling altogether.
+	m3, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := m3.diff.YOffset(); got == before {
+		t.Error("pgdown did not scroll the diff — the positive control is broken")
+	}
+}

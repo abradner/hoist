@@ -4,7 +4,7 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ db  → v202602201200           │db                                       │
 │┃   ✓ …alpha  → v202602201200       │v202601151010 → v202602201200            │
-│┃   ✓ …beta  → v202602201200        │1 occurrence · 1 file · digest from      │
+│┃   ✓ …beta  → v202602201200        │1 image reference · 1 file · digest from │
 │┃                                   │manifest                                 │
 │┃                                   │                                         │
 │┃                                   │no commit history — ghcr.io/example/db   │
@@ -21,4 +21,4 @@
 │┃                                   │                                         │
 │┃                                   │                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-          enter promote · space tick · d · e · shift+d direct · r · esc · ? more
+              enter promote · space tick · d yaml · e digest · esc back · ? more

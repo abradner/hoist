@@ -27,9 +27,9 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Top:    key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
-		Bottom: key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
+		Back:   keys.Esc.Bubbles(),
+		Top:    keys.Home.Bubbles(),
+		Bottom: keys.End.Bubbles(),
 	}
 }
 
@@ -57,14 +57,7 @@ func New(path string, found bool, text string) Model {
 // defaults for them are "home"/"end" names this screen does not otherwise use.
 func newViewport() viewport.Model {
 	v := viewport.New()
-	v.KeyMap = viewport.KeyMap{
-		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
-		PageUp:       key.NewBinding(key.WithKeys("pgup")),
-		HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
-		HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
-		Down:         key.NewBinding(key.WithKeys("down", "j")),
-		Up:           key.NewBinding(key.WithKeys("up", "k")),
-	}
+	v.KeyMap = keys.ViewportKeyMap()
 	v.MouseWheelEnabled = false
 	return v
 }

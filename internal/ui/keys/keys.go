@@ -53,7 +53,7 @@ type Binding struct {
 	Class Class
 	Group Group
 	// Keys are the bubbles/key match strings for a non-write binding. A write binding leaves
-	// this nil and is matched by Matches below instead, which is stateless (train3-design.md,
+	// this nil and is matched by Matches below instead, which is stateless (the audit doc,
 	// "Matches for a write binding") rather than table-driven, since a write's whole point is
 	// telling shift from a legacy uppercase byte, which no fixed string list can express.
 	Keys []string
@@ -68,7 +68,7 @@ type Binding struct {
 // write builds a Write-class Binding: shift+letter is what every surface shows (rule 5), and
 // letter is what Matches actually tests, since a legacy terminal sends the same byte for
 // shift+letter and caps-lock-then-letter and only Matches' own caps-lock check (point 3, from
-// train3-design.md) can tell them apart when a protocol-capable terminal reports it.
+// the audit doc) can tell them apart when a protocol-capable terminal reports it.
 // Every Write binding today lists under the mockup's ACT column (restart, abandon, direct,
 // ci-none are all actions, never a view or a navigation), so group is fixed here rather than
 // taken as a parameter with only one value ever passed (golangci-lint's unparam).
@@ -84,7 +84,7 @@ func write(letter rune, name string) Binding {
 
 // Matches reports whether msg is this binding's key. For every non-write binding it defers to
 // bubbles' key.Matches over Keys. For a write binding it runs the stateless four-rule test
-// from train3-design.md's "Matches for a write binding" section:
+// from the audit doc's "Matches for a write binding" section:
 //  1. the base letter must match, case-insensitively;
 //  2. ctrl, alt or meta held rejects it outright — a write is a bare letter plus shift, never
 //     a chord;
@@ -167,13 +167,23 @@ var (
 	Abandon = write('x', "abandon")
 	Direct  = write('d', "direct")
 	CINone  = write('c', "ci-none")
+
+	// HalfPageDown and HalfPageUp are the vim-style ctrl+d/ctrl+u half-page scroll some
+	// screens' viewport bodies also answer to alongside pgup/pgdn — not part of the approved
+	// keymap's own Screen × key table (rule 7 names only ↑/↓, ←/→, pgup/pgdn, home/end as the
+	// shared navigation set), so neither is ever added to a Screen's registry row: a bonus
+	// muscle-memory alias a footer or the help overlay never advertises, built through this
+	// package only so no screen's viewport wiring calls key.NewBinding directly any more
+	// (T3-10, internal/copycheck's TestNoKeyNewBindingOutsideKeys).
+	HalfPageDown = Binding{Name: "halfpagedown", Class: Spatial, Group: Navigate, Keys: []string{"ctrl+d"}, Show: "ctrl+d"}
+	HalfPageUp   = Binding{Name: "halfpageup", Class: Spatial, Group: Navigate, Keys: []string{"ctrl+u"}, Show: "ctrl+u"}
 )
 
 // Screen names one screen's own row in the registry. ScrTagsReader is the tag picker's commit
 // pane, which unbinds and rebinds a few of the list's own keys (→/← swap meaning) rather than
 // being a screen the app ever pushes on its own stack.
 //
-// Deviation from train3-design.md's literal spelling: the design's Binding-var block and its
+// Deviation from the audit doc's literal spelling: the design's Binding-var block and its
 // Screen-const comment both name Watch, Restart and Config, which cannot coexist as Go
 // identifiers at package scope. Every Screen constant here carries a "Scr" prefix instead, so
 // keys.Watch/keys.Restart/keys.Config stay the Binding vars the design's four-write-binding

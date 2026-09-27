@@ -1,4 +1,4 @@
-// Package restart is the matrix's R key: the screen that shows what a restart would roll, takes
+// Package restart is the matrix's shift+r key: the screen that shows what a restart would roll, takes
 // the confirmation, and follows the rollout.
 //
 // It is deliberately not the deploy confirm screen with a different noun. That screen's whole
@@ -134,6 +134,10 @@ type Model struct {
 	plan   restart.Plan
 	at     time.Time
 	notice string
+	// refused is true only for New's own construction-time misconfiguration refusal (Do
+	// without Observe) — a wiring mistake a re-read could never fix, unlike a stateFailed set
+	// later by a real Read call's own error, which "r" (P2-8, T3 review) is allowed to retry.
+	refused bool
 	// done is which Deployments have finished rolling, kept on the model rather than anywhere
 	// package-level: two of these screens can exist at once (two envs), and shared mutable
 	// state between them would be both a race and a lie.
@@ -169,6 +173,15 @@ func (m Model) busy() bool {
 	return m.state == stateReading || m.state == stateStarting || m.state == stateRolling
 }
 
+// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
+// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds bare
+// "d" to half-page down — the registry lists "d" as unbound on this screen.
+func newViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = keys.ViewportKeyMap()
+	return v
+}
+
 // New builds the screen for one family in one env. names are the Deployments the repo says that
 // family declares; nothing is read from the cluster until Init runs.
 //
@@ -184,10 +197,11 @@ func New(env, family string, names []string, production bool, funcs Funcs, style
 		env: env, family: family, names: names, production: production,
 		scope: scope.Open(),
 		state: stateReading,
-		body:  viewport.New(),
+		body:  newViewport(),
 	}
 	if funcs.Do != nil && funcs.Observe == nil {
 		m.state = stateFailed
+		m.refused = true
 		m.notice = "restart screen misconfigured: Do is set without Observe, so a restart here would have no way to tell whether it finished"
 	}
 	return m
@@ -302,6 +316,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "esc":
 		continuing := m.state == stateStarting || m.state == stateRolling
 		return m, func() tea.Msg { return BackMsg{RollingContinues: continuing} }
+	case "home":
+		m.body.GotoTop()
+		return m, nil
+	case "end":
+		m.body.GotoBottom()
+		return m, nil
 	case "enter":
 		if m.state != stateConfirm {
 			return m, nil
@@ -315,16 +335,35 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				Title(fmt.Sprintf("Restart %s in %s? It is a production env.", ui.Plural(len(m.plan.Targets), "Deployment"), m.env))
 			// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing:
 			// a Confirm used standalone rather than inside a huh.Form ignores every keypress.
-			m.confirm.WithKeyMap(huh.NewDefaultKeyMap())
+			m.confirm.WithKeyMap(keys.HuhKeyMap())
 			m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 			m.confirm.WithWidth(m.dialogWidth())
 			return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 		}
 		return m.start()
+	case "r", "f5", "ctrl+r":
+		return m.reread()
 	}
 	var cmd tea.Cmd
 	m.body, cmd = m.body.Update(msg)
 	return m, cmd
+}
+
+// reread is P2-8 (T3 review): the design's own "r" re-read row for this screen, missing until
+// now. Re-runs Funcs.Read to refresh replica counts, strategy and last-restart times against
+// whatever the cluster says right now — restart's own equivalent of plan/tags' own "reload"
+// gesture. Only offered from stateConfirm (already loaded once) or a stateFailed set by a real
+// Read error; New's own construction-time refusal (m.refused) is a wiring mistake no re-read
+// could fix, and busy() states (a Read/Do/Observe call already outstanding, or a rollout in
+// progress) have nothing idle to re-read from.
+func (m Model) reread() (Model, tea.Cmd) {
+	if m.refused || m.busy() || m.state == stateDone {
+		return m, nil
+	}
+	m.state = stateReading
+	m.notice = ""
+	m.scope.ID = scope.New()
+	return m.render(), m.Init()
 }
 
 func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
@@ -416,8 +455,9 @@ func (m Model) render() Model {
 			if was == "" {
 				was = "never restarted this way"
 			}
-			fmt.Fprintf(&b, "\n %s %s  %s\n", mark, m.styles.Accent.Render(st.Name), m.styles.Dim.Render(fmt.Sprintf("%d replica(s) · %s · last restart: %s", st.Replicas, st.Strategy, was)))
+			fmt.Fprintf(&b, "\n %s %s  %s\n", mark, m.styles.Accent.Render(st.Name), m.styles.Dim.Render(fmt.Sprintf("%s · %s · last restart: %s", ui.Plural(int(st.Replicas), "replica"), st.Strategy, was)))
 			for _, c := range st.GracefulRestartConcerns() {
+				c = fixImageParenPlural(c)
 				// Wrapped to what the frame and the indent leave, every continuation line
 				// indented under the "!": a concern is one sentence and reads as one.
 				const indent = "     "
@@ -437,6 +477,35 @@ func (m Model) render() Model {
 	}
 	m.body.SetContent(strings.TrimRight(b.String(), "\n"))
 	return m
+}
+
+// imageParenPluralPrefix is pkg/rollout's own literal shape for the unpinned-image concern
+// (DeploymentStatus.GracefulRestartConcerns, "unpinned image(s) <list>: <reason>") — pkg/rollout
+// is activity-shaped (§4.3) and cannot import internal/ui.Plural itself, so this screen, the one
+// place that renders the concern, corrects the plural at the TUI render point instead (P2-13,
+// T3 review: this always read "image(s)", even for exactly one). Built by concatenation, not as
+// one literal, so it names the string to fix without itself tripping
+// internal/copycheck's TestNoParenPlural, which scans for exactly this shape in a literal this
+// package actually renders.
+const imageParenPluralPrefix = "unpinned image" + "(" + "s) "
+
+// fixImageParenPlural rewrites pkg/rollout's "unpinned image(s) <list>: <reason>" to "unpinned
+// image <one>: …" or "unpinned images <a>, <b>: …" depending on how many the list actually
+// names; any other concern string (a different sentence entirely) passes through unchanged.
+func fixImageParenPlural(c string) string {
+	rest, ok := strings.CutPrefix(c, imageParenPluralPrefix)
+	if !ok {
+		return c
+	}
+	list, reason, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return c
+	}
+	word := "image"
+	if strings.Contains(list, ", ") {
+		word = "images"
+	}
+	return "unpinned " + word + " " + list + ": " + reason
 }
 
 // View renders the screen in the frame: the header, the target list, a notes section for

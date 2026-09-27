@@ -39,7 +39,7 @@ func TestHelpViewNamesShiftWritesOnlyWhenPresent(t *testing.T) {
 }
 
 // TestKbdLineNamesWhatWasGranted: the overlay always says whether this run can tell a caps-lock
-// letter from a real shift (train3-design.md's own resolution of that question).
+// letter from a real shift (the audit doc's own resolution of that question).
 func TestKbdLineNamesWhatWasGranted(t *testing.T) {
 	plain := HelpView(ScrWatch, tea.KeyboardEnhancementsMsg{})
 	if !strings.Contains(plain, "a capital counts as shift") {
@@ -56,5 +56,29 @@ func TestKbdLineNamesWhatWasGranted(t *testing.T) {
 func TestHelpTitleNamesTheScreen(t *testing.T) {
 	if got, want := HelpTitle(ScrConfig), "help · config"; got != want {
 		t.Errorf("HelpTitle(ScrConfig) = %q, want %q", got, want)
+	}
+}
+
+// TestNoRegistryDescIsTruncated is P1-3 from the T3 review: groupBlock/padTrunc cuts a Desc to
+// helpColWidth with no ellipsis and no wrap, so a Desc (plus the " (asks)" suffix a Write
+// binding's row appends) that is even one rune too long is silently cut mid-word — "promote
+// into the curs", "quit (confirm if a pr", "restart (production:", "back (a rollout in pr" were
+// all found this way. This walks the whole registry rather than trusting a golden file, so a
+// new row can't reintroduce the defect before -update is next run.
+func TestNoRegistryDescIsTruncated(t *testing.T) {
+	const budget = helpColWidth - 8 - 1 // Show column (%-8s) + one separating space
+	for _, s := range Screens() {
+		for _, e := range On(s) {
+			if e.Name == Help.Name {
+				continue // the overlay never lists its own key (HelpView's own skip)
+			}
+			desc := e.Desc
+			if e.Class == Write {
+				desc += " (asks)" // groupBlock's own suffix for a Write-class row
+			}
+			if n := len([]rune(desc)); n > budget {
+				t.Errorf("%v %s: Desc %q is %d runes, over the %d-rune column budget — it will be cut mid-word", s, e.Show, desc, n, budget)
+			}
+		}
 	}
 }

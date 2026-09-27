@@ -60,7 +60,7 @@ func NewStyles(dark bool) Styles {
 	warn := ld(lipgloss.Color("166"), lipgloss.Color("214"))
 	bad := ld(lipgloss.Color("160"), lipgloss.Color("203"))
 	// T3-02: Info, Production and Help/Muted each get their own hue instead of sharing Warn's
-	// amber or Dim's grey (train3-design.md's own list of what today collapses to one colour).
+	// amber or Dim's grey (the audit doc's own list of what today collapses to one colour).
 	// info is a calm blue — a plain report, never itself an exception. production is the
 	// mockups' own violet (docs/tui/mockups.html's `.c-prod`, #d9a0f0), picked specifically to
 	// read as "a fact about this env" rather than "something is wrong" the way Warn's amber

@@ -21,4 +21,4 @@
 │v1                                                                                                                    │
 │  pinned                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-      enter actions · p promote into c · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help
+env c          enter actions · p promote into c · t deploy tag · w watch · r refresh · shift+r restart · q quit · ? help

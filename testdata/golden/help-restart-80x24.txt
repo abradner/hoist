@@ -2,21 +2,21 @@
 │app-production / counta                                      not yet restarted│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │2 Deployments in app-production                                               │
-│                                                                              │
-│   counta  1 replica(s) · RollingUpdate · last restart: never restarted this w│
-│     !╭─ help · restart ──────────────────────────────────────────────╮ but   │
-│      │NAVIGATE                       │ ACT                           │       │
-│     !│esc      back (a rollout in pr │ enter    restart (production: │       │
+│      ╭─ help · restart ──────────────────────────────────────────────╮       │
+│   cou│NAVIGATE                       │ ACT                           │is way │
+│     !│esc      back (keeps running)  │ enter    restart (confirms)   │ but   │
 │      │↑        scroll                │                               │       │
-│      │↓        scroll                │                               │       │
-│   cou│pgup     page                  │                               │started│
-│     !│pgdn     page                  │                               │ but   │
+│     !│↓        scroll                │                               │       │
+│      │pgup     page                  │                               │       │
+│      │pgdn     page                  │                               │       │
+│   cou│home     top                   │                               │rted th│
+│     !│end      bottom                │                               │ but   │
 │      │VIEW                           │ APP                           │       │
-│     !│l        activity log          │ ctrl+c   quit now             │       │
+│     !│r        re-read the cluster   │ ctrl+c   quit now             │       │
+│      │l        activity log          │                               │       │
 │      │                                                               │       │
 │      │a capital counts as shift                                      │       │
 │      ╰───────────────────────────────────────────────────────────────╯       │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

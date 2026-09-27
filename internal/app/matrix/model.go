@@ -367,6 +367,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.moveCursor(-max(m.gridHeight(), 1)), nil
 	case keys.PgDn.Matches(msg):
 		return m.moveCursor(max(m.gridHeight(), 1)), nil
+	case keys.Home.Matches(msg):
+		// P2-8 (T3 review): the design's own home/end row was missing here. moveCursor's own
+		// clamp does the actual jump-to-first/last work, the same trick fitWidths' clamp and
+		// the plan screen's own Home/End case rely on: a delta at least as large in magnitude
+		// as the list always lands at the end it points to, on either cursor (row or pane).
+		return m.moveCursor(-max(len(m.matrix.Rows), len(m.inflight))), nil
+	case keys.End.Matches(msg):
+		return m.moveCursor(max(len(m.matrix.Rows), len(m.inflight))), nil
 	case keys.Tab.Matches(msg):
 		return m.toggleFocus(), nil
 	case keys.Config.Matches(msg):
@@ -951,12 +959,25 @@ const minCellWidth = 10
 
 // fitWidths shrinks the widest env columns, one cell at a time, until the grid fits width.
 // The family column keeps its natural width.
+//
+// P1-4 (T3 review): total must also count the "│" grid.go's own dataRow/ruleRow join every
+// column with — one separator between each pair of columns, len(out)-1 of them — not just each
+// column's own text-plus-padding. Missing that made fitWidths believe a row fit when it was
+// actually len(out)-1 cells too wide, so the row Frame received was wider than the terminal;
+// Frame's own line cropping then ate into whatever sat at the row's right edge, which is the
+// last column's right-aligned state word ("pinn…", "extern…", "spl…" at 80 columns — the ref
+// should truncate before the state word ever does, per formatCell's own room calculation, but
+// that calculation was never reached because the column was never actually shrunk to make
+// room).
 func fitWidths(widths []int, width int) []int {
 	out := append([]int(nil), widths...)
 	total := func() int {
 		n := 0
 		for _, w := range out {
 			n += w + cellPad*2
+		}
+		if len(out) > 1 {
+			n += len(out) - 1 // the "│" separators between columns
 		}
 		return n
 	}
@@ -1291,15 +1312,20 @@ func (m Model) statusBar() string {
 		promoteLong = "p promote into " + target
 	}
 	hints := []keys.Hint{
-		{B: keys.Enter, Long: "enter actions", Short: "actions", Pri: 0},
+		{B: keys.Enter, Long: "enter actions", Short: "enter actions", Pri: 0},
 		{B: keys.Promote, Long: promoteLong, Short: "p promote into", Pri: 1},
 		{B: keys.Tag, Long: "t deploy tag", Short: "t tag", Pri: 2},
 		{B: keys.Watch, Long: "w watch", Short: "w watch", Pri: 3},
 		{B: keys.Refresh, Long: "r refresh", Short: "r refresh", Pri: 4},
 		{B: keys.Restart, Long: "shift+r restart", Short: "shift+r restart", Pri: 6},
-		{B: keys.Tab, Long: "tab in flight", Short: "tab in flight", Pri: 7},
-		{B: keys.Quit, Long: "q quit", Short: "q quit", Pri: 0},
 	}
+	// "tab in flight" is only true when there is an in-flight pane to focus (toggleFocus is a
+	// no-op otherwise, T3-04) — advertising it with nothing in flight is a hint for a key that
+	// does nothing (P2-13, T3 review).
+	if len(m.inflight) > 0 {
+		hints = append(hints, keys.Hint{B: keys.Tab, Long: "tab in flight", Short: "tab in flight", Pri: 7})
+	}
+	hints = append(hints, keys.Hint{B: keys.Quit, Long: "q quit", Short: "q quit", Pri: 0})
 	// help true: the root's own overlay (T3-03/04) — Footer appends "? help"/"? more" itself.
 	return keys.Footer(m.styles, m.width, status, hints, true)
 }

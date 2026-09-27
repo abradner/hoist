@@ -8,10 +8,10 @@
 // bubbletea; ui must never import keys back — keys is one layer further from the terminal,
 // built on top of the palette rather than under it.
 //
-// T3-01 (train3-design.md) lands the registry, the matcher and the footer helper with no
-// screen wired to any of them yet: AGENTS.md §4.8 records this as transitional, and every
-// screen still carries its own bubbles keymap until its own PR in the T3 train migrates it.
-// A binding's Name is the semantic id a keypress resolves to ("refresh", "abandon") — one
+// T3-01 through T3-10 (the audit doc) migrated every screen in internal/app to this package's
+// registry, matcher and footer helper (AGENTS.md §4.8); a raw bubbles keymap or `key.NewBinding`
+// call outside this package is a regression now, frozen by internal/copycheck rather than left
+// to review. A binding's Name is the semantic id a keypress resolves to ("refresh", "abandon") — one
 // letter has exactly one Name across every screen it is bound on (audit rule 1), enforced by
 // TestLetterOneMeaning below, not by review alone (AGENTS.md §10 meta-rule 5).
 package keys

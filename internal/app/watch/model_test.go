@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/scope"
@@ -103,7 +104,7 @@ func TestFirstPaintIsOneSnapshot(t *testing.T) {
 		t.Fatalf("Init read %d snapshots, want exactly 1 (--once is the first paint)", r.calls)
 	}
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"web-app-staging", "Synced", "Healthy", "0123456789ab", "Deployment web", "rolled out · 2 replica(s)", "CronJob web-purge", "polled just now · every 5s"} {
+	for _, want := range []string{"web-app-staging", "Synced", "Healthy", "0123456789ab", "Deployment web", "rolled out · 2 replicas", "CronJob web-purge", "polled just now · every 5s"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view lacks %q:\n%s", want, v)
 		}
@@ -160,6 +161,24 @@ func TestRPollsNow(t *testing.T) {
 	}
 	if r.calls != 2 {
 		t.Fatalf("r read %d times in total, want 2", r.calls)
+	}
+}
+
+// TestF5AndCtrlRAlsoPollNow is P2-8 from the T3 review: the key handler matched only the
+// literal string "r", so keys.Refresh's own F5 and ctrl+r aliases — both listed on this
+// screen's footer and help overlay — did nothing.
+func TestF5AndCtrlRAlsoPollNow(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{{Code: tea.KeyF5}, {Code: 'r', Mod: tea.ModCtrl}} {
+		r := &reader{snaps: []Snapshot{healthy()}}
+		m := ready(t, r, &clock{t0}, 80, 24)
+		_, cmd := m.Update(k)
+		if cmd == nil {
+			t.Errorf("%v produced no read", k)
+			continue
+		}
+		if _, ok := cmd().(scope.Result[snapshotMsg]); !ok {
+			t.Errorf("%v's command did not yield a snapshot", k)
+		}
 	}
 }
 
@@ -284,5 +303,38 @@ func TestSnapshotMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	}
 	if got.polls != 0 || got.snap.App != "" {
 		t.Fatalf("a foreign snapshotMsg was accepted onto a screen that never asked for it: polls=%d app=%q", got.polls, got.snap.App)
+	}
+}
+
+// TestHomeEndScrollBody is P2-8 from the T3 review: the design's own home/end row was missing
+// on this viewport-backed screen.
+func TestHomeEndScrollBody(t *testing.T) {
+	m := ready(t, &reader{snaps: []Snapshot{healthy()}}, &clock{t0}, 80, 10)
+	m.body.SetContent(strings.Repeat("line\n", 40))
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !m.body.AtBottom() {
+		t.Error("end did not scroll the body to the bottom")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if !m.body.AtTop() {
+		t.Error("home did not scroll the body to the top")
+	}
+}
+
+// TestSpaceNoLongerScrollsTheBody is P2-6 from the T3 review: the body viewport was left on
+// viewport.New()'s bubbles-library default keymap, which binds space to page down — nothing on
+// this screen's footer or help overlay mentions it.
+func TestSpaceNoLongerScrollsTheBody(t *testing.T) {
+	m := ready(t, &reader{snaps: []Snapshot{healthy()}}, &clock{t0}, 80, 10)
+	m.body.SetContent(strings.Repeat("line\n", 40))
+
+	m2, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "})
+	if got := m2.body.YOffset(); got != 0 {
+		t.Errorf("space scrolled the body: YOffset=%d, want 0", got)
+	}
+	// Positive control: pgdown must still scroll.
+	m3, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := m3.body.YOffset(); got == 0 {
+		t.Error("pgdown did not scroll the body — the positive control is broken")
 	}
 }
