@@ -12,8 +12,8 @@
 │ pinned       │ v1            pinned │ v1           pinned │ v1    pinned     │
 │ sidecar      │ v1            pinned │ v1           pinned │                  │
 │ thirdparty   │ 7           external │ 8          external │ 8   external     │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
+├──────────────────────────────────────────────────────────────────────────────┤
+│in flight · 1                                                                 │
 │⟳ 5pr6sd333t → app-production   blocked on approval · 12m                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-        actions · promote into · tag · watch · refresh · restart · quit · ? more
+        actions · p promote into · t tag · w watch · r refresh · q quit · ? more

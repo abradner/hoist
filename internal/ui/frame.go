@@ -16,14 +16,13 @@ import (
 // construction rather than by counting.
 //
 // A screen's View is `ui.Frame{...}.Render(styles, width, height)`; a sub-pane inside a
-// section (the in-flight panel under the matrix) is Box, the same thing without a footer.
+// section (the in-flight panel under the matrix, T3-05 — moved inside the frame's own
+// Sections, retiring the earlier separate Panes field below the box) is Box, the same thing
+// without a footer.
 type Frame struct {
 	Title    string
 	Sections []string
-	// Panes are full-width blocks (already rendered, a Box each) stacked under the main box
-	// and above the footer — the matrix's in-flight pane. Empty strings are skipped.
-	Panes  []string
-	Footer string
+	Footer   string
 }
 
 // chrome is the number of rows the box's own edges take: top and bottom.
@@ -41,17 +40,16 @@ func BodyHeight(height, sections int) int {
 // footer on the last line. Content wider than the box is truncated with "…"; content taller
 // than the space above the footer is trimmed — but never by dropping the closing border off
 // the bottom, and never by deleting a screen's header (or any other earlier section)
-// to keep a bare "…" marker for the LAST section alone. When the assembled box (plus any
-// Panes) is too tall for the room above the footer, rows are cut from the bottom of the box's
-// LAST section only — the section nearest the closing border, never an earlier one — down to
-// a single dim "…" continuation row. If even THAT (its own rule included) is not enough to
-// close the gap, the whole section is dropped outright instead of leaving an orphaned "…"
-// that was never going to be enough on its own; the box then ends at whatever section is now
-// last. Only once every section has been considered do Panes get cut whole from the bottom,
-// and only as an absolute last resort — one that should never fire while any section still had
-// something left to give — does an earlier row get dropped at all; the closing border itself
-// is never a candidate for removal. A width or height too small to hold a box (under 4
-// columns or 3 rows) renders only what fits.
+// to keep a bare "…" marker for the LAST section alone. When the assembled box is too tall for
+// the room above the footer, rows are cut from the bottom of the box's LAST section only — the
+// section nearest the closing border, never an earlier one — down to a single dim "…"
+// continuation row. If even THAT (its own rule included) is not enough to close the gap, the
+// whole section is dropped outright instead of leaving an orphaned "…" that was never going to
+// be enough on its own; the box then ends at whatever section is now last. Only as an absolute
+// last resort — one that should never fire while any section still had something left to give
+// — does an earlier row get dropped; the closing border itself is never a candidate for
+// removal. A width or height too small to hold a box (under 4 columns or 3 rows) renders only
+// what fits.
 func (f Frame) Render(st Styles, width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
@@ -68,12 +66,6 @@ func (f Frame) Render(st Styles, width, height int) string {
 
 	main, starts := boxLines(st, f.Title, f.Sections, width)
 	bottom := bottomBorder(st, width)
-	var panes []string
-	for _, p := range f.Panes {
-		if p != "" {
-			panes = append(panes, strings.Split(p, "\n")...)
-		}
-	}
 
 	// Work backward from the last section: trim it to a single "…" marker if that closes the
 	// gap, otherwise drop it whole (rule included) and reconsider the section now last. This
@@ -81,7 +73,7 @@ func (f Frame) Render(st Styles, width, height int) string {
 	// trailing sections gives way one at a time before an earlier, higher-priority section
 	// (the header) is ever touched.
 	for n := len(starts); n > 0; {
-		total := len(main) + 1 + len(panes)
+		total := len(main) + 1
 		if total <= room {
 			break
 		}
@@ -108,18 +100,12 @@ func (f Frame) Render(st Styles, width, height int) string {
 		break
 	}
 
-	if total := len(main) + 1 + len(panes); total > room {
+	if total := len(main) + 1; total > room {
 		overflow := total - room
-		if len(panes) > 0 {
-			paneCut := min(overflow, len(panes))
-			panes = panes[:len(panes)-paneCut]
-			overflow -= paneCut
-		}
 		// Pathological remainder (room too small even for title + the header's own one
-		// marker row + the panes already cut to nothing): fall back to dropping from the
-		// earliest content row after the title. This never fires while the header still has
-		// more than one row to give — the loop above already reduced it to its own single
-		// continuation row first.
+		// marker row): fall back to dropping from the earliest content row after the title.
+		// This never fires while the header still has more than one row to give — the loop
+		// above already reduced it to its own single continuation row first.
 		for overflow > 0 && len(main) > 1 {
 			main = append(main[:1], main[2:]...)
 			overflow--
@@ -127,7 +113,6 @@ func (f Frame) Render(st Styles, width, height int) string {
 	}
 
 	lines := append(main, bottom) //nolint:gocritic // main is never read again after this
-	lines = append(lines, panes...)
 	if len(lines) > room {
 		lines = lines[:room]
 	}

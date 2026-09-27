@@ -45,7 +45,7 @@ func TestInFlightPaneSizesToTheTerminal(t *testing.T) {
 	p := parked("5pr6sd333t", "app-staging", "app-production", 12)
 
 	expanded := ansi.Strip(withPane(80, 24, p).View())
-	for _, want := range []string{"in flight (1)", "5pr6sd333t   app-staging → app-production", "started 12m ago", "● PR #103", "◍ approval", "○ rollout", "blocked on you — comment on PR #103 to release it:", "hoist approve 5pr6sd333t"} {
+	for _, want := range []string{"in flight · 1", "5pr6sd333t   app-staging → app-production", "started 12m ago", "✓ PR #103", "⏸ approval", "· rollout", "waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103"} {
 		if !strings.Contains(expanded, want) {
 			t.Errorf("expanded pane lacks %q:\n%s", want, expanded)
 		}
@@ -65,7 +65,7 @@ func TestInFlightPaneSizesToTheTerminal(t *testing.T) {
 	if !strings.Contains(folded, "⟳ 1 in flight: 5pr6sd333t blocked on approval") {
 		t.Errorf("with no room for a pane the notes carry the line:\n%s", folded)
 	}
-	if strings.Contains(folded, "in flight (1)") {
+	if strings.Contains(folded, "in flight · 1") {
 		t.Errorf("no pane should be drawn at 12 rows:\n%s", folded)
 	}
 	// The table keeps its families whenever a pane is drawn (the pane is the guest); at 12
@@ -78,7 +78,7 @@ func TestInFlightPaneSizesToTheTerminal(t *testing.T) {
 	// Two promotions, wide: both expanded, separated by a rule.
 	q := parked("9xy8wv777u", "", "app-staging", 3)
 	two := withPane(120, 40, p, q).View()
-	if v := ansi.Strip(two); !strings.Contains(v, "in flight (2)") || !strings.Contains(v, "deploy → app-staging") {
+	if v := ansi.Strip(two); !strings.Contains(v, "in flight · 2") || !strings.Contains(v, "deploy → app-staging") {
 		t.Errorf("two promotions:\n%s", v)
 	}
 	uitest.Golden(t, "matrix-inflight-two", two, 120, 40)
@@ -143,7 +143,7 @@ func TestFinishedPromotionsLeaveThePane(t *testing.T) {
 	if got := m.InFlight(); len(got) != 1 || got[0].ID != "5pr6sd333t" {
 		t.Fatalf("pane holds %+v; want the active one only", got)
 	}
-	if v := ansi.Strip(m.View()); strings.Contains(v, "0d0n3d0n3d") || !strings.Contains(v, "in flight (1)") {
+	if v := ansi.Strip(m.View()); strings.Contains(v, "0d0n3d0n3d") || !strings.Contains(v, "in flight · 1") {
 		t.Fatalf("view:\n%s", v)
 	}
 	m = uitest.Keys(m, update, "tab")
@@ -187,5 +187,35 @@ func TestOpenPRAsksWhichWhenSeveralHaveOne(t *testing.T) {
 	m, _ = m.Update(uitest.Key("esc"))
 	if m.chooser != nil || m.chooserKind != chooserImage {
 		t.Fatal("esc must reset the chooser kind")
+	}
+}
+
+// TestInFlightInsideFrame proves the in-flight pane is drawn INSIDE the matrix's own frame
+// (T3-05: Frame.Panes is retired, the pane is a Section like any other) rather than as a
+// separately-bordered block stacked below it: the box's own closing border (╰) sits on the
+// second-to-last row, with the footer alone on the very last one — never a second, nested
+// box's own bottom border appearing anywhere in between.
+func TestInFlightInsideFrame(t *testing.T) {
+	const h = 30 // tall enough that Frame's own overflow trimming never touches this section
+	p := parked("5pr6sd333t", "app-staging", "app-production", 12)
+	view := withPane(80, h, p).View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != h {
+		t.Fatalf("view has %d lines, want %d", len(lines), h)
+	}
+	if got := ansi.Strip(lines[h-2]); !strings.HasPrefix(got, "╰") {
+		t.Fatalf("row h-1 (index %d) = %q, want the frame's own closing border", h-2, got)
+	}
+	if strings.Contains(ansi.Strip(lines[h-1]), "╰") || strings.Contains(ansi.Strip(lines[h-1]), "╭") {
+		t.Fatalf("row h (the footer) must not carry a second box border: %q", ansi.Strip(lines[h-1]))
+	}
+	// No OTHER row (between the frame's own opening and closing border) carries a border
+	// character — a nested ui.Box (the pre-T3-05 shape) would show its own ╭/╰ somewhere in
+	// between.
+	for i, l := range lines[1 : h-2] {
+		plain := ansi.Strip(l)
+		if strings.Contains(plain, "╰") || strings.Contains(plain, "╭") {
+			t.Fatalf("row %d carries a second (nested) box border: %q", i+2, plain)
+		}
 	}
 }

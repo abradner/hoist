@@ -10,6 +10,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/session"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -68,33 +69,44 @@ func (m Model) WithNow(now func() time.Time) Model {
 // pane folds into the notes section instead of taking rows from it.
 const minTableRows = 4
 
-// inflightPane renders the pane for the rows the frame can give it, or "" when there is
-// nothing to show or no room even for the compact form (then inflightLine goes into notes).
+// inflightPane renders the pane's own content for the rows the frame can give it, or "" when
+// there is nothing to show or no room even for the compact form (then inflightLine goes into
+// notes). T3-05: this is plain content now, drawn INSIDE the matrix's own frame as one more
+// Section (View, below) rather than a separately-bordered ui.Box stacked under it — the
+// mockups' own "in flight · N" header line replaces the old box title, so what used to be the
+// box's own top/bottom border rows are two fewer rows this needs.
 func (m Model) inflightPane(rows int) string {
 	n := len(m.inflight)
 	if n == 0 && m.inflightErr == "" {
 		return ""
 	}
 	if m.inflightErr != "" {
-		if rows < 3 {
+		if rows < 2 {
 			return ""
 		}
-		return ui.Box(m.styles, "in flight", []string{m.styles.Warn.Render(ansi.Wordwrap("cannot list promotions: "+m.inflightErr, max(m.width-2, 1), ""))}, m.width)
+		return "in flight\n" + m.styles.Warn.Render(ansi.Wordwrap("cannot list promotions: "+m.inflightErr, max(m.width-2, 1), ""))
 	}
+	title := m.paneTitle(n)
 	// Decided by measuring, not by counting: the step strip wraps at narrow widths, so the
 	// expanded form's height depends on the terminal.
-	title := fmt.Sprintf("in flight (%d)", n)
-	if expanded := ui.Box(m.styles, title, m.expandedSections(), m.width); lipgloss.Height(expanded) <= rows {
+	if expanded := title + "\n" + strings.Join(m.expandedSections(), "\n"); lipgloss.Height(expanded) <= rows {
 		return expanded
 	}
 	lines := make([]string, 0, n)
 	for _, s := range m.inflight {
 		lines = append(lines, m.compactLine(s))
 	}
-	if compact := ui.Box(m.styles, title, []string{strings.Join(lines, "\n")}, m.width); lipgloss.Height(compact) <= rows {
+	if compact := title + "\n" + strings.Join(lines, "\n"); lipgloss.Height(compact) <= rows {
 		return compact
 	}
 	return ""
+}
+
+// paneTitle is the pane's own header row: "in flight · N" (v2·01a/b), left-aligned so a
+// caller that wants to add a right-aligned companion (a poll countdown, ticketed — see the
+// T3-05 report's own "uncomputable" list) has somewhere to put it without reflowing this.
+func (m Model) paneTitle(n int) string {
+	return m.styles.Title.Render(fmt.Sprintf("in flight · %d", n))
 }
 
 // paneRows is how many rows inflightPane will take for a given budget — the same decision,
@@ -142,12 +154,12 @@ func (m Model) expandedSections() []string {
 			head += "  " + m.styles.Warn.Render("driving")
 		}
 		strip := m.styleStrip(s)
-		text, command := s.Action()
+		text, command := approvalCopy(s)
 		var action string
 		switch {
 		case command != "" && ansi.StringWidth(text)+4+ansi.StringWidth(command) > m.width-2:
 			// The command is the executable part: when the two do not share the line, it
-			// gets its own rather than losing its tail to the box's truncation.
+			// gets its own rather than losing its tail to truncation.
 			action = m.styles.Warn.Render(text) + "\n    " + m.styles.Accent.Render(command)
 		case command != "":
 			action = m.styles.Warn.Render(text) + "    " + m.styles.Accent.Render(command)
@@ -161,39 +173,72 @@ func (m Model) expandedSections() []string {
 	return out
 }
 
-// styleStrip colours the step strip — done good, active warn, blocked bad, unreached dim —
-// and, when the whole pipeline does not fit the width, breaks it after the merge (or the
-// direct push) so the post-merge steps sit on their own line, as the mockup draws them,
-// rather than being truncated away.
+// approvalCopy is s.Action() with one wording fix (T3-05, UX-H10): a promotion blocked on the
+// approval step reads "waiting for an approver to comment `hoist approve <id>` on PR #N"
+// instead of flight's own "blocked on you — comment … to release it:", which AGENTS.md §9's
+// own regression note (entry 11's neighbour, the copy sweep) flags as reading like an accusal
+// rather than a status. Scoped to the matrix's own pane rather than changed in package flight
+// itself, which is a later train's file (T3-06) — this keeps the fix local to the files T3-05
+// actually touches while still landing the mockup's exact wording here.
+func approvalCopy(s flight.Summary) (text, command string) {
+	text, command = s.Action()
+	if command == "" || !strings.HasPrefix(command, "hoist approve") {
+		return text, command
+	}
+	if s.PR != nil && s.PR.Number > 0 {
+		return fmt.Sprintf("waiting for an approver to comment `%s` on PR #%d", command, s.PR.Number), ""
+	}
+	return fmt.Sprintf("waiting for an approver to comment `%s` on the PR", command), ""
+}
+
+// styleStrip renders the step strip with the shared ui.Step glyph set (T3-05: "one glyph set",
+// retiring this pane's own ●/◍/✗/○ in favour of the same ✓/◐/·/✗/⏸ set flight.Model itself
+// will move to in T3-06) — derived from each Row's own Glyph rather than parsing
+// Summary.StepStrip()'s pre-rendered string, since the mapping needs the state, not the glyph
+// character. When the whole pipeline does not fit the width, it breaks after the merge (or the
+// direct push) so the post-merge steps sit on their own line, as the mockup draws them, rather
+// than being truncated away.
 func (m Model) styleStrip(s flight.Summary) string {
-	parts := strings.Split(s.StepStrip(), "  ")
-	if ansi.StringWidth(s.StepStrip()) > m.width-2 {
-		for i, p := range parts {
-			if strings.HasSuffix(p, " merge") || strings.HasSuffix(p, " push to base") {
-				head := m.styleParts(parts[:i+1])
-				tail := m.styleParts(parts[i+1:])
-				return strings.Join(head, "  ") + "\n" + strings.Join(tail, "  ")
+	labels := make([]string, len(s.Rows))
+	plain := make([]string, len(s.Rows))
+	styled := make([]string, len(s.Rows))
+	width := 0
+	for i, r := range s.Rows {
+		labels[i] = flight.Label(r.Step)
+		if r.Step == engine.StepPROpened && s.PR != nil && s.PR.Number > 0 {
+			labels[i] = fmt.Sprintf("PR #%d", s.PR.Number)
+		}
+		state := stepState(r)
+		plain[i] = ui.StepGlyph(state) + " " + labels[i]
+		styled[i] = m.styles.Step(state, labels[i])
+		width += ansi.StringWidth(plain[i]) + 2
+	}
+	if width > m.width-2 {
+		for i := range plain {
+			if strings.HasSuffix(plain[i], " merge") || strings.HasSuffix(plain[i], " push to base") {
+				return strings.Join(styled[:i+1], "  ") + "\n" + strings.Join(styled[i+1:], "  ")
 			}
 		}
 	}
-	return strings.Join(m.styleParts(parts), "  ")
+	return strings.Join(styled, "  ")
 }
 
-func (m Model) styleParts(parts []string) []string {
-	parts = append([]string(nil), parts...)
-	for i, p := range parts {
-		switch {
-		case strings.HasPrefix(p, flight.StripDone):
-			parts[i] = m.styles.Good.Render(p)
-		case strings.HasPrefix(p, flight.StripActive):
-			parts[i] = m.styles.Warn.Render(p)
-		case strings.HasPrefix(p, flight.StripBlocked):
-			parts[i] = m.styles.Bad.Render(p)
-		default:
-			parts[i] = m.styles.Dim.Render(p)
-		}
+// stepState maps a flight.Row's own Glyph string to the shared ui.StepState enum — the one
+// place that translation happens, so the matrix's pane and (once T3-06 lands) the flight
+// screen itself read the same five states off the same Row data.
+func stepState(r flight.Row) ui.StepState {
+	switch r.Glyph {
+	case flight.GlyphDone:
+		return ui.StepDone
+	case flight.GlyphActive:
+		return ui.StepActive
+	case flight.GlyphWaiting:
+		return ui.StepWaiting
+	case flight.GlyphBlocked:
+		return ui.StepFailed
+	default:
+		return ui.StepPending
 	}
-	return parts
 }
 
 // compactLine is the narrow form: "⟳ 5pr6sd333t → app-production   blocked on approval · 12m".

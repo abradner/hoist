@@ -769,12 +769,23 @@ func (m Model) View() string {
 	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		return fmt.Sprintf("window too small: %d×%d, hoist needs at least %d×%d", m.width, m.height, minWidth, minHeight)
 	}
+	if len(m.matrix.Envs) == 0 {
+		return redact.Strings(m.emptyView())
+	}
 	m = m.layout()
 	frame := ui.Frame{Title: m.title(), Sections: []string{m.subheader(), m.gridSection()}, Footer: m.statusBar()}
 	if notes := m.notes(); notes != "" {
 		frame.Sections = append(frame.Sections, notes)
 	}
-	frame.Panes = []string{m.inflightPane(m.paneBudget())}
+	if d := m.detailLines(); len(d) > 0 {
+		frame.Sections = append(frame.Sections, strings.Join(d, "\n"))
+	}
+	if pane := m.inflightPane(m.paneBudget()); pane != "" {
+		// T3-05: the in-flight pane is a Section of this SAME frame now, not a separate
+		// ui.Box stacked below it (Frame.Panes, retired) — the mockups draw it inside the one
+		// box, ending at the frame's own closing border.
+		frame.Sections = append(frame.Sections, pane)
+	}
 	view := redact.Strings(frame.Render(m.styles, m.width, m.height))
 	if m.menuOpen {
 		title := fmt.Sprintf("%s · %s", orNoEnv(m.menuFamily), m.menuEnv)
@@ -825,6 +836,32 @@ func pluralFamilies(n int) string {
 		return "1 family"
 	}
 	return fmt.Sprintf("%d families", n)
+}
+
+// emptyView is what the matrix shows when the repo has no envs at all (v2·06b, UX-M18): a
+// single-section frame naming where hoist looked and what to fix, rather than a blank table
+// with nothing to say about it. Deviation from the mockup: it names m.repo.Root (the only
+// path this screen actually holds) rather than the live apps_root value, which is
+// cmd/hoist's own config concern and not plumbed into matrix.Model (out of this file's
+// scope) — the guidance still names the config key and flag an operator would check, per
+// UX-M18's own wording.
+func (m Model) emptyView() string {
+	body := []string{
+		"",
+		fmt.Sprintf(" no environments discovered under %s", displayRoot(m.repo.Root)),
+		"",
+		" hoist reads Argo CD Application wrappers under the apps root and names",
+		" each env by its spec.destination.namespace. Check repos[].apps_root in",
+		" the config, or pass --apps-root / --repo.",
+		"",
+		" c shows the config hoist loaded",
+	}
+	footer := keys.Footer(m.styles, m.width, "", []keys.Hint{
+		{B: keys.Refresh, Long: "r refresh", Short: "r refresh", Pri: 0},
+		{B: keys.Config, Long: "c config", Short: "c config", Pri: 1},
+		{B: keys.Quit, Long: "q quit", Short: "q quit", Pri: 0},
+	}, true)
+	return ui.Frame{Title: m.title(), Sections: []string{strings.Join(body, "\n")}, Footer: footer}.Render(m.styles, m.width, m.height)
 }
 
 func (m Model) title() string {
@@ -957,28 +994,69 @@ func (m Model) stateWord(c Cell, env string) string {
 	return string(c.State)
 }
 
+// hasPane reports whether the in-flight pane occupies a Section at all (T3-05: it is one of
+// Frame's own Sections now, not a separate Pane appended below the box — see View), so its own
+// inter-section rule has to be counted alongside the subheader's and the notes' whenever one is
+// present. It says nothing about whether the pane ultimately finds room to render non-empty at
+// the current height — paneBudget/inflightPane decide that — so a height too tight for even the
+// compact form is, at worst, one row off here; the same approximation the pre-T3-05 code lived
+// with when the pane cost 0 rather than 1 extra rule row.
+func (m Model) hasPane() bool {
+	return len(m.inflight) > 0 || m.inflightErr != ""
+}
+
+// detailLines is the detail pane's own content, "" when the terminal is too narrow for it or
+// there is nothing to show — the same lines View appends as a Section, computed once here so
+// gridHeight/paneBudget size around it instead of guessing its height.
+func (m Model) detailLines() []string {
+	if m.width < detailMinWidth {
+		return nil
+	}
+	return Detail(m.matrix, m.CurrentFamily(), m.CurrentEnv(), m.IsProduction(m.CurrentEnv()), m.inflight)
+}
+
 // gridHeight is how many data rows the grid draws — the terminal's own body height, less the
-// subheader, the notes, the in-flight pane and the grid's own 3 fixed rows (top rule, header,
-// mid rule).
+// subheader, the notes, the detail pane, the in-flight pane and the grid's own 3 fixed rows
+// (top rule, header, mid rule).
 func (m Model) gridHeight() int {
 	sections := 2 // title's subheader + grid, at least
 	notes := m.notes()
 	if notes != "" {
 		sections++
 	}
+	detail := m.detailLines()
+	if len(detail) > 0 {
+		sections++
+	}
+	if m.hasPane() {
+		sections++
+	}
 	rows := ui.BodyHeight(m.height, sections) - 1 /* subheader */
 	rows -= lipgloss.Height(notes) * boolInt(notes != "")
+	rows -= len(detail)
 	rows -= m.paneRows(m.paneBudget())
 	return max(rows-3, 1)
 }
 
 // paneBudget is how many rows the in-flight pane may take: what is left after the frame's
-// chrome (the subheader plus the grid section, always present, and the base notes when there
-// are any) and a grid tall enough to keep its families on screen.
+// chrome (the subheader plus the grid section, always present, the base notes and the detail
+// pane when there are any, and each one's own inter-section rule) and a grid tall enough to
+// keep its families on screen.
 func (m Model) paneBudget() int {
 	notes := len(m.baseNotes())
-	rows := ui.BodyHeight(m.height, 2+boolInt(notes > 0)) - notes - 1 /* subheader */
-	grid := len(m.matrix.Rows) + 3                                    // + top rule, header row, header/body rule
+	detail := len(m.detailLines())
+	sections := 2
+	if notes > 0 {
+		sections++
+	}
+	if detail > 0 {
+		sections++
+	}
+	if m.hasPane() {
+		sections++
+	}
+	rows := ui.BodyHeight(m.height, sections) - notes - detail - 1 /* subheader */
+	grid := len(m.matrix.Rows) + 3                                 // + top rule, header row, header/body rule
 	return rows - max(grid, minTableRows+3)
 }
 
@@ -1208,19 +1286,19 @@ func (m Model) statusBar() string {
 		status = "env " + env + " (production)"
 	}
 	target := m.CurrentEnv()
-	promoteLong := "promote into"
+	promoteLong := "p promote into"
 	if target != "" {
-		promoteLong = "promote into " + target
+		promoteLong = "p promote into " + target
 	}
 	hints := []keys.Hint{
-		{B: keys.Enter, Long: "actions", Short: "actions", Pri: 0},
-		{B: keys.Promote, Long: promoteLong, Short: "promote into", Pri: 1},
-		{B: keys.Tag, Long: "deploy tag", Short: "tag", Pri: 2},
-		{B: keys.Watch, Long: "watch", Short: "watch", Pri: 3},
-		{B: keys.Refresh, Long: "refresh", Short: "refresh", Pri: 4},
-		{B: keys.Restart, Long: "restart", Short: "restart", Pri: 6},
-		{B: keys.Tab, Long: "in flight", Short: "in flight", Pri: 7},
-		{B: keys.Quit, Long: "quit", Short: "quit", Pri: 0},
+		{B: keys.Enter, Long: "enter actions", Short: "actions", Pri: 0},
+		{B: keys.Promote, Long: promoteLong, Short: "p promote into", Pri: 1},
+		{B: keys.Tag, Long: "t deploy tag", Short: "t tag", Pri: 2},
+		{B: keys.Watch, Long: "w watch", Short: "w watch", Pri: 3},
+		{B: keys.Refresh, Long: "r refresh", Short: "r refresh", Pri: 4},
+		{B: keys.Restart, Long: "shift+r restart", Short: "shift+r restart", Pri: 6},
+		{B: keys.Tab, Long: "tab in flight", Short: "tab in flight", Pri: 7},
+		{B: keys.Quit, Long: "q quit", Short: "q quit", Pri: 0},
 	}
 	// help true: the root's own overlay (T3-03/04) — Footer appends "? help"/"? more" itself.
 	return keys.Footer(m.styles, m.width, status, hints, true)
