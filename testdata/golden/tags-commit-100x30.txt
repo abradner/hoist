@@ -27,4 +27,4 @@
 │                                                                                                  │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-           ↑/↓ · pgup/pgdn scroll · home/end · enter review the change · ← back to the list · ? help
+    ↑/↓ commit · pgup/pgdn scroll · home/end · enter review the change · ← back to the list · ? help

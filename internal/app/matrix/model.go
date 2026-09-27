@@ -1313,7 +1313,7 @@ func (m Model) statusBar() string {
 	}
 	hints := []keys.Hint{
 		{B: keys.Enter, Long: "enter actions", Short: "enter actions", Pri: 0},
-		{B: keys.Promote, Long: promoteLong, Short: "p promote into", Pri: 1},
+		{B: keys.Promote, Long: promoteLong, Short: "p promote", Pri: 1},
 		{B: keys.Tag, Long: "t deploy tag", Short: "t tag", Pri: 2},
 		{B: keys.Watch, Long: "w watch", Short: "w watch", Pri: 3},
 		{B: keys.Refresh, Long: "r refresh", Short: "r refresh", Pri: 4},

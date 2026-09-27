@@ -21,4 +21,4 @@
 │body line 17 of the rate-limiting design note                                 │
 │body line 18 of the rate-limiting design note                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-         ↑/↓ · pgup/pgdn · home/end · enter review · ← back to the list · ? help
+  ↑/↓ commit · pgup/pgdn · home/end · enter review · ← back to the list · ? help

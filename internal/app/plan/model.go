@@ -1300,7 +1300,7 @@ func (m Model) hints() string {
 	switch {
 	case m.state == stateSelectEnv:
 		return keys.Footer(m.styles, m.width, "", []keys.Hint{
-			{B: keys.Up, Long: "↑/↓ choose", Short: "↑/↓", Pri: 1},
+			{B: keys.Up, Long: "↑/↓ choose", Short: "↑/↓ choose", Pri: 1},
 			{B: keys.Enter, Long: "enter confirm", Pri: 0},
 			{B: keys.Esc, Long: "esc back", Pri: -1},
 		}, true)

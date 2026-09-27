@@ -722,7 +722,7 @@ func (m Model) hints() string {
 		hints = append(hints, keys.Hint{B: keys.Direct, Long: "shift+d direct", Pri: 1})
 	}
 	hints = append(hints,
-		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓", Pri: 3},
+		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓ commits", Pri: 3},
 		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r fresh", Pri: 4},
 		keys.Hint{B: keys.Log, Long: "l activity", Pri: 5},
 		keys.Hint{B: keys.Esc, Long: "esc back to tags", Short: "esc back", Pri: -1},

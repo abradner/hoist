@@ -21,4 +21,4 @@
 │credential for ghcr.io; cluster: not configured (registries[].cluster); op:   │
 │not configured (registries[].op)                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+       enter actions · p promote · t tag · w watch · r refresh · q quit · ? more

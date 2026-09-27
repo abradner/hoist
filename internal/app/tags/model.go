@@ -1569,7 +1569,7 @@ func (m Model) viewReading() string {
 // readingFooter is the commit-detail view's own footer (ScrTagsReader's registry row).
 func (m Model) readingFooter() string {
 	hints := []keys.Hint{
-		{B: keys.Up, Long: "↑/↓ switch commit", Short: "↑/↓", Pri: 3},
+		{B: keys.Up, Long: "↑/↓ switch commit", Short: "↑/↓ commit", Pri: 3},
 		{B: keys.PgUp, Long: "pgup/pgdn scroll", Short: "pgup/pgdn", Pri: 2},
 		{B: keys.Home, Long: "home/end scroll ends", Short: "home/end", Pri: 4},
 		{B: keys.Enter, Long: "enter review the change", Short: "enter review", Pri: 1},
