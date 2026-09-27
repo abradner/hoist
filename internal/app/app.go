@@ -161,6 +161,17 @@ type Model struct {
 	quitConfirming   bool
 	quitConfirm      *huh.Confirm
 	quitConfirmValue bool
+
+	// kbd is what the terminal answered when View below asked for
+	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes (T3-01) — flag 8, the one Kitty-protocol
+	// feature that can report a caps-lock letter as ModCapsLock distinct from ModShift
+	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
+	// records whether the terminal granted it). No screen reads this yet: its one use is a
+	// single line in T3-03's help overlay ("caps lock ignored" vs "a capital counts as
+	// shift"), never passed down into any value-typed screen (train3-design.md's own "needs
+	// your decision", resolved as: match without tracking state per-screen, record once here
+	// for that one line instead).
+	kbd tea.KeyboardEnhancementsMsg
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -351,6 +362,12 @@ func (m Model) noteStarted(build session.BuildID, id string) Model {
 // the top screen.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.KeyboardEnhancementsMsg:
+		// Skipped by internal/parity's parser (tea.* messages, not a pkg.XMsg case), so this
+		// needs no registry row (train3-design.md's own acceptance check). m.kbd's only
+		// consumer is T3-03's help overlay.
+		m.kbd = msg
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		if m.quitConfirm != nil {
@@ -975,6 +992,13 @@ func (m Model) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
+	// T3-01: ask every run for the one Kitty-protocol feature that can tell a caps-lock letter
+	// apart from a real shift (internal/ui/keys.Binding.Matches, point 3) — a terminal that
+	// doesn't support it, or hasn't opted in, just never sends a KeyboardEnhancementsMsg back,
+	// and the legacy path (point 4 of Matches) is what every terminal runs today regardless
+	// (train3-design.md's own "Modifier" note). Requesting it costs nothing on a terminal that
+	// ignores it (tmux, Terminal.app default sessions verified in that note).
+	v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
 	return v
 }
 

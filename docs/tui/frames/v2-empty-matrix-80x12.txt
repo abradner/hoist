@@ -1,0 +1,12 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│                                                                              │
+│ no environments discovered under cluster/apps                                │
+│                                                                              │
+│ hoist reads Argo CD Application wrappers under the apps root and names       │
+│ each env by its spec.destination.namespace. Check repos[].apps_root in       │
+│ the config, or pass --apps-root / --repo.                                    │
+│                                                                              │
+│ c shows the config hoist loaded                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                                          r refresh · c config · ? help · q quit

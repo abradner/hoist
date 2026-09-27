@@ -347,6 +347,14 @@ no rule stated for any of them:
   `scope.Foreign` — correct, but a second shape for the same problem. Porting them to `scope` is
   unticketed cleanup, not a defect; a new screen still uses `scope.Do`/`scope.Foreign` from the
   start rather than adding a third counter-based instance of this pattern.
+- **Keys come from `internal/ui/keys`, transitional until every screen migrates.** T3-01 lands
+  the whole approved screen × key table as data (`docs/audit/2026-09-ux-arch-audit.md`,
+  "Proposed keymap"), the stateless write-binding matcher that tells a real shift from caps lock
+  (§9 entry 13), and the footer helper, but wires none of it into a screen yet — every screen
+  keeps its own bubbles keymap and hand-built footer until its own PR in the T3 train switches
+  it over. Once every screen has migrated this bullet becomes a flat rule (T3-10's own scope);
+  until then, a screen being on its old keymap is not a bug to fix opportunistically — it is
+  this train's own ordering (train3-design.md's "Ordering and golden churn" table).
 
 ### 4.9 Configuration
 
@@ -1093,6 +1101,33 @@ test lives** (if one exists).
    `TestAbandonDuringBusyStepCannotBeOutlived` (the same ownership rule is what lets Abandon's own
    wait for a busy Step, and R's refusal while it waits, be answered correctly by the controller
    alone, with no screen involved at all) — all in `internal/app` and `internal/app/flight`.
+13. **A legacy terminal cannot tell shift from caps lock, and `key.Matches` cannot tell either
+   even when a terminal can.** What happened: the T3 keymap audit set out to display every write
+   binding as `shift+r` rather than a bare `R`, on the theory that hoist could simply match
+   `key.WithKeys("shift+r")`. It cannot: `bubbletea/v2` requests no keyboard enhancement by
+   default, so a printable letter arrives as one byte and ultraviolet's decoder sets `ModShift`
+   on it whenever the byte is uppercase — the terminal never says *why* it is uppercase, so
+   `shift+r` and caps-lock-then-`r` produce the identical `Key{Code:'r', Text:"R", Mod:ModShift}`
+   on every terminal in that state, kitty-capable or not, because the enhancement was never
+   asked for. Separately, even once `View.KeyboardEnhancements.ReportAllKeysAsEscapeCodes` is
+   requested and a protocol-capable terminal grants it (reporting a real, separate
+   `ModCapsLock` bit), `KeyPressMsg.String()` still prefers `Key.Text` ("R") over the
+   modifier-qualified keystroke, so `key.Matches(msg, key.WithKeys("shift+r"))` never fires for
+   a printable letter regardless — only reading `msg.Key().Mod` directly does. Root cause: two
+   different libraries' abstractions (bubbles' string-keyed `key.Matches`, ultraviolet's
+   modifier-carrying `Key`) solve for different terminals, and neither one alone can express
+   "shift, and reject caps lock when the terminal can tell them apart, and accept a legacy
+   capital when it can't." Rule: a write binding is never matched by `key.Matches` — only
+   `internal/ui/keys.Binding.Matches`, which reads `msg.Key().Mod` directly and implements the
+   four-rule test in that method's own doc comment (reject ctrl/alt/meta; reject
+   `ModCapsLock` without `ModShift`; accept `ModShift`, an upper-case `Text`, or an upper-case
+   `Code` otherwise) — and it is always DISPLAYED as `shift+<letter>` (`Binding.Show`), never
+   the bare capital, because a capital in a footer reads as "press this letter" and invites the
+   exact caps-lock press a legacy terminal cannot tell from shift. Regression tests:
+   `TestWriteMatches` in `internal/ui/keys/keys_test.go` covers all seven cases (legacy shift,
+   legacy bare capital, kitty shift, kitty caps lock alone — rejected, kitty shift+caps lock,
+   lower case — rejected, ctrl+shift — rejected); `TestNoBareCapital` asserts no `Show`, `Desc`
+   or rendered footer in the registry shows a bare capital letter.
 
 ## 10. Maintaining This Document
 

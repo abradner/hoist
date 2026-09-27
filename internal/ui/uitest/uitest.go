@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/spinner"
@@ -121,6 +122,14 @@ func Keys[M any](m M, update UpdateFunc[M], keys ...string) M {
 
 // Key builds the tea.KeyPressMsg a terminal would send for k: a single character is itself,
 // with Text set the way a real press carries it; the names below are the special keys.
+//
+// "shift+<letter>" and "capslock+<letter>" (T3-01) build the two keys a legacy terminal cannot
+// tell apart (both arrive as an uppercase byte with ModShift, since a plain letter is never
+// escape-encoded without the Kitty ReportAllKeysAsEscapeCodes enhancement) and the one a
+// protocol-capable, opted-in terminal reports distinctly (ModCapsLock alone, no ModShift) — see
+// keys.Binding.Matches, which is what actually tells them apart. "home", "end" and "shift+tab"
+// round out the set §4.8's reader screens (config, tags' g/G-replacement) and huh's own
+// Prev-field binding need.
 func Key(k string) tea.KeyPressMsg {
 	switch k {
 	case "enter":
@@ -129,6 +138,8 @@ func Key(k string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 	case "space":
 		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	case "up":
@@ -145,6 +156,10 @@ func Key(k string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyPgDown}
 	case "pgup":
 		return tea.KeyPressMsg{Code: tea.KeyPgUp}
+	case "home":
+		return tea.KeyPressMsg{Code: tea.KeyHome}
+	case "end":
+		return tea.KeyPressMsg{Code: tea.KeyEnd}
 	case "f5":
 		return tea.KeyPressMsg{Code: tea.KeyF5}
 	case "ctrl+r":
@@ -155,6 +170,16 @@ func Key(k string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
 	case "ctrl+u":
 		return tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+	}
+	if letter, ok := strings.CutPrefix(k, "shift+"); ok && len([]rune(letter)) == 1 {
+		r := unicode.ToLower([]rune(letter)[0])
+		return tea.KeyPressMsg{Code: r, Text: string(unicode.ToUpper(r)), Mod: tea.ModShift}
+	}
+	if letter, ok := strings.CutPrefix(k, "capslock+"); ok && len([]rune(letter)) == 1 {
+		r := unicode.ToLower([]rune(letter)[0])
+		// A caps-lock letter with no shift held: the kitty-protocol report a terminal sends
+		// only once flag 8 (ReportAllKeysAsEscapeCodes) is granted, distinct from ModShift.
+		return tea.KeyPressMsg{Code: r, Text: string(unicode.ToUpper(r)), Mod: tea.ModCapsLock}
 	}
 	r := []rune(k)
 	if len(r) != 1 {

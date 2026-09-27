@@ -1,0 +1,24 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│ cluster/apps · base main · context my-cluster                                │
+├──────────────┬──────────────────────────────┬────────────────────────────────┤
+│ FAMIL╭─ help · matrix ────────────────────────────────────────────────╮      │
+├──────│ NAVIGATE                      │ ACT                            │──────┤
+│ ▸ ord│ ↑↓ ←→    move                 │ enter  actions for this cell   │inned │
+│   mar│ tab      table ⇄ in flight    │ p      promote into this env   │ifted │
+│   tem│ pgup/dn  page                 │ t      deploy a tag            │ernal │
+│   web│ esc      back · close         │ w      watch the rollout       │inned │
+│   wor│                               │ shift+r restart        (asks)  │inned │
+│      │ VIEW                          │ shift+x abandon        (asks)  │      │
+│      │ r F5     refresh              │                                │      │
+│      │ o        open PR in browser   │ APP                            │      │
+│      │ c        config               │ ?      this help               │      │
+│      │ l        activity log         │ q      quit (asks if driving)  │      │
+├──────│                               │ ctrl+c quit now                │──────┤
+│ marke├───────────────────────────────┴────────────────────────────────┤      │
+├──────│ shift+ keys always ask before they write                       │──────┤
+│ in fl╰────────────────────────────────────────────────────────────────╯n 12s │
+│ 5pr6sd333t  orders, marketing  app-staging → app-production              12m │
+│ ✓ branch ✓ commit ✓ push ✓ PR #103 ✓ CI ⏸ approval · merge · argo · rollout  │
+│ waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                                                                       esc close

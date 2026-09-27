@@ -1,0 +1,24 @@
+╭─ hoist · promotion · waiting for approval ───────────────────────────────────╮
+│ 5pr6sd333t  app-staging → app-production                     started 12m ago │
+│ orders v2026011510 → v2026022012 · marketing sha-0000111 → sha-1a2b3c4       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ✓ branch        hoist/app-production/5pr6sd333t                      12m ago │
+│ ✓ commit        signed · 2 files                                     12m ago │
+│ ✓ push                                                               12m ago │
+│ ✓ PR #103       opened                                               11m ago │
+│ ✓ CI            4 of 4 checks passed                                  6m ago │
+│ ⏸ approval      waiting 6m                                 next check in 12s │
+│ · merge                                                                      │
+│ · argo refresh                                                               │
+│ · argo sync                                                                  │
+│ · rollout       2 deployments                                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ waiting for an approver to comment `hoist approve 5pr6sd333t`                │
+│ on PR #103 · o opens it                                                      │
+│                                                                              │
+│ deadline in 3h 48m · leaving this screen keeps it running                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 11m ago  PR #103 opened · github.com/me/my-gitops/pull/103                   │
+│  6m ago  CI green · 4 checks                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                 esc back (keeps running) · o open PR · w watch · l log · ? help

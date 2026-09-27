@@ -1,0 +1,24 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│ cluster/apps · base main · context my-cluster                                │
+├──────────────┬──────────────────────────────┬────────────────────────────────┤
+│ FAMILY       │ ▸ APP-STAGING                │ APP-PRODUCTION ⚠               │
+├──────────────┼──────────────────────────────┼────────────────────────────────┤
+│ ▸ orders     │ v202602201200         pinned │ v202601151010           pinned │
+│   marketing  │ sha-1a2b3c4           pinned │ sha-0000111            drifted │
+│   temporal   │ 2 images            external │ 2 images              external │
+│   web        │ 2 builds               split │ v202601010101           pinned │
+│   worker     │ v3                  unpinned │ v2                    unpinned │
+│              │                              │                                │
+│              │                              │                                │
+│              │                              │                                │
+│              │                              │                                │
+│              │                              │                                │
+├──────────────┴──────────────────────────────┴────────────────────────────────┤
+│ marketing in app-production runs sha-77c0ffe; manifest says sha-0000111      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ in flight · 1                                              next check in 12s │
+│ 5pr6sd333t  orders, marketing  app-staging → app-production              12m │
+│ ✓ branch ✓ commit ✓ push ✓ PR #103 ✓ CI ⏸ approval · merge · argo · rollout  │
+│ waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  enter actions · p promote into · t tag · w watch · r refresh · ? help · q quit

@@ -1,0 +1,24 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│ cluster/apps · base main · context my-cluster                                │
+├──────────────┬──────────────────────────────┬────────────────────────────────┤
+│ FAMILY       │ APP-STAGING                  │ ▸ APP-PRODUCTION ⚠             │
+├──────────────┼──────────────────────────────┼────────────────────────────────┤
+│ ▸ orders     │ v202602201200         pinned │ v202601151010           pinned │
+│   marketing╭─ orders · app-production ⚠ ────────────────────────╮    drifted │
+│   temporal │ ▸ p  promote into app-production from app-staging  │   external │
+│   web      │   t  deploy a tag to app-production                │     pinned │
+│   worker   │   w  watch the rollout                             │   unpinned │
+│            │   shift+r  restart orders in app-production        │            │
+│            │      resume in flight 5pr6sd333t (approval)        │            │
+│            │      promote into app-production from…             │            │
+│            ├────────────────────────────────────────────────────┤            │
+│            │ ⚠ production: every write opens a PR and waits     │            │
+├────────────│   for an approver's `hoist approve` comment        │────────────┤
+│ marketing i╰────────────────────────────────────────────────────╯000111      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ in flight · 1                                              next check in 12s │
+│ 5pr6sd333t  orders, marketing  app-staging → app-production              12m │
+│ ✓ branch ✓ commit ✓ push ✓ PR #103 ✓ CI ⏸ approval · merge · argo · rollout  │
+│ waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                  ↑/↓ move · enter run · the letter runs it directly · esc close

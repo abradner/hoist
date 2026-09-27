@@ -1,0 +1,24 @@
+╭─ hoist · promotion · confirm ────────────────────────────────────────────────╮
+│ app-staging → app-production ⚠                                      mode: PR │
+│ 3 repos · 41 commits · 3 migrations · 6 image references, 3 files            │
+├───────────────────────────────────┬──────────────────────────────────────────┤
+│ ghcr.io/example/                  │ orders  v2026011510 → v2026022012        │
+├───────────────────────────────────┼──────────────────────────────────────────┤
+│ ▸ ✓ orders                        │ 18 commits · 2 migrations                │
+│     v2026011510 → v2026022012     │                                          │
+│   ✓ marketing                     │ 4a1c2ef Add rate limiting to the API     │
+│     sha-0000111 → sha-1a2b3c4     │ 77c0ffe db: index created_at   migration │
+│   ✓ web · split in staging        │ e9b0d31 Fix N+1 query on digests         │
+│     v2026010101 → v2026021509     │ b71c0de db: backfill region    migration │
+│   · worker · already current      │ 1b2d3e4 Bump temporal SDK to 1.31        │
+│     v2026022012, no change        │ 6f8a90c Drop the legacy export endpoint  │
+│                                   │ …12 more                                 │
+│                                   │                                          │
+│                                   │                                          │
+│                                   │                                          │
+├───────────────────────────────────┴──────────────────────────────────────────┤
+│ web runs 2 builds in app-staging; promoting the newer, v202602150930         │
+│ app-production is a production env: the PR waits for `hoist approve`         │
+│ worker is already at v2026022012 in app-production and is left alone         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+         enter promote · space tick · d yaml · e edit digest · esc back · ? help
