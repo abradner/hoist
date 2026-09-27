@@ -155,7 +155,7 @@ type Model struct {
 	width, height int
 	// now is the clock the header's elapsed/deadline are worded against; a test pins it.
 	now func() time.Time
-	// log is the History scrollback, always shown (v2/: the M10 train's "visible by
+	// log is the History scrollback, always shown (v2/T3-06: the M10 train's "visible by
 	// default" already made it the common case; l no longer toggles it — the root's generic
 	// keyed handling (KeyScreen, below) now sends l to the shared activity screen instead, so
 	// this screen has nothing left for a toggle to hide, and every mockup (v2·04a/b) draws the
@@ -459,7 +459,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case keys.Esc.Matches(msg):
 		return m, func() tea.Msg { return BackMsg{} }
 	}
-	// The log is always shown now (v2/: l no longer toggles it — see the log field's own
+	// The log is always shown now (v2/T3-06: l no longer toggles it — see the log field's own
 	// doc comment), so any key this switch didn't recognize is the viewport's: ↑/↓,
 	// PageUp/PageDown scroll it. Laid out on this copy first — View lays out its own copy, so
 	// the retained viewport would otherwise be the zero-sized one NewAttached built (the same
@@ -553,7 +553,7 @@ func (m Model) openConfirm() (Model, tea.Cmd) {
 	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.id)
 	m.confirmOverride = huh.NewConfirm().Title(title).Value(&m.confirmValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
-	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly :
+	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly:
 	// the one shared keymap every standalone huh field in this app now uses.
 	m.confirmOverride.WithKeyMap(keys.HuhKeyMap())
 	m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
@@ -662,7 +662,7 @@ func (m Model) layout() Model {
 		fixed += lipgloss.Height(n)
 		sections++
 	}
-	// The log is always shown now (v2/ — see the log field's own doc comment), so its own
+	// The log is always shown now (v2/T3-06 — see the log field's own doc comment), so its own
 	// section and the "history" label above it are unconditional too.
 	sections++
 	fixed++ // the "history" label above the log
@@ -889,16 +889,16 @@ func (m Model) actionSection() string {
 	// ApprovalCopy, not sum.Action() directly: the one wording fix v2·04a settled on (UX-H10) —
 	// "waiting for an approver to comment `hoist approve <id>` on PR #N" as ONE sentence, not
 	// Action()'s own "blocked on you — comment ... to release it:" plus a separate command line.
-	// Exported from this package now rather than kept as the matrix pane's own local
+	// Exported from this package now (T3-06) rather than kept as the matrix pane's own local
 	// wrapper, so the screen and the pane render the identical sentence from one place.
 	// command is always "" after ApprovalCopy: Action()'s only non-empty command was the
 	// approval-wait one, and ApprovalCopy folds it into text as one sentence (its own doc
-	// comment) — nothing left needs the separate accent-styled command line the pre-
+	// comment) — nothing left needs the separate accent-styled command line the pre-T3-06
 	// rendering had here.
 	text, _ := ApprovalCopy(sum)
 	// approvalWaiting is true exactly when text is the ApprovalCopy sentence rather than some
 	// other active row's plain detail — the one case that takes priority over the generic
-	// countdown below, matching the pre- precedence (Action's own non-empty command
+	// countdown below, matching the pre-T3-06 precedence (Action's own non-empty command
 	// implied the identical priority, before ApprovalCopy folded it into text and left command
 	// always "").
 	approvalStep, hasActive := ActiveStep(m.rows)

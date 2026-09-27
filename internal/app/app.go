@@ -166,7 +166,7 @@ type Model struct {
 	quitConfirmValue bool
 
 	// kbd is what the terminal answered when View below asked for
-	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes  — flag 8, the one Kitty-protocol
+	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes (T3-01) — flag 8, the one Kitty-protocol
 	// feature that can report a caps-lock letter as ModCapsLock distinct from ModShift
 	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
 	// records whether the terminal granted it). Its one use is a single line in its help
@@ -554,7 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// guards live there, once, not duplicated here) and adopts it as the root's own.
 		//
 		// A failed refresh used to become the matrix's own clear-on-next-key notice — exactly
-		// the #164 shape the activity log exists to end (P2 #7): F5 is async, so
+		// the #164 shape the activity log exists to end: F5 is async, so
 		// the operator can easily have pressed another key by the time this lands, and the
 		// refusal disappeared before it was ever read. TakeRefreshError hands back that error
 		// (and clears it on the matrix) so it goes to the activity log instead, which survives.
@@ -777,7 +777,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case flight.WatchMsg:
-		// w on the flight screen the same openWatch the matrix's own w/OpenWatchMsg
+		// w on the flight screen: the same openWatch the matrix's own w/OpenWatchMsg
 		// already uses — flight has already resolved which family (families(), its own doc
 		// comment, raising its own chooser when there was more than one), so this is exactly
 		// the plain (family, target) pair openWatch takes, pushed on top of the flight screen
@@ -846,7 +846,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		// /: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
+		// T3-07/T3-08: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
 		// is gone); the deploy confirm screen offers shift+d itself now, once the diff is
 		// already on screen, so there is only ever one path in here.
 		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))

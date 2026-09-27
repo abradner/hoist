@@ -16,7 +16,7 @@ import (
 // construction rather than by counting.
 //
 // A screen's View is `ui.Frame{...}.Render(styles, width, height)`; a sub-pane inside a
-// section (the in-flight panel under the matrix,  — moved inside the frame's own
+// section (the in-flight panel under the matrix, T3-05 — moved inside the frame's own
 // Sections, retiring the earlier separate Panes field below the box) is Box, the same thing
 // without a footer.
 type Frame struct {
@@ -237,7 +237,7 @@ func NoticeLines(st Styles, text string, width int) []string {
 }
 
 // NoticeLinesStyled is NoticeLines with the rendering style named explicitly, rather than
-// always st.Notice the root's activity row colours itself by the entry's own kind —
+// always st.Notice: the root's activity row colours itself by the entry's own kind —
 // Info for a plain report, Good for a landed/completed outcome, Bad for a refusal or failure —
 // instead of every entry reading in the same amber regardless of what happened.
 func NoticeLinesStyled(style lipgloss.Style, text string, width int) []string {

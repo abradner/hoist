@@ -271,7 +271,7 @@ func freshDigestsFor(pl gitops.Plan, fresh *freshInputs) (map[string]image.Ref, 
 }
 
 // checkFreshBase is direct mode's own additional gap-closer alongside checkCloneCurrentForBase
-// (round-N finding, "base-advanced-with-new-occurrence"): it independently discovers and plans
+// ("base-advanced-with-new-occurrence"): it independently discovers and plans
 // from a throwaway, freshly-fetched snapshot of origin/base's current tree, then refuses if that
 // discovers any occurrence — identified by file/line/column, never by its current value, since a
 // differing value at an ALREADY-known position is exactly what checkCloneCurrentForBase already

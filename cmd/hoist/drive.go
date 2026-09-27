@@ -18,7 +18,7 @@ import (
 // so this conversion happens once, here, at the one place allowed to know both sides.
 // settingsFor (main.go) and buildPollDurations (wiring.go, which layers Deadline on top for
 // flight.PollDurations' own shape) both call this rather than each hand-copying the same four
-// fields a third and fourth time (P3).
+// fields a third and fourth time.
 func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 	return engine.PollIntervals{
 		CI:       time.Duration(poll.CI),

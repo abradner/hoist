@@ -76,7 +76,7 @@ type state int
 
 const (
 	// stateSelectEnv prompts for the missing env with a huh.Select — the target when p opened
-	// this screen with a source but no configured pair for it (rare after p now always
+	// this screen with a source but no configured pair for it (rare, since p now always
 	// carries a target), or the SOURCE when p opened it with a target but no unambiguous
 	// reverse pair (the screen's own "promote into <target> from…", the normal ambiguous case).
 	// selectingSource says which.
@@ -118,7 +118,7 @@ type StartMsg struct {
 	// passes this as StartRequest.View so the freshness check re-checks the SAME view this plan
 	// was built from, rather than whatever the service's current view has since become (an F5
 	// refresh between loading this screen and pressing Enter must not silently launder a plan
-	// built from a now-stale view;).
+	// built from a now-stale view).
 	View service.RepoView
 }
 
@@ -150,7 +150,7 @@ type historyMsg struct {
 	err   error
 }
 
-// RefreshMsg is r/F5/ctrl+r rebuild the plan at fresh origin. The screen has no way to
+// RefreshMsg is r/F5/ctrl+r: rebuild the plan at fresh origin. The screen has no way to
 // fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection;
 // service.Plan itself never fetches either, it only reads whatever repo the service currently
 // holds), so this asks the root to run the matrix's own completion-triggered refresh
@@ -272,7 +272,7 @@ func newViewport() viewport.Model {
 	return v
 }
 
-// New builds the plan screen. retires the old "P forces a prompt" gesture: p on the
+// New builds the plan screen, which retires the old "P forces a prompt" gesture: p on the
 // matrix always names a Target (the cursor's column), and Source is either the one
 // unambiguous reverse pair or "" — in which case this screen prompts "promote into <target>
 // from…" itself, rather than the matrix ever forcing a prompt for an arbitrary target. A
@@ -328,7 +328,7 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
-// Reload is RefreshMsg's own rebuild the root calls this once matrix.RepoRefreshedMsg
+// Reload is RefreshMsg's own rebuild: the root calls this once matrix.RepoRefreshedMsg
 // lands with a fresh *gitops.Repo, from origin, so this screen's plan is rebuilt against exactly
 // what F5 just fetched rather than the boot-time snapshot it was opened with. A no-op outside
 // stateReady: a load already in flight (stateLoading) or a still-open env prompt has nothing yet

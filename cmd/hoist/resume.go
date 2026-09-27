@@ -33,8 +33,7 @@ func promotionsSettings(cfg *config.Config, kubeOverride string) service.Setting
 // boundedCommandContext gives runPromotions/runResume/runAbandon the same interruptible,
 // deadline-bounded context every one of them built by hand before this PR: talking to a real
 // forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate
-// (finding, applied to runPromotions and missed on runResume's --env path until this
-// unification).
+// (applied to runPromotions and missed on runResume's --env path until this unification).
 func boundedCommandContext(deadline time.Duration) (context.Context, context.CancelFunc) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	if deadline <= 0 {

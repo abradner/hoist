@@ -17,13 +17,13 @@ import (
 )
 
 // keyed is implemented by a screen adapter whose underlying screen has a stated row in
-// internal/ui/keys' registry  — the root's own "?" and "l" key handling (app.go's
+// internal/ui/keys' registry (T3-03) — the root's own "?" and "l" key handling (app.go's
 // Update) only fires for a top screen that implements this, so the help overlay never lists
 // keys a screen doesn't honour yet (the audit doc's scope) and "l" never opens the
 // activity log from a screen that hasn't opted in. Every adapter embeds its package's Model by
 // value, so this is promoted automatically wherever the underlying Model itself exposes
 // KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own later PRs
-// (onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
+// (T3-04 onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
 type keyed interface{ KeyScreen() keys.Screen }
 
 // Screen is what the root drives. Screens are values: every method returns the updated

@@ -218,7 +218,7 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 		return nil, err
 	}
 
-	// Direct mode's own additional gap (round-N finding, "base-advanced-with-new-occurrence"):
+	// Direct mode's own additional gap ("base-advanced-with-new-occurrence"):
 	// this runs BEFORE the no-op check below (the CLI's own historical order, Divergence 4) so an
 	// unseen origin occurrence is refused outright rather than reported as "already current" on
 	// either face.

@@ -140,7 +140,7 @@ type Model struct {
 	now         func() time.Time
 }
 
-// KeyScreen implements the root's keyed interface the matrix now has a stated row in
+// KeyScreen implements the root's keyed interface: the matrix now has a stated row in
 // internal/ui/keys' registry, so the root's own "?" help overlay and "l" activity-log handling
 // apply to it exactly as they already do to watch/restart/config/activity.
 func (m Model) KeyScreen() keys.Screen { return keys.ScrMatrix }
@@ -1006,7 +1006,7 @@ func (m Model) stateWord(c Cell, env string) string {
 // inter-section rule has to be counted alongside the subheader's and the notes' whenever one is
 // present. It says nothing about whether the pane ultimately finds room to render non-empty at
 // the current height — paneBudget/inflightPane decide that — so a height too tight for even the
-// compact form is, at worst, one row off here; the same approximation the pre- code lived
+// compact form is, at worst, one row off here; the same approximation the pre-T3-05 code lived
 // with when the pane cost 0 rather than 1 extra rule row.
 func (m Model) hasPane() bool {
 	return len(m.inflight) > 0 || m.inflightErr != ""
@@ -1096,7 +1096,7 @@ func boolInt(b bool) int {
 // notes is the section under the grid: the transient notice or hint first, else what the
 // cluster said about the cursor's column, then the in-flight fold when the pane itself has no
 // room (paneBudget's own decision). The bubbles help.Model line this used to carry is retired
-// in  — the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
+// in T3-04 — the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
 func (m Model) notes() string {
 	lines := m.baseNotes()
 	if m.paneRows(m.paneBudget()) == 0 {

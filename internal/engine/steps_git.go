@@ -266,7 +266,7 @@ func (c CommittedStep) expectedBlobs(ctx context.Context, s *PromotionState) (ma
 // CheckRepoViewCurrent, by view — internal/service/fresh.go, internal/service/repo.go), which
 // refuses to start the engine at all when the checkout disagrees with origin/<base>. Direct mode
 // cannot lean on that same validate-and-refuse dance for the files it never even knew to look at
-// (a new occurrence origin/<base> gained that the clone's own disk never had — round-N finding),
+// (a new occurrence origin/<base> gained that the clone's own disk never had),
 // so StartPromotion guards that case separately: it discovers against a throwaway snapshot of
 // origin/<base>'s actual current tree and refuses on a missing occurrence
 // (discoverAtFreshBase/checkFreshBase in internal/service/fresh.go). That snapshot never feeds

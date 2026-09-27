@@ -43,7 +43,7 @@ import (
 // since Applications remain the primary concern, but it closes both gaps a legacy state can
 // have.
 //
-// s.EditApps gets the same treatment as a third, independent gap (review, PR #182): a
+// s.EditApps gets the same treatment as a third, independent gap (PR #182): a
 // state file saved any time between M5 and EditApps' own introduction has a populated ArgoApps
 // but a nil EditApps, since the two fields were computed together at construction from that
 // point on but ArgoApps alone before it — so "ArgoApps non-empty" cannot stand in for "EditApps
@@ -93,8 +93,8 @@ func EnsureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 // from cmd/hoist's own runResume/runAbandon) is a NEW path-traversal surface: an id containing
 // a path separator or ".." reaches outside the promotions directory (`../../etc/passwd`), or
 // sideways into the archive subdirectory (`archive/<real-id>`), letting `hoist resume`/`hoist
-// abandon` act on an archived or aged-out promotion `hoist promotions` never lists as live
-// (P3). Find refuses any id containing a path separator or ".." outright, and —
+// abandon` act on an archived or aged-out promotion `hoist promotions` never lists as live.
+// Find refuses any id containing a path separator or ".." outright, and —
 // once a state file does load — refuses one whose own ID does not match id, so a file that
 // happens to sit at the expected path but was never saved as this id (or was moved/archived
 // since) is treated as not found rather than silently acted on.
