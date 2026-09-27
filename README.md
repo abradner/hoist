@@ -28,40 +28,45 @@ now — re-observed against GitHub and the cluster, not read from a log — with
 yours to do.
 
 ```
-╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY      ▸ A                   B                    C                     │
-│ absent      v1            pinned                       v9    pinned          │
-│ drift       v1          unpinned  v2           pinned  v2  unpinned          │
-│ empty                             no images                                  │
-│ mixedtags   2 versions     split                                             │
-│ multi       2 images      pinned  2 images   unpinned                        │
-│ pinned      v1            pinned  v1           pinned  v1    pinned          │
-│ sidecar     v1            pinned  v1           pinned                        │
-│ thirdparty  7           external  8          external  8   external          │
-│                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
-│5pr6sd333t   app-staging → app-production   started 12m ago                   │
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge              │
-│○ argo refresh  ○ argo sync  ○ rollout                                        │
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│my-gitops · base main                                                         │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t│
+│─────────────┬───────────────────────────────┬─────────────────────────────── │
+│ FAMILY      │ ▸ APP-STAGING                 │ APP-PRODUCTION ⚠               │
+│─────────────┼───────────────────────────────┼─────────────────────────────── │
+│ marketing   │ sha256:aaaaaaaaaaaa    pinned │ sha256:aaaaaaaaaaaa    pinned  │
+│ ▸ orders    │ v202602201200          pinned │ v202601151010          pinned  │
+│ temporal    │ 2 images             external │ 2 images             external  │
+│ web         │ 2 versions              split │ v202601010101          pinned  │
+│ worker      │ v3                   unpinned │ v2                   unpinned  │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│in flight · 1                                                                 │
+│  5pr6sd333t   app-staging → app-production   started 12m ago                 │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env a                p promote • d deploy • w watch • r resume • ? help • q quit
+  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
 ```
 
-(Rendered from the test fixture, which is why the environments are called `A`, `B` and `C`; a
-real repo's columns are its Argo destination namespaces, and a production column is marked `⚠`.)
+(Copied verbatim from `testdata/golden/matrix-mockup-80x24.txt`, built with realistic names for
+docs; a real repo's columns are its Argo destination namespaces, and a production column is marked
+`⚠`. See [the guide](docs/guide.md#keys-at-a-glance) for every key.)
 
 Before any write, the confirm screen leads with what is being shipped — the commits between the
 build an environment declares and the one about to be written, and which of them migrate the
 database — with the YAML diff one key away:
 
 ```
-╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
-│ghcr.io/example/web:v9   →   app-production              mode: PR · production│
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
+│ghcr.io/example/app:v3   →   app-production          mode: PR · shift+d direct│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks │
+│rolling out 14 commits · 2 migrations · replacing v1, declared 4 weeks        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  4a1c2ef  Add rate limiting to the public API                                │
 │  e9b0d31  Fix N+1 query when resolving digests                               │
@@ -72,10 +77,13 @@ database — with the YAML diff one key away:
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│writes 3 occurrences in 1 file · digest dddddddddddd           d  see the yaml│
+│writes 3 image references in 1 file · digest 333333333333      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                              enter deploy · ↑/↓ scroll · d yaml diff · esc back
+      enter deploy · d yaml · shift+d direct · ↑/↓ · r fresh · esc back · ? more
 ```
+
+(Abridged from `testdata/golden/deploy-mockup-80x24.txt` — commit rows and the footer are trimmed
+for the page; the screen's own golden test is the byte-exact version.)
 
 ## Install
 
@@ -83,8 +91,10 @@ database — with the YAML diff one key away:
 go install github.com/abradner/hoist/cmd/hoist@latest
 ```
 
-That builds the newest tagged release (or `main`, before the first tag exists). Prebuilt binaries
-for macOS and Linux, amd64 and arm64, are attached to every
+`@latest` builds the newest tagged release — `v0.1.0` today, pre-alpha; `main` moves faster than
+tags do (a merge is not a release), so `go install github.com/abradner/hoist/cmd/hoist@main` is
+the way to get what's actually landed if you want to track development rather than the tag.
+Prebuilt binaries for macOS and Linux, amd64 and arm64, are attached to every
 [release](https://github.com/abradner/hoist/releases) with a `checksums.txt`; `hoist --version`
 names what you are running. `git` on `PATH` and `gh auth status` logged in is the whole
 prerequisite: hoist runs `git` directly, and reaches GitHub through go-gh, which reads your `gh`
@@ -118,13 +128,13 @@ merge, for Argo to sync, for every Deployment it touched to roll out. On the mat
 hoist deploy --env app-staging --image ghcr.io/me/web:v3@sha256:…
 ```
 
-On the plan screen `o` does the same job for one repo inside a promotion — the TUI's `--digest`,
+On the plan screen `e` does the same job for one repo inside a promotion — the TUI's `--digest`,
 overriding what the resolver chose for the row under the cursor. Which sources the resolver asks,
 and which registry credentials it tries, can be set for a whole session with the root
 `--digest-sources`, `--registry-auth`, `--cluster-secret` and `--op-ref` flags.
 
 The reference must carry its digest; hoist will not resolve a bare tag on the way in. On the matrix
-this is `d`: a picker lists the registry's tags with the build age of each, whether the paired
+this is `t`: a picker lists the registry's tags with the build age of each, whether the paired
 staging environment has committed it, and the commits and migrations between the build the
 environment declares and the one under the cursor. Releases lead the list; tags named after a
 digest and moving tags like `latest` or a branch name sit below their own dividers, so a handful
@@ -139,7 +149,10 @@ hoist restart --env app-staging --family web
 This is the one operation that writes to the cluster instead of to git: it stamps the same
 annotation `kubectl rollout restart` does, so there is no branch, no PR and nothing to resume.
 Before rolling anything it names every target with its replica count and strategy and warns
-where the restart will not be graceful. On the matrix this is `R`.
+where the restart will not be graceful. On the matrix this is `shift+r` — shift, because it's a
+write (a legacy terminal can't tell a real shift from caps lock, so hoist accepts a bare capital
+there too, charitably; only a kitty-protocol terminal, which *can* tell the difference, rejects
+caps lock pressed alone with no real shift).
 
 ## Rules hoist enforces
 
@@ -164,12 +177,13 @@ convention, and the refusal says which one:
   the guard lifts, even if Argo is still converging.
 
 Three read-only screens sit beside them, each also a subcommand: `w` on the matrix watches one
-Application converge outside any promotion (`hoist watch --app`), `C` shows the effective config
+Application converge outside any promotion (`hoist watch --app`), `c` shows the effective config
 and the file it came from (`hoist config show`/`path`), and the in-flight pane under the matrix
-lists what is promoting right now (`hoist promotions`), with `r` reopening one and `o` opening its
-PR. On that reopened flight screen, `c` is the one override the TUI offers: when your `ci.none`
-policy is `prompt` and a PR reports no checks at all, it treats them as green for that promotion
-after a confirmation — the same thing `--override-ci-none` does at the CLI, and never a default.
+lists what is promoting right now (`hoist promotions`), with `tab` then `enter` reopening one and
+`o` opening its PR. On that reopened flight screen, `shift+c` is the one override the TUI offers:
+when your `ci.none` policy is `prompt` and a PR reports no checks at all, it treats them as green
+for that promotion after a confirmation — the same thing `--override-ci-none` does at the CLI, and
+never a default.
 
 These, by contrast, are warnings and never refusals: a digest the source's pods and manifest
 disagree on, a promotion that jumps straight to production, a build staging has never committed,

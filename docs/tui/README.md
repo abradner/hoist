@@ -1,12 +1,17 @@
 # TUI redesign mockups
 
-`mockups.html` is six screens of a proposed hoist TUI (M10 built them; see the frame notes
-below for where the build departed from the proposal) — matrix, tag picker, deploy confirm,
-flight, rollout, and the in-flight panel — drawn as real terminal frames rather than described
-in prose. Open it in a browser.
+`mockups.html` is a set of hoist TUI screens drawn as real terminal frames rather than described
+in prose. Open it in a browser. It holds two generations, in one file:
 
-It is a **proposal, not a record**: nothing here is what hoist renders today. It exists so the
-redesign starts from something concrete enough to argue with.
+- **Frames 1–13**: six original screens — matrix, tag picker, deploy confirm, flight, rollout,
+  and the in-flight panel (M10 built them; see "What M10 built, and where it departed" below). A
+  **proposal**, not a record — the redesign starting point, not what hoist renders today.
+- **The "v2 proposal · 2026-09 audit" section**: drawn from `docs/audit/2026-09-ux-arch-audit.md`
+  and, unlike frames 1–13, since built (T3-01 through T3-10) — see "v2 design record" below. This
+  half of the file *is* a record now, checkable against the real screens' own golden tests.
+
+Don't assume the whole file is one or the other; check which section a frame is in before citing
+it as either the current shape or an open question.
 
 ## What the frames are
 
@@ -59,18 +64,33 @@ reason found on contact with real widths and data:
 - **Flight screen** (frame 13, added by M10 rather than proposed): the step list degrades to
   the same strip on a short terminal so the blocked reason and the command always fit.
 
-## v2 proposal (2026-09 audit)
+## v2 design record (2026-09 audit, built)
 
-The section headed "v2 proposal · 2026-09 audit" at the end of `mockups.html` draws the
-screens that `docs/audit/2026-09-ux-arch-audit.md` asks for. The frames are the matrix in
-pipeline order with a cell cursor and a detail pane, the `enter` action menu, the help overlay,
-flight (waiting and done), both confirm screens, the tag picker, and the empty and error
-states. Each caption names the finding IDs it answers, and the keys follow that doc's proposed
-keymap. Like frames 1–13, it is a **proposal**. The operator approves it and the keymap before
-the UX train (T3) builds anything.
+The section headed "v2 proposal · 2026-09 audit" at the end of `mockups.html` draws the screens
+that `docs/audit/2026-09-ux-arch-audit.md` asked for: the matrix in pipeline order with a cell
+cursor and a detail pane, the `enter` action menu, the help overlay, flight (waiting and done),
+both confirm screens, the tag picker, and the empty and error states. Each caption names the
+finding IDs it answers, and the keys follow that doc's keymap. Unlike frames 1–13 (still an
+undecided sketch), this section stopped being a proposal once the operator approved it: T3-01
+through T3-10 built every screen and the `internal/ui/keys` registry to match it (AGENTS.md
+§4.8), so `mockups.html`'s "v2" heading is now this repo's **design record** — read it to see
+what a screen is supposed to look like, alongside its own golden test to see what it actually
+renders. A frame here and a screen's behaviour disagreeing is a bug in one of the two, not a
+pending decision; file it rather than "fixing" the mockup to match without checking which side
+is wrong (AGENTS.md §8, "review feedback": work out which end disagrees before touching either).
 
 Unlike frames 1–13, which were pasted into the HTML by hand, genframes.py writes this section
 into `mockups.html` itself, between the `v2:begin`/`v2:end` markers. It refuses any line
 wider than its cell, and any frame not exactly its stated height. So
 `python3 docs/tui/genframes.py` regenerates it in full, and only `mockups.html` changes — the
-script writes nothing else to disk, so a second run leaves `git status` clean.
+script writes nothing else to disk, so a second run leaves `git status` clean. `python3
+docs/tui/genframes.py --txt` instead writes each v2 frame's plain text to
+`docs/tui/frames/<name>.txt` (never touching `mockups.html`), one file per frame named after the
+caption (`v2-matrix-80x24.txt`, `v2-plan-confirm-80x24.txt`, …) — the mechanism for actually
+checking a screen against its mockup: `diff -u docs/tui/frames/v2-<name>.txt
+testdata/golden/<name>.txt` (or the closest-matching `*-mockup-*.txt` golden built with the same
+placeholder names, §"Placeholders" above) shows exactly what changed, line by line, rather than
+eyeballing two renders side by side. A mismatch is expected wherever the golden's own fixture
+tells a different story than the mockup's invented data (a drift scenario against a production
+warning, say) — the diff is for catching a real layout or wording drift, not for demanding
+byte-identical output between two deliberately different scenarios.
