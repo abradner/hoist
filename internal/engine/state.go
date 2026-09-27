@@ -66,7 +66,7 @@ type PromotionState struct {
 
 	// The M4 fields below are policy, read once from internal/config by the CLI when this
 	// PromotionState is built (a step's Observe must not import internal/config — see
-	// steps_m4.go) and carried here exactly like CommitMessage/PRTitle/PRBody above: none of
+	// steps_review.go) and carried here exactly like CommitMessage/PRTitle/PRBody above: none of
 	// them is secret or unbounded (AGENTS.md §4.3), and a resumed run re-reading the config
 	// file could in principle see a changed policy — carrying the value used when the
 	// promotion started is deliberate, not an oversight, so a promotion never straddles two
@@ -97,7 +97,7 @@ type PromotionState struct {
 	// already-merged PR) reports one.
 	MergeSHA string
 
-	// The M5 fields below are the same two categories steps_m5.go's three new steps need,
+	// The M5 fields below are the same two categories steps_converge.go's three new steps need,
 	// alongside the M4 fields above: a config-sourced fact re-read on resume (ArgoNamespace),
 	// and a structural fact about the plan already committed to, computed once and carried
 	// rather than recomputed (ArgoApps, like Edits/CommitMessage/PRTitle/PRBody).

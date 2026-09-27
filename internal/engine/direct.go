@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/git"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // StepDirectGate and StepDirectPushed are direct mode's own two steps (AGENTS.md M6 brief,
@@ -247,36 +245,4 @@ func (d DirectPushedStep) Act(ctx context.Context, s *PromotionState) error {
 	// this call exists to additionally guard against, never worse than before either existed.
 	_, _, _ = d.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
 	return nil
-}
-
-// DirectSteps returns the steps a direct-mode promotion drives: the production/confirmation
-// gate, then the same branch-and-commit steps the PR flow uses (BranchedStep, CommittedStep —
-// unmodified), then DirectPushedStep in place of PushedStep+PROpenedStep.
-//
-// productionEnvs MUST be RepoConfig.Envs.Production passed through exactly as loaded, never
-// filtered, narrowed, or recomputed by the caller — DirectCommitGateStep's whole guarantee
-// rests on this list actually being the one config authority that also governs PR-required
-// and approval-required elsewhere (AGENTS.md §4.5); a caller that "helpfully" pre-filters it
-// (e.g. "only pass the envs relevant to this repo") reintroduces exactly the config-bug risk
-// invariant 6 asks to be structurally impossible. confirmed must be true only in direct
-// response to the operator's own keypress + huh.Confirm gesture (internal/app/tags) or, at the
-// CLI, its documented equivalent (cmd/hoist) — never a default, never inferred from anything
-// else in the promotion.
-func DirectSteps(g git.Git, productionEnvs []string, confirmed bool, onWaiting func()) []Step {
-	return []Step{
-		DirectCommitGateStep{ProductionEnvs: productionEnvs, Confirmed: confirmed},
-		BranchedStep{Git: g},
-		CommittedStep{Git: g, OnWaiting: onWaiting},
-		DirectPushedStep{Git: g},
-	}
-}
-
-// AllDirectSteps is DirectSteps plus the Argo/rollout convergence both modes share — the direct
-// mirror of CoreSteps/AllSteps, and what `hoist promote --direct` and `hoist deploy --direct`
-// actually drive. The split exists for the same reason the PR path's does: DirectSteps is the
-// git-only core, useful on its own in tests that exercise the gate and the push without a
-// cluster, while the exported pairing keeps a caller from silently driving a promotion that
-// lands a commit and then never tells Argo about it (issue #66).
-func AllDirectSteps(g git.Git, a argo.Argo, ro rollout.Rollout, productionEnvs []string, confirmed bool, onWaiting func()) []Step {
-	return append(DirectSteps(g, productionEnvs, confirmed, onWaiting), ConvergeSteps(g, a, ro)...)
 }

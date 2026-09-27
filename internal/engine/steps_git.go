@@ -417,13 +417,3 @@ func (p PROpenedStep) Act(ctx context.Context, s *PromotionState) error {
 	s.PR = &pr
 	return nil
 }
-
-// Steps returns the four steps, in order, wired to g and f.
-func Steps(g git.Git, f forge.Forge, onWaiting func()) []Step {
-	return []Step{
-		BranchedStep{Git: g},
-		CommittedStep{Git: g, OnWaiting: onWaiting},
-		PushedStep{Git: g},
-		PROpenedStep{Forge: f},
-	}
-}

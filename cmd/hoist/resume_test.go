@@ -332,7 +332,7 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 	// and so made MergedStep re-run its own Act, burning the deadline in real git subprocesses.
 	// That cycle is fixed (Drive's Merged short-circuit, internal/engine/engine.go) and is
 	// covered directly by TestDriveDoesNotChurnPushDeleteWhileWaitingOnArgoAfterMerge
-	// (internal/engine/steps_m5_test.go), which counts pushes and deletes against a real remote
+	// (internal/engine/steps_converge_test.go), which counts pushes and deletes against a real remote
 	// rather than inferring anything from timing. The widening stays only for determinism.
 	shortDeadline := strings.NewReplacer(
 		"deadline: 10s", "deadline: 2s",
@@ -465,7 +465,7 @@ func TestEnsureArgoAppsLeavesAlreadyPopulatedStateAlone(t *testing.T) {
 // path: a state file saved any time between M5 (ArgoApps) and EditApps' own introduction has
 // ArgoApps populated but EditApps nil, and the old "ArgoApps non-empty means fully populated,
 // skip everything" check would leave EditApps nil forever — silently starving
-// ArgoSyncedStep.revisionCarries of the per-Application scoping it now needs (steps_m5.go's
+// ArgoSyncedStep.revisionCarries of the per-Application scoping it now needs (steps_converge.go's
 // editsForApp). Unlike the sibling test above, this drives a real gitops.Discover against
 // newPromoteFixture's own clone, so the mutant this guards against is "ensureArgoApps decides
 // EditApps doesn't need rebuilding", not just "it decides nothing needs rebuilding".

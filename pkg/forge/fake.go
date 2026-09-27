@@ -231,7 +231,7 @@ func (f *Fake) Comments(_ context.Context, prNumber int, since time.Time) ([]Com
 	// otherwise silently return them in whatever order they happened to land — this can mask a
 	// real "last valid comment wins" bug at the ApprovedStep layer, since a fake in the wrong
 	// order proves nothing about that logic's actual correctness. Tie-broken by ID, mirroring
-	// isNewerComment's own tie-break rule in internal/engine/steps_m4.go.
+	// isNewerComment's own tie-break rule in internal/engine/steps_review.go.
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
 			return out[i].CreatedAt.Before(out[j].CreatedAt)
@@ -275,7 +275,7 @@ func (f *Fake) MergePR(_ context.Context, prNumber int, expectedHeadSHA string) 
 		// A test that never configured HeadSHAs (most of them — HeadSHA defaults to "") hasn't
 		// opted into exercising the stale-head scenario at all; only compare when the fake
 		// actually has a recorded head to compare against, mirroring MergedStep's own Observe
-		// pre-check (steps_m4.go), which is equally permissive about an unknown head.
+		// pre-check (steps_review.go), which is equally permissive about an unknown head.
 		if expectedHeadSHA != "" && f.prs[i].HeadSHA != "" && f.prs[i].HeadSHA != expectedHeadSHA {
 			return PR{}, fmt.Errorf("forge: PR #%d head is %s, not the expected %s: %w", prNumber, f.prs[i].HeadSHA, expectedHeadSHA, ErrStaleHead)
 		}

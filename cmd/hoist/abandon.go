@@ -91,7 +91,7 @@ func abandonPromotion(ctx context.Context, cfg *config.Config, id string) ([]str
 	// the reloaded state's own PR.Closed would otherwise still read false): ObserveAll above
 	// always probes MergedStep first when it's in the step list (engine.go's own phaseIndex
 	// short-circuit), and MergedStep.Observe's own findOwnPR unconditionally re-fetches the
-	// live PR (GetPR, falling back to FindPR — steps_m4.go) and assigns it back to s.PR before
+	// live PR (GetPR, falling back to FindPR — steps_review.go) and assigns it back to s.PR before
 	// this ever runs, regardless of merged/closed state. A round-2 review raised this as a
 	// possible re-close-on-retry gap and an earlier version of this fix added a second,
 	// explicit GetPR call here to guard against it directly; traced and confirmed genuinely

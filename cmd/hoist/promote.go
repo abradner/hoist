@@ -531,16 +531,11 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 			fmt.Fprintln(stderr, "hoist promote: waiting for signing approval...")
 		}
 	}
-	var steps []engine.Step
-	if *direct {
-		// eff.cfg.Envs.Production, unfiltered — DirectSteps'/DirectCommitGateStep's own doc
-		// comments explain why this must be exactly that list, verbatim, never narrowed.
-		// Confirmed is true only because both --direct and --confirm-direct were given,
-		// checked above (the CLI's keypress-then-confirm equivalent).
-		steps = engine.AllDirectSteps(newGit, a, ro, eff.cfg.Envs.Production, true, onWaiting)
-	} else {
-		steps = engine.AllSteps(newGit, f, a, ro, onWaiting)
-	}
+	// eff.cfg.Envs.Production, unfiltered — DirectSteps'/DirectCommitGateStep's own doc
+	// comments explain why this must be exactly that list, verbatim, never narrowed.
+	// Confirmed is true only because both --direct and --confirm-direct were given,
+	// checked above (the CLI's keypress-then-confirm equivalent).
+	steps := engine.StepsFor(s, newGit, f, a, ro, eff.cfg.Envs.Production, true, onWaiting)
 	// The claim only needs to outlive the gap up to the first durable state write — once that
 	// lands, findInFlight's own re-observation of the real state file is what enforces invariant
 	// 5 for the rest of the (possibly hours-long) promotion, so release it here rather than

@@ -180,7 +180,7 @@ type Git interface {
 	// reachable, not checked out). Added in M4 so ApprovedStep can anchor "was this comment
 	// posted after the code it approves" on the commit's own timestamp rather than the PR's
 	// CreatedAt: PR.CreatedAt is only a safe stand-in for that while other steps' checks
-	// happen to make an earlier PR on stale content unreachable (see steps_m4.go's doc
+	// happen to make an earlier PR on stale content unreachable (see steps_review.go's doc
 	// comment); CommitTime lets Approved state that fact directly instead of leaning on it.
 	CommitTime(ctx context.Context, dir, sha string) (time.Time, error)
 	// WorktreeAtRef creates a throwaway, detached linked worktree of cloneDir at dir, checked

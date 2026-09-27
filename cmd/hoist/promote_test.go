@@ -57,13 +57,13 @@ func outGitHost(t *testing.T, dir string, args ...string) string {
 //
 // Two things depend on this, both invisible when MergedStep is the last step (M4 alone) but
 // exposed the moment anything (M5's Argo/rollout steps) runs after it in the same process:
-//  1. MergedStep.Observe's ancestry check (steps_m4.go) fetches origin/<base> fresh and
+//  1. MergedStep.Observe's ancestry check (steps_review.go) fetches origin/<base> fresh and
 //     requires the merge commit to be part of its real history — true instantly for a real
 //     GitHub merge, never true for the fake's bookkeeping alone. A single `hoist promote`
 //     invocation that has to poll past Merged (waiting on Argo/rollout to converge) re-Observes
 //     every step from the top on each poll tick, including Merged with pr.Merged now true —
 //     hitting this exact check.
-//  2. ArgoSyncedStep.Observe (steps_m5.go) compares the cluster's reported SyncRevision against
+//  2. ArgoSyncedStep.Observe (steps_converge.go) compares the cluster's reported SyncRevision against
 //     s.MergeSHA, which is the real pushed commit sha (fake.go's own "M4 hardening finding #2":
 //     MergeSHA prefers a real, resolvable sha over its synthetic "merged-" placeholder whenever
 //     one was given) — a fixture that pre-configures a fake Argo status with a hardcoded

@@ -93,17 +93,14 @@ func (w *world) directSteps() []Step {
 }
 
 func (w *world) stepsFor(s *PromotionState) []Step {
-	if s.Direct {
-		return w.directSteps()
-	}
-	return w.prSteps()
+	return StepsFor(s, w.g, w.forge, w.argo, w.ro, nil, true, nil)
 }
 
 // newPromotionState builds a fresh, unresolved PromotionState for this world's one fixture
 // plan — DeriveID is deterministic over (repoFullName, plan), so every state built this way for
 // this world names the identical branch/PR/state id, exactly as a real restarted process would
 // (AGENTS.md §4.1). Approval is auto: this harness exercises sequencing and re-observation, not
-// the approval-comment matcher, which steps_m4_test.go already covers directly. ArgoNamespace/
+// the approval-comment matcher, which steps_review_test.go already covers directly. ArgoNamespace/
 // ArgoApps are always set, mirroring a real repo's config — a scenario that never calls
 // argoSyncs/rollsOut just leaves those steps parked at their own natural Blocked/Waiting stop.
 func (w *world) newPromotionState() *PromotionState {
@@ -208,7 +205,7 @@ func (w *world) rollsOut(s *PromotionState) {
 // supersede writes ref as a LATER, independent deploy into the fixture's target env — from a
 // separate clone of the same origin, exactly as a real second deploy (hoist's own, or anyone
 // else's) would, never going through this world's own steps. Reuses direct_test.go's own
-// supersedeBase, the same adversary steps_m5_test.go's own TestArgoSyncedAcceptsARevisionThat…
+// supersedeBase, the same adversary steps_converge_test.go's own TestArgoSyncedAcceptsARevisionThat…
 // tests already build this exact way.
 func (w *world) supersede(ref string) {
 	w.t.Helper()
