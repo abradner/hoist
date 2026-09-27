@@ -1051,23 +1051,40 @@ func (c Controller) onAbandoned(msg abandonedMsg) (Controller, tea.Cmd, []Change
 	}
 	if msg.err != nil {
 		if e.driver == nil {
-			// A failed abandon of a never-built drive (e.g. Resume's own Backend.Resume call
-			// returned an error and was then abandoned before any driver ever existed) must not
-			// leave a Stopped, driver-less entry behind: Poke/OverrideCINone's own ErrNoDriver
-			// guard refuses it, but that guard is defence in depth — the actual enforcement is
-			// here, not leaving a state Poke would ever have to refuse in the first place. There
-			// is nothing left to retry (no driver to step, no PR/branch this attempt ever
-			// created), so this entry is simply gone; the operator sees the failure and can
-			// Resume/Start fresh.
+			// A failed abandon of a driver-less entry — either a never-built drive (e.g. Resume's
+			// own Backend.Resume call returned an error and was then abandoned before any driver
+			// ever existed) or one whose build is simply still in flight (Abandon's own busy-wait
+			// or onAbandonWait's timeout branch can dispatch Backend.Abandon before onBuilt has
+			// ever landed a driver for it) — must not leave a Stopped, driver-less entry behind:
+			// Poke/OverrideCINone's own ErrNoDriver guard refuses it, but that guard is defence in
+			// depth — the actual enforcement is here, not leaving a state Poke would ever have to
+			// refuse in the first place. There is nothing left to retry (no driver to step, no
+			// PR/branch this attempt ever created), so this entry is simply gone; the operator
+			// sees the failure and can Resume/Start fresh.
+			e.phase = Stopped
+			snap := snapshotOf(e)
 			c = c.withoutEntry(e.build)
-			return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err}}
+			return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err, Snap: snap}}
 		}
+		// A pollMsg already scheduled (Waiting) or the busy Step this abandon was itself waiting
+		// on (Stepping-busy) can still be in flight/queued at this point — neither has any gen
+		// bump to drop it, since this whole abandon attempt never re-armed one. Left alone, the
+		// pending pollMsg would pass onPoll's busy/Abandoning guard (this entry is neither, once
+		// set to Stopped) and dispatch a fresh Step on the ctx Abandon already cancelled, or the
+		// in-flight Step's own stepMsg would land in onStep and — since e.phase is no longer
+		// Abandoning by the time it arrives — fall through to the ordinary "schedule the next
+		// poll" path instead of being recognised as the abandon's own busy step, silently
+		// reviving an entry the operator was told had failed to abandon (found in review). Bumping
+		// gen here drops both: any pollMsg/stepMsg still addressed to the old generation is stale.
+		e.gen++
+		e.busy = false
 		e.phase = Stopped
 		e.abandoning = false
 		e.abandonIssued = false
 		c = c.withEntry(e)
 		return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err}}
 	}
+	e.phase = Stopped
 	snap := snapshotOf(e)
 	c = c.withoutEntry(e.build)
 	return c, nil, []Change{{Kind: ChangeAbandoned, Build: msg.build, ID: msg.id, Lines: msg.lines, Snap: snap}}
