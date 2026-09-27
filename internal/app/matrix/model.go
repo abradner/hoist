@@ -41,7 +41,6 @@ type chooserKind int
 
 const (
 	chooserImage  chooserKind = iota // t on a cell with several first-party images
-	chooserResume                    // several promotions in flight, resuming from o/menu
 	chooserOpenPR                    // o with several in flight that have PRs
 )
 
@@ -700,17 +699,7 @@ func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if choice == "" {
 			return m, nil
 		}
-		switch kind {
-		case chooserResume:
-			for _, s := range m.inflight {
-				if chooserKey(s) != choice {
-					continue
-				}
-				return m, func() tea.Msg { return resumeMsgFor(s) }
-			}
-			m.notice = "that promotion is no longer in flight"
-			return m, nil
-		case chooserOpenPR:
+		if kind == chooserOpenPR {
 			for _, s := range m.withPR() {
 				if s.ID == choice {
 					url := s.PR.URL
@@ -804,10 +793,7 @@ func (m Model) View() string {
 	}
 	if m.chooser != nil {
 		title := "deploy"
-		switch m.chooserKind {
-		case chooserResume:
-			title = "resume"
-		case chooserOpenPR:
+		if m.chooserKind == chooserOpenPR {
 			title = "open PR"
 		}
 		return ui.Dialog(m.styles, view, title, redact.Strings(m.chooser.View()), m.width, m.height)

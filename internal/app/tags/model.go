@@ -703,7 +703,8 @@ func (m Model) reload() (Model, tea.Cmd) {
 }
 
 // newBodyViewport is the commit-detail viewport with only the paging keys bound: ↑/↓ (and
-// j/k) stay the picker's own "next commit", and space stays "review the change", so the
+// j/k) stay the picker's own "next commit", and enter (not space — space is unbound on this
+// screen since #120's v2 redesign) stays "review the change" from inside the reader, so the
 // viewport's defaults for those (line scroll, page down) are unbound rather than fought over.
 func newBodyViewport() viewport.Model {
 	v := viewport.New()

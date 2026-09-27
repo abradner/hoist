@@ -598,9 +598,9 @@ and a confirmation (direct mode there is `shift+d`, same as the plan confirm bel
 carries no separate direct-deploy shortcut of its own); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
 age relative to now and whether the paired staging env's manifest carries it, and under the cursor
 the commits between the declared build and the one under the cursor with the migrations among them
-(`pkg/migrate` — `tab` into the list, `enter` opens a commit in a scrolling view (`pgdn`/`pgup`
-page the body, `home`/`end` jump to its ends; ↑/↓ still switch commits — #120), `space` reviews
-the change; a split target env names
+(`pkg/migrate` — `tab` into the list, `→` opens a commit in a scrolling reader (`pgdn`/`pgup`
+page the body, `home`/`end` jump to its ends; ↑/↓ still switch commits — #120), `enter` there
+reviews the change (`space` is unbound on this screen); a split target env names
 every declared reference in the header and says which one the count runs from — #119;
 a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
 the confirm screens lead with the work, not the mechanism (M10): the deploy confirm says
@@ -1172,9 +1172,16 @@ test lives** (if one exists).
    `ReportAllKeysAsEscapeCodes | ReportAlternateKeys | ReportAssociatedText` — every render
    (`app.go`'s `View`); a terminal that doesn't support the request, or doesn't grant it, simply
    never sends a `KeyboardEnhancementsMsg` back, so a legacy terminal is unaffected either way.
-   Regression test: `TestKittyShiftedPunctuationNeedsAlternateKeys` in
-   `internal/app/kitty_decode_test.go` decodes a raw Kitty escape sequence directly and asserts
-   the shifted punctuation survives.
+   Regression tests (T3 followup, group 5 — the test named here previously,
+   `TestKittyShiftedPunctuationNeedsAlternateKeys`, decodes the raw pre-fix byte sequence directly
+   against ultraviolet's decoder with no flag requested at all, so it documents the bug's shape
+   but cannot fail from a regression in what `View` requests; it is not the gate): the actual gate
+   is `TestViewRequestsAllKeysAsEscapeCodes` in `internal/app/app_test.go`, which renders the real
+   `View` and asserts all three `KeyboardEnhancements` fields are set, plus
+   `TestKittyShiftedPunctuationDecodesCorrectlyWithAlternateKeys` in
+   `internal/app/kitty_decode_test.go`, which decodes the extended CSI-u form a terminal sends
+   once `ReportAlternateKeys` is actually granted and asserts the shifted punctuation comes out
+   right.
 
 ## 10. Maintaining This Document
 

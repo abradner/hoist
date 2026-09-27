@@ -655,23 +655,41 @@ func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 // TestEnvSelectResyncsTargetFromField/TestBuildEnvSelectWiresFiltering pair above. This drives
 // the real construction path (New -> buildSourceSelect, not a hand-built Select) with down then
 // enter, proving the source prompt's own enter-confirms handling in updateSelectEnv actually
-// advances past stateSelectEnv with the field's own resynced value — the fixture repo's own
-// SourcesFor("app-production") offers exactly one candidate (app-staging), so down is a no-op
-// here the same way TestEnvSelectResyncsTargetFromField's own comment explains for the target
-// side, but enter still has to complete the gesture through the real widget.
+// advances past stateSelectEnv with the field's own resynced value.
+//
+// T3 followup, group 5: the original version of this test ran against discoverFixture, whose
+// repo has only two discovered envs — so SourcesFor("app-production") offers exactly one
+// candidate (app-staging) and pressing down is a no-op there (the same reason
+// TestEnvSelectResyncsTargetFromField's own comment gives for the target side). A no-op down
+// press can't prove down actually moves the selection; it only proves enter still completes the
+// gesture. This now builds a synthetic three-env repo (the same minimal &gitops.Repo{Envs: ...}
+// shape TestEmptyStateNamesTheConfig uses) so SourcesFor("prod") offers two sorted candidates —
+// down must move off the first one (a-staging) onto the second (b-staging) before enter fires,
+// so the test actually exercises the field's own cursor movement rather than merely tolerating
+// it doing nothing.
 func TestSourceSelectCompletesThroughRealInput(t *testing.T) {
-	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	r := &gitops.Repo{Root: "/repo", Envs: map[string]*gitops.Env{
+		"prod":      {Name: "prod"},
+		"a-staging": {Name: "a-staging"},
+		"b-staging": {Name: "b-staging"},
+	}}
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "", "prod", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	if m.state != stateSelectEnv || !m.selectingSource {
 		t.Fatalf("state = %v selectingSource = %v, want stateSelectEnv/true (target set, source unset)", m.state, m.selectingSource)
 	}
+	if m.source != "a-staging" {
+		t.Fatalf("source = %q before any keypress, want a-staging (SourcesFor's first sorted candidate)", m.source)
+	}
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	if m.source != "app-staging" {
-		t.Fatalf("source = %q after down, want app-staging (SourcesFor's only candidate)", m.source)
+	if m.source != "b-staging" {
+		t.Fatalf("source = %q after down, want b-staging — down must move the selection off the first candidate", m.source)
 	}
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.state != stateLoading {
 		t.Fatalf("state = %v after enter, want stateLoading — updateSelectEnv did not advance past the source prompt", m.state)
+	}
+	if m.source != "b-staging" {
+		t.Fatalf("source = %q after enter, want the down-selected b-staging to have stuck", m.source)
 	}
 	if cmd == nil {
 		t.Error("enter on the source prompt produced no command (Init's own load)")
