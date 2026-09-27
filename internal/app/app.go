@@ -625,10 +625,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
 		// here the message was forwarded to the top screen — the deploy screen itself — which
 		// fed it to its own viewport, so Esc did nothing and the screen could not be left
-		// (Copilot, PR #72). popAndRelist (Train 2 design PR 4): the operator backing out of a
-		// deploy confirm may have just watched one land on the flight screen before backing out
-		// further, so the pane re-lists at once rather than waiting for the next tick, exactly
-		// like plan.BackMsg and flight.BackMsg below.
+		// (Copilot, PR #72). T3-08: openDeploy no longer pops the tags picker before pushing the
+		// deploy screen, so this pop lands back on that same tags.Model instance — cursor,
+		// filter and loaded rows all intact — rather than on the matrix. popAndRelist still is
+		// the right call: it only re-lists when the pop actually lands on the matrix
+		// (matrixOnTop), which it no longer does on this path, but a no-op relist costs nothing
+		// and keeps this case identical to plan.BackMsg/flight.BackMsg below rather than growing
+		// its own special case.
 		return m.popAndRelist()
 	case plan.BackMsg:
 		return m.popAndRelist()
@@ -1304,11 +1307,17 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.Histor
 	defer cancel()
 	pc, err := m.planFn(ctx, service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
 	if err != nil {
-		return m.pop().noteErr(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
+		// T3-08: the picker stays on the stack (below) — a build failure is a notice on IT,
+		// not a pop back past it to the matrix, since the operator's next move is most likely
+		// picking a different tag from the very list they were just looking at.
+		return m.noteErr(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
-	m = m.pop() // the picker has done its job
+	// T3-08: the picker stays on the stack underneath, unlike before this train — deploy.BackMsg
+	// (esc) pops back onto that same tags.Model instance, cursor/filter/loaded rows intact,
+	// rather than all the way to the matrix. Direct mode is the deploy screen's own shift+d
+	// gesture now (Model.onKey/toggleDirect), never set here.
 	m = m.push(ds)
 	return m, ds.Init()
 }

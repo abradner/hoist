@@ -32,6 +32,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
@@ -187,19 +188,6 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
-// WithDirectMode opens the screen already in direct mode, for the picker's own D path: that
-// gesture (keypress + huh.Confirm, internal/app/tags) has already been completed, and asking
-// for it twice would be ceremony rather than safety. Production is the exception — §4.5 gives
-// it no direct path at all, so the request is dropped and the screen says why.
-func (m Model) WithDirectMode() Model {
-	if m.production {
-		m.notice = fmt.Sprintf("%s is a production env — deploys there always open a PR", m.target)
-		return m
-	}
-	m.mode = ModeDirect
-	return m
-}
-
 // WithView records the service.RepoView the plan was actually built against (New's own caller,
 // openDeploy, gets this from the same service.PlannedChange planFn returned) — carried into
 // StartMsg.View so the root's StartPromotion call checks freshness against the view THIS plan
@@ -235,6 +223,12 @@ func (m Model) scroll(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.notice = ""
+	// T3-08: shift+d toggles direct mode — checked ahead of the msg.String() switch below since
+	// keys.Direct.Matches is the stateless write-binding test (rule 5's shift-vs-caps-lock
+	// distinction), not a string a switch case could match directly.
+	if keys.Direct.Matches(msg) {
+		return m.toggleDirect()
+	}
 	switch msg.String() {
 	case "esc":
 		return m, func() tea.Msg { return BackMsg{} }
@@ -262,32 +256,39 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		m.showYAML = !m.showYAML
 		return m, nil
-	case "m":
-		if m.production {
-			// §4.5: production always goes through a PR. Refusing with the reason beats a
-			// key that silently does nothing.
-			m.notice = fmt.Sprintf("%s is a production env — deploys there always open a PR", m.target)
-			return m, nil
-		}
-		if m.mode == ModeDirect {
-			m.mode = ModePR
-			return m, nil
-		}
-		m.confirmV = false
-		m.confirm = huh.NewConfirm().
-			Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target)).
-			Description("Nothing reviews this before it deploys.").
-			Value(&m.confirmV)
-		// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing: a
-		// Confirm used standalone rather than inside a huh.Form ignores every keypress, so
-		// without this y/n/←/→ all did nothing and this screen could not be switched to
-		// direct mode at all (Copilot, PR #72).
-		m.confirm.WithKeyMap(huh.NewDefaultKeyMap())
-		m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-		m.confirm.WithWidth(m.dialogWidth())
-		return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 	}
 	return m.scroll(msg)
+}
+
+// toggleDirect is shift+d (T3-08, was m): behind a confirmation when turning direct mode ON,
+// silent when turning it back off, and never offered at all for a production target — hidden
+// from the footer and the help overlay (hints/KeyScreen's own registry row), and, pressed
+// anyway, a plain no-op here too. That is politeness only (rule 5's own note): the actual,
+// unbypassable enforcement is engine.DirectCommitGateStep, which refuses a production env
+// regardless of what this screen — or any future caller — believed.
+func (m Model) toggleDirect() (Model, tea.Cmd) {
+	if m.production {
+		return m, nil
+	}
+	if m.mode == ModeDirect {
+		m.mode = ModePR
+		return m, nil
+	}
+	m.confirmV = false
+	m.confirm = huh.NewConfirm().
+		Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target)).
+		Description("Nothing reviews this before it deploys.").
+		Value(&m.confirmV)
+	// WithKeyMap(keys.HuhKeyMap()) is not optional decoration: huh.NewConfirm leaves keymap
+	// zero-valued, and a zero key.Binding matches nothing, so a Confirm used standalone rather
+	// than inside a huh.Form ignores every keypress — without this y/n/←/→ all did nothing and
+	// this screen could not be switched to direct mode at all (Copilot, PR #72). keys.HuhKeyMap
+	// (T3-08, AGENTS.md §9 entry 6) rather than huh.NewDefaultKeyMap() directly, so this dialog's
+	// home/end and MultiSelect-toggle keys agree with every other huh field in the app.
+	m.confirm.WithKeyMap(keys.HuhKeyMap())
+	m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	m.confirm.WithWidth(m.dialogWidth())
+	return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 }
 
 func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
@@ -314,7 +315,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // start emits the confirmation. Confirmed is true only on the direct path, which is only ever
-// reached through the huh.Confirm above (or the picker's own, via WithDirectMode).
+// reached through toggleDirect's own huh.Confirm above.
 func (m Model) start(mode string) tea.Cmd {
 	pl, target, img, view := m.pl, m.target, m.image, m.view
 	confirmed := mode == ModeDirect
@@ -353,7 +354,12 @@ func (m Model) layout() Model {
 	body := max(ui.BodyHeight(m.height, sections)-fixed, 3)
 	m.diff.SetWidth(inner)
 	m.diff.SetHeight(body)
-	resized := m.commits.Width() != inner
+	// resized covers height too (T3-08), not just width: commitLines' own "↓ N more commits"
+	// trailer (v2·05a) is windowed to how many commit lines actually fit the box, so a height
+	// change — not only a width change — must re-render the content, or the trailer's count
+	// (and which commits are shown at all) goes stale the moment the terminal is resized taller
+	// or shorter.
+	resized := m.commits.Width() != inner || m.commits.Height() != body
 	m.commits.SetWidth(inner)
 	m.commits.SetHeight(body)
 	if resized {
@@ -391,7 +397,7 @@ func (m Model) View() string {
 	// Laid out on this copy at render time, so the body viewport is sized against exactly the
 	// sections about to be drawn (a notice set since SetSize, the yaml/commits toggle).
 	m = m.layout()
-	title := "hoist · confirm deploy"
+	title := "hoist · deploy · confirm"
 	if m.showYAML && m.history.Delta != nil {
 		title += " · yaml"
 	}
@@ -439,9 +445,12 @@ func (m Model) headerSection() string {
 	case m.production:
 		chip = m.styles.Production.Render(chip + " · production")
 	case m.mode == ModeDirect:
-		chip = m.styles.Warn.Render(chip)
+		// T3-08 (v2·05a): the chip always also names the key that flips the mode, since shift+d
+		// toggles either way — never a bare capital (rule 5): "shift+d PR" here, "shift+d
+		// direct" in the default (PR-mode) case below.
+		chip = m.styles.Warn.Render(chip) + m.styles.Dim.Render(" · shift+d PR")
 	default:
-		chip = m.styles.Accent.Render(chip)
+		chip = m.styles.Accent.Render(chip) + m.styles.Dim.Render(" · shift+d direct")
 	}
 	return ui.StatusBar(max(m.width-2, 1), left, chip)
 }
@@ -485,7 +494,9 @@ func (m Model) summarySection() string {
 	}
 	if replacing := m.history.replacing(); replacing != "" {
 		if !m.history.Since.IsZero() {
-			replacing += ", live " + ui.Span(m.now().Sub(m.history.Since))
+			// T3-08 (v2·05a): "declared", not "live" — this screen reads the manifest's own
+			// age, never a cluster/Argo state (mirrors tags.Model's own declaredLine wording).
+			replacing += ", declared " + ui.Span(m.now().Sub(m.history.Since))
 		}
 		parts = append(parts, m.styles.Warn.Render(replacing))
 	}
@@ -514,8 +525,13 @@ func tagOrDigest(r image.Ref) string {
 	return d
 }
 
-// commitLines is the commit viewport's content: one line per commit, migration-carrying
-// ones marked, newest first as the delta lists them.
+// commitLines is the commit viewport's content: one line per commit, migration-carrying ones
+// marked, newest first as the delta lists them. T3-08 (v2·05a): windowed to what the viewport's
+// own box actually shows — commits.Height(), set by layout() before this is (re-)called — with
+// a right-aligned "↓ N more commits" trailer for the rest, mirroring tags.Model's own pane
+// convention (T3-07) rather than leaving the operator to scroll blind to find out how much is
+// below the fold. room<=0 (WithHistory runs before the root's first SetSize) shows every commit
+// unwindowed; layout's own resized guard re-renders once a real height is known.
 func (m Model) commitLines() string {
 	d := m.history.Delta
 	if d == nil {
@@ -525,8 +541,13 @@ func (m Model) commitLines() string {
 		return m.styles.Dim.Render("no commits between the two builds")
 	}
 	width := max(m.width-4, 20)
-	lines := make([]string, 0, len(d.Commits)+1)
-	for _, c := range d.Commits {
+	commits, more := d.Commits, 0
+	if room := m.commits.Height(); room > 0 && len(commits) > room {
+		shown := max(room-1, 1)
+		commits, more = commits[:shown], len(d.Commits)-shown
+	}
+	lines := make([]string, 0, len(commits)+1)
+	for _, c := range commits {
 		sha := c.SHA
 		if len(sha) > 7 {
 			sha = sha[:7]
@@ -539,7 +560,12 @@ func (m Model) commitLines() string {
 		}
 		lines = append(lines, line)
 	}
-	if d.Truncated {
+	switch {
+	case more > 0:
+		trailer := fmt.Sprintf("↓ %d more commits", more)
+		pad := max(width-ansi.StringWidth(trailer), 0)
+		lines = append(lines, m.styles.Dim.Render(strings.Repeat(" ", pad)+trailer))
+	case d.Truncated:
 		lines = append(lines, m.styles.Dim.Render(fmt.Sprintf("  …and %d older commits the forge did not list", d.Total-len(d.Commits))))
 	}
 	return strings.Join(lines, "\n")
@@ -607,24 +633,39 @@ func (m Model) footerSection() string {
 	return ui.StatusBar(max(m.width-2, 1), left, right)
 }
 
+// hints is the screen's own footer (T3-08, v2·05a): enter deploys, d toggles yaml/commits when
+// there is history to toggle with, shift+d offers direct mode except on a production target
+// (hidden entirely there, not merely refused — rule 5's "never offered"), ↑/↓ scroll, and esc
+// goes back to the tag picker underneath (T3-08: the picker stays on the stack now, so this is
+// no longer a return to the matrix).
 func (m Model) hints() string {
-	help := "enter deploy · ↑/↓ scroll"
+	hints := []keys.Hint{{B: keys.Enter, Long: "enter deploy", Pri: 0}}
 	if m.history.Delta != nil {
 		if m.showYAML {
-			help += " · d back to commits"
+			hints = append(hints, keys.Hint{B: keys.Diff, Long: "d back to commits", Short: "d commits", Pri: 2})
 		} else {
-			help += " · d yaml diff"
+			hints = append(hints, keys.Hint{B: keys.Diff, Long: "d yaml", Pri: 2})
 		}
 	}
 	if !m.production {
-		help += " · m mode"
+		hints = append(hints, keys.Hint{B: keys.Direct, Long: "shift+d direct", Pri: 1})
 	}
-	help += " · esc back"
-	return ui.StatusBar(m.width, "", m.styles.Hint.Render(help))
+	hints = append(hints,
+		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓", Pri: 3},
+		keys.Hint{B: keys.Log, Long: "l activity", Pri: 4},
+		keys.Hint{B: keys.Esc, Long: "esc back to tags", Short: "esc back", Pri: -1},
+	)
+	return keys.Footer(m.styles, m.width, "", hints, true)
 }
 
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
+func (m Model) KeyScreen() keys.Screen { return keys.ScrDeploy }
+
 // scale is the one-line summary of what will be written — the sentence an operator would say
-// out loud before pressing enter.
+// out loud before pressing enter. "image reference(s)", never "occurrence(s)" (T3-08): the
+// latter is this codebase's own internal term for one image: scalar in one manifest
+// (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an operator is about
+// to press enter on.
 func scale(pl gitops.Plan) string {
 	files := map[string]bool{}
 	n := 0
@@ -635,7 +676,7 @@ func scale(pl gitops.Plan) string {
 		n++
 		files[e.File] = true
 	}
-	return fmt.Sprintf("%s in %s", plural(n, "occurrence"), plural(len(files), "file"))
+	return fmt.Sprintf("%s in %s", plural(n, "image reference"), plural(len(files), "file"))
 }
 
 func plural(n int, word string) string {

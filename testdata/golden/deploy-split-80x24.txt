@@ -1,4 +1,4 @@
-╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
 │ghcr.io/example/web:v9   →   app-production              mode: PR · production│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │rolling out 14 commits · 2 migrations · replacing v202601010101 and v20251212…│
@@ -13,12 +13,12 @@
 │  ccccccc  older change                                                       │
 │  ddddddd  older change                                                       │
 │  eeeeeee  older change                                                       │
-│  fffffff  older change                                                       │
+│                                                            ↓ 4 more commits  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │2 migrations run on this deploy:                                              │
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│writes 3 occurrences in 1 file · digest dddddddddddd           d  see the yaml│
+│writes 3 image references in 1 file · digest dddddddddddd      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                              enter deploy · ↑/↓ scroll · d yaml diff · esc back
+    enter deploy · d yaml · ↑/↓ commits · l activity · esc back to tags · ? help

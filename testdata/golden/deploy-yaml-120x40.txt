@@ -1,7 +1,7 @@
-╭─ hoist · confirm deploy · yaml ──────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · deploy · confirm · yaml ────────────────────────────────────────────────────────────────────────────────────╮
 │ghcr.io/example/web:v9   →   app-production                                                      mode: PR · production│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks                                         │
+│rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 weeks                                     │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │--- a/cluster/apps/app-production/web/app.yaml                                                                        │
 │+++ b/cluster/apps/app-production/web/app.yaml                                                                        │
@@ -35,6 +35,6 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│3 occurrences in 1 file · digest dddddddddddd · verified before commit                              d  back to commits│
+│3 image references in 1 file · digest dddddddddddd · verified before commit                         d  back to commits│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                enter deploy · ↑/↓ scroll · d back to commits · esc back
+                                 enter deploy · d back to commits · ↑/↓ commits · l activity · esc back to tags · ? help

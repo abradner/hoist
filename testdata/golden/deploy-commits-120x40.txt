@@ -1,7 +1,7 @@
-╭─ hoist · confirm deploy ─────────────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────────────────────────────────────────────╮
 │ghcr.io/example/web:v9   →   app-production                                                      mode: PR · production│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks                                         │
+│rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 weeks                                     │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │  4a1c2ef  Add rate limiting to the public API                                                                        │
 │  e9b0d31  Fix N+1 query when resolving digests                                                                       │
@@ -35,6 +35,6 @@
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                                                           │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                                                             │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│writes 3 occurrences in 1 file · digest dddddddddddd                                                   d  see the yaml│
+│writes 3 image references in 1 file · digest dddddddddddd                                              d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                      enter deploy · ↑/↓ scroll · d yaml diff · esc back
+                                            enter deploy · d yaml · ↑/↓ commits · l activity · esc back to tags · ? help

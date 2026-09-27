@@ -1,7 +1,7 @@
 ╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
-│ghcr.io/example/web:v9   →   app-production              mode: PR · production│
+│ghcr.io/example/app:v3   →   app-production          mode: PR · shift+d direct│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 w…│
+│rolling out 14 commits · 2 migrations · replacing v1, declared 4 weeks        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  4a1c2ef  Add rate limiting to the public API                                │
 │  e9b0d31  Fix N+1 query when resolving digests                               │
@@ -9,16 +9,16 @@
 │  1b2d3e4  Bump temporal SDK to 1.31                                          │
 │  6f8a90c  Drop the legacy /v1/export endpoint                                │
 │  a3e91b2  db: backfill events.tenant_id  migration                           │
-│  bbbbbbb  older change                                                       │
-│  ccccccc  older change                                                       │
-│  ddddddd  older change                                                       │
-│  eeeeeee  older change                                                       │
+│  9d2c4e1  Retry the registry HEAD on 429                                     │
+│  c0ffee1  Log the resolved digest at startup                                 │
+│  5e6f7a8  Move health checks to /healthz                                     │
+│  d4c3b2a  Tidy the Dockerfile layers                                         │
 │                                                            ↓ 4 more commits  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │2 migrations run on this deploy:                                              │
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│writes 3 image references in 1 file · digest dddddddddddd      d  see the yaml│
+│writes 3 image references in 1 file · digest 333333333333      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-    enter deploy · d yaml · ↑/↓ commits · l activity · esc back to tags · ? help
+   enter deploy · d yaml · shift+d direct · ↑/↓ · l activity · esc back · ? help
