@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
@@ -72,7 +72,7 @@ type startOpts struct {
 // collapsing the (Drive, error) pair back to the (state, driveFn, err) shape these tests were
 // originally written against, back when a cmd/hoist TUI start adapter (removed in the
 // service-design train's PR F) produced exactly that shape.
-func startForTest(ctx context.Context, svc *service.Service, p gitops.Plan, opts startOpts, progress func(string)) (engine.PromotionState, flight.Driver, error) {
+func startForTest(ctx context.Context, svc *service.Service, p gitops.Plan, opts startOpts, progress func(string)) (engine.PromotionState, session.Driver, error) {
 	var onWaiting func()
 	if progress != nil {
 		onWaiting = func() { progress("waiting for signing approval") }
@@ -97,7 +97,7 @@ func startForTest(ctx context.Context, svc *service.Service, p gitops.Plan, opts
 // clone stands in for what a real GitHub squash-merge does to the base branch the instant a
 // commit sha exists on this promotion: forge.Fake's own MergePR never touches real git (it only
 // flips an in-memory Merged flag), so MergedStep's own Observe — re-run by this driveFn's own
-// engine.DriveStatus walk every tick, per flight.Driver's contract, not only once like
+// engine.DriveStatus walk every tick, per session.Driver's contract, not only once like
 // internal/service.Driver.Run's own loop — would otherwise see origin's base branch never caught up and
 // misreport a genuine revert (M4 hardening finding #1; internal/engine/fixture_test.go's own
 // mergeToBase helper does the identical push for that package's tests). Doing the push as soon
@@ -105,7 +105,7 @@ func startForTest(ctx context.Context, svc *service.Service, p gitops.Plan, opts
 // own grace period hasn't elapsed yet on the very first call that reaches it (so the whole
 // pipeline can complete branch/commit/push/PR-open and the merge itself within one later call,
 // with no separate opportunity to react in between).
-func driveToDone(t *testing.T, clone string, driveFn flight.Driver, start engine.PromotionState, maxIters int) engine.PromotionState {
+func driveToDone(t *testing.T, clone string, driveFn session.Driver, start engine.PromotionState, maxIters int) engine.PromotionState {
 	t.Helper()
 	cur := start
 	var lastErr error

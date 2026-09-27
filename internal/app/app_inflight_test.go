@@ -13,30 +13,42 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
-// The in-flight adaptor is optional: a root built without WithInFlight must boot. The
-// generation-stamped listing helper once dereferenced a nil List (Copilot, #124). Asserted
-// on the helper and the pop path directly rather than by draining Init, whose batch holds a
-// real 30-second tick.
+// The in-flight adaptor is optional: a root built without a Service must boot. session.New's own
+// nil-backend convention (ErrNoBackend from Start/Resume, a no-op Init) is what replaces the old
+// per-func nil checks this test used to drive directly.
 func TestInitWithoutInFlightDoesNotPanic(t *testing.T) {
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil, apprestart.Funcs{})
-	if cmd := root.listInFlightAt(root.listGen); cmd != nil {
-		t.Fatal("no List wired: the listing command must be nil, not a call on nil")
+	cmd := root.Init()
+	if cmd == nil {
+		t.Fatal("Init produced no command at all (the background-colour request, at least, should always fire)")
+	}
+	// Init's own command must not panic when it's actually run — the regression this test
+	// guards (Copilot, #124): a nil List dereferenced inside the generation-stamped listing
+	// helper. tea.Batch collapses to the bare surviving cmd when the others (screenCmd,
+	// session.Controller.Init with a nil backend) are nil, so this does not assume a
+	// tea.BatchMsg shape — only that running whatever comes back is safe.
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			_ = c() // must not panic
+		}
 	}
 	if _, cmd := root.popAndRelist(); cmd != nil {
-		t.Fatal("no List wired: popAndRelist must issue nothing")
-	}
-	if _, cmd := root.listInFlight(); cmd != nil {
-		t.Fatal("no List wired: listInFlight must issue nothing")
+		t.Fatal("no backend wired: popAndRelist must issue nothing")
 	}
 }
 
 // Two listings in flight at once: the older answer, landing last, must not paint an older
-// snapshot over the newer pane. Each listing carries its generation; the root keeps the
-// current one and drops the rest.
+// snapshot over the newer pane. session.Controller's own listGen is what guards this
+// (TestListGenDropsOlderListing, internal/app/session/controller_test.go); this is the
+// app-level integration proof that the matrix pane actually reflects the guard.
 func TestAnOlderListingCannotOverwriteANewerOne(t *testing.T) {
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
@@ -53,30 +65,25 @@ func TestAnOlderListingCannotOverwriteANewerOne(t *testing.T) {
 		return []service.Listed{{State: st, Done: false, Statuses: []engine.StepStatus{{Step: engine.StepBranched, Observation: engine.Observation{Satisfied: true}}}}}, nil
 	}
 	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, svcWithInFlight(fakeInFlight{List: list}), Promotion{}, nil, apprestart.Funcs{})
-	var m tea.Model = root
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	tm0, _ := root.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	mm := tm0.(Model)
 
-	listingCmd := func(cmd tea.Cmd) tea.Cmd {
-		for _, c := range cmd().(tea.BatchMsg) {
-			if c == nil {
-				continue
-			}
-			if _, ok := c().(inFlightMsg); ok {
-				return c
-			}
-		}
-		t.Fatal("no listing in the tick's batch")
-		return nil
-	}
-	var cmd tea.Cmd
-	m, cmd = m.Update(inFlightTickMsg{})
-	older := listingCmd(cmd)
-	m, cmd = m.Update(inFlightTickMsg{})
-	newer := listingCmd(cmd)
+	// Two explicit relists, through the real popAndRelist path (a no-op pop on this single-
+	// screen stack, then Relist) — in place of the old inFlightTickMsg-driven pair.
+	// session.Controller.Relist bumps its own listGen every call, and each hop below threads the
+	// returned Model forward so the second really is a later generation than the first, the same
+	// guard a real tick chain uses.
+	mm, olderCmd := mm.popAndRelist()
+	mm, newerCmd := mm.popAndRelist()
+	// The fixture's own list() answers "first00001" on its first real call, "second0002" on
+	// every one after — so olderCmd must actually be CALLED (not just constructed) before
+	// newerCmd for the two to carry the values their names promise.
+	olderMsg, newerMsg := olderCmd(), newerCmd()
 
 	// Newest answers first, then the stale one.
-	m, _ = m.Update(newer())
-	m, _ = m.Update(older())
+	var m tea.Model = mm
+	m, _ = m.Update(newerMsg)
+	m, _ = m.Update(olderMsg)
 	got := m.(Model).stack[0].(matrixScreen).InFlight()
 	if len(got) != 1 || got[0].ID != "second0002" {
 		t.Fatalf("pane shows %+v; want the newer listing only", got)
