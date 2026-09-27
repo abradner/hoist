@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
@@ -147,66 +146,6 @@ func TestPlanDigestOverrideBeatsPods(t *testing.T) {
 	}
 }
 
-// F4 regression: registryEntryFor and entryAuthConfig, together, are what used to be a
-// single registryFor call applied to every repo — the bug. registryEntryFor picks by
-// longest matching prefix, never the first entry that merely overlaps; entryAuthConfig
-// must never leak one entry's cluster secret or op ref onto a repo a different entry (or
-// no entry) covers.
-func TestRegistryEntryForPicksLongestMatchNeverFirstOverlap(t *testing.T) {
-	registries := []config.RegistryConfig{
-		{Prefix: "ghcr.io/", Auth: []string{"env"}, Op: "op://vault/broad/field"},
-		{Prefix: "ghcr.io/example/web", Auth: []string{"cluster"}, Cluster: config.ClusterSecret{Namespace: "app-staging", Secret: "web-pull"}},
-	}
-	cases := []struct {
-		repo, wantPrefix string
-	}{
-		{"ghcr.io/example/web", "ghcr.io/example/web"}, // matches both; the longer, more specific entry wins
-		// "ghcr.io/example/web" carries no trailing slash, so it must not cover a
-		// same-string-prefixed but distinct repo path any more than a bare host prefix
-		// may cover a different host (TestRegistryEntryForRejectsHostConfusion) — the
-		// boundary rule in gitops.MatchesPrefix is the same rule at every path segment,
-		// not a host-only special case. "web" and "webhooks" are different image repos.
-		{"ghcr.io/example/webhooks", "ghcr.io/"},  // falls through to the broad entry, not the web-scoped one
-		{"ghcr.io/example/marketing", "ghcr.io/"}, // only the broad entry covers it
-		{"quay.io/example/other", ""},             // no entry covers it at all
-	}
-	for _, tc := range cases {
-		e := registryEntryFor(registries, tc.repo)
-		got := ""
-		if e != nil {
-			got = e.Prefix
-		}
-		if got != tc.wantPrefix {
-			t.Errorf("registryEntryFor(%q) = %q, want %q", tc.repo, got, tc.wantPrefix)
-		}
-	}
-
-	// entryAuthConfig: the entry decides its own values only. The broad ghcr.io/ entry's
-	// op ref must never appear for a repo the specific web entry covers, and the web
-	// entry's cluster secret must never appear for a repo only the broad entry covers.
-	webEntry := registryEntryFor(registries, "ghcr.io/example/web")
-	auth, clusterSecret, opRef := entryAuthConfig(webEntry, resolveOptions{})
-	if len(auth) != 1 || auth[0] != registry.AuthCluster || clusterSecret != "app-staging/web-pull" || opRef != "" {
-		t.Errorf("web entry: auth=%v clusterSecret=%q opRef=%q, want cluster/app-staging/web-pull/\"\"", auth, clusterSecret, opRef)
-	}
-	broadEntry := registryEntryFor(registries, "ghcr.io/example/marketing")
-	auth, clusterSecret, opRef = entryAuthConfig(broadEntry, resolveOptions{})
-	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "" || opRef != "op://vault/broad/field" {
-		t.Errorf("broad entry: auth=%v clusterSecret=%q opRef=%q, want env/\"\"/op://vault/broad/field", auth, clusterSecret, opRef)
-	}
-	// A repo no entry covers gets the default chain, and neither entry's cluster secret
-	// or op ref.
-	auth, clusterSecret, opRef = entryAuthConfig(nil, resolveOptions{})
-	if len(auth) != len(registry.DefaultAuthOrder) || clusterSecret != "" || opRef != "" {
-		t.Errorf("unmatched repo: auth=%v clusterSecret=%q opRef=%q, want the default chain and nothing else", auth, clusterSecret, opRef)
-	}
-	// An explicit flag overrides every entry outright, for any repo.
-	auth, clusterSecret, opRef = entryAuthConfig(webEntry, resolveOptions{auth: []registry.AuthSource{registry.AuthEnv}, clusterSecret: "x/y", opRef: "op://flag/a/b"})
-	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "x/y" || opRef != "op://flag/a/b" {
-		t.Errorf("flag override: auth=%v clusterSecret=%q opRef=%q", auth, clusterSecret, opRef)
-	}
-}
-
 // F4 regression, end to end: two repos, each covered by a different registries[] entry,
 // must resolve through two distinct Clients, each carrying only its own entry's
 // credentials — never a merged chain built from whichever entry a single global lookup
@@ -273,39 +212,6 @@ registries:
 
 // A scaled-to-zero repo with a bare tag goes to the registry, and the section reports
 // which credential source authenticated — by name.
-// F9 regression: buildResolveFunc's own comment claims "resolutionOptions runs once here
-// since it does not depend on the source env", but the closure it returned called
-// resolutionOptions(cfg, rc, ...) fresh on every invocation — reading rc, a pointer,
-// however it stood at call time. Prove it now runs exactly once by mutating rc's
-// kube.context after building the closure: with resolutionOptions computed once at build
-// time, that later mutation must have no effect on the context runResolution actually
-// requests.
-func TestBuildResolveFuncComputesOptionsOnce(t *testing.T) {
-	contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-	rc := &config.RepoConfig{DigestSources: []string{"pods"}, Kube: config.KubeConfig{Context: "first-context"}}
-	fn := buildResolveFunc(&config.Config{}, rc, []string{"ghcr.io/"})
-
-	// Mutate rc after the closure is built. A per-call resolutionOptions would pick this
-	// up on the next invocation; a once-computed opts must not.
-	rc.Kube.Context = "second-context"
-
-	repo := &gitops.Repo{Root: "x", Envs: map[string]*gitops.Env{"app-staging": {Name: "app-staging"}}}
-	if _, err := fn(context.Background(), repo, "app-staging", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fn(context.Background(), repo, "app-staging", nil); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range *contexts {
-		if c != "first-context" {
-			t.Errorf("kube context requested = %q, want first-context on every call (resolutionOptions must run once): %v", c, *contexts)
-		}
-	}
-	if len(*contexts) != 2 {
-		t.Fatalf("expected 2 calls (one per fn invocation), got %d: %v", len(*contexts), *contexts)
-	}
-}
-
 func TestPlanFallsBackToRegistryAndReportsAuthSource(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "cluster/apps/web-app-staging-app.yaml", argoApp("web-staging", "cluster/apps/app-staging/web", "app-staging"))
@@ -506,42 +412,41 @@ registries:
     cluster: { namespace: app-staging, secret: ghcr-pull }
     op: op://vault/item/field
 `)
-	f := resolveFlags{}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rc := cfg.Repos[0]
-	opts, err := resolutionOptions(cfg, &rc, f)
+	opts, err := service.NewResolveOptions(cfg, &rc, "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.kubeContext != "from-config" || len(opts.order) != 2 || opts.order[0] != resolve.SourceManifest || opts.order[1] != resolve.SourceRegistry {
+	if opts.KubeContext != "from-config" || len(opts.Order) != 2 || opts.Order[0] != resolve.SourceManifest || opts.Order[1] != resolve.SourceRegistry {
 		t.Errorf("repo defaults not applied: %+v", opts)
 	}
-	// F4: resolutionOptions no longer merges a registries[] entry into one global chain —
-	// that per-repo decision is registryEntryFor/entryAuthConfig's job, in runResolution.
+	// F4: NewResolveOptions no longer merges a registries[] entry into one global chain —
+	// that per-repo decision is registryEntryFor/entryAuthConfig's job, in resolveImages.
 	// Absent a flag, auth/clusterSecret/opRef stay at the zero value here.
-	if len(opts.auth) != 0 || opts.clusterSecret != "" || opts.opRef != "" {
+	if len(opts.Auth) != 0 || opts.ClusterSecret != "" || opts.OpRef != "" {
 		t.Errorf("registry fields should be unset absent a flag: %+v", opts)
 	}
-	if len(opts.registries) != 1 || opts.registries[0].Prefix != "ghcr.io/example/" {
-		t.Errorf("registries not carried through for per-repo lookup: %+v", opts.registries)
+	if len(opts.Registries) != 1 || opts.Registries[0].Prefix != "ghcr.io/example/" {
+		t.Errorf("registries not carried through for per-repo lookup: %+v", opts.Registries)
 	}
 	// Flags win, one by one, and apply to every repo (entryAuthConfig).
-	opts, err = resolutionOptions(cfg, &rc, resolveFlags{kubeContext: "flag", digestSources: "none", registryAuth: "env", clusterSecret: "x/y", opRef: "op://a/b/c"})
+	opts, err = service.NewResolveOptions(cfg, &rc, "none", "env", "x/y", "op://a/b/c", "flag")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.kubeContext != "flag" || opts.order != nil || len(opts.auth) != 1 || opts.auth[0] != registry.AuthEnv || opts.clusterSecret != "x/y" || opts.opRef != "op://a/b/c" {
+	if opts.KubeContext != "flag" || opts.Order != nil || len(opts.Auth) != 1 || opts.Auth[0] != registry.AuthEnv || opts.ClusterSecret != "x/y" || opts.OpRef != "op://a/b/c" {
 		t.Errorf("flags did not win: %+v", opts)
 	}
 	// No config at all: the documented defaults.
-	opts, err = resolutionOptions(&config.Config{}, nil, resolveFlags{})
+	opts, err = service.NewResolveOptions(&config.Config{}, nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.kubeContext != "" || len(opts.order) != 3 || len(opts.auth) != 0 || opts.clusterSecret != "" || opts.opRef != "" || len(opts.registries) != 0 {
+	if opts.KubeContext != "" || len(opts.Order) != 3 || len(opts.Auth) != 0 || opts.ClusterSecret != "" || opts.OpRef != "" || len(opts.Registries) != 0 {
 		t.Errorf("defaults: %+v", opts)
 	}
 
@@ -618,42 +523,6 @@ spec:
         - name: web
           image: ` + img + `
 `
-}
-
-// A direct Head/Tags call on the per-repo registry (M6's tag picker will make them) must be
-// routed to the client scoped to that repo and must error for a repo with no registry —
-// never fall through to whichever client happened to be built first (F4).
-func TestMultiRegistryRoutesDirectCallsByRepo(t *testing.T) {
-	a := &registry.Fake{Digests: map[string]string{"ghcr.io/acme/app:v1": "sha256:" + strings.Repeat("a", 64)}}
-	b := &registry.Fake{Digests: map[string]string{"quay.io/other/app:v1": "sha256:" + strings.Repeat("b", 64)}}
-	m := &multiRegistry{byRepo: map[string]registry.Registry{"ghcr.io/acme/app": a, "quay.io/other/app": b}, primary: a}
-	ctx := context.Background()
-	if d, err := m.Head(ctx, image.Ref{Repo: "quay.io/other/app", Tag: "v1"}); err != nil || !strings.HasPrefix(d, "sha256:bbbb") {
-		t.Fatalf("Head routed wrong: %q, %v", d, err)
-	}
-	if _, err := m.Head(ctx, image.Ref{Repo: "ghcr.io/nobody/app", Tag: "v1"}); err == nil || !strings.Contains(err.Error(), "no registry configured") {
-		t.Fatalf("unmatched repo: got %v, want no-registry error", err)
-	}
-	if _, err := m.Tags(ctx, "ghcr.io/nobody/app"); err == nil {
-		t.Fatal("Tags for an unmatched repo must error, not use the primary client")
-	}
-}
-
-// Codex P1 (draft #29 pass): a bare-host prefix like "ghcr.io" must never match a
-// different host that merely shares its leading bytes. Before the fix, registryEntryFor
-// used a raw strings.HasPrefix, so an entry configured for "ghcr.io" (no trailing slash)
-// — with an op ref or a cluster secret attached — matched "ghcr.io.attacker.example/…"
-// too, and entryAuthConfig would hand that host the entry's credentials.
-func TestRegistryEntryForRejectsHostConfusion(t *testing.T) {
-	registries := []config.RegistryConfig{
-		{Prefix: "ghcr.io", Op: "op://vault/ghcr/field"}, // no trailing slash, deliberately
-	}
-	if e := registryEntryFor(registries, "ghcr.io.attacker.example/org/app"); e != nil {
-		t.Fatalf("registryEntryFor matched an attacker-controlled host via prefix confusion: %+v", e)
-	}
-	if e := registryEntryFor(registries, "ghcr.io/abradner/app"); e == nil || e.Op != "op://vault/ghcr/field" {
-		t.Fatalf("registryEntryFor(real repo) = %+v, want the ghcr.io entry", e)
-	}
 }
 
 // With two registries[] entries whose repos both fail every auth link, the diagnostic names

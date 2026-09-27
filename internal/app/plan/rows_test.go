@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
 )
 
@@ -225,16 +227,6 @@ func TestRenderDiff(t *testing.T) {
 	}
 }
 
-func TestIsProduction(t *testing.T) {
-	envs := config.EnvsConfig{Production: []string{"app-production"}}
-	if !IsProduction("app-production", envs) {
-		t.Error("app-production should be production")
-	}
-	if IsProduction("app-staging", envs) {
-		t.Error("app-staging should not be production")
-	}
-}
-
 func TestSkippedStaging(t *testing.T) {
 	envs := config.EnvsConfig{
 		Production: []string{"app-production", "app-production-2"},
@@ -273,16 +265,16 @@ func TestTargetsFor(t *testing.T) {
 // Summary must make the same distinction rather than reporting both as "not consulted",
 // which reads as "the registry was never asked" when it was asked and simply failed.
 func TestSummaryDistinguishesNotConsultedFromAllFailed(t *testing.T) {
-	notConsulted := Summary(ResolveOutcome{})
+	notConsulted := Summary(service.Resolution{})
 	if !containsLine(notConsulted, "registry not consulted") {
 		t.Errorf("no attempt at all: got %v, want a \"registry not consulted\" line", notConsulted)
 	}
-	allFailed := Summary(ResolveOutcome{RegistryConsulted: true, RegistryAuthTried: []string{"env", "keychain"}})
+	allFailed := Summary(service.Resolution{Consulted: true, AuthTried: []registry.AuthSource{registry.AuthEnv, registry.AuthKeychain}})
 	want := "registry: consulted; all auth sources failed (env, keychain)"
 	if !containsLine(allFailed, want) {
 		t.Errorf("consulted, all failed: got %v, want a line %q", allFailed, want)
 	}
-	won := Summary(ResolveOutcome{RegistryConsulted: true, RegistryAuth: "cluster"})
+	won := Summary(service.Resolution{Consulted: true, AuthUsed: "cluster"})
 	if !containsLine(won, "registry auth: cluster") {
 		t.Errorf("consulted, cluster won: got %v, want \"registry auth: cluster\"", won)
 	}

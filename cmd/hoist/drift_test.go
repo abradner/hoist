@@ -7,6 +7,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/k8s"
@@ -26,7 +27,13 @@ func TestDriftFuncAsksPodsOnlyWhateverTheConfigSays(t *testing.T) {
 	cfg := &config.Config{Repos: []config.RepoConfig{rc}}
 
 	contexts, authCfgs := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-	if _, err := buildResolveFunc(cfg, &rc, rc.Promotable)(context.Background(), r, "app-staging", nil); err != nil {
+	opts, err := service.NewResolveOptions(cfg, &rc, "", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := service.Settings{RepoDir: absFixture(t), Promotable: rc.Promotable, Resolve: opts}
+	svc := service.New(set, serviceDeps())
+	if _, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: "app-staging", Target: "app-production"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(*contexts) != 0 || len(*authCfgs) != 0 {

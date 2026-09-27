@@ -8,6 +8,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -27,13 +28,12 @@ import (
 // manifest there; with forgeErr set it returns that error and the screen says the age is
 // unavailable. blameRef is the checkout's HEAD sha (line numbers were read from that tree);
 // the default branch is the fallback when HEAD was never pushed; "" when unknown.
-// base is the root --base (#105): the blame fallback for a HEAD that was never pushed.
-// kubeContext is the root --kube-context, else the repo's kube.context, for the cluster
-// credential source when a registry entry names one. reg carries the root
-// --registry-auth/--cluster-secret/--op-ref (#132), applied to every image repo's registry
-// client exactly as buildTagsFunc and runResolution apply them; only its auth,
-// clusterSecret and opRef are read.
-func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base, kubeContext string, reg resolveOptions) history.Funcs {
+// base is the root --base (#105): the blame fallback for a HEAD that was never pushed. svc is
+// the session's own Service (its Settings carry the root --kube-context/--registry-auth/
+// --cluster-secret/--op-ref, #132): historyAdaptor.registry below calls svc.RegistryFor exactly
+// as buildTagsFunc does, so both adaptors pick the same registries[] entry the identical way
+// (F4) rather than each re-deriving it.
+func buildHistoryFuncs(rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base string, svc *service.Service) history.Funcs {
 	if rc == nil {
 		return history.Funcs{}
 	}
@@ -64,14 +64,7 @@ func buildHistoryFuncs(cfg *config.Config, rc *config.RepoConfig, r *gitops.Repo
 	if len(rc.Apps) == 0 {
 		return history.Funcs{Mapped: func(string) bool { return false }, LiveAge: liveAge}
 	}
-	var registries []config.RegistryConfig
-	if cfg != nil {
-		registries = cfg.Registries
-	}
-	// kubeContext arrives already resolved (the root flag, else the selected repo's own
-	// kube.context — settingsFor/runTUI's eff.kubeContext), so there is no fallback left to
-	// apply here.
-	h := &historyAdaptor{rc: rc, kubeContext: kubeContext, registries: registries, reg: reg, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
+	h := &historyAdaptor{rc: rc, svc: svc, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -96,10 +89,8 @@ type registryOrErr struct {
 
 // historyAdaptor holds the memoised clients and the cache behind buildHistoryFuncs.
 type historyAdaptor struct {
-	rc          *config.RepoConfig
-	kubeContext string // already resolved: the root --kube-context, else the repo's own configured context
-	registries  []config.RegistryConfig
-	reg         resolveOptions // the root credential-chain overrides (#132); auth/clusterSecret/opRef only
+	rc  *config.RepoConfig
+	svc *service.Service
 
 	mu       sync.Mutex
 	forges   map[string]forgeOrErr    // app repo -> forge
@@ -160,15 +151,7 @@ func (h *historyAdaptor) registry(imageRepo string) (registry.Registry, error) {
 	if re, ok := h.regs[imageRepo]; ok {
 		return re.r, re.err
 	}
-	entry := registryEntryFor(h.registries, imageRepo)
-	auth, clusterSecret, opRef := entryAuthConfig(entry, h.reg)
-	regCfg := registry.AuthConfig{Order: auth, OpRef: opRef}
-	if clusterSecret != "" && has(auth, registry.AuthCluster) {
-		if cluster, _, err := newCluster(h.kubeContext); err == nil {
-			regCfg.ClusterSecret, regCfg.Cluster = clusterSecret, cluster
-		}
-	}
-	reg, err := newRegistry(regCfg)
+	reg, err := h.svc.RegistryFor(imageRepo)
 	h.regs[imageRepo] = registryOrErr{r: reg, err: err}
 	return reg, err
 }

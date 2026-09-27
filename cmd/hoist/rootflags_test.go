@@ -11,6 +11,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -148,12 +149,21 @@ func TestRootDigestSourcesReachTheTUIResolveFunc(t *testing.T) {
 			t.Fatalf("%v: exit %d, want the runner's 42", tc.args, code)
 		}
 		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-		out, err := buildResolveFuncWith(gotCfg, got.cfg, got.promotable, got.resolveFlags())(context.Background(), r, "app-staging", nil)
+		opts, err := service.NewResolveOptions(gotCfg, got.cfg, got.resolve.digestSources, got.resolve.registryAuth, got.resolve.clusterSecret, got.resolve.opRef, got.kubeContext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc := service.New(service.Settings{RepoDir: got.repo, Promotable: got.promotable, Resolve: opts}, serviceDeps())
+		pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: "app-staging", Target: "app-production"})
 		if err != nil {
 			t.Fatalf("%v: resolve: %v", tc.args, err)
 		}
-		if len(*contexts) != tc.clusters || (tc.clusters == 0) != (len(out.Resolutions) == 0) {
-			t.Errorf("%v: clusters opened %v, resolutions %d; want %d clusters", tc.args, *contexts, len(out.Resolutions), tc.clusters)
+		resCount := 0
+		if pc.Resolution != nil {
+			resCount = len(pc.Resolution.Res)
+		}
+		if len(*contexts) != tc.clusters || (tc.clusters == 0) != (resCount == 0) {
+			t.Errorf("%v: clusters opened %v, resolutions %d; want %d clusters", tc.args, *contexts, resCount, tc.clusters)
 		}
 	}
 }
@@ -233,13 +243,14 @@ registries:
 		if code := run(tc.args, io.Discard, io.Discard); code != 42 {
 			t.Fatalf("%v: exit %d, want 42", tc.args, code)
 		}
-		regOpts, err := resolutionOptions(gotCfg, got.cfg, got.resolveFlags())
+		regOpts, err := service.NewResolveOptions(gotCfg, got.cfg, got.resolve.digestSources, got.resolve.registryAuth, got.resolve.clusterSecret, got.resolve.opRef, got.kubeContext)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, authCfgs := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-		buildTagsFunc(gotCfg, got.cfg, got.kubeContext, regOpts)("ghcr.io/example/app")
-		h := buildHistoryFuncs(gotCfg, got.cfg, nil, &forge.Fake{}, nil, "head", got.base, got.kubeContext, regOpts)
+		svc := service.New(service.Settings{Config: gotCfg, Repo: got.cfg, KubeContext: got.kubeContext, Resolve: regOpts}, serviceDeps())
+		buildTagsFunc(got.cfg, svc)("ghcr.io/example/app")
+		h := buildHistoryFuncs(got.cfg, nil, &forge.Fake{}, nil, "head", got.base, svc)
 		_, _ = h.Revision(context.Background(), image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"})
 		if len(*authCfgs) != 2 {
 			t.Fatalf("%v: registries built %d, want the picker's and the history's", tc.args, len(*authCfgs))

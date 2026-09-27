@@ -20,6 +20,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -34,7 +35,7 @@ import (
 // §4.8's "cmd/hoist owns the adapter" rule: this package only ever sees the plain function
 // type, never pkg/git, pkg/forge or internal/config themselves). It is called from inside a
 // tea.Cmd (see the plan.StartMsg case below), never directly from Update, since it can talk to
-// a real git remote and forge (AGENTS.md §4.3) — exactly like plan.ResolveFunc.
+// a real git remote and forge (AGENTS.md §4.3) — exactly like plan.Func.
 //
 // A non-nil error means the plan cannot start right now (a real in-flight conflict, missing
 // github config, a claim failure, or every ticked edit already being a no-op — see
@@ -154,7 +155,7 @@ type Model struct {
 	repo       *gitops.Repo
 	promotable []string
 	envs       config.EnvsConfig
-	resolveFn  plan.ResolveFunc
+	planFn     plan.Func
 	tagsFn     tags.BuildFunc
 	// restartFn is everything the restart screen needs from the cluster, supplied by the root's
 	// own caller (cmd/hoist) so this package opens no connection of its own (AGENTS.md §4.8).
@@ -238,19 +239,19 @@ type Model struct {
 // New returns the root model with the matrix screen on the stack. promotable lists the
 // image repo prefixes that count as first-party (the same list hoist plan --promotable
 // takes). envs is the selected repo's envs config (production, pairs), zero-valued when
-// there is none. resolveFn is what the plan screen calls to resolve digests; nil runs it in
-// "digest sources: none" mode throughout. promo is what confirming a plan and driving the
-// flight screen need — see Promotion's own doc comment. tagsFn is what the tag-picker screen
-// calls to list and fetch registry/forge data for one image repo; nil opens the picker with no
-// data source (it reports the resulting error itself, same as a resolveFn failure does for
-// plan). The theme starts dark and is replaced when the terminal reports its background.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolveFn plan.ResolveFunc, promo Promotion, tagsFn tags.BuildFunc, restartFn apprestart.Funcs) Model {
+// there is none. planFn is svc.Plan (internal/service): what the plan screen calls to build a
+// promotion's gitops.Plan, and what openDeploy below calls directly to build a deploy's. promo
+// is what confirming a plan and driving the flight screen need — see Promotion's own doc
+// comment. tagsFn is what the tag-picker screen calls to list and fetch registry/forge data for
+// one image repo; nil opens the picker with no data source (it reports the resulting error
+// itself). The theme starts dark and is replaced when the terminal reports its background.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, planFn plan.Func, promo Promotion, tagsFn tags.BuildFunc, restartFn apprestart.Funcs) Model {
 	m := Model{
 		styles:         ui.NewStyles(true),
 		repo:           repo,
 		promotable:     promotable,
 		envs:           envs,
-		resolveFn:      resolveFn,
+		planFn:         planFn,
 		startPromotion: promo.Start,
 		poll:           promo.Poll,
 		openURL:        promo.OpenURL,
@@ -259,7 +260,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, resolve
 		restartFn:      restartFn,
 	}
 	// The matrix starts without a cluster question; WithDrift supplies one. Deriving it from
-	// resolveFn (as before #122) collapsed a partial rollout to the one digest a plan picks.
+	// planFn (as before #122) collapsed a partial rollout to the one digest a plan picks.
 	return m.push(matrixScreen{matrix.New(repo, promotable, envs, nil)})
 }
 
@@ -542,7 +543,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.envs.Pairs != nil {
 			target = m.envs.Pairs[msg.Source]
 		}
-		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.resolveFn, m.history)}
+		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.planFn, m.history)}
 		m = m.push(ps)
 		return m, ps.Init()
 	case deploy.BackMsg:
@@ -636,7 +637,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// buildPromotionForConfirm (cmd/hoist/promote.go) can talk to a real git
 			// remote and forge — the claim-then-rescan one-in-flight check re-observes
 			// any conflicting promotion for this target env — so this runs off the
-			// Update call stack (AGENTS.md §4.3), exactly like plan.ResolveFunc's own
+			// Update call stack (AGENTS.md §4.3), exactly like plan.Func's own
 			// loadCmd.
 			defer cancel()
 			if cancelDeadline != nil {
@@ -944,7 +945,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tagsFn != nil {
 			mapped, regTagsFn, gitTagsFn, metaFn = m.tagsFn(msg.ImageRepo)
 		}
-		production := plan.IsProduction(msg.Target, m.envs)
+		production := m.envs.IsProduction(msg.Target)
 		stagingEnv, stagingTags, hasMismatch := tags.StagingMismatch(m.repo, msg.ImageRepo, msg.Target, m.envs)
 		opts := tags.Options{
 			Mapped: mapped, Production: production,
@@ -1081,7 +1082,7 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m.withMatrixNotice(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
 	}
-	rs := restartScreen{apprestart.New(target, family, names, plan.IsProduction(target, m.envs), m.restartFn, m.styles)}
+	rs := restartScreen{apprestart.New(target, family, names, m.envs.IsProduction(target), m.restartFn, m.styles)}
 	m = m.push(rs)
 	return m, rs.Init()
 }
@@ -1109,15 +1110,21 @@ func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 // A build failure is a notice on the matrix rather than a screen: the operator picked a tag
 // that cannot be written (an unpinned ref, a repo with no occurrence in the env), and the
 // useful response is the reason, not an empty confirm screen.
+//
+// planFn (svc.Plan) is called directly here, off the Update call stack notwithstanding —
+// AGENTS.md §4.3's own reasoning is about a call that can talk to a cluster or registry; a
+// deploy plan never resolves a digest (the reference is caller-supplied), so Plan's own Deploy
+// branch is exactly as pure as gitops.BuildDeployPlan was. Plan also attaches
+// WarnDeployIntoProduction itself now, so the confirm screen and the PR body it later renders
+// agree with the CLI's dry run by construction (service:Plan, PR B) rather than by both callers
+// remembering to attach it.
 func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
-	pl, err := gitops.BuildDeployPlan(m.repo, target, ref, m.promotable)
+	pc, err := m.planFn(context.Background(), service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
 	if err != nil {
 		return m.pop().withMatrixNotice(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
-	// The identical warning cmd/hoist's own `deploy` attaches, from the same helper, so the
-	// confirm screen and the PR body it later renders agree with the CLI's dry run.
-	plan.WarnDeployIntoProduction(&pl, m.envs)
+	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h)}
 	if direct {
 		ds = deployScreen{ds.WithDirectMode()}

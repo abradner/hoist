@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
@@ -321,28 +322,32 @@ func RenderDiff(root string, edits []gitops.Edit, ticked map[string]bool) (strin
 
 // Summary is the resolution section: which cluster context and registry credential source
 // were consulted (by name only, AGENTS.md §4.4), then each resolved repo's source and
-// detail, in repo order. It renders the same facts cmd/hoist's resolutionReport.print does.
-func Summary(o ResolveOutcome) []string {
-	lines := make([]string, 0, len(o.Resolutions)+2)
+// detail, in repo order. It renders the same facts cmd/hoist's printResolution does.
+func Summary(o service.Resolution) []string {
+	lines := make([]string, 0, len(o.Res)+2)
 	if o.KubeContext != "" {
 		lines = append(lines, "kube context "+o.KubeContext)
 	} else {
 		lines = append(lines, "cluster not consulted")
 	}
 	switch {
-	case o.RegistryAuth != "":
-		lines = append(lines, "registry auth: "+o.RegistryAuth)
-	case o.RegistryConsulted:
+	case o.AuthUsed != "":
+		lines = append(lines, "registry auth: "+o.AuthUsed)
+	case o.Consulted:
 		// The registry was asked — every link in the chain, including the anonymous
 		// fallback, failed. Distinct from "not consulted" below: a resolution warning
 		// elsewhere already says the registry was asked, so this label must agree
-		// (mirrors cmd/hoist's resolutionReport.print, AGENTS.md §4.10).
-		lines = append(lines, "registry: consulted; all auth sources failed ("+strings.Join(o.RegistryAuthTried, ", ")+")")
+		// (mirrors cmd/hoist's printResolution, AGENTS.md §4.10).
+		authNames := make([]string, 0, len(o.AuthTried))
+		for _, a := range o.AuthTried {
+			authNames = append(authNames, string(a))
+		}
+		lines = append(lines, "registry: consulted; all auth sources failed ("+strings.Join(authNames, ", ")+")")
 	default:
 		lines = append(lines, "registry not consulted")
 	}
-	for _, repo := range resolve.Repos(o.Resolutions) {
-		r := o.Resolutions[repo]
+	for _, repo := range resolve.Repos(o.Res) {
+		r := o.Res[repo]
 		if !r.Resolved() {
 			lines = append(lines, fmt.Sprintf("  %s  unresolved", repo))
 			continue
@@ -365,42 +370,13 @@ func TargetsFor(r *gitops.Repo, source string) []string {
 	return out
 }
 
-// IsProduction reports whether env is listed in the repo's envs.production (AGENTS.md
-// §4.5): direct mode is never offered for it, whatever the source env.
-func IsProduction(env string, envs config.EnvsConfig) bool {
-	return envs.IsProduction(env)
-}
-
-// WarnDeployIntoProduction attaches gitops.WarnProductionTarget to a deploy plan whose target
-// env the operator's own config lists as production, and is the single place that decision is
-// made: cmd/hoist's `deploy` and the TUI's own deploy screen both call it, because a warning
-// only one of the two entry points attaches is a warning half the operators never see — which
-// is exactly the bug the constant replaced (an ad-hoc string in one screen's View, reaching
-// neither the dry run nor the PR body). Informational only; production's real constraint is
-// the PR — always — plus whichever approval mode the repo configures for that env: the
-// comment is the default, but an explicit `approval: auto` is permitted (§4.5), so neither
-// this helper nor the warning it attaches may claim a human comment is unconditional. Both
-// are enforced in internal/engine.
-//
-// A no-op for anything but a deploy: a promotion into production is what the paired-env
-// config exists to describe, so saying it out loud there is noise, not news.
-func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
-	if pl == nil || !pl.IsDeploy() || !envs.IsProduction(pl.TargetEnv) {
-		return
-	}
-	pl.Warnings = append(pl.Warnings, gitops.Warning{
-		Code:    gitops.WarnProductionTarget,
-		Message: fmt.Sprintf("%s is a production env: this deploy opens a PR, and waits for an approval comment unless the repo sets approval: auto for it", pl.TargetEnv),
-	})
-}
-
 // SkippedStaging reports the configured staging env for source when target is production
 // but is not that configured pair — the "deploying straight to production, skipping
 // <staging>" warning (AGENTS.md §4.5). It never blocks (principle 5); skip is false when
 // target is not production, or is exactly the configured pair, or source has no configured
 // pair to skip.
 func SkippedStaging(source, target string, envs config.EnvsConfig) (staging string, skip bool) {
-	if !IsProduction(target, envs) {
+	if !envs.IsProduction(target) {
 		return "", false
 	}
 	staging, ok := envs.Pairs[source]

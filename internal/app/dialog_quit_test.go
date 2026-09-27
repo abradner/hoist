@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -71,7 +73,14 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pm := plan.New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, nil, history.Funcs{})
+	planFn := plan.Func(func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, []string{"ghcr.io/"}, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	})
+	pm := plan.New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, planFn, history.Funcs{})
 	pm = uitest.Drain(pm, pm.Init(), plan.Model.Update)
 	root := sized(t).(Model).push(planScreen{pm})
 	var tm tea.Model = root

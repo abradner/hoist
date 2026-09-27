@@ -13,6 +13,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -60,7 +61,7 @@ func runInit(t *testing.T, m Model) Model {
 func readyModel(t *testing.T, envs config.EnvsConfig) Model {
 	t.Helper()
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", false, nil, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -87,7 +88,7 @@ func TestImpactBodySaysAtLeastWhenMigrationsIncomplete(t *testing.T) {
 				}, nil
 			},
 		}
-		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, nil, hist)
+		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), hist)
 		m = uitest.Drain(m, m.Init(), updateFn).SetSize(120, 40).SetStyles(ui.NewStyles(true))
 		v := ansi.Strip(m.View())
 		if !strings.Contains(v, "1 migration") || !strings.Contains(v, "run on this promotion:") {
@@ -105,12 +106,12 @@ func TestImpactBodySaysAtLeastWhenMigrationsIncomplete(t *testing.T) {
 func TestAsyncLoad(t *testing.T) {
 	r := discoverFixture(t)
 	calls := 0
-	fake := ResolveFunc(func(_ context.Context, _ *gitops.Repo, source string, _ map[string]image.Ref) (ResolveOutcome, error) {
+	fake := fakePlanFunc([]string{"ghcr.io/"}, func(_ context.Context, req service.PlanRequest) (service.Resolution, bool, error) {
 		calls++
-		if source != "app-staging" {
-			t.Errorf("resolveFn source = %q, want app-staging", source)
+		if req.Source != "app-staging" {
+			t.Errorf("planFn source = %q, want app-staging", req.Source)
 		}
-		return ResolveOutcome{KubeContext: "test-context", RegistryAuth: "env"}, nil
+		return service.Resolution{KubeContext: "test-context", AuthUsed: "env"}, true, nil
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	if m.state != stateLoading {
@@ -166,9 +167,7 @@ func TestAsyncLoad(t *testing.T) {
 // draft followup caught it as the exact bypass the rule exists to prevent.)
 func TestResolveErrorFailsTheScreen(t *testing.T) {
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
-		return ResolveOutcome{}, errCannotReachCluster
-	})
+	fake := errFunc(errCannotReachCluster)
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {
@@ -193,11 +192,11 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 	redact.Register(secret)
 
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
-		return ResolveOutcome{
-			KubeContext:  "test-context",
-			RegistryAuth: "env",
-			Resolutions: map[string]resolve.Resolution{
+	fake := fakePlanFunc([]string{"ghcr.io/"}, func(context.Context, service.PlanRequest) (service.Resolution, bool, error) {
+		return service.Resolution{
+			KubeContext: "test-context",
+			AuthUsed:    "env",
+			Res: map[string]resolve.Resolution{
 				// Resolved, so its Detail lands in Summary's per-repo line.
 				"ghcr.io/example/web": {
 					Repo:   "ghcr.io/example/web",
@@ -216,7 +215,7 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 					}},
 				},
 			},
-		}, nil
+		}, true, nil
 	})
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
@@ -487,7 +486,7 @@ func TestEnvSelectResyncsTargetFromField(t *testing.T) {
 // though this fixture's TargetsFor("app-staging") only ever offers one.
 func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, nil, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	if m.state != stateSelectEnv {
 		t.Fatalf("state = %v, want stateSelectEnv", m.state)
 	}
@@ -593,7 +592,7 @@ func TestResizeKeepsTheCursor(t *testing.T) {
 // text — a synthetic plan over the fixture repo's root, with NoOp edits so no file is read.
 func TestViewGoldenCollidingLabels(t *testing.T) {
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, nil, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	same := func(repo string) gitops.Edit {
 		ref := ref(repo + ":v202602201200@sha256:" + strings.Repeat("a", 64))
 		return edit("cluster/apps/app-production/web/deployment.yaml", ref, ref)
@@ -624,9 +623,7 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 	redact.Register(secret)
 
 	r := discoverFixture(t)
-	fake := ResolveFunc(func(context.Context, *gitops.Repo, string, map[string]image.Ref) (ResolveOutcome, error) {
-		return ResolveOutcome{}, sentinelErr("cluster unreachable: token " + secret + " rejected")
-	})
+	fake := errFunc(sentinelErr("cluster unreachable: token " + secret + " rejected"))
 	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {

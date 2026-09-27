@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"time"
 
-	appplan "github.com/abradner/hoist/internal/app/plan"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
@@ -95,19 +95,18 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
 	}
-	plan, err := gitops.BuildDeployPlan(r, *env, ref, eff.promotable)
+	set := settingsFor(cfg, eff)
+	set.KubeContext = *kubeContext
+	svc := service.New(set, serviceDeps())
+	// service.Plan attaches WarnDeployIntoProduction itself for every deploy it builds, so the
+	// dry-run output, the confirm screen and the PR body all carry it by construction — the CLI
+	// and the TUI's own deploy path (internal/app's openDeploy) no longer attach it separately.
+	pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Target: *env, Deploy: &ref})
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
 		return exitFailure
 	}
-
-	// A deploy into production is worth saying out loud, and worth saying somewhere durable:
-	// as a plan warning it reaches the dry-run output, the confirm screen AND the PR body,
-	// where a UI-only string reached none of them. Attached through the shared helper so the
-	// TUI's own deploy path attaches the identical warning (see its doc comment).
-	if eff.cfg != nil {
-		appplan.WarnDeployIntoProduction(&plan, eff.cfg.Envs)
-	}
+	plan := pc.Plan
 
 	if *dryRun {
 		// The configured promotable list travels here as it does for `hoist plan`, so a deploy
