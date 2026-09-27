@@ -774,16 +774,25 @@ func (c Controller) Live() []Snapshot {
 }
 
 // AnyRunning reports whether at least one tracked entry is actually in progress — Building,
-// Stepping, or Waiting — the root's own q-with-drives-running gate (Train 2 design PR 3). A
+// Stepping, or Waiting, or an Abandoning entry whose Backend.Abandon call has actually been
+// dispatched (abandonIssued) — the root's own q-with-drives-running gate (Train 2 design PR 3). A
 // Stopped entry (a Blocked step or a terminal, non-retryable error — R/Poke re-arms it) or one
-// already Abandoning does not, by itself, need a confirm before the program quits: nothing
-// further will happen to it without the operator asking again, so there is nothing left running
-// for the confirm to warn about.
+// still Abandoning but not yet abandonIssued (waiting on a busy Step to notice its ctx was
+// cancelled — nothing has actually been dispatched to the forge/cluster yet) does not, by itself,
+// need a confirm before the program quits: StopAll's own ctx cancel is all there would be to
+// interrupt. An abandonIssued entry is different — a real Backend.Abandon call (re-observe, close
+// the PR, delete the branch) is in flight, and quitting out from under it is exactly the "kills a
+// running service.Abandon mid-way" case a confirm exists for (found in review: this used to
+// exclude every Abandoning entry regardless of abandonIssued).
 func (c Controller) AnyRunning() bool {
 	for _, e := range c.entries {
 		switch e.phase {
 		case Building, Stepping, Waiting:
 			return true
+		case Abandoning:
+			if e.abandonIssued {
+				return true
+			}
 		}
 	}
 	return false
