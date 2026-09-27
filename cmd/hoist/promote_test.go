@@ -17,6 +17,8 @@ import (
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/image"
+	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
@@ -1269,5 +1271,81 @@ func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
 	}
 	if len(f.PRs()) != 0 {
 		t.Fatalf("no PR should have been created: %+v", f.PRs())
+	}
+}
+
+// bodyCapturingForge wraps whatever newForge already builds (in
+// TestPromoteCarriesResolutionWarningsIntoThePRBody below, newPromoteFixture's
+// mergeSimulatingForge) and records the body of every PR it opens. forge.Fake's own body
+// storage is unexported (package forge; these tests are package main), so this is the seam:
+// exactly the "wrap the forge to observe what's built" shape mergeSimulatingForge itself
+// already uses, one interface up.
+type bodyCapturingForge struct {
+	forge.Forge
+	body *string
+}
+
+func (b *bodyCapturingForge) CreatePR(ctx context.Context, spec forge.PRSpec) (forge.PR, error) {
+	*b.body = spec.Body
+	return b.Forge.CreatePR(ctx, spec)
+}
+
+// TestPromoteCarriesResolutionWarningsIntoThePRBody is the regression test for the gap
+// runPromote had and runPlan/the TUI plan screen did not: runResolution's report carries
+// resolve.Warnings (a running-vs-manifest disagreement, here) that runPlan prepends to
+// plan.Warnings before rendering, but runPromote built the identical resolution report and
+// discarded it, so a PR hoist promote opened could never carry the same warning its own `hoist
+// plan --dry-run` would have shown for the exact same inputs. internal/engine/template.go's
+// RenderPRBody renders plan.Warnings verbatim, so a fixed runPromote surfaces this warning in
+// the PR body without any change to the engine or the renderer.
+func TestPromoteCarriesResolutionWarningsIntoThePRBody(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+
+	// app-staging's manifest (newPromoteFixture) pins ghcr.io/example/app:v2@digestNew; a
+	// cluster whose pods report a different digest for that same repo running in app-staging
+	// disagrees with it — the same shape TestPlanResolvesFromFakePods exercises for `hoist
+	// plan`, reused here for `hoist promote`.
+	runningDigest := "sha256:" + strings.Repeat("2", 64)
+	cluster := &k8s.Fake{Images: map[string][]k8s.RunningImage{"app-staging": {
+		{Pod: "app-1", Container: "app", Ref: image.Ref{Repo: "ghcr.io/example/app", Digest: runningDigest}},
+	}}}
+	prevCluster := newCluster
+	newCluster = func(string) (k8s.Cluster, string, error) { return cluster, "test-context", nil }
+	t.Cleanup(func() { newCluster = prevCluster })
+
+	// Resolution now picks runningDigest (pods win) rather than newPromoteFixture's own
+	// digestNew, so the fixture's rollout fake — which reports app-production as live at
+	// digestNew — would otherwise block RolledOutStep forever. Point it at what this plan
+	// actually promotes; this test cares about the warning reaching the PR body, not about
+	// exercising the fixture's own default rollout fixture.
+	fakeRollout := &rollout.Fake{}
+	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{
+		Namespace: "app-production",
+		Name:      "app",
+		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + runningDigest}},
+		Complete:  true,
+	})
+	prevRollout := newRollout
+	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
+	t.Cleanup(func() { newRollout = prevRollout })
+
+	var body string
+	prevForge := newForge
+	newForge = func(ownerRepo string) (forge.Forge, error) {
+		f, err := prevForge(ownerRepo)
+		if err != nil {
+			return f, err
+		}
+		return &bodyCapturingForge{Forge: f, body: &body}, nil
+	}
+	t.Cleanup(func() { newForge = prevForge })
+
+	var out, errOut bytes.Buffer
+	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
+	if got := run(args, &out, &errOut); got != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
+	}
+	if !strings.Contains(body, "[running-vs-manifest]") || !strings.Contains(body, "ghcr.io/example/app") {
+		t.Fatalf("PR body is missing the resolution warning:\n%s", body)
 	}
 }

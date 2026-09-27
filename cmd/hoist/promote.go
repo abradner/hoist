@@ -21,6 +21,7 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/redact"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // newGit and newForge are variables so tests substitute fakes/local fixtures: no test in this
@@ -396,8 +397,9 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	planDigests := map[string]image.Ref(digests)
 	var planReasons map[string]string
+	var rep *resolutionReport
 	if len(opts.order) > 0 {
-		rep, err := runResolution(context.Background(), r, *from, prefixes, opts, digests)
+		rep, err = runResolution(context.Background(), r, *from, prefixes, opts, digests)
 		if err != nil {
 			fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 			return exitFailure
@@ -408,6 +410,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
 		return exitFailure
+	}
+	if rep != nil {
+		// runPlan (main.go) and the TUI plan screen (internal/app/plan/model.go) both prepend
+		// resolve.Warnings here so a pods/manifest digest disagreement reaches the operator;
+		// promote must match, since its plan is what gets rendered into the PR body
+		// (internal/engine/template.go's plan.Warnings) with no other chance to surface it.
+		plan.Warnings = append(resolve.Warnings(rep.res), plan.Warnings...)
 	}
 
 	// gitops.Discover, above, read every occurrence's position and content from eff.repo's own
