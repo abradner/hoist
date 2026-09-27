@@ -276,6 +276,15 @@ type entry struct {
 	progressCh chan string
 
 	abandoning bool
+	// abandonIssued is set the moment Backend.Abandon is actually dispatched for this entry —
+	// from Abandon's own immediate (!busy) path, from onAbandonWait's timeout branch, or from
+	// onBuilt's own abandoning branch below — and is the one thing every call site checks before
+	// dispatching a second one. Abandon can be asked for while a Step (Abandon) or a build
+	// (Resume/Start) is still in flight; either one can independently decide "time to actually
+	// call Abandon now", and gen alone cannot arbitrate between them: a gen bump only takes
+	// effect once its own case handler returns, which is too late for a case that already
+	// dispatched abandonCmd before the other one's message was even delivered.
+	abandonIssued bool
 }
 
 // Controller is the value type that owns every drive this session package tracks — see doc.go's
@@ -625,13 +634,15 @@ func (c Controller) Abandon(id string) (Controller, tea.Cmd) {
 	}
 	e.phase = Abandoning
 	e.abandoning = true
-	c = c.withEntry(e)
 	if e.busy {
+		c = c.withEntry(e)
 		gen := e.gen
 		return c, c.cfg.After(c.cfg.AbandonWait, func(time.Time) tea.Msg {
 			return abandonWaitMsg{build: e.build, gen: gen, attempt: 0}
 		})
 	}
+	e.abandonIssued = true
+	c = c.withEntry(e)
 	return c, c.abandonCmd(e.build, e.gen, id)
 }
 
@@ -816,16 +827,32 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 		// longer matters: proceeding to a fresh Step (on success) would silently re-arm past the
 		// cancel, and reporting a build failure (on the ctx this same Abandon call cancelled)
 		// would drop Backend.Abandon entirely — found in review of ceaccb2. Either way the
-		// operator asked to abandon, so that is what happens now. Abandon, when it saw the entry
-		// busy (the Resume call in flight), also scheduled an abandonWaitMsg chain of its own —
-		// bump gen here so that chain (still carrying the old gen) is dropped by onAbandonWait's
-		// own gen check instead of racing this call and invoking Backend.Abandon twice.
+		// operator asked to abandon, so that is what happens now.
 		e.busy = false
 		if msg.err == nil {
 			e.state = msg.state
 			e.driver = msg.drive
 		}
+		if e.abandonIssued {
+			// Abandon's own wait chain (Abandon's immediate path, or onAbandonWait's timeout
+			// branch) already dispatched Backend.Abandon for this entry before this builtMsg
+			// arrived, capturing its own (build, gen) at that dispatch time — deliberately NOT
+			// bumped here, since that call's own abandonedMsg still has to match e.gen when it
+			// comes back (found in review: bumping gen unconditionally, as an earlier version of
+			// this fix did, orphaned that in-flight call's result instead of preventing a second
+			// one — the entry never got removed). Record the build's own outcome and stop: the
+			// already-dispatched abandonCmd will resolve this entry on its own.
+			c = c.withEntry(e)
+			return c, nil, nil
+		}
+		// Nothing has dispatched Backend.Abandon for this entry yet — this onBuilt call is the
+		// first thing to decide "call it now". Bump gen so a same-gen abandonWaitMsg still
+		// in-flight from Abandon's own busy path (below) is dropped by onAbandonWait's own gen
+		// check instead of racing this dispatch (found in review of ceaccb2 — the comment used to
+		// claim this bump alone was sufficient; abandonIssued above is what actually prevents the
+		// double call when the wait chain gets there first instead).
 		e.gen++
+		e.abandonIssued = true
 		c = c.withEntry(e)
 		return c, c.abandonCmd(e.build, e.gen, e.id), nil
 	}
@@ -980,6 +1007,13 @@ func (c Controller) onAbandonWait(msg abandonWaitMsg) (Controller, tea.Cmd, []Ch
 			return abandonWaitMsg{build: build, gen: gen, attempt: attempt}
 		}), nil
 	}
+	// The wait gave up (or the entry was already idle) — this is the wait chain's own dispatch of
+	// Backend.Abandon. Mark it issued before onBuilt's own abandoning branch (below) can find out:
+	// a slow Resume/Start build landing at the same gen after this point must not dispatch a
+	// second Backend.Abandon call of its own (found in review — see abandonIssued's own doc
+	// comment on why gen alone cannot arbitrate this).
+	e.abandonIssued = true
+	c = c.withEntry(e)
 	return c, c.abandonCmd(e.build, e.gen, e.id), nil
 }
 
@@ -1003,6 +1037,7 @@ func (c Controller) onAbandoned(msg abandonedMsg) (Controller, tea.Cmd, []Change
 		}
 		e.phase = Stopped
 		e.abandoning = false
+		e.abandonIssued = false
 		c = c.withEntry(e)
 		return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err}}
 	}

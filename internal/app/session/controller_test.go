@@ -610,6 +610,68 @@ func TestPokeRefusesADriverLessEntry(t *testing.T) {
 	}
 }
 
+// TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands: Abandon fired against a busy (Building)
+// entry schedules an abandonWaitMsg chain that gives up after Config.AbandonTimeout and
+// dispatches Backend.Abandon itself — but if the entry's own slow Resume call THEN lands (at the
+// same gen, since the gen bump onBuilt's abandoning branch does only takes effect after it
+// returns), onBuilt's abandoning branch must not dispatch a second Backend.Abandon call of its
+// own. Before the fix, onBuilt always issued its own abandonCmd whenever e.abandoning was true,
+// trusting the gen bump to protect against a race that had, in this exact ordering, already
+// happened before the bump ran.
+func TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands(t *testing.T) {
+	now := fixedClock(time.Now())
+	abandoned := 0
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return &fakeDrive{id: "promo-1"}, nil },
+		abandonFn: func(context.Context, string) ([]string, error) { abandoned++; return nil, nil },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+	c2, waitCmd := h.c.Abandon("promo-1") // busy (Building) — takes the wait path
+	h.c = c2
+
+	// Drive the wait chain to its own timeout, WITHOUT the slow Resume call landing yet — this
+	// is onAbandonWait's own terminal branch dispatching Backend.Abandon.
+	cmd := waitCmd
+	var held tea.Msg
+	for i := 0; i < 10 && cmd != nil; i++ {
+		msg := cmd()
+		if _, ok := msg.(abandonedMsg); ok {
+			held = msg // Backend.Abandon already ran (abandoned == 1); hold its result, don't deliver it yet
+			break
+		}
+		h, cmd = harnessUpdate(h, msg)
+	}
+	if held == nil {
+		t.Fatal("setup: the abandon wait chain never reached its own Backend.Abandon call")
+	}
+	if abandoned != 1 {
+		t.Fatalf("setup: Backend.Abandon called %d times before the slow Resume landed, want 1", abandoned)
+	}
+
+	// Now the slow Resume call finally returns, at the same gen onBuilt's abandoning branch reads.
+	h, followUp := started(h, resumeCmd)
+	if abandoned != 1 {
+		t.Fatalf("BUG: onBuilt's abandoning branch dispatched a second Backend.Abandon call: %d", abandoned)
+	}
+	if followUp != nil {
+		t.Fatal("onBuilt's abandoning branch produced a follow-up command once abandonIssued was already set")
+	}
+
+	// Deliver the held abandonedMsg from the wait chain's own call, as it would arrive for real.
+	h, _ = harnessUpdate(h, held)
+	if abandoned != 1 {
+		t.Fatalf("Backend.Abandon called %d times total, want exactly 1", abandoned)
+	}
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("promo-1 still tracked after the abandon completed")
+	}
+}
+
 // TestBlockedDuringAbandonKeepsAbandoningPhase: a Blocked tick reported for a Step that Abandon
 // is waiting on must not overwrite phase Abandoning with Stopped — doing so let Poke re-arm
 // (bumping gen), which drops the abandonWaitMsg already scheduled and the abandon silently
