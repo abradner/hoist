@@ -376,6 +376,114 @@ func (e EnvsConfig) IsProduction(env string) bool {
 	return false
 }
 
+// PipelineOrder orders envs by where they sit in the promotion pipeline envs.pairs describes,
+// so the matrix's columns read left-to-right the way an image actually flows (a source before
+// its target) rather than alphabetically. envs is the full set of envs the matrix discovered —
+// every one of them appears in the result exactly once, whether or not it appears in Pairs.
+//
+// The algorithm: build the directed graph source->target from Pairs restricted to envs in the
+// input list (a pair naming an env this repo doesn't have is ignored — the matrix has nothing
+// to show for it); order every weakly-connected chain by walking from its head (an env with no
+// incoming pair) forward along Pairs; break ties between chains, and order unpaired envs, by
+// name; and fall back to a flat alphabetical order for any envs whose chain contains a cycle,
+// since a cycle has no head to start the walk from and PipelineOrder must still terminate and
+// place every env exactly once.
+func (e EnvsConfig) PipelineOrder(envs []string) []string {
+	in := make(map[string]bool, len(envs))
+	for _, env := range envs {
+		in[env] = true
+	}
+	// next/prev restricted to envs actually present, so a pair naming an unknown env doesn't
+	// create a phantom link.
+	next := map[string]string{}
+	hasIncoming := map[string]bool{}
+	for src, tgt := range e.Pairs {
+		if !in[src] || !in[tgt] {
+			continue
+		}
+		next[src] = tgt
+		hasIncoming[tgt] = true
+	}
+
+	// Detect cycles: any env reachable from itself by following next. If one exists, the
+	// whole ordering falls back to alphabetical (a cycle has no head to start a deterministic
+	// walk from, and mixing a partial pipeline order with an alphabetical remainder would be
+	// harder to read than either alone).
+	for start := range in {
+		seen := map[string]bool{}
+		cur := start
+		for {
+			seen[cur] = true
+			nxt, ok := next[cur]
+			if !ok {
+				break
+			}
+			if seen[nxt] {
+				return sortedEnvs(envs)
+			}
+			cur = nxt
+		}
+	}
+
+	// Heads are envs with no incoming pair — a chain starts there. Sort heads by name so
+	// multiple independent chains, and unpaired envs (a head with no outgoing pair either),
+	// come out in a stable, readable order.
+	var heads []string
+	for env := range in {
+		if !hasIncoming[env] {
+			heads = append(heads, env)
+		}
+	}
+	sort.Strings(heads)
+
+	out := make([]string, 0, len(envs))
+	placed := map[string]bool{}
+	for _, head := range heads {
+		cur := head
+		for !placed[cur] {
+			out = append(out, cur)
+			placed[cur] = true
+			nxt, ok := next[cur]
+			if !ok {
+				break
+			}
+			cur = nxt
+		}
+	}
+	// Anything left (only reachable by an incoming edge from an env outside the input list,
+	// or otherwise not walked above) is appended alphabetically rather than dropped.
+	var rest []string
+	for env := range in {
+		if !placed[env] {
+			rest = append(rest, env)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
+}
+
+// sortedEnvs is the flat alphabetical fallback PipelineOrder uses on a cycle.
+func sortedEnvs(envs []string) []string {
+	out := make([]string, len(envs))
+	copy(out, envs)
+	sort.Strings(out)
+	return out
+}
+
+// SourcesOf is every env Pairs names as promoting into target, sorted. The matrix's p key
+// uses it to find the pair a target's column implies: exactly one source means p can start a
+// promotion with no prompt; zero or several mean the plan screen has to ask.
+func (e EnvsConfig) SourcesOf(target string) []string {
+	var out []string
+	for src, tgt := range e.Pairs {
+		if tgt == target {
+			out = append(out, src)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Approval is the approval mode for env: the explicit setting, else comment for a
 // production env, else auto.
 func (r RepoConfig) Approval(env string) string {

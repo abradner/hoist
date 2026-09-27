@@ -1,0 +1,40 @@
+╭─ hoist · matrix · repo ──────────────────────────────────────────────────────────────────────────────────────────────╮
+│repo · base main · 2 envs · 4 families                                                                                │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│─────────────┬──────────────────────────────────────────────┬──────────────────────────────────────────────           │
+│ FAMILY      │ ▸ APP-PRODUCTION                             │ APP-STAGING                                             │
+│─────────────┼──────────────────────────────────────────────┼──────────────────────────────────────────────           │
+│ ▸ counta    │ 2 images                              pinned │ v202602201200                         pinned            │
+│ marketing   │ sha-0000111122223333444455556666777…  pinned │ sha-1a2b3c4d5e6f708192a3b4c5d6e7f80…  pinned            │
+│ temporal    │ 2 images                            external │ 2 images                            external            │
+│ web         │ v202601010101                       unpinned │ 2 versions                             split            │
+│             │            ╭─ help · matrix ───────────────────────────────────────────────╮                           │
+│             │            │NAVIGATE                       │ ACT                           │                           │
+│             │            │esc      close the menu or ove │ enter    open the action menu │                           │
+│             │            │↑        move row              │ p        promote into the curs│                           │
+│             │            │↓        move row              │ t        deploy a tag (tag pic│                           │
+│             │            │←        move column           │ w        watch the cell's fami│                           │
+│             │            │→        move column           │ shift+r  restart the cell's fa│                           │
+│             │            │pgup     page                  │ shift+x  abandon the in-flight│                           │
+│             │            │pgdn     page                  │                               │                           │
+│             │            │tab      table ⇄ in-flight pan │                               │                           │
+│             │            │VIEW                           │ APP                           │                           │
+│             │            │r        re-read the cluster a │ q        quit (confirm if a pr│                           │
+│             │            │o        open the PR of the in │ ctrl+c   quit now, printing wh│                           │
+│             │            │c        config view           │                               │                           │
+│             │            │l        activity log          │                               │                           │
+│             │            │                                                               │                           │
+│             │            │shift+ keys always ask before they write                       │                           │
+│             │            │                                                               │                           │
+│             │            │a capital counts as shift                                      │                           │
+│             │            ╰───────────────────────────────────────────────────────────────╯                           │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+│             │                                              │                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+env app-prod… actions · promote into app-production · deploy tag · watch · refresh · restart · in flight · quit · ? help

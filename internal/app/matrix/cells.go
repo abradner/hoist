@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 )
@@ -144,6 +145,30 @@ func Compute(r *gitops.Repo, promotable []string, running Running) Table {
 		t.Rows = append(t.Rows, row)
 	}
 	return t
+}
+
+// Order reorders t's columns into the pipeline order envs.PipelineOrder derives from
+// envs.pairs (T3-04, UX-M9's own header-order companion): a promotion flows source-to-target,
+// so the matrix should read that way left-to-right instead of alphabetically. Pure: every
+// Row's Cells is permuted along with Envs so index i in the result still means the same env
+// for both, and no cell's own content is touched.
+func Order(t Table, envs config.EnvsConfig) Table {
+	order := envs.PipelineOrder(t.Envs)
+	index := make(map[string]int, len(t.Envs))
+	for i, e := range t.Envs {
+		index[e] = i
+	}
+	out := Table{Envs: order, Rows: make([]Row, len(t.Rows))}
+	for ri, r := range t.Rows {
+		cells := make([]Cell, len(order))
+		for i, e := range order {
+			if from, ok := index[e]; ok && from < len(r.Cells) {
+				cells[i] = r.Cells[from]
+			}
+		}
+		out.Rows[ri] = Row{Family: r.Family, Cells: cells}
+	}
+	return out
 }
 
 // cellFor computes everything about a cell except Differs, which needs its neighbour.

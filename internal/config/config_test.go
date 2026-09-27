@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -525,5 +526,96 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !c.Found || len(c.Repos) != 1 || len(c.Registries) != 1 || c.Repos[0].Name != "my-gitops" {
 		t.Errorf("example: Found=%v repos=%d registries=%d", c.Found, len(c.Repos), len(c.Registries))
+	}
+}
+
+// TestPipelineOrderFromAnyMapOrder proves the result does not depend on Go's randomized map
+// iteration: a chain app-staging -> app-production must always come out staging-first, no
+// matter how the pairs map happens to be built.
+func TestPipelineOrderFromAnyMapOrder(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
+	for i := 0; i < 20; i++ {
+		got := envs.PipelineOrder([]string{"app-production", "app-staging"})
+		want := []string{"app-staging", "app-production"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("PipelineOrder = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestPipelineOrderTwoChains proves two independent pipelines are each kept in order and the
+// chains themselves are ordered by their head's name.
+func TestPipelineOrderTwoChains(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{
+		"app-staging":    "app-production",
+		"worker-staging": "worker-production",
+	}}
+	got := envs.PipelineOrder([]string{"worker-production", "app-production", "worker-staging", "app-staging"})
+	want := []string{"app-staging", "app-production", "worker-staging", "worker-production"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PipelineOrder = %v, want %v", got, want)
+	}
+}
+
+// TestPipelineOrderUnpaired proves an env with no pair at all still appears, sorted among the
+// other heads.
+func TestPipelineOrderUnpaired(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
+	got := envs.PipelineOrder([]string{"app-production", "app-staging", "sandbox"})
+	want := []string{"app-staging", "app-production", "sandbox"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PipelineOrder = %v, want %v", got, want)
+	}
+}
+
+// TestPipelineOrderCycleFallsBackToAlpha proves a cyclic pair set (which has no head to walk
+// from) is never lost or hung, but falls back to a flat alphabetical order.
+func TestPipelineOrderCycleFallsBackToAlpha(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{"a": "b", "b": "a"}}
+	got := envs.PipelineOrder([]string{"b", "a"})
+	want := []string{"a", "b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PipelineOrder = %v, want %v", got, want)
+	}
+}
+
+// TestPipelineOrderFanIn proves several sources promoting into one target (fan-in) still
+// places every env exactly once, with the target following its sources.
+func TestPipelineOrderFanIn(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{
+		"app-staging": "app-production",
+		"app-canary":  "app-production",
+	}}
+	got := envs.PipelineOrder([]string{"app-production", "app-staging", "app-canary"})
+	if len(got) != 3 {
+		t.Fatalf("PipelineOrder = %v, want 3 envs", got)
+	}
+	seen := map[string]bool{}
+	for _, e := range got {
+		if seen[e] {
+			t.Fatalf("PipelineOrder = %v, duplicate %q", got, e)
+		}
+		seen[e] = true
+	}
+	if !seen["app-production"] || !seen["app-staging"] || !seen["app-canary"] {
+		t.Fatalf("PipelineOrder = %v, missing an env", got)
+	}
+}
+
+// TestSourcesOfSortedAndScoped proves SourcesOf finds every pair naming target, sorted, and
+// nothing else.
+func TestSourcesOfSortedAndScoped(t *testing.T) {
+	envs := EnvsConfig{Pairs: map[string]string{
+		"app-canary":  "app-production",
+		"app-staging": "app-production",
+		"other":       "elsewhere",
+	}}
+	got := envs.SourcesOf("app-production")
+	want := []string{"app-canary", "app-staging"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SourcesOf = %v, want %v", got, want)
+	}
+	if got := envs.SourcesOf("nope"); got != nil {
+		t.Fatalf("SourcesOf(nope) = %v, want nil", got)
 	}
 }

@@ -7,17 +7,23 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// column names each help-overlay group, in the v2·03 mockup's own left-to-right, top-to-bottom
-// order (NAVIGATE, ACT, VIEW, APP).
-var column = []struct {
+// pair is one row of the v2·03 mockup's own 2×2 grid of groups: NAVIGATE beside ACT, VIEW
+// beside APP — laid out side by side (T3-04) rather than stacked, which is what let a
+// write-heavy screen's overlay (the matrix, with its restart/abandon bindings) overflow past
+// 24 rows when every group was simply one more block underneath the last.
+var pairs = [][2]struct {
 	g     Group
 	title string
 }{
-	{Navigate, "NAVIGATE"},
-	{Act, "ACT"},
-	{View, "VIEW"},
-	{AppGroup, "APP"},
+	{{Navigate, "NAVIGATE"}, {Act, "ACT"}},
+	{{View, "VIEW"}, {AppGroup, "APP"}},
 }
+
+// helpColWidth is each column's fixed width in the pair layout — wide enough for the longest
+// entry this train's screens actually use ("shift+r  restart the cell's family → restart
+// screen" truncates past this, which is an accepted trade-off of a fixed two-column grid over
+// one column that could grow to fit anything).
+const helpColWidth = 30
 
 // HelpTitle is the overlay's own dialog title for screen s — "help · matrix" — the same string
 // ui.Dialog draws around HelpView's body, kept as its own function so app.go's View never
@@ -51,19 +57,17 @@ func HelpView(s Screen, kbd tea.KeyboardEnhancementsMsg) string {
 
 	var body strings.Builder
 	first := true
-	for _, col := range column {
-		es := byGroup[col.g]
-		if len(es) == 0 {
+	for _, row := range pairs {
+		left := groupBlock(row[0].title, byGroup[row[0].g])
+		right := groupBlock(row[1].title, byGroup[row[1].g])
+		if left == "" && right == "" {
 			continue
 		}
 		if !first {
 			body.WriteString("\n")
 		}
 		first = false
-		body.WriteString(col.title)
-		for _, e := range es {
-			fmt.Fprintf(&body, "\n%-8s %s", e.Show, e.Desc)
-		}
+		body.WriteString(joinCols(left, right, helpColWidth))
 	}
 	if hasWrite {
 		fmt.Fprintf(&body, "\n\nshift+ keys always ask before they write")
@@ -71,6 +75,63 @@ func HelpView(s Screen, kbd tea.KeyboardEnhancementsMsg) string {
 	fmt.Fprintf(&body, "\n\n%s", kbdLine(kbd))
 
 	return body.String()
+}
+
+// groupBlock is one group's own heading plus its entries — "" for an empty group, so a screen
+// missing a whole group (watch has no ACT bindings) leaves that side of the pair blank rather
+// than printing a bare heading over nothing.
+func groupBlock(title string, es []Entry) string {
+	if len(es) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(title)
+	for _, e := range es {
+		desc := e.Desc
+		if e.Class == Write {
+			// v2·02/v2·03: a write binding's own row names that it asks first, right where the
+			// operator is reading the key, rather than only in the shared "shift+ keys always
+			// ask" line at the very bottom.
+			desc += " (asks)"
+		}
+		fmt.Fprintf(&b, "\n%-8s %s", e.Show, desc)
+	}
+	return b.String()
+}
+
+// joinCols lays two already-built blocks side by side, left padded/truncated to width, joined
+// by a plain rule — HelpView's own column pairing (T3-04, v2·03), kept local rather than
+// reusing ui.Columns so this package's HelpView signature stays exactly what T3-01 shipped
+// (no ui.Styles parameter to thread through call sites and tests that don't otherwise need
+// one just to draw an unstyled dialog body).
+func joinCols(left, right string, width int) string {
+	ll := strings.Split(left, "\n")
+	rl := strings.Split(right, "\n")
+	n := len(ll)
+	if len(rl) > n {
+		n = len(rl)
+	}
+	lines := make([]string, n)
+	for i := 0; i < n; i++ {
+		l, r := "", ""
+		if i < len(ll) {
+			l = ll[i]
+		}
+		if i < len(rl) {
+			r = rl[i]
+		}
+		lines[i] = padTrunc(l, width) + " │ " + padTrunc(r, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// padTrunc pads or truncates s to exactly width runes.
+func padTrunc(s string, width int) string {
+	r := []rune(s)
+	if len(r) > width {
+		return string(r[:width])
+	}
+	return s + strings.Repeat(" ", width-len(r))
 }
 
 // kbdLine is the one line HelpView always shows naming what this run's terminal reported: only

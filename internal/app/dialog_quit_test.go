@@ -85,7 +85,7 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 		}
 		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
 	})
-	pm := plan.New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, planFn, history.Funcs{})
+	pm := plan.New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", planFn, history.Funcs{})
 	pm = uitest.Drain(pm, pm.Init(), plan.Model.Update)
 	root := sized(t).(Model).push(planScreen{pm})
 	var tm tea.Model = root

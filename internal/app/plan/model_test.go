@@ -62,7 +62,7 @@ func runInit(t *testing.T, m Model) Model {
 func readyModel(t *testing.T, envs config.EnvsConfig) Model {
 	t.Helper()
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, envs, "app-staging", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -89,7 +89,7 @@ func TestImpactBodySaysAtLeastWhenMigrationsIncomplete(t *testing.T) {
 				}, nil
 			},
 		}
-		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), hist)
+		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", noneFunc([]string{"ghcr.io/"}), hist)
 		m = uitest.Drain(m, m.Init(), updateFn).SetSize(120, 40).SetStyles(ui.NewStyles(true))
 		v := ansi.Strip(m.View())
 		if !strings.Contains(v, "1 migration") || !strings.Contains(v, "run on this promotion:") {
@@ -114,7 +114,7 @@ func TestAsyncLoad(t *testing.T) {
 		}
 		return service.Resolution{KubeContext: "test-context", AuthUsed: "env"}, true, nil
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
 	if m.state != stateLoading {
 		t.Fatalf("state = %v, want stateLoading", m.state)
 	}
@@ -169,7 +169,7 @@ func TestAsyncLoad(t *testing.T) {
 func TestResolveErrorFailsTheScreen(t *testing.T) {
 	r := discoverFixture(t)
 	fake := errFunc(errCannotReachCluster)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {
 		t.Fatal("m.err = nil, want the resolve error to fail the screen")
@@ -218,7 +218,7 @@ func TestViewRedactsRegisteredSecrets(t *testing.T) {
 			},
 		}, true, nil
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -380,7 +380,7 @@ func TestEnterEmitsStartMsg(t *testing.T) {
 func TestLoadedPlanViewCarriesThroughToStartMsg(t *testing.T) {
 	wantView := service.RepoView{Dir: "/plan-loaded-view", FromOrigin: true, SHA: "plan-loaded-view-sha"}
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, viewFunc([]string{"ghcr.io/"}, wantView), history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", viewFunc([]string{"ghcr.io/"}, wantView), history.Funcs{})
 	m = runInit(t, m)
 	if m.state != stateReady {
 		t.Fatalf("state = %v, want stateReady", m.state)
@@ -526,7 +526,7 @@ func TestEnvSelectResyncsTargetFromField(t *testing.T) {
 // though this fixture's TargetsFor("app-staging") only ever offers one.
 func TestBuildEnvSelectWiresFiltering(t *testing.T) {
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	if m.state != stateSelectEnv {
 		t.Fatalf("state = %v, want stateSelectEnv", m.state)
 	}
@@ -632,7 +632,7 @@ func TestResizeKeepsTheCursor(t *testing.T) {
 // text — a synthetic plan over the fixture repo's root, with NoOp edits so no file is read.
 func TestViewGoldenCollidingLabels(t *testing.T) {
 	r := discoverFixture(t)
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	same := func(repo string) gitops.Edit {
 		ref := ref(repo + ":v202602201200@sha256:" + strings.Repeat("a", 64))
 		return edit("cluster/apps/app-production/web/deployment.yaml", ref, ref)
@@ -664,7 +664,7 @@ func TestViewRedactsRegisteredSecretsInFatalError(t *testing.T) {
 
 	r := discoverFixture(t)
 	fake := errFunc(sentinelErr("cluster unreachable: token " + secret + " rejected"))
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
 	m = runInit(t, m)
 	if m.err == nil {
 		t.Fatal("want the resolve error to have failed the screen")
@@ -742,7 +742,7 @@ func TestSwitchingTheRightPaneStartsAtTheTop(t *testing.T) {
 func TestLoadedMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	a := readyModel(t, config.EnvsConfig{})
 	r := discoverFixture(t)
-	b := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	b := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", noneFunc([]string{"ghcr.io/"}), history.Funcs{})
 	if b.state != stateLoading {
 		t.Fatalf("setup: state = %v, want stateLoading", b.state)
 	}

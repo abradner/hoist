@@ -47,12 +47,14 @@ func TestColumnCursor(t *testing.T) {
 	}
 }
 
-// TestMatrixHLNoLongerMoveColumns is the proposed keymap's own regression (docs/audit/2026-09-
-// ux-arch-audit.md "Proposed keymap" rule 7: "h/l retire as aliases because l is the log"): h and
-// l must no longer move the column cursor the way TestColumnCursor's left/right do — h is simply
-// unbound now (falls through to the table's own key handling, which has no use for it either),
-// and l instead opens the activity screen (TestMatrixLKeyOpensActivity).
-func TestMatrixHLNoLongerMoveColumns(t *testing.T) {
+// TestMatrixHDoesNotMoveColumns is the proposed keymap's own regression (docs/audit/2026-09-
+// ux-arch-audit.md "Proposed keymap" rule 7: "h/l retire as aliases because l is the log"): h
+// must no longer move the column cursor the way TestColumnCursor's left/right do. l's own
+// behaviour moved entirely to the root (T3-03/T3-04: the matrix implements KeyScreen now, so
+// the root's generic "l opens the activity log for any keyed screen" handling covers it before
+// the key ever reaches this package's own Update — see internal/app/app_test.go for that
+// routing test).
+func TestMatrixHDoesNotMoveColumns(t *testing.T) {
 	m := uitest.Keys(newFixture(), update, "right") // col 1 = "b"
 	if got := m.CurrentEnv(); got != "b" {
 		t.Fatalf("setup: CurrentEnv() = %q, want b", got)
@@ -60,21 +62,6 @@ func TestMatrixHLNoLongerMoveColumns(t *testing.T) {
 	m = uitest.Keys(m, update, "h")
 	if got := m.CurrentEnv(); got != "b" {
 		t.Errorf("h moved the column cursor: CurrentEnv() = %q, want b (h retired as a Left alias)", got)
-	}
-	if msg, ok := emitted(t, m, "l").(OpenActivityMsg); !ok {
-		t.Fatalf("l emitted %#v, want OpenActivityMsg — l is retired as a Right alias and bound to the activity log instead", msg)
-	}
-	if got := m.CurrentEnv(); got != "b" {
-		t.Errorf("l moved the column cursor: CurrentEnv() = %q, want b (l retired as a Right alias)", got)
-	}
-}
-
-// TestMatrixLKeyOpensActivity: l on the matrix opens the activity screen, driven through a real
-// keypress (AGENTS.md §9 entry 6: a gesture's test presses the key and asserts the emitted
-// message, never a field a key would have set).
-func TestMatrixLKeyOpensActivity(t *testing.T) {
-	if msg, ok := emitted(t, newFixture(), "l").(OpenActivityMsg); !ok {
-		t.Fatalf("l emitted %#v, want OpenActivityMsg", msg)
 	}
 }
 
@@ -87,48 +74,80 @@ func emitted(t *testing.T, m Model, k string) tea.Msg {
 	return cmd()
 }
 
-func TestPromoteOpensPlanForCurrentEnv(t *testing.T) {
-	m := uitest.Keys(newFixture(), update, "right")
-	if msg, ok := emitted(t, m, "p").(OpenPlanMsg); !ok || msg.Source != "b" || msg.Force {
-		t.Fatalf("p emitted %+v", msg)
+// TestPPromotesIntoCursorColumn is T3-04's own operator decision (train3-design.md): p
+// promotes INTO the cursor column, with the source taken from the reverse of envs.pairs when
+// exactly one exists. fixture()'s envs are a, b, c; pairing a->b puts them in pipeline order
+// a, b, c (Order/PipelineOrder), so Right from the default cursor (a) lands on b, whose one
+// reverse pair is a.
+func TestPPromotesIntoCursorColumn(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"a": "b"}}
+	m := New(fixture(), []string{"ghcr.io/"}, envs, nil).SetSize(80, 24)
+	if got := m.CurrentEnv(); got != "a" {
+		t.Fatalf("setup: CurrentEnv() = %q, want a (pipeline order a,b,c)", got)
 	}
-	if msg, ok := emitted(t, m, "P").(OpenPlanMsg); !ok || msg.Source != "b" || !msg.Force {
-		t.Fatalf("P emitted %+v", msg)
+	m = uitest.Keys(m, update, "right")
+	if got := m.CurrentEnv(); got != "b" {
+		t.Fatalf("setup: CurrentEnv() = %q, want b", got)
+	}
+	if msg, ok := emitted(t, m, "p").(OpenPlanMsg); !ok || msg.Source != "a" || msg.Target != "b" {
+		t.Fatalf("p on b emitted %+v, want {Source:a Target:b}", msg)
+	}
+	// c has no reverse pair at all: the plan screen itself must ask.
+	m = uitest.Keys(m, update, "right")
+	if got := m.CurrentEnv(); got != "c" {
+		t.Fatalf("setup: CurrentEnv() = %q, want c", got)
+	}
+	if msg, ok := emitted(t, m, "p").(OpenPlanMsg); !ok || msg.Source != "" || msg.Target != "c" {
+		t.Fatalf("p on c emitted %+v, want {Source:\"\" Target:c}", msg)
+	}
+}
+
+// TestPOnFanInAsks proves a target with SEVERAL reverse sources (fan-in) is exactly as
+// ambiguous as no source at all: p must still leave Source empty rather than guessing one.
+func TestPOnFanInAsks(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"a": "c", "b": "c"}}
+	m := New(fixture(), []string{"ghcr.io/"}, envs, nil).SetSize(80, 24)
+	m = uitest.Keys(m, update, "right") // pipeline order a, c, b (PipelineOrderFanIn shape)
+	if got := m.CurrentEnv(); got != "c" {
+		t.Fatalf("setup: CurrentEnv() = %q, want c", got)
+	}
+	if msg, ok := emitted(t, m, "p").(OpenPlanMsg); !ok || msg.Source != "" || msg.Target != "c" {
+		t.Fatalf("p on a fan-in target emitted %+v, want Source empty", msg)
 	}
 }
 
 func TestDeployNewOpensTagsForCurrentCell(t *testing.T) {
 	// Default cursor: row 0 (families sort to "absent" first), col 0 (envs sort to "a" first).
-	msg, ok := emitted(t, newFixture(), "d").(OpenTagsMsg)
+	msg, ok := emitted(t, newFixture(), "t").(OpenTagsMsg)
 	if !ok || msg.Target != "a" || msg.ImageRepo != "ghcr.io/x/app" {
 		t.Fatalf("OpenTagsMsg = %+v, want {ImageRepo: ghcr.io/x/app, Target: a}", msg)
 	}
 }
 
-// The "thirdparty" family has no first-party image at all — d must not emit
+// The "thirdparty" family has no first-party image at all — t must not emit
 // OpenTagsMsg{ImageRepo: ""}, and the reason lands in the notes section, not a clipped bar.
-func TestDeployNewWithNoFirstPartyImageShowsNotice(t *testing.T) {
+func TestTagKeyWithNoFirstPartyImageShowsNotice(t *testing.T) {
 	m := newFixture().SetSize(80, 24)
 	// absent, drift, empty, mixedtags, multi, pinned, sidecar, thirdparty — 7 rows down.
 	m = uitest.Keys(m, update, "down", "down", "down", "down", "down", "down", "down")
-	m2, cmd := m.Update(uitest.Key("d"))
+	m2, cmd := m.Update(uitest.Key("t"))
 	if cmd != nil {
-		t.Fatalf("d on a third-party-only cell produced a command: %v", cmd())
+		t.Fatalf("t on a third-party-only cell produced a command: %v", cmd())
 	}
 	if !strings.Contains(m2.View(), "no first-party image") {
 		t.Errorf("View() lacks the notice:\n%s", m2.View())
 	}
 }
 
-// A family with several first-party images asks which one (#85: d used to pick the first
+// A family with several first-party images asks which one (#85: this used to pick the first
 // sorted one silently). The chooser is driven by keys; the answer is read from the widget.
-func TestDeployNewWithSeveralImagesOpensAChooser(t *testing.T) {
+func TestTagKeyWithSeveralImagesOpensAChooser(t *testing.T) {
 	m := newFixture().SetSize(100, 30)
 	// absent, drift, empty, mixedtags, multi — 4 rows down, env a.
 	m = uitest.Keys(m, update, "down", "down", "down", "down")
-	m, cmd := m.Update(uitest.Key("d"))
+	m, cmd := m.Update(uitest.Key("t"))
 	if m.chooser == nil || !m.CapturesText() {
-		t.Fatal("d on a two-image cell must open the chooser")
+		t.Fatal("t on a two-image cell must open the chooser")
 	}
 	m = uitest.Drain(m, cmd, update)
 	view := ansi.Strip(m.View())
@@ -152,7 +171,7 @@ func TestDeployNewWithSeveralImagesOpensAChooser(t *testing.T) {
 		t.Fatal("the chooser must close on enter")
 	}
 	// esc backs out with nothing emitted.
-	m, _ = m.Update(uitest.Key("d"))
+	m, _ = m.Update(uitest.Key("t"))
 	m, cmd = m.Update(uitest.Key("esc"))
 	if cmd != nil || m.chooser != nil {
 		t.Fatalf("esc must close the chooser silently (cmd=%v)", cmd)
@@ -174,11 +193,20 @@ func TestCurrentEnvEmptyRepo(t *testing.T) {
 	uitest.Golden(t, "matrix-empty", m.View(), 80, 24)
 }
 
-func TestRestartKeyEmitsOpenRestartMsg(t *testing.T) {
+// TestShiftRRestart proves the write binding's own four-rule test (AGENTS.md §9 entry 13):
+// shift+r (the kitty-protocol shape) and a legacy bare capital R (every terminal without flag
+// 8) both restart, but a caps-lock-then-r on a terminal that CAN tell the difference must not.
+func TestShiftRRestart(t *testing.T) {
 	m := uitest.Keys(newFixture(), update, "right", "down")
-	msg, ok := emitted(t, m, "R").(OpenRestartMsg)
+	msg, ok := emitted(t, m, "shift+r").(OpenRestartMsg)
 	if !ok || msg.Family != "drift" || msg.Target != "b" {
-		t.Fatalf("R emitted %+v, want {Family: drift, Target: b}", msg)
+		t.Fatalf("shift+r emitted %+v, want {Family: drift, Target: b}", msg)
+	}
+	if _, ok := emitted(t, m, "R").(OpenRestartMsg); !ok {
+		t.Fatal("a legacy bare capital R must still restart (no protocol to tell it from shift)")
+	}
+	if got := emitted(t, m, "capslock+r"); got != nil {
+		t.Fatalf("caps-lock-then-r must not restart on a terminal that can tell them apart; emitted %+v", got)
 	}
 	if got := emitted(t, newFixture(), "r"); got != nil {
 		t.Fatalf("lower-case r must not restart; emitted %+v", got)
@@ -601,25 +629,32 @@ func TestViewGolden(t *testing.T) {
 		m = uitest.Keys(m, update, "right", "right", "down")
 		uitest.Golden(t, "matrix", m.View(), size[0], size[1])
 	}
-	m := New(fixture(), []string{"ghcr.io/"}, envs, nil).SetSize(80, 24)
-	m = uitest.Keys(m, update, "?")
-	uitest.Golden(t, "matrix-help", m.View(), 80, 24)
+	// The ? overlay is the root's own (T3-03/T3-04, internal/ui/keys.HelpView + the "help-matrix"
+	// golden in internal/ui/keys), not this screen's — matrix.Model itself no longer has a
+	// help view to golden here.
 }
 
 // The title names the base only when it is not main, and the kube context whenever one is
 // in use (#105): a plain run keeps the plain title, a session against another branch or a
 // named cluster says so. The context is its kubeconfig name, never an address. The golden
 // proves the longer title still fits 80 columns.
-func TestTitleNamesBaseWhenNotMainAndTheContextInUse(t *testing.T) {
+// TestSubheaderNamesBaseWhenNotMainAndTheContextInUse: the base and kube context (#105) moved
+// from the title bar into the subheader row (T3-04, matching v2·01a/b — the title bar names
+// only the repo, "hoist · matrix · <root>", and the subheader carries everything about how
+// this run was launched).
+func TestSubheaderNamesBaseWhenNotMainAndTheContextInUse(t *testing.T) {
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(80, 24)
-	if got := m.title(); strings.Contains(got, "base") || got != m.WithRun("main", "").title() {
-		t.Fatalf("plain title should not name a base or context: %q", got)
+	if strings.Contains(m.title(), "base") || strings.Contains(m.title(), "my-cluster") {
+		t.Fatalf("title must never name the base or context: %q", m.title())
 	}
-	got := m.WithRun("develop", "my-cluster").title()
-	if !strings.Contains(got, "· base develop") || !strings.Contains(got, "· my-cluster") {
-		t.Fatalf("title should name both overrides: %q", got)
+	if got := m.subheader(); strings.Contains(got, "base develop") || got != m.WithRun("main", "").subheader() {
+		t.Fatalf("plain subheader should not name a non-default base: %q", got)
 	}
-	if got := m.WithRun("main", "my-cluster").title(); strings.Contains(got, "base") || !strings.Contains(got, "my-cluster") {
+	got := m.WithRun("develop", "my-cluster").subheader()
+	if !strings.Contains(got, "· base develop") || !strings.Contains(got, "· context my-cluster") {
+		t.Fatalf("subheader should name both overrides: %q", got)
+	}
+	if got := m.WithRun("main", "my-cluster").subheader(); strings.Contains(got, "base develop") || !strings.Contains(got, "my-cluster") {
 		t.Fatalf("main is the default and should not be named, the context should: %q", got)
 	}
 	uitest.Golden(t, "matrix-run", m.WithRun("develop", "my-cluster").SetStyles(ui.NewStyles(true)).View(), 80, 24)
@@ -638,20 +673,15 @@ func TestTooSmallAWindowSaysSo(t *testing.T) {
 	}
 }
 
-// C emits OpenConfigMsg (#104), whatever the cursor is on — the config is the session's,
-// not a cell's — and shows up in ? help.
+// c emits OpenConfigMsg (#104, T3-04: config moves from capital C to lower-case c since it
+// no longer needs shift — it only opens a screen to look at something, like every other lower-
+// case verb here), whatever the cursor is on — the config is the session's, not a cell's.
 func TestConfigKeyEmitsOpenConfigMsg(t *testing.T) {
 	m := newFixture().SetSize(80, 24)
-	if _, ok := emitted(t, m, "C").(OpenConfigMsg); !ok {
-		t.Fatalf("C emitted %+v, want OpenConfigMsg", emitted(t, m, "C"))
+	if _, ok := emitted(t, m, "c").(OpenConfigMsg); !ok {
+		t.Fatalf("c emitted %+v, want OpenConfigMsg", emitted(t, m, "c"))
 	}
-	if got := emitted(t, m, "c"); got != nil {
-		t.Fatalf("lower-case c emitted %+v, want nothing", got)
-	}
-	// The full help line is longer than 120 columns and truncates from the right, so the
-	// key is checked on a terminal wide enough to show all of it.
-	m = uitest.Keys(m.SetSize(200, 24), update, "?")
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "C config") {
-		t.Errorf("? help lacks the C key:\n%s", v)
+	if got := emitted(t, m, "C"); got != nil {
+		t.Fatalf("capital C emitted %+v, want nothing (retired)", got)
 	}
 }

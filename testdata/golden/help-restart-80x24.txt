@@ -2,22 +2,22 @@
 │app-production / counta                                      not yet restarted│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │2 Deployments in app-production                                               │
-│  ╭─ help · restart ──────────────────────────────────────────────────────╮   │
-│  │NAVIGATE                                                               │s w│
-│  │esc      back (a rollout in progress continues, and the screen says so)│   │
-│  │↑        scroll                                                        │   │
-│  │↓        scroll                                                        │   │
-│  │pgup     page                                                          │   │
-│  │pgdn     page                                                          │   │
-│  │ACT                                                                    │ted│
-│  │enter    restart (production: confirm dialog)                          │   │
-│  │VIEW                                                                   │   │
-│  │l        activity log                                                  │   │
-│  │APP                                                                    │   │
-│  │ctrl+c   quit now                                                      │   │
-│  │                                                                       │   │
-│  │a capital counts as shift                                              │   │
-│  ╰───────────────────────────────────────────────────────────────────────╯   │
+│                                                                              │
+│   counta  1 replica(s) · RollingUpdate · last restart: never restarted this w│
+│     !╭─ help · restart ──────────────────────────────────────────────╮ but   │
+│      │NAVIGATE                       │ ACT                           │       │
+│     !│esc      back (a rollout in pr │ enter    restart (production: │       │
+│      │↑        scroll                │                               │       │
+│      │↓        scroll                │                               │       │
+│   cou│pgup     page                  │                               │started│
+│     !│pgdn     page                  │                               │ but   │
+│      │VIEW                           │ APP                           │       │
+│     !│l        activity log          │ ctrl+c   quit now             │       │
+│      │                                                               │       │
+│      │a capital counts as shift                                      │       │
+│      ╰───────────────────────────────────────────────────────────────╯       │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯

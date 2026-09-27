@@ -293,13 +293,15 @@ func latestActivityText(m Model) string {
 	return e.Text
 }
 
-// pressD presses d on the matrix and, when the cell has several first-party images (the
-// fixture's first family, counta, has two), accepts the chooser's first option with enter —
-// the same image the pre-M10 "first sorted repo" rule picked silently. Returns the command
-// the matrix emitted (matrix.OpenTagsMsg's cmd).
+// pressD presses t (T3-04: was d) on the matrix and, when the cell has several first-party
+// images (the fixture's first family, counta, has two), accepts the chooser's first option
+// with enter — the same image the pre-M10 "first sorted repo" rule picked silently. Returns
+// the command the matrix emitted (matrix.OpenTagsMsg's cmd). Kept named pressD: it is called
+// from many pre-existing tests below and renaming every call site is out of this change's
+// scope — only the key it presses moved.
 func pressD(t *testing.T, m tea.Model) (tea.Model, tea.Cmd) {
 	t.Helper()
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	if cmd != nil {
 		if _, ok := cmd().(matrix.OpenTagsMsg); ok {
 			return m, cmd
@@ -307,7 +309,7 @@ func pressD(t *testing.T, m tea.Model) (tea.Model, tea.Cmd) {
 	}
 	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("d, then enter on the chooser, produced no command")
+		t.Fatal("t, then enter on the chooser, produced no command")
 	}
 	return m, cmd
 }
@@ -315,11 +317,11 @@ func pressD(t *testing.T, m tea.Model) (tea.Model, tea.Cmd) {
 func TestViewSnapshot(t *testing.T) {
 	m := sized(t)
 	got := plain(m)
-	// "env app-production" rather than the whole status line: a real env name is long, and at
-	// this fixture's 80 columns the line truncates its tail. What matters is that the SELECTED
-	// env is named at all — it governs every write gesture on this screen and used to appear
-	// nowhere — and it is placed first for exactly that reason.
-	for _, want := range []string{"FAMILY", "APP-PRODUCTION", "APP-STAGING", "v202602201200", "2 images", "external", "env app-production", "? help"} {
+	// T3-04: the selected env is named by the header's own cursor marker (▸ APP-PRODUCTION)
+	// rather than a footer "env <name>" phrase — the footer's own room goes to the write verbs
+	// instead (v2·01a), and at 80 columns that already leaves no room for "? help" to stay
+	// unshortened, so the overlay hint reads "? more" per keys.Footer's own rule.
+	for _, want := range []string{"FAMILY", "▸ APP-PRODUCTION", "APP-STAGING", "v202602201200", "2 images", "external", "? more"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("view lacks %q", want)
 		}
@@ -368,11 +370,13 @@ func TestHelpToggleKeepsHeight(t *testing.T) {
 	if n := len(strings.Split(v, "\n")); n != height {
 		t.Errorf("with help: %d lines, want %d", n, height)
 	}
-	if !strings.Contains(v, "promote to…") {
+	// The two-column help layout (T3-04) truncates a long Desc to its own column width, so the
+	// substring checked here is short enough to survive that.
+	if !strings.Contains(v, "promote into the curs") {
 		t.Errorf("help line missing:\n%s", v)
 	}
 	m, _ = press(t, m, tea.KeyPressMsg{Code: '?', Text: "?"})
-	if v := plain(m); strings.Contains(v, "promote to…") {
+	if v := plain(m); strings.Contains(v, "promote into the curs") {
 		t.Error("help line still shown after second ?")
 	}
 }
@@ -1212,10 +1216,11 @@ func TestFailedStartThenOverrideLoadsHistory(t *testing.T) {
 	m := New(r, []string{"ghcr.io/"}, envs, planFn, svc, Promotion{}, nil, apprestart.Funcs{}).WithHistory(hist)
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	// envs.Pairs only configures app-staging as a source; land the column cursor there so p
-	// goes straight to loading rather than the env-select prompt (a pair configured for the
-	// OTHER direction only, from whichever env the column defaults to).
-	if tm.(Model).stack[0].(matrixScreen).CurrentEnv() != "app-staging" {
+	// T3-04: p promotes INTO the cursor column, with the source taken from the one reverse pair
+	// (envs.pairs) when exactly one exists. envs.Pairs only configures app-staging->app-
+	// production, so land the column cursor on app-production (the TARGET) for p to go
+	// straight to loading rather than the plan screen's own "promote into … from…" prompt.
+	if tm.(Model).stack[0].(matrixScreen).CurrentEnv() != "app-production" {
 		tm, _ = tm.Update(uitest.Key("right"))
 	}
 
@@ -1725,12 +1730,13 @@ func TestEnterOnBuildingPaneEntryReattaches(t *testing.T) {
 		t.Fatalf("matrix pane rendered the zero StartedAt literally:\n%s", view)
 	}
 
-	// enter on the pane: matrix.ResumeMsg is what either key emits — with exactly one entry and
-	// no id yet, it must carry Build, not an empty ID.
+	// tab then enter on the pane (T3-04): matrix.ResumeMsg is what it emits — with exactly one
+	// entry and no id yet, it must carry Build, not an empty ID.
 	var top tea.Model = root3
+	top, _ = top.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	top, resumeCmd := press(t, top, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if resumeCmd == nil {
-		t.Fatal("enter on the in-flight pane produced no command")
+		t.Fatal("tab+enter on the in-flight pane produced no command")
 	}
 	msg := resumeCmd()
 	rm, ok := msg.(matrix.ResumeMsg)
@@ -2078,7 +2084,7 @@ func TestBackgroundColorRethemes(t *testing.T) {
 	if m.(Model).styles.Dark {
 		t.Error("theme did not follow a light background")
 	}
-	if got := plain(m); !strings.Contains(got, "env app-production") {
+	if got := plain(m); !strings.Contains(got, "APP-PRODUCTION") {
 		t.Error("view broke after retheme")
 	}
 	m, _ = m.Update(tea.BackgroundColorMsg{Color: color.Black})
@@ -2464,11 +2470,12 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	if v := plain(m); !strings.Contains(v, "in flight (1)") || !strings.Contains(v, "hoist approve 5pr6sd333t") {
 		t.Fatalf("the matrix did not receive the listing:\n%s", v)
 	}
-	// r: resume, via session.Controller.Resume — the same attach path a confirmed plan's Start
-	// now takes.
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'r', Text: "r"})
+	// tab then enter (T3-04: was r): resume the pane's own cursor, via session.Controller.Resume
+	// — the same attach path a confirmed plan's Start now takes.
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("r produced no command")
+		t.Fatal("tab+enter produced no command")
 	}
 	tm, resumeCmd := m.Update(cmd()) // matrix.ResumeMsg -> the root's own case
 	if resumeCmd == nil {
@@ -2609,17 +2616,19 @@ func TestWithDriftMarksEveryEnvPendingUntilItAnswers(t *testing.T) {
 func TestConfigKeyPushesConfigScreen(t *testing.T) {
 	m := sized(t)
 	m = m.(Model).WithConfigView("/home/me/.config/hoist/config.yaml", true, "poll:\n    ci: 20s\n")
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'C', Text: "C"})
+	// T3-04: config moves from capital C to lower-case c (it only opens a screen to look at
+	// something, like every other lower-case verb on the matrix).
+	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'c', Text: "c"})
 	if cmd == nil {
-		t.Fatal("C produced no command")
+		t.Fatal("c produced no command")
 	}
 	msg := cmd()
 	if _, ok := msg.(matrix.OpenConfigMsg); !ok {
-		t.Fatalf("C's command yields %T, want matrix.OpenConfigMsg", msg)
+		t.Fatalf("c's command yields %T, want matrix.OpenConfigMsg", msg)
 	}
 	m, _ = m.Update(msg)
 	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("stack has %d screens after C, want 2", n)
+		t.Fatalf("stack has %d screens after c, want 2", n)
 	}
 	if v := plain(m); !strings.Contains(v, "/home/me/.config/hoist/config.yaml") || !strings.Contains(v, "ci: 20s") {
 		t.Errorf("config screen lacks the path or the text:\n%s", v)
@@ -3289,6 +3298,17 @@ func TestQuitHintClearsOnNextKey(t *testing.T) {
 func TestHelpOverlayGoldens(t *testing.T) {
 	sizes := []struct{ w, h int }{{80, 24}, {120, 40}}
 
+	// T3-04: the matrix now implements keyed too — help-matrix replaces the retired
+	// matrix-help golden (matrix's own former bubbles help.Model view), compared to v2·03.
+	t.Run("matrix", func(t *testing.T) {
+		for _, size := range sizes {
+			tm := sized(t)
+			tm, _ = tm.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			tm, _ = tm.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+			uitest.Golden(t, "help-matrix", tm.(Model).View().Content, size.w, size.h)
+		}
+	})
+
 	t.Run("watch", func(t *testing.T) {
 		for _, size := range sizes {
 			tm := openWatchScreenForTest(t)
@@ -3318,7 +3338,9 @@ func TestHelpOverlayGoldens(t *testing.T) {
 			tm := sized(t).(Model).note(activity.Info, "something happened", "", "")
 			var tmodel tea.Model = tm
 			tmodel, _ = tmodel.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
-			tmodel, _ = tmodel.Update(matrix.OpenActivityMsg{})
+			// l on the matrix now opens the activity log through the root's own generic
+			// "any keyed screen" handling (T3-04) rather than a per-screen message.
+			tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 			tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
 			uitest.Golden(t, "help-activity", tmodel.(Model).View().Content, size.w, size.h)
 		}
@@ -3397,7 +3419,7 @@ func TestHelpOverlayOnEveryKeyedScreen(t *testing.T) {
 		tm := sized(t).(Model).note(activity.Info, "something happened", "", "")
 		var tmodel tea.Model = tm
 		tmodel, _ = tmodel.Update(tea.WindowSizeMsg{Width: width, Height: height})
-		tmodel, _ = tmodel.Update(matrix.OpenActivityMsg{})
+		tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 		before := plain(tmodel)
 		tmodel, _ = tmodel.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
 		if !strings.Contains(plain(tmodel), "help · activity") {

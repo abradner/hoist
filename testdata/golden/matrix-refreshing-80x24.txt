@@ -1,24 +1,24 @@
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY      ▸ A                   B                    C                     │
-│ absent      v1            pinned                       v9    pinned          │
-│ drift       v1          unpinned  v2           pinned  v2  unpinned          │
-│ empty                             no images                                  │
-│ mixedtags   2 versions     split                                             │
-│ multi       2 images      pinned  2 images   unpinned                        │
-│ pinned      v1            pinned  v1           pinned  v1    pinned          │
-│ sidecar     v1            pinned  v1           pinned                        │
-│ thirdparty  7           external  8          external  8   external          │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+│repo · base main                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│──────────────┬──────────────────────┬─────────────────────┬──────────────    │
+│ FAMILY       │ ▸ A                  │ B                   │ C                │
+│──────────────┼──────────────────────┼─────────────────────┼──────────────    │
+│ ▸ absent     │ v1            pinned │                     │ v9    pinned     │
+│ drift        │ v1          unpinned │ v2           pinned │ v2  unpinned     │
+│ empty        │                      │ no images           │                  │
+│ mixedtags    │ 2 versions     split │                     │                  │
+│ multi        │ 2 images      pinned │ 2 images   unpinned │                  │
+│ pinned       │ v1            pinned │ v1           pinned │ v1    pinned     │
+│ sidecar      │ v1            pinned │ v1           pinned │                  │
+│ thirdparty   │ 7           external │ 8          external │ 8   external     │
+│              │                      │                     │                  │
+│              │                      │                     │                  │
+│              │                      │                     │                  │
+│              │                      │                     │                  │
+│              │                      │                     │                  │
+│              │                      │                     │                  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │re-reading origin/main…                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env a                p promote • d deploy • w watch • r resume • ? help • q quit
+        actions · promote into · tag · watch · refresh · restart · quit · ? more

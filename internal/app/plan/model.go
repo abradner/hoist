@@ -75,9 +75,14 @@ func ValidateOverride(repo, text string) (image.Ref, error) {
 type state int
 
 const (
-	stateSelectEnv state = iota // prompting for the target env (huh.Select)
-	stateLoading                // resolving + building the plan (spinner)
-	stateReady                  // rows + diff shown
+	// stateSelectEnv prompts for the missing env with a huh.Select — the target when p opened
+	// this screen with a source but no configured pair for it (rare after T3-04: p now always
+	// carries a target), or the SOURCE when p opened it with a target but no unambiguous
+	// reverse pair (T3-04's own "promote into <target> from…", the normal ambiguous case).
+	// selectingSource says which.
+	stateSelectEnv state = iota
+	stateLoading         // resolving + building the plan (spinner)
+	stateReady           // rows + diff shown
 )
 
 type focusPane int
@@ -182,6 +187,11 @@ type Model struct {
 	err   error
 
 	envSelect *huh.Select[string]
+	// selectingSource is true when envSelect is prompting for the SOURCE (T3-04's own
+	// "promote into <target> from…") rather than the target — the field the huh binding
+	// writes into, and what updateSelectEnv resyncs from GetValue and moves on from, differ
+	// accordingly.
+	selectingSource bool
 
 	spinner spinner.Model
 	status  string
@@ -256,13 +266,16 @@ func (m Model) ResetStarting() Model {
 	return m
 }
 
-// New builds the plan screen for one source env. target is the configured pair for source
-// (envs.pairs[source]), or "" when there is none; forcePrompt is true when the matrix
-// screen's P (rather than p) opened it, which always prompts even when a pair is
-// configured. planFn is nil in tests that never load a plan through the real service (a fixture
-// builds gitops.Plan directly via loadedMsg instead). hist is the commit-history bundle (M10); a
-// zero value degrades every repo to a named gap.
-func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source, target string, forcePrompt bool, planFn Func, hist history.Funcs) Model {
+// New builds the plan screen. T3-04 retires the old "P forces a prompt" gesture: p on the
+// matrix always names a Target (the cursor's column), and Source is either the one
+// unambiguous reverse pair or "" — in which case this screen prompts "promote into <target>
+// from…" itself, rather than the matrix ever forcing a prompt for an arbitrary target. A
+// caller with a source but no target (kept for a caller that still has one, e.g. a future
+// non-matrix producer) still gets the older "promote <source> to…" prompt instead. planFn is
+// nil in tests that never load a plan through the real service (a fixture builds gitops.Plan
+// directly via loadedMsg instead). hist is the commit-history bundle (M10); a zero value
+// degrades every repo to a named gap.
+func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source, target string, planFn Func, hist history.Funcs) Model {
 	m := Model{
 		repo:       repo,
 		promotable: promotable,
@@ -281,10 +294,15 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		overrides:  map[string]image.Ref{},
 		styles:     ui.NewStyles(true),
 	}
-	if target == "" || forcePrompt {
+	switch {
+	case target != "" && source == "":
+		m.state = stateSelectEnv
+		m.selectingSource = true
+		m.buildSourceSelect()
+	case target == "":
 		m.state = stateSelectEnv
 		m.buildEnvSelect()
-	} else {
+	default:
 		m.state = stateLoading
 		m.status = fmt.Sprintf("resolving digests from %s pods…", source)
 	}
@@ -320,6 +338,25 @@ func (m *Model) buildEnvSelect() {
 		sel = sel.Options(opts...)
 	} else {
 		m.err = fmt.Errorf("no other env to promote %s to", m.source)
+	}
+	m.envSelect = sel
+}
+
+// buildSourceSelect is buildEnvSelect's mirror for T3-04's own "promote into <target>
+// from…": every other discovered env is a candidate source, bound to m.source instead of
+// m.target.
+func (m *Model) buildSourceSelect() {
+	candidates := SourcesFor(m.repo, m.target)
+	sel := huh.NewSelect[string]().Title(fmt.Sprintf("promote into %s from…", m.target)).Value(&m.source)
+	sel.WithKeyMap(huh.NewDefaultKeyMap())
+	if len(candidates) > 0 {
+		opts := make([]huh.Option[string], 0, len(candidates))
+		for _, e := range candidates {
+			opts = append(opts, huh.NewOption(e, e))
+		}
+		sel = sel.Options(opts...)
+	} else {
+		m.err = fmt.Errorf("no other env to promote into %s from", m.target)
 	}
 	m.envSelect = sel
 }
@@ -564,7 +601,11 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 
 func (m Model) updateSelectEnv(msg tea.Msg) (Model, tea.Cmd) {
 	if kmsg, ok := msg.(tea.KeyPressMsg); ok && kmsg.String() == "enter" {
-		if m.target == "" {
+		if m.selectingSource {
+			if m.source == "" {
+				return m, nil
+			}
+		} else if m.target == "" {
 			return m, nil
 		}
 		m.state = stateLoading
@@ -572,14 +613,19 @@ func (m Model) updateSelectEnv(msg tea.Msg) (Model, tea.Cmd) {
 		return m, m.Init()
 	}
 	_, cmd := m.envSelect.Update(msg)
-	// Re-read m.target from the field itself rather than trusting buildEnvSelect's
-	// Value(&m.target) binding to have kept it current: this Model is a value passed by copy
-	// through every Update in the chain, so the pointer that binding captured addresses a
-	// Model snapshot that stopped being "the" model the instant New returned. Without this
-	// resync, Down could move the highlighted option while m.target silently stayed pinned
-	// to whichever option construction time happened to default to.
+	// Re-read the field this select is bound to from the widget itself rather than trusting
+	// buildEnvSelect's/buildSourceSelect's own Value(&m.target)/Value(&m.source) binding to
+	// have kept it current: this Model is a value passed by copy through every Update in the
+	// chain, so the pointer that binding captured addresses a Model snapshot that stopped
+	// being "the" model the instant New returned. Without this resync, Down could move the
+	// highlighted option while the field silently stayed pinned to whichever option
+	// construction time happened to default to.
 	if v, ok := m.envSelect.GetValue().(string); ok {
-		m.target = v
+		if m.selectingSource {
+			m.source = v
+		} else {
+			m.target = v
+		}
 	}
 	return m, cmd
 }

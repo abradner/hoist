@@ -137,8 +137,8 @@ type Model struct {
 	// the operator's next keypress (#164's own shape, one layer further: a real refusal that
 	// arrived a beat before an unrelated "j" was simply gone). View's own bottom row shows only
 	// the latest entry, one line, plus a "l: activity (N)" hint — not cleared by a keypress
-	// either, only ever replaced by a newer entry. Opening the log (l, matrix.OpenActivityMsg
-	// below) does not dismiss it: View draws the row on every screen regardless of what is on
+	// either, only ever replaced by a newer entry. Opening the log (l, the root's own generic
+	// keyed handling below) does not dismiss it: View draws the row on every screen regardless of what is on
 	// top of the stack (its own doc comment), so it keeps showing underneath the log screen too
 	// — the full history is what the log adds, not a replacement for this row.
 	activity activity.Log
@@ -459,9 +459,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			// The activity log, from any screen that has opted into the registry (keyed) —
 			// generic root-level handling, not a per-screen message (train3-design.md's own
-			// "the root intercepts ?, l and q as keys, not as *Msgs"). The matrix's own l
-			// (matrix.OpenActivityMsg, below) still handles itself: matrixScreen does not
-			// implement keyed yet (that lands in T3-04), so this never double-fires for it.
+			// "the root intercepts ?, l and q as keys, not as *Msgs"). Since T3-04, matrixScreen
+			// implements keyed too, so this now covers the matrix itself as well — its own
+			// former l handling (matrix.OpenActivityMsg) is retired.
 			if !m.capturesText() {
 				if _, ok := m.top().(keyed); ok {
 					if _, already := m.top().(activityScreen); !already {
@@ -550,11 +550,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.push(fs)
 		return m, tea.Batch(fs.Init(), cmd)
 	case matrix.OpenPlanMsg:
-		target := ""
-		if m.envs.Pairs != nil {
-			target = m.envs.Pairs[msg.Source]
-		}
-		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, target, msg.Force, m.planFn, m.history)}
+		// T3-04: p always names the Target (the cursor's column); Source is the one reverse
+		// pair when exactly one exists, else "" — the plan screen itself then asks "promote
+		// into <target> from…" (plan.New's own stateSelectEnv branch below).
+		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, msg.Target, m.planFn, m.history)}
 		m = m.push(ps)
 		return m, ps.Init()
 	case deploy.BackMsg:
@@ -682,13 +681,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cs.Init()
 	case appconfig.BackMsg:
 		return m.pop(), nil
-	case matrix.OpenActivityMsg:
-		// A snapshot of the log as it stands right now — activity.Model's own doc comment: the
-		// screen never re-fetches while it is open, mirroring config.Model's identical "what was
-		// true when it opened" convention.
-		as := activityScreen{activity.New(m.activity, time.Now)}
-		m = m.push(as)
-		return m, as.Init()
 	case activity.BackMsg:
 		return m.pop(), nil
 	case matrix.OpenRestartMsg:
