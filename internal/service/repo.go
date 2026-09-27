@@ -62,6 +62,12 @@ func (s *Service) LoadRepo(ctx context.Context, mode RepoMode) (RepoView, error)
 	switch mode {
 	case RepoFromOrigin:
 		dir := s.settings.RepoDir
+		// refreshMu (Service's own doc comment) serializes the whole fetch-swap-discover
+		// sequence against the fixed repo-view worktree: Discover reads dir, which a second,
+		// concurrent refresh could remove and recreate out from under it the instant
+		// refreshRepoView above returns, so the lock has to cover both calls, not just the
+		// first.
+		s.refreshMu.Lock()
 		fresh, sha, err := refreshRepoView(ctx, s.Git(), s.settings.RepoDir, s.settings.Base)
 		if err != nil {
 			view.Fallback = err
@@ -72,9 +78,22 @@ func (s *Service) LoadRepo(ctx context.Context, mode RepoMode) (RepoView, error)
 		}
 		r, derr := gitops.Discover(dir, s.settings.AppsRoot)
 		if derr != nil {
+			s.refreshMu.Unlock()
 			return RepoView{}, derr
 		}
 		view.Repo, view.Dir = r, dir
+		// s.view is published HERE, still under refreshMu, not after releasing it: two
+		// concurrent RepoFromOrigin refreshes are only ordered against each other by refreshMu,
+		// so publishing outside that lock let whichever of the two happened to reach s.mu.Lock
+		// second win regardless of which one actually finished its own fetch-discover sequence
+		// second — an older refresh's stale view could overwrite a newer one that had already
+		// landed (P3 #8, t2-review.md). Publishing before Unlock keeps "last to hold refreshMu"
+		// and "last to publish" the same event.
+		s.mu.Lock()
+		s.view = view
+		s.mu.Unlock()
+		s.refreshMu.Unlock()
+		return view, nil
 	default: // RepoFromClone
 		r, err := gitops.Discover(s.settings.RepoDir, s.settings.AppsRoot)
 		if err != nil {

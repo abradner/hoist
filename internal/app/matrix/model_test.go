@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -409,6 +410,59 @@ func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
 
 	if m2.repo.Root == "stale-repo" {
 		t.Error("a superseded repo-refresh answer from an earlier Model generation overwrote the current one's repo")
+	}
+}
+
+// TestRefreshesNeverOverlap is Train 2 design PR 4's own coalescing fix:
+// TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped already proves a second askRepoRefresh
+// while one is outstanding issues no command of its own; this proves the ask it lost is not
+// simply dropped for good (the OLD behavior, before this PR) but re-issued exactly once after the
+// in-flight one lands — "two completions" landing close together (F5 and a drive finishing, or
+// two drives finishing near each other) must never run RefreshRepoFunc concurrently (inflight
+// never exceeds 1) and must settle at no more than 2 total calls (the original plus one coalesced
+// re-issue, never a queue of more).
+func TestRefreshesNeverOverlap(t *testing.T) {
+	var inflight, maxInflight, calls int32
+	fn := func(_ context.Context) (*gitops.Repo, error) {
+		n := atomic.AddInt32(&inflight, 1)
+		defer atomic.AddInt32(&inflight, -1)
+		atomic.AddInt32(&calls, 1)
+		for {
+			prevMax := atomic.LoadInt32(&maxInflight)
+			if n <= prevMax || atomic.CompareAndSwapInt32(&maxInflight, prevMax, n) {
+				break
+			}
+		}
+		return fixture(), nil
+	}
+	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).WithRefreshRepo(fn)
+
+	m, cmd1 := m.askRepoRefresh()
+	if cmd1 == nil {
+		t.Fatal("setup: first askRepoRefresh issued no command")
+	}
+	// The second ask — a completion refresh landing while F5's own is still outstanding, or the
+	// reverse — must set refreshAgain rather than run concurrently.
+	m, cmd2 := m.askRepoRefresh()
+	if cmd2 != nil {
+		t.Fatal("a second askRepoRefresh while one is outstanding must not itself issue a command")
+	}
+
+	msg1 := cmd1()
+	m, cmd3 := m.Update(msg1)
+	if cmd3 == nil {
+		t.Fatal("landing the first refresh while a second was coalesced must re-issue exactly once")
+	}
+	m, _ = m.Update(cmd3())
+
+	if maxInflight > 1 {
+		t.Errorf("max concurrent RefreshRepoFunc calls = %d, want at most 1 (never overlapping)", maxInflight)
+	}
+	if calls > 2 {
+		t.Errorf("RefreshRepoFunc called %d times, want at most 2 (the original plus one coalesced re-issue)", calls)
+	}
+	if m.refreshAgain {
+		t.Error("refreshAgain still set after the coalesced re-issue was itself processed — it must clear on every RepoRefreshedMsg, not just the first")
 	}
 }
 

@@ -96,6 +96,14 @@ type Model struct {
 	// own package doc).
 	sess session.Controller
 
+	// lastList is the most recent full listing session.ChangeListed carried (state files on
+	// disk, each re-observed) — kept so a ChangeStepped change (Train 2 design PR 4) can
+	// re-merge the controller's own freshest live snapshots into the matrix's in-flight pane
+	// (mergeInFlight's own shape) without waiting for the next listing tick and without a forge
+	// call of its own: the listed-but-not-live entries in the last full listing are still good,
+	// only the live ones need refreshing.
+	lastList []service.Listed
+
 	// poll, openURL and openPRMode are Promotion's remaining fields, unpacked here — see
 	// Promotion's own doc comment for what each one is and why a nil OpenURL degrades to a
 	// notice rather than a panic.
@@ -369,8 +377,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
 		// here the message was forwarded to the top screen — the deploy screen itself — which
 		// fed it to its own viewport, so Esc did nothing and the screen could not be left
-		// (Copilot, PR #72).
-		return m.pop(), nil
+		// (Copilot, PR #72). popAndRelist (Train 2 design PR 4): the operator backing out of a
+		// deploy confirm may have just watched one land on the flight screen before backing out
+		// further, so the pane re-lists at once rather than waiting for the next tick, exactly
+		// like plan.BackMsg and flight.BackMsg below.
+		return m.popAndRelist()
 	case plan.BackMsg:
 		return m.popAndRelist()
 	case plan.StartMsg:
@@ -556,32 +567,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // listing alone would never show); and an abandon's own outcome adds a notice and, on success,
 // asks for a fresh listing right away rather than waiting for the next tick.
 func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
+	// needsRefresh/needsRelist are decided across the WHOLE batch, and acted on at most once
+	// each, after the loop — never per change. A single Driver.Step can land and finish in the
+	// same tick (session.Controller.Update's own doc comment: "a stepMsg that both lands and
+	// finishes" produces ChangeLanded AND ChangeDone together), and calling
+	// requestMatrixRefresh/Relist once per change would refresh twice for what the operator
+	// experiences as one event — matrix's own refreshingRepo/refreshAgain coalescing would stop
+	// that from corrupting anything, but it would still cost a second, pointless fetch
+	// (TestLandedRefreshesOnce's own point).
 	var cmds []tea.Cmd
+	var needsRefresh, needsRelist bool
 	for _, ch := range changes {
 		switch ch.Kind {
 		case session.ChangeBuildFailed:
 			m = m.popBuildFailed(ch.Build, ch.Err)
 		case session.ChangeListed:
-			list := ch.List
-			live := m.sess.Live()
-			m = m.withMatrix(func(ms matrix.Model) matrix.Model {
-				return ms.SetInFlight(mergeInFlight(list, live), nil)
-			})
+			m.lastList = ch.List
+			m = m.remergeInFlight()
+		case session.ChangeStepped:
+			// Train 2 design PR 4, FB-M8 for a drive running here: the pane reflects this
+			// session's own freshest live snapshot the instant a Step lands, rather than
+			// waiting for the next listing tick (session.Config.ListEvery) — no forge call, just
+			// a re-merge of what this session already knows against the last full listing.
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			m = m.remergeInFlight()
+		case session.ChangeLanded, session.ChangeDone:
+			// A landed or finished drive can have moved exactly what the matrix's own drift
+			// column and repo read describe (a merge, a direct push) — refresh both the way F5
+			// does (matrix.Model.RequestRefresh, its own repoGen guard and refreshAgain
+			// coalescing unchanged) so the operator sees the new tag without pressing F5
+			// themselves, and relist right away so the pane doesn't wait for the next tick to
+			// drop this entry (Done) or show it landed (Landed).
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			needsRefresh = true
+			needsRelist = true
+		case session.ChangeBlocked, session.ChangeFailed:
+			// Relist only: a blocked or failed drive hasn't landed anything new for drift or the
+			// repo to reflect, but the pane's own phase has moved and should not wait either.
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			needsRelist = true
 		case session.ChangeRefused:
 			// A whole-listing failure (the forge/state directory unreachable) — left for a
 			// later train PR to surface; the pane simply keeps its last good listing.
 		case session.ChangeAbandoned:
 			m.notice = "abandoned " + ch.ID
 			m = m.mirrorAttached(ch.Build, ch.Snap)
-			var relistCmd tea.Cmd
-			m.sess, relistCmd = m.sess.Relist()
-			cmds = append(cmds, relistCmd)
+			needsRelist = true
 		case session.ChangeAbandonFailed:
 			m.notice = fmt.Sprintf("abandon %s failed: %v", ch.ID, ch.Err)
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 		default:
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 		}
+	}
+	if needsRefresh {
+		var refreshCmd tea.Cmd
+		m, refreshCmd = m.requestMatrixRefresh()
+		cmds = append(cmds, refreshCmd)
+	}
+	if needsRelist {
+		var relistCmd tea.Cmd
+		m.sess, relistCmd = m.sess.Relist()
+		cmds = append(cmds, relistCmd)
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -609,6 +656,39 @@ func (m Model) mirrorAttached(build session.BuildID, fallback session.Snapshot) 
 		return m
 	}
 	return m
+}
+
+// remergeInFlight re-merges this session's own live snapshots (session.Controller.Live) into the
+// matrix's in-flight pane against the last full listing this session saw (m.lastList) — the exact
+// merge session.ChangeListed already does, replayed with fresher live data and no forge call
+// (Train 2 design PR 4). Used both for a fresh listing itself and, ChangeStepped's own case
+// above, for the pane to reflect a live entry's progress in between listing ticks.
+func (m Model) remergeInFlight() Model {
+	live := m.sess.Live()
+	list := m.lastList
+	return m.withMatrix(func(ms matrix.Model) matrix.Model {
+		return ms.SetInFlight(mergeInFlight(list, live), nil)
+	})
+}
+
+// requestMatrixRefresh triggers the matrix's own completion-triggered refresh (matrix.Model.
+// RequestRefresh: refresh() for drift, askRepoRefresh() for the repo, through the existing
+// repoGen guard and its refreshAgain coalescing — Train 2 design PR 4). The matrix always sits
+// at stack index 0 (push never inserts below it, pop and truncateToMatrix both refuse to remove
+// it), so this indexes directly rather than searching the whole stack the way withMatrix does
+// for a message that can land while some other screen is on top.
+func (m Model) requestMatrixRefresh() (Model, tea.Cmd) {
+	if len(m.stack) == 0 {
+		return m, nil
+	}
+	ms, ok := m.stack[0].(matrixScreen)
+	if !ok {
+		return m, nil
+	}
+	nm, cmd := ms.RequestRefresh()
+	m.stack = append([]Screen(nil), m.stack...)
+	m.stack[0] = matrixScreen{nm}
+	return m, cmd
 }
 
 // popBuildFailed removes the preflight flightScreen a Start/Resume call's own failure leaves
