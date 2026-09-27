@@ -116,6 +116,57 @@ func TestFrameOverflowDropsTheWholeLastSectionRatherThanEatAnEarlierRow(t *testi
 	}
 }
 
+// TestFrameOverflowWalksBackThroughMultipleTrailingSections pins the codex finding on top of
+// TestFrameOverflowDropsTheWholeLastSectionRatherThanEatAnEarlierRow: dropping the last section
+// alone is not always enough. When a 4-section frame overflows badly enough that both trailing
+// sections have to give way, Render must walk backward — drop the last section whole, then
+// re-apply the same trim-or-drop judgement to the section that is now last — rather than falling
+// straight through to the pathological "eat rows after the title" fallback the moment the first
+// drop doesn't close the gap. That fallback starts cutting at index 1 (right after the title),
+// which reaches into the header before a still-trimmable third section is ever considered.
+func TestFrameOverflowWalksBackThroughMultipleTrailingSections(t *testing.T) {
+	st := NewStyles(true)
+	f := Frame{
+		Title: "hoist · promotion",
+		Sections: []string{
+			"HEADER abcd1234 app-staging → app-production",
+			"row one",
+			"keep-a\nkeep-b\nkeep-c",
+			strings.Repeat("history line\n", 5),
+		},
+		Footer: "f",
+	}
+	// height=8: room=7. main is 14 rows + border = 15, five over. Dropping the history section
+	// whole (rule included) removes 6, leaving 9 (one over room=7... walked through below) — not
+	// enough by itself; the third section then must also give way, trimmed to its own single "…"
+	// marker rather than dropped, since trimming alone closes the remaining gap.
+	out := f.Render(st, 60, 8)
+	lines := shape(t, out, 60, 8)
+	if !strings.Contains(lines[1], "HEADER abcd1234") {
+		t.Fatalf("header row was dropped instead of a trailing section: %q\n%s", lines[1], out)
+	}
+	if !strings.Contains(out, "row one") {
+		t.Fatalf("the second section was dropped, want only the two trailing sections affected:\n%s", out)
+	}
+	if strings.Contains(out, "history line") {
+		t.Fatalf("the history section's own content should be gone entirely:\n%s", out)
+	}
+	if strings.Contains(out, "keep-b") || strings.Contains(out, "keep-c") {
+		t.Fatalf("the third section should be trimmed to a single marker row, not left partially shown:\n%s", out)
+	}
+	closing := lines[len(lines)-2]
+	if !strings.HasPrefix(closing, "╰") || !strings.HasSuffix(closing, "╯") {
+		t.Fatalf("closing border not at height-2 (row %d): %q", len(lines)-2, closing)
+	}
+	above := lines[len(lines)-3]
+	if strings.HasPrefix(above, "├") || strings.HasSuffix(above, "┤") {
+		t.Fatalf("a bare rule sits directly above the closing border, detached from any content: %q", above)
+	}
+	if !strings.Contains(above, "…") {
+		t.Fatalf("expected the row above the closing border to carry the trimmed section's \"…\" marker: %q", above)
+	}
+}
+
 func TestBodyHeight(t *testing.T) {
 	// 24 rows: footer 1, edges 2, one rule between two sections = 20 content rows.
 	if got := BodyHeight(24, 2); got != 20 {

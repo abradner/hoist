@@ -595,7 +595,13 @@ func TestRetryScheduleUsesTheDriversWait(t *testing.T) {
 func TestDriveErrorOnNonRetryableStepStopsPolling(t *testing.T) {
 	drv := &stubDrive{err: &engine.StepError{Step: engine.StepPushed, Op: "act", Err: errors.New("rejected: non-fast-forward")}}
 	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
-	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+	// height 11, not this file's usual 10: at 10, header+steps+action+notes+the log's own
+	// unconditional 3-line floor (layout, above) do not fit even with the log dropped
+	// entirely, so ui.Frame's now-correct backward walk (internal/ui/frame.go) has to give up
+	// the notes section too — the log is meant to be the only sacrificial one here (View's own
+	// comment). One more row is enough room for the log to be dropped outright while header,
+	// steps, action and the error notice all stay intact.
+	m = m.SetSize(80, 11).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
 	batch, ok := cmd().(tea.BatchMsg)
@@ -782,7 +788,10 @@ func TestDriveErrorRedactsRegisteredSecret(t *testing.T) {
 	redact.Register(secret)
 	drv := &stubDrive{err: errors.New("checking CI status: token " + secret + " rejected")}
 	m := New(fixtureState(), PollDurations{}, drv.fn(fixtureState()))
-	m = m.SetSize(80, 10).SetStyles(ui.NewStyles(true))
+	// height 11: see TestDriveErrorOnNonRetryableStepStopsPolling's comment above — at this
+	// file's usual 10 there is not enough room for the notes section even with the log
+	// dropped entirely, so the redacted error text would be cropped along with it.
+	m = m.SetSize(80, 11).SetStyles(ui.NewStyles(true))
 
 	cmd := m.Init()
 	batch := cmd().(tea.BatchMsg)

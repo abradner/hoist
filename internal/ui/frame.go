@@ -75,27 +75,37 @@ func (f Frame) Render(st Styles, width, height int) string {
 		}
 	}
 
-	if total := len(main) + 1 + len(panes); total > room && len(starts) > 0 {
+	// Work backward from the last section: trim it to a single "…" marker if that closes the
+	// gap, otherwise drop it whole (rule included) and reconsider the section now last. This
+	// repeats until the box fits or only one section remains — so a run of several short
+	// trailing sections gives way one at a time before an earlier, higher-priority section
+	// (the header) is ever touched.
+	for n := len(starts); n > 0; {
+		total := len(main) + 1 + len(panes)
+		if total <= room {
+			break
+		}
 		overflow := total - room
-		last := len(starts) - 1
-		sectionStart := starts[last]
-		avail := len(main) - sectionStart // content rows currently in the last section
+		sectionStart := starts[n-1]
+		avail := len(main) - sectionStart // content rows currently in this section
 		cut := min(overflow, max(avail-1, 0))
-		if cut < overflow && last > 0 {
+		if cut < overflow && n > 1 {
 			// Reducing this section to its own single marker row still would not close the
 			// gap: dropping it entirely (rule included) is strictly better than leaving a
 			// bare "…" that was never going to be enough by itself, and moves the box's
 			// closing border up to whatever section is now last, rather than reaching past
 			// this section into an earlier, higher-priority one.
 			main = main[:sectionStart-1]
-		} else {
-			if cut > 0 {
-				main = main[:len(main)-cut]
-			}
-			if avail > 0 {
-				main[len(main)-1] = continuationRow(st, width)
-			}
+			n--
+			continue
 		}
+		if cut > 0 {
+			main = main[:len(main)-cut]
+		}
+		if avail > 0 {
+			main[len(main)-1] = continuationRow(st, width)
+		}
+		break
 	}
 
 	if total := len(main) + 1 + len(panes); total > room {
