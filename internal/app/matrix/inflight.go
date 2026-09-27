@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -24,9 +25,15 @@ import (
 // fits. Absent when nothing is in flight.
 
 // ResumeMsg asks the root to re-drive one in-flight promotion on the flight screen (r, or
-// enter on the pane) — the TUI's `hoist resume <id>`.
+// enter on the pane) — the TUI's `hoist resume <id>`. Build carries the session.Controller
+// BuildID for an entry still Building (P1 #2): ID is empty until a real promotion id exists, so
+// re-attaching to it before then has nothing else to key by — the root re-attaches by Build
+// directly (session.Controller.BuildSnapshot) rather than calling Resume with an empty id, which
+// would fail to find anything and, worse, would have started a second drive had Resume("")
+// happened to succeed.
 type ResumeMsg struct {
-	ID string
+	ID    string
+	Build session.BuildID
 }
 
 // SetInFlight replaces what the pane shows. err is the listing's own failure (the state
@@ -99,11 +106,36 @@ func (m Model) paneRows(rows int) int {
 	return 0
 }
 
+// paneID is the identity a pane line shows: the real promotion id once one exists, or a
+// placeholder for a still-Building live entry (flight.Summary.ID is empty until then, P3 #1/P1
+// #2 — an empty string rendered bare read as a layout bug, not "no id yet").
+func paneID(s flight.Summary) string {
+	if s.ID == "" {
+		return "(starting)"
+	}
+	return s.ID
+}
+
+// paneAge is compactLine/inflightLine's "how long has this been going" text: a Building entry's
+// StartedAt is the zero time (flight.StartedAt reads it off engine.PromotionState.History, which
+// a Building entry has none of yet), so subtracting it from now() would read as an absurd
+// multi-decade duration rather than "just started".
+func paneAge(m Model, s flight.Summary) string {
+	if s.StartedAt.IsZero() {
+		return "starting"
+	}
+	return ui.Span(m.now().Sub(s.StartedAt))
+}
+
 // expandedSections is one section per promotion: two header lines, a rule, then the action.
 func (m Model) expandedSections() []string {
 	out := make([]string, 0, len(m.inflight)*2)
 	for _, s := range m.inflight {
-		head := m.styles.Accent.Render(s.ID) + "   " + m.styles.Title.Render(pair(s)) + m.styles.Dim.Render("   started "+ui.Ago(m.now(), s.StartedAt))
+		started := "starting…"
+		if !s.StartedAt.IsZero() {
+			started = "started " + ui.Ago(m.now(), s.StartedAt)
+		}
+		head := m.styles.Accent.Render(paneID(s)) + "   " + m.styles.Title.Render(pair(s)) + m.styles.Dim.Render("   "+started)
 		if s.Live {
 			// This session is driving it right now — never true for a listing-only entry
 			// (Train 2 design PR 3): distinguish that from "re-observed, last seen here".
@@ -173,7 +205,7 @@ func (m Model) compactLine(s flight.Summary) string {
 	if s.Live {
 		verdict += " · driving"
 	}
-	return m.styles.Accent.Render("⟳ "+s.ID+" → "+target) + "   " + m.styles.Warn.Render(verdict) + m.styles.Dim.Render(" · "+ui.Span(m.now().Sub(s.StartedAt)))
+	return m.styles.Accent.Render("⟳ "+paneID(s)+" → "+target) + "   " + m.styles.Warn.Render(verdict) + m.styles.Dim.Render(" · "+paneAge(m, s))
 }
 
 // inflightLine is the one-line fold for the notes section when no pane fits at all.
@@ -186,7 +218,7 @@ func (m Model) inflightLine() string {
 	}
 	verdicts := make([]string, 0, len(m.inflight))
 	for _, s := range m.inflight {
-		verdicts = append(verdicts, s.ID+" "+s.Verdict())
+		verdicts = append(verdicts, paneID(s)+" "+s.Verdict())
 	}
 	return m.styles.Accent.Render(fmt.Sprintf("⟳ %d in flight: ", len(m.inflight))) + strings.Join(verdicts, "; ")
 }

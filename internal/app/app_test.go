@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/activity"
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
 	"github.com/abradner/hoist/internal/app/history"
@@ -27,7 +28,6 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
@@ -194,6 +194,24 @@ func attach(t *testing.T, m Model, startCmd tea.Cmd) (Model, tea.Cmd) {
 // stepOnce runs one session.Controller Step call (the plain, unbatched func stepCmd builds) and
 // feeds its result back through Update — the mirrored equivalent of the old
 // driveResultFrom/onDriveResult path, now one layer down.
+// firstStepOfPokeBatch unwraps session.Controller.Poke/OverrideCINone's own returned cmd — since
+// a rearm now batches its stepCmd together with a fresh listenCmd (so progress keeps flowing
+// after R/c re-arm one, AGENTS.md §9's own goroutine-leak lesson applies here too) — and returns
+// only the stepCmd, uncalled, exactly as stepOnce expects. Never call the batch's second element
+// directly: listenCmd blocks on an unbuffered select until a progress line arrives or its ctx is
+// done, and neither happens synchronously in a test.
+func firstStepOfPokeBatch(t *testing.T, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil command")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) < 1 || batch[0] == nil {
+		t.Fatalf("Poke/OverrideCINone command yields %#v, want tea.BatchMsg(stepCmd, listenCmd)", cmd)
+	}
+	return batch[0]
+}
+
 func stepOnce(t *testing.T, m Model, cmd tea.Cmd) Model {
 	t.Helper()
 	if cmd == nil {
@@ -262,6 +280,18 @@ func press(t *testing.T, m tea.Model, k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // is a BatchMsg, runs every sub-cmd in its own goroutine too — enough to exercise a real
 // in-flight driveCmd without pulling in the whole runtime.
 func plain(m tea.Model) string { return ansi.Strip(m.View().Content) }
+
+// latestActivityText returns the root's own most recent activity.Entry.Text, or "" if nothing
+// has been logged yet — the direct-field-access replacement for the old root.notice string, since
+// Model.activity (internal/app/activity) is the append-only log that succeeded it (Train 2 design
+// PR9): a test that used to read root.notice now reads the log's own latest entry instead.
+func latestActivityText(m Model) string {
+	e, ok := m.activity.Latest()
+	if !ok {
+		return ""
+	}
+	return e.Text
+}
 
 // pressD presses d on the matrix and, when the cell has several first-party images (the
 // fixture's first family, counta, has two), accepts the chooser's first option with enter —
@@ -591,8 +621,11 @@ func TestSecondStartForSameTargetIsRefused(t *testing.T) {
 	if calls != before {
 		t.Errorf("startPromotion called %d additional time(s) for the refused second StartMsg, want 0", calls-before)
 	}
-	if v := plain(tm2); !strings.Contains(v, "already running") {
-		t.Errorf("notice missing the refusal reason:\n%s", v)
+	// The bottom row truncates to one line (Model.bottomLine's own doc comment) and this
+	// message is long enough to be cut before "already running" — the full reason is what the
+	// activity log entry itself carries, read here rather than the necessarily-truncated view.
+	if got := latestActivityText(tm2.(Model)); !strings.Contains(got, "already running") {
+		t.Errorf("activity entry missing the refusal reason: %q", got)
 	}
 }
 
@@ -897,8 +930,9 @@ func TestStartMsgShowsNoticeOnBuildError(t *testing.T) {
 	if n := len(m.(Model).stack); n != before {
 		t.Errorf("stack ended at %d screens after a construction error, want back to %d (the building screen popped)", n, before)
 	}
-	if v := plain(m); !strings.Contains(v, "still in flight") {
-		t.Errorf("view missing the construction-error notice:\n%s", v)
+	// The bottom row truncates to one line; the full reason lives on the activity entry itself.
+	if got := latestActivityText(m.(Model)); !strings.Contains(got, "still in flight") {
+		t.Errorf("activity entry missing the construction-error reason: %q", got)
 	}
 }
 
@@ -1042,8 +1076,9 @@ func TestPlanEarlierResolveCannotLandOnNewPlan(t *testing.T) {
 		t.Fatalf("stack has %d screens after esc, want 1 (matrix only)", n)
 	}
 
-	// Move the column cursor so the second plan is for a different source env.
-	tm, _ = press(t, tm, uitest.Key("l"))
+	// Move the column cursor so the second plan is for a different source env. (l used to be a
+	// Right alias; it is retired — the proposed keymap binds it to the activity log instead.)
+	tm, _ = press(t, tm, uitest.Key("right"))
 	source2 := tm.(Model).stack[0].(matrixScreen).CurrentEnv()
 	if source2 == "" || source2 == source1 {
 		t.Fatalf("setup: moving the column did not change the source env (%q -> %q)", source1, source2)
@@ -1181,7 +1216,7 @@ func TestFailedStartThenOverrideLoadsHistory(t *testing.T) {
 	// goes straight to loading rather than the env-select prompt (a pair configured for the
 	// OTHER direction only, from whichever env the column defaults to).
 	if tm.(Model).stack[0].(matrixScreen).CurrentEnv() != "app-staging" {
-		tm, _ = tm.Update(uitest.Key("l"))
+		tm, _ = tm.Update(uitest.Key("right"))
 	}
 
 	// p: open and fully load the plan screen (testPlanFunc/the fake Delta never block).
@@ -1313,10 +1348,19 @@ func TestStartMsgErrorNoticeIsRedacted(t *testing.T) {
 	m, _ = m.Update(sessionBuildCmd(t, cmd)())
 	v := plain(m)
 	if strings.Contains(v, secret) {
-		t.Errorf("view leaks the registered secret unredacted:\n%s", v)
+		t.Errorf("bottom row leaks the registered secret unredacted:\n%s", v)
 	}
-	if !strings.Contains(v, redact.Redacted) {
-		t.Errorf("view missing %q for the redacted notice:\n%s", redact.Redacted, v)
+	// The bottom row truncates to one line (Model.bottomLine) and this message is long enough
+	// that the redaction marker itself can be cut off before it — the activity screen's own
+	// full, never-truncated rendering (activity.Lines' own doc comment) is where the redaction
+	// guarantee is actually provable end to end.
+	root := m.(Model)
+	full := activityScreen{activity.New(root.activity, time.Now)}.View()
+	if strings.Contains(full, secret) {
+		t.Errorf("activity screen leaks the registered secret unredacted:\n%s", full)
+	}
+	if !strings.Contains(full, redact.Redacted) {
+		t.Errorf("activity screen missing %q for the redacted entry:\n%s", redact.Redacted, full)
 	}
 }
 
@@ -1436,8 +1480,10 @@ func TestFlightOpenPRMsgBothModeShowsURLAndErrorOnFailure(t *testing.T) {
 	if !strings.Contains(v, "https://example.invalid/pr/1") {
 		t.Errorf("view missing the URL after a failed launch in both mode:\n%s", v)
 	}
-	if !strings.Contains(v, "no such browser") {
-		t.Errorf("view missing the launch error in both mode:\n%s", v)
+	// The bottom row truncates to one line and this message is long enough to lose its tail;
+	// the full text (URL and error both) lives on the activity entry itself.
+	if got := latestActivityText(m.(Model)); !strings.Contains(got, "no such browser") {
+		t.Errorf("activity entry missing the launch error in both mode: %q", got)
 	}
 }
 
@@ -1617,6 +1663,103 @@ func TestEscDuringBuildKeepsBuilding(t *testing.T) {
 	}
 }
 
+// TestEnterOnBuildingPaneEntryReattaches is P1 #2 from t2-review.md, driven through real
+// keypresses end to end: plan -> enter (start) -> esc during Build (back to the matrix, which
+// re-lists and so picks the still-Building entry up on its pane) -> enter on that pane entry ->
+// the SAME BuildID re-attached on a fresh flight screen. Before this fix, matrix.ResumeMsg for an
+// id-less pane entry carried ID: "" and the root's case called session.Controller.Resume(""),
+// which always fails (Find("") never matches anything in Resume's own byID map) — so the pane's
+// enter/r gesture on exactly the window it exists for (preflight, or the up-to-120s signing
+// wait) always ended in "could not start promotion: …" instead of re-attaching.
+func TestEnterOnBuildingPaneEntryReattaches(t *testing.T) {
+	// The fake fakeService this constructs has no ResumeFn set — Backend.Resume (fakeService.Resume,
+	// fakeservice_test.go) panics if called at all, which is this test's proof that Resume is
+	// called zero times: a wrong fix that still routes through session.Controller.Resume("")
+	// fails this test by panicking, not merely by asserting the wrong screen.
+	release := make(chan struct{})
+	promo := testPromo{Start: func(ctx context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, session.Driver, error) {
+		<-release // never resolves until the test says so — stays Building throughout
+		return engine.PromotionState{}, nil, ctx.Err()
+	}}
+	m := sizedWithPromotion(t, promo)
+	defer close(release)
+
+	tm, startCmd := m.Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	root := tm.(Model)
+	if n := len(root.stack); n != 2 {
+		t.Fatalf("stack has %d screens after StartMsg, want 2 (matrix, the building flight screen)", n)
+	}
+	before, ok := root.stack[1].(flightScreen)
+	if !ok {
+		t.Fatalf("top screen is %T, want flightScreen", root.stack[1])
+	}
+	_, build := before.Attached()
+	if build == 0 {
+		t.Fatal("setup: Start produced a zero BuildID")
+	}
+	_ = startCmd // deliberately never run: the build stays outstanding (like esc during a real signing wait)
+
+	// esc: back to the matrix, which re-lists at once (truncateToMatrix's own doc comment).
+	tm2, relistCmd := root.Update(flight.BackMsg{})
+	root2 := tm2.(Model)
+	if n := len(root2.stack); n != 1 {
+		t.Fatalf("esc during Building should pop to the matrix: stack has %d screens, want 1", n)
+	}
+	if relistCmd == nil {
+		t.Fatal("esc from the matrix produced no relist command")
+	}
+	// Run the listing (a listMsg, session.Event) through the root so apply()'s ChangeListed case
+	// re-merges this session's own live entries (mergeInFlight) into the matrix's pane — the
+	// Building entry has no state file yet, so nothing but session.Controller.Live() shows it.
+	tm3, _ := root2.Update(relistCmd())
+	root3 := tm3.(Model)
+
+	view := plain(root3)
+	if !strings.Contains(view, "starting") {
+		t.Fatalf("matrix pane does not show the Building entry as \"starting\":\n%s", view)
+	}
+	if strings.Contains(view, "started 0001-01-01") || strings.Contains(view, "started 292277") {
+		t.Fatalf("matrix pane rendered the zero StartedAt literally:\n%s", view)
+	}
+
+	// enter on the pane: matrix.ResumeMsg is what either key emits — with exactly one entry and
+	// no id yet, it must carry Build, not an empty ID.
+	var top tea.Model = root3
+	top, resumeCmd := press(t, top, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if resumeCmd == nil {
+		t.Fatal("enter on the in-flight pane produced no command")
+	}
+	msg := resumeCmd()
+	rm, ok := msg.(matrix.ResumeMsg)
+	if !ok {
+		t.Fatalf("enter on the pane emitted %#v, want matrix.ResumeMsg", msg)
+	}
+	if rm.ID != "" {
+		t.Fatalf("ResumeMsg.ID = %q, want empty — this entry has no promotion id yet", rm.ID)
+	}
+	if rm.Build != build {
+		t.Fatalf("ResumeMsg.Build = %d, want %d", rm.Build, build)
+	}
+
+	// The root's own case: this must re-attach the SAME BuildID without ever reaching
+	// session.Controller.Resume/Backend.Resume (fakeService.Resume panics — see above).
+	tm4, _ := top.Update(msg)
+	root4 := tm4.(Model)
+	if n := len(root4.stack); n != 2 {
+		t.Fatalf("re-attach should push exactly one flight screen: stack has %d screens, want 2", n)
+	}
+	fs, ok := root4.stack[1].(flightScreen)
+	if !ok {
+		t.Fatalf("top screen is %T, want the re-attached flightScreen", root4.stack[1])
+	}
+	if _, b := fs.Attached(); b != build {
+		t.Errorf("re-attach produced BuildID %d, want the original %d — a second build exists", b, build)
+	}
+	if n := len(root4.sess.Live()); n != 1 {
+		t.Errorf("session.Controller tracks %d entries after re-attach, want exactly 1", n)
+	}
+}
+
 // TestReobserveKeyThroughRoot: a real "R" keypress on an attached flight screen, driven through
 // the root's own Update exactly as a running program would — the top screen's own key handling
 // emits flight.ReobserveMsg, and the root's case (unchanged by PR 3) answers it by calling
@@ -1650,23 +1793,26 @@ func TestReobserveKeyThroughRoot(t *testing.T) {
 	if pokeCmd == nil {
 		t.Fatal("R's ReobserveMsg produced no re-drive command")
 	}
-	top.Update(pokeCmd()) // the actual Step call
+	top.Update(firstStepOfPokeBatch(t, pokeCmd)()) // the actual Step call
 	if stepCalls != 2 {
 		t.Errorf("Step called %d time(s) after R, want 2 (the setup call plus exactly one re-drive)", stepCalls)
 	}
 }
 
-// TestRootNoticeClearsOnNextKeypress: the root's own notice is transient, same convention as
-// every screen's own notice field — it should not linger forever once the operator moves on.
-func TestRootNoticeClearsOnNextKeypress(t *testing.T) {
+// TestNoticeSurvivesKeypress inverts the old TestRootNoticeClearsOnNextKeypress: the root's
+// activity row (Model.activity, replacing the old transient notice string, Train 2 design PR9)
+// is deliberately NOT cleared on the operator's next keypress — that was exactly the #164-shaped
+// problem this package exists to end, a real refusal disappearing the moment an unrelated key
+// landed. It is only ever replaced by a newer entry, or dismissed by opening the log (l).
+func TestNoticeSurvivesKeypress(t *testing.T) {
 	m := sized(t)
 	m = openPR(t, m)
 	if !strings.Contains(plain(m), "not wired yet") {
 		t.Fatal("setup: notice not shown after OpenPRMsg")
 	}
 	m, _ = press(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if strings.Contains(plain(m), "not wired yet") {
-		t.Error("root notice still shown after a later keypress")
+	if !strings.Contains(plain(m), "not wired yet") {
+		t.Error("the activity row was cleared by an unrelated keypress — it must survive until a newer entry replaces it")
 	}
 }
 
@@ -1795,38 +1941,6 @@ func TestSelectedMsgReportsAnUndeployableChoice(t *testing.T) {
 	}
 	if v := plain(m); !strings.Contains(v, "cannot deploy") {
 		t.Errorf("notice should say why it cannot be deployed:\n%s", v)
-	}
-}
-
-// TestWithMatrixNoticeFindsMatrixWhenNotOnTop is finding 6's own regression test (round N,
-// Copilot): withMatrixNotice's doc comment says it sets the notice on the matrix screen
-// "wherever it actually sits in the stack", but an earlier revision only ever checked
-// m.stack[top] — true only because every real caller today happens to reach it exactly
-// there (tags.SelectedMsg/DirectRequestedMsg pop straight back to a matrix that's always
-// immediately below, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
-// screen). Build a stack where the matrix is deliberately NOT on top — matrix, then a plan
-// screen pushed on top of it, mirroring TestPromotePushesPlanScreen — and confirm
-// withMatrixNotice still finds and updates it rather than silently doing nothing.
-func TestWithMatrixNoticeFindsMatrixWhenNotOnTop(t *testing.T) {
-	m := sized(t)
-	m, cmd := press(t, m, tea.KeyPressMsg{Code: 'p', Text: "p"})
-	if cmd == nil {
-		t.Fatal("p produced no command")
-	}
-	m, _ = m.Update(cmd())
-	stack := m.(Model).stack
-	if n := len(stack); n != 2 {
-		t.Fatalf("stack has %d screens after p, want 2", n)
-	}
-	if _, ok := stack[len(stack)-1].(matrixScreen); ok {
-		t.Fatal("fixture precondition: the plan screen, not the matrix, must be on top")
-	}
-
-	const notice = "test-notice-not-on-top"
-	m2 := m.(Model).withMatrixNotice(notice)
-	m3 := m2.pop() // drop the plan screen back off to see the matrix's own view
-	if v := plain(m3); !strings.Contains(v, notice) {
-		t.Fatalf("withMatrixNotice should have found the matrix even though it wasn't on top:\n%s", v)
 	}
 }
 
@@ -2195,8 +2309,9 @@ func TestRestartEarlierStartedDropped(t *testing.T) {
 		t.Fatalf("stack has %d screens after esc, want 1 (matrix only)", n)
 	}
 
-	// l: move the column so the second restart instance targets a different env.
-	tm, _ = press(t, tm, tea.KeyPressMsg{Code: 'l', Text: "l"})
+	// Move the column so the second restart instance targets a different env. (l used to be a
+	// Right alias; it is retired — the proposed keymap binds it to the activity log instead.)
+	tm, _ = press(t, tm, tea.KeyPressMsg{Code: tea.KeyRight})
 
 	// R again: a second, distinct restart screen instance, driven to stateStarting exactly like
 	// the first — the shared state a state-only guard could not tell apart.
@@ -2314,6 +2429,39 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	}
 	if v := plain(tm2); !strings.Contains(v, "FAMILY") {
 		t.Fatalf("not back on the matrix:\n%s", v)
+	}
+}
+
+// TestPRURLInActivity: session.ChangeBuilt's own "started" activity entry names the PR when
+// Controller already has one — almost never true for a brand-new Start (the preflight that
+// produces this Change runs before anything is pushed), but a resumed drive can already carry
+// one, exactly like TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen's own
+// fixture just above.
+func TestPRURLInActivity(t *testing.T) {
+	parked := engine.PromotionState{ID: "5pr6sd333t", SourceEnv: "app-staging", TargetEnv: "app-production",
+		PR: &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}}
+	svc := svcWithInFlight(fakeInFlight{
+		Resume: func(_ context.Context, _ string) (engine.PromotionState, session.Driver, error) {
+			return parked, driverAlways(parked), nil
+		},
+	})
+	m := sizedWithService(t, svc, Promotion{}).(Model)
+	tm, cmd := m.Update(matrix.ResumeMsg{ID: "5pr6sd333t"})
+	root, _ := attach(t, tm.(Model), cmd)
+
+	e, ok := root.activity.Latest()
+	if !ok {
+		t.Fatal("no activity entry after the resumed drive attached")
+	}
+	// Exact text, not just Contains(id): a resumed entry used to carry no source/target at all
+	// (session.Controller.Resume, unlike Start, never had them to seed the entry with), so this
+	// read "started 5pr6sd333t ( → )" — Contains(id) alone passed on that blank text just fine
+	// (found in review of ceaccb2).
+	if want := "started 5pr6sd333t (app-staging → app-production)"; e.Text != want {
+		t.Errorf("activity entry Text = %q, want %q", e.Text, want)
+	}
+	if e.URL != "https://forge.example.invalid/pr/103" {
+		t.Errorf("activity entry URL = %q, want the resumed promotion's PR URL", e.URL)
 	}
 }
 
@@ -2454,6 +2602,26 @@ func TestRepoRefreshedMsgUpdatesTheRootRepoToo(t *testing.T) {
 	}
 }
 
+// TestRepoRefreshedMsgFailureSurvivesAKeypress is P2 #7 from t2-review.md: a failed F5 used to
+// become the matrix's own notice, which — like every matrix.Model.notice — is cleared the very
+// next keypress (matrix/model.go's own `m.notice = ""` on every key). F5 is async: the operator
+// can easily have pressed another key (moved the cursor, opened help) by the time the failure
+// actually lands, so the refusal was routinely never read at all — the #164 shape the root's
+// activity log exists to end. This asserts the failure reaches the activity log instead, and
+// that an unrelated keypress afterward does not clear it.
+func TestRepoRefreshedMsgFailureSurvivesAKeypress(t *testing.T) {
+	tm := sized(t)
+	tm2, _ := tm.Update(matrix.RepoRefreshedMsg{Gen: 0, Err: errors.New("dial tcp: no route to host")})
+	m2 := tm2.(Model)
+	if got := latestActivityText(m2); !strings.Contains(got, "no route to host") {
+		t.Fatalf("activity log = %q, want it to carry the refresh failure", got)
+	}
+	m3, _ := press(t, m2, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if got := latestActivityText(m3.(Model)); !strings.Contains(got, "no route to host") {
+		t.Errorf("the refresh failure was cleared by an unrelated keypress: latest activity is now %q", got)
+	}
+}
+
 // TestDoneShowsNewTagWithoutF5 is Train 2 design PR 4's central promise: a promotion the
 // operator watched finish (session.ChangeDone) refreshes the matrix's own repo read exactly as
 // F5 does, so the new tag shows up without the operator pressing F5 themselves — and the pane
@@ -2548,6 +2716,87 @@ func TestLandedRefreshesOnce(t *testing.T) {
 	}
 }
 
+// TestLandedDriveRefreshesMatrixEndToEnd is P3 #10 from t2-review.md: TestDoneShowsNewTagWithoutF5
+// and TestLandedRefreshesOnce both drive app.Model.apply directly with a synthetic
+// session.Change, which proves apply's own wiring but never that a real
+// Start -> Driver.Step -> session.Controller sequence actually produces the Change apply reacts
+// to — the one-line joint (app.go's own case session.Event -> apply) had no test driving it from
+// a real Change. This goes through the real path instead: plan.StartMsg -> the real
+// testPromo-shaped Start closure -> a real Driver whose first Step call both lands and finishes
+// in the same tick (Direct, PushedSHA set — the documented "a stepMsg that both lands and
+// finishes" shape, session.Controller.Update's own doc comment) — using Promotion's own Now/After
+// seam (added by this fix) so nothing here waits on a real clock. It asserts the
+// completion-triggered refresh (RequestRefresh, the same path F5 takes) actually fires and the
+// matrix cell renders the NEW tag, not just that a repo pointer changed.
+func TestLandedDriveRefreshesMatrixEndToEnd(t *testing.T) {
+	before := &gitops.Repo{Root: "repo", Envs: map[string]*gitops.Env{
+		"app-staging": {Name: "app-staging", Families: map[string]*gitops.Family{
+			"web": {Name: "web", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/web", Tag: "v1"}}}},
+		}},
+	}}
+	after := &gitops.Repo{Root: "repo", Envs: map[string]*gitops.Env{
+		"app-staging": {Name: "app-staging", Families: map[string]*gitops.Family{
+			"web": {Name: "web", Occurrences: []gitops.Occurrence{{Ref: image.Ref{Repo: "ghcr.io/example/web", Tag: "v2"}}}},
+		}},
+	}}
+
+	drv := funcDriver{
+		StepFunc: func(context.Context) (service.Tick, error) {
+			return service.Tick{
+				State: engine.PromotionState{ID: "abcd1234", Direct: true, PushedSHA: "deadbeef"},
+				Done:  true,
+			}, nil
+		},
+		StateFunc: func() engine.PromotionState {
+			return engine.PromotionState{ID: "abcd1234", Direct: true, PushedSHA: "deadbeef"}
+		},
+	}
+	svc := &fakeService{startFn: func(context.Context, gitops.Plan, startOpts, func(string)) (engine.PromotionState, session.Driver, error) {
+		return engine.PromotionState{ID: "abcd1234", Direct: true}, drv, nil
+	}}
+
+	fixedNow := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	promo := Promotion{
+		Now:   func() time.Time { return fixedNow },
+		After: func(_ time.Duration, f func(time.Time) tea.Msg) tea.Cmd { return func() tea.Msg { return f(fixedNow) } },
+	}
+	m := New(before, []string{"ghcr.io/"}, config.EnvsConfig{}, testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{}), svc, promo, nil, apprestart.Funcs{})
+	_ = m.Init()
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	m = tm.(Model)
+
+	if v := plain(m); !strings.Contains(v, "v1") {
+		t.Fatalf("setup: matrix does not show the original tag v1:\n%s", v)
+	}
+
+	var refreshCalls int
+	m = m.WithRefreshRepo(func(context.Context) (*gitops.Repo, string, error) {
+		refreshCalls++
+		return after, "", nil
+	})
+
+	tm2, startCmd := m.Update(plan.StartMsg{
+		Plan:   gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"},
+		Mode:   plan.ModeDirect,
+		Source: "app-staging", Target: "app-production",
+	})
+	m2, stepCmd := attach(t, tm2.(Model), startCmd)
+	m3 := drainRoot(m2, stepCmd)
+
+	if refreshCalls != 1 {
+		t.Fatalf("RefreshRepoFunc called %d times after a real landed+done drive, want exactly 1", refreshCalls)
+	}
+
+	// The refresh happens in the background while the flight screen is still on top (exactly
+	// like a real F5 mid-promotion) — esc back to the matrix to see the cell it already updated.
+	tm4, backCmd := tea.Model(m3).Update(flight.BackMsg{})
+	m4 := drainRoot(tm4.(Model), backCmd)
+	if v := plain(m4); !strings.Contains(v, "v2") {
+		t.Fatalf("matrix cell does not show the new tag after the completion-triggered refresh:\n%s", v)
+	}
+}
+
 // TestEarlierF5AnswerCannotOverwriteCompletionRefresh: the attacker is a slow F5 the operator
 // pressed before a drive landed, whose answer (carrying the OLD repo, at generation 0 — a freshly
 // built matrix.Model's own zero-value repoGen, exactly TestRepoRefreshedMsgUpdatesTheRootRepoToo's
@@ -2588,15 +2837,16 @@ func TestEarlierF5AnswerCannotOverwriteCompletionRefresh(t *testing.T) {
 	}
 }
 
-// TestNoticeIsOnScreen is #164's regression: every screen renders through ui.Frame.Render,
-// which emits exactly `height` lines, so a notice appended after that landed on row
-// height+1 and the alternate screen buffer never showed it — an in-flight refusal on the
-// deploy confirm screen was indistinguishable from a dead enter key.
+// TestNoticeIsOnScreen is #164's regression, adapted for the activity row that replaced the old
+// transient notice (Train 2 design PR9): every screen renders through ui.Frame.Render, which
+// emits exactly `height` lines, so a row appended after that landed on row height+1 and the
+// alternate screen buffer never showed it — an in-flight refusal on the deploy confirm screen
+// was indistinguishable from a dead enter key.
 //
 // The existing notice tests (TestStartMsgShowsNoticeOnBuildError and friends) could not
 // catch it: strings.Contains over the whole view is true whether or not the line is on the
-// terminal. This asserts the SHAPE — exactly `height` lines, the notice on the last one, and
-// the screen still drawn above it — at both golden sizes (AGENTS.md §4.8).
+// terminal. This asserts the SHAPE — exactly `height` lines, the row on the last one, and the
+// screen still drawn above it — at both golden sizes (AGENTS.md §4.8).
 func TestNoticeIsOnScreen(t *testing.T) {
 	for _, size := range []struct{ w, h int }{{80, 24}, {120, 40}} {
 		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
@@ -2604,59 +2854,60 @@ func TestNoticeIsOnScreen(t *testing.T) {
 			m, _ = m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
 			// A real refusal, not a synthetic string: this is the exact message the
 			// operator could not read (#164, #166).
-			const notice = "could not start promotion: promotion x5hz5gszie targeting spritz-staging is still in flight (at direct-pushed); run `hoist resume x5hz5gszie` instead of starting a second one"
-			root := m.(Model)
-			root.notice = notice
+			const text = "could not start promotion: promotion x5hz5gszie targeting spritz-staging is still in flight (at direct-pushed); run `hoist resume x5hz5gszie` instead of starting a second one"
+			root := m.(Model).noteErr(text)
 			lines := strings.Split(ansi.Strip(root.View().Content), "\n")
 			if len(lines) != size.h {
-				t.Fatalf("view is %d lines on a %d-row terminal; a notice must take rows FROM the screen, never add one past the bottom", len(lines), size.h)
+				t.Fatalf("view is %d lines on a %d-row terminal; the activity row must take a row FROM the screen, never add one past the bottom", len(lines), size.h)
 			}
 			for i, line := range lines {
 				if w := ansi.StringWidth(line); w > size.w {
 					t.Errorf("line %d is %d cells wide, over %d:\n%s", i+1, w, size.w, line)
 				}
 			}
-			// The notice wraps, so it is the terminal's last ROWS: its head must sit
-			// within the final ui.NoticeMaxLines, and its tail on the very last row.
-			tail := strings.Join(lines[len(lines)-ui.NoticeMaxLines:], "\n")
-			if !strings.Contains(tail, "could not start promotion") {
-				t.Errorf("the notice does not start within the last %d rows; got:\n%s", ui.NoticeMaxLines, tail)
+			// Unlike the old notice (wrapped over up to ui.NoticeMaxLines), the activity row is
+			// exactly one line: the message's own head, plus the "l: activity" hint.
+			last := lines[len(lines)-1]
+			if !strings.Contains(last, "could not start promotion") {
+				t.Errorf("the activity row does not start with the failure text; got:\n%s", last)
 			}
-			if !strings.Contains(lines[len(lines)-1], "starting a second one") {
-				t.Errorf("the notice does not end on the terminal's last row; got:\n%s", lines[len(lines)-1])
+			if !strings.Contains(last, "l: activity (1)") {
+				t.Errorf("the activity row is missing its own hint; got:\n%s", last)
 			}
-			// Positive control: the screen the notice explains is still drawn above it, so
-			// this cannot pass by rendering the notice alone.
+			// Positive control: the screen the row explains is still drawn above it, so this
+			// cannot pass by rendering the row alone.
 			if !strings.Contains(strings.Join(lines[:len(lines)-1], "\n"), "FAMILY") {
-				t.Error("the matrix is gone from above the notice")
+				t.Error("the matrix is gone from above the activity row")
 			}
 		})
 	}
 }
 
 // TestNoticeTooLongForTheTerminalIsCapped: a git or forge transport error runs long, and the
-// notice's rows are taken from the screen it is explaining — so it is wrapped and capped at
-// ui.NoticeMaxLines rather than allowed to push that screen away.
+// activity row's own line is taken from the screen it is explaining — so, unlike the old notice
+// (wrapped and capped at ui.NoticeMaxLines), it is truncated to exactly one line rather than
+// allowed to push that screen away or grow past a single row. The full error is never lost: it
+// stays on the entry itself, readable in full on the activity screen (l) —
+// TestLongErrorFullInActivityView (internal/app/activity) is that half's own regression test.
 func TestNoticeTooLongForTheTerminalIsCapped(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	root := m.(Model)
-	root.notice = "could not start promotion: " + strings.Repeat("a very long transport error ", 40)
+	root := m.(Model).noteErr("could not start promotion: " + strings.Repeat("a very long transport error ", 40))
 	lines := strings.Split(ansi.Strip(root.View().Content), "\n")
 	if len(lines) != height {
 		t.Fatalf("view is %d lines on a %d-row terminal, want exactly %d", len(lines), height, height)
 	}
-	notice := 0
+	rows := 0
 	for _, line := range lines {
 		if strings.Contains(line, "very long transport error") || strings.Contains(line, "could not start promotion") {
-			notice++
+			rows++
 		}
 	}
-	if notice != ui.NoticeMaxLines {
-		t.Errorf("notice took %d rows, want it capped at %d", notice, ui.NoticeMaxLines)
+	if rows != 1 {
+		t.Errorf("the activity row took %d terminal rows, want exactly 1 (never wrapped over several, unlike the old notice)", rows)
 	}
 	if !strings.Contains(lines[len(lines)-1], "…") {
-		t.Errorf("a capped notice must mark its overflow with an ellipsis; last line:\n%s", lines[len(lines)-1])
+		t.Errorf("a truncated activity row must mark its overflow with an ellipsis; last line:\n%s", lines[len(lines)-1])
 	}
 }
 

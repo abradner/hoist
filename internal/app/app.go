@@ -8,7 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/activity"
 	appconfig "github.com/abradner/hoist/internal/app/config"
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
@@ -48,6 +50,16 @@ type Promotion struct {
 	Poll       flight.PollDurations
 	OpenURL    func(url string) error
 	OpenPRMode string
+	// Now and After are session.Controller's own clock/scheduler seam (session.Config), threaded
+	// through here rather than reached for directly (AGENTS.md §4.8: this package builds
+	// session.Config, but only cmd/hoist decides what a real run's clock is) so a test can drive
+	// a real Start -> Step(landed) -> refresh sequence deterministically — a fixed Now and an
+	// After that fires on request rather than actually sleeping — the same seam session.Config
+	// already exposes to its own package's tests, now reachable from app.New (P3 #10,
+	// t2-review.md). Both nil (every real caller, and every test that never needs to drive a
+	// tick chain) keeps session.Config's own defaults: time.Now and tea.Tick.
+	Now   func() time.Time
+	After func(d time.Duration, f func(time.Time) tea.Msg) tea.Cmd
 }
 
 // openURLResultMsg is the browser launcher's answer for one URL, delivered by the command
@@ -115,12 +127,18 @@ type Model struct {
 	openURL    func(url string) error
 	openPRMode string
 
-	// notice is a transient, root-level message shown below the top screen — used for
-	// a real in-flight conflict, missing config, and for flight.OpenPRMsg when no real handler
-	// is wired in (nil svc/OpenURL). Cleared on the next keypress, mirroring
-	// every screen's own per-keypress notice convention (matrix.Model, plan.Model, flight.Model
-	// all clear theirs the same way).
-	notice string
+	// activity is the root's own record of what has happened this session (internal/app/activity,
+	// Train 2 design PR9) — a real in-flight conflict, missing config, a promotion started,
+	// landed, blocked or failed, an abandon, a browser-launch outcome. It replaces the old
+	// transient "notice" string, which showed exactly one message and cleared unconditionally on
+	// the operator's next keypress (#164's own shape, one layer further: a real refusal that
+	// arrived a beat before an unrelated "j" was simply gone). View's own bottom row shows only
+	// the latest entry, one line, plus a "l: activity (N)" hint — not cleared by a keypress
+	// either, only ever replaced by a newer entry. Opening the log (l, matrix.OpenActivityMsg
+	// below) does not dismiss it: View draws the row on every screen regardless of what is on
+	// top of the stack (its own doc comment), so it keeps showing underneath the log screen too
+	// — the full history is what the log adds, not a replacement for this row.
+	activity activity.Log
 
 	// configPath, configFound and configText are what the config screen shows (C, #104):
 	// where the file was read from or looked for, whether it existed, and the effective
@@ -167,7 +185,10 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, planFn 
 		promotable: promotable,
 		envs:       envs,
 		planFn:     planFn,
-		sess:       session.New(svc, session.Config{Deadline: promo.Poll.Deadline, ListEvery: promo.Poll.Approval}),
+		sess: session.New(svc, session.Config{
+			Deadline: promo.Poll.Deadline, ListEvery: promo.Poll.Approval,
+			Now: promo.Now, After: promo.After,
+		}),
 		poll:       promo.Poll,
 		openURL:    promo.OpenURL,
 		openPRMode: promo.OpenPRMode,
@@ -258,7 +279,7 @@ func (m Model) start(req service.StartRequest, source, target string) (Model, te
 	sess, build, cmd, err := m.sess.Start(req, source, target)
 	m.sess = sess
 	if err != nil {
-		m.notice = startErrorNotice(err)
+		m = m.noteErr(startErrorNotice(err))
 		// A refusal this immediate (ErrNoBackend, ErrTargetBusy) never gets as far as a
 		// flightScreen for popBuildFailed to pop and reset — the plan/deploy screen that just
 		// set its own one-shot Enter guard (#PR8/FB-L4) is still the top of the stack right now,
@@ -289,6 +310,43 @@ func startErrorNotice(err error) string {
 	return fmt.Sprintf("could not start promotion: %v", err)
 }
 
+// note appends one activity.Entry — every former `m.notice = ...` site in this file now calls
+// this instead (Model.activity's own doc comment). detail and url are optional; either may be
+// empty.
+func (m Model) note(kind activity.Kind, text, detail, url string) Model {
+	m.activity = m.activity.Add(activity.Entry{At: time.Now(), Kind: kind, Text: text, Detail: detail, URL: url})
+	return m
+}
+
+// noteErr is note's shorthand for the common Err case with no detail/URL.
+func (m Model) noteErr(text string) Model { return m.note(activity.Err, text, "", "") }
+
+// errText is a nil-safe error-to-string conversion for the note call sites above, which have to
+// treat a *Change.Err whose type is a pointer that can itself be nil (Blocked's own
+// *engine.BlockedError) the same way a plain nil error would be.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// noteStarted adds the "started" activity entry for a freshly built or resumed drive
+// (session.ChangeBuilt) — its own PR URL when Controller already has one (almost never true this
+// early, but a resumed drive can already carry it).
+func (m Model) noteStarted(build session.BuildID, id string) Model {
+	snap, ok := m.sess.BuildSnapshot(build)
+	text := fmt.Sprintf("started %s → %s", snap.Source, snap.Target)
+	if id != "" {
+		text = fmt.Sprintf("started %s (%s → %s)", id, snap.Source, snap.Target)
+	}
+	url := ""
+	if ok && snap.State.PR != nil {
+		url = snap.State.PR.URL
+	}
+	return m.note(activity.Info, text, "", url)
+}
+
 // Update handles window size, theme and the global keys, and forwards everything else to
 // the top screen.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -313,7 +371,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// one layer down, TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit's own shape).
 			return m.updateQuitConfirm(msg)
 		}
-		m.notice = ""
+		// Unlike the old transient notice, the activity row is never cleared by a keypress here
+		// — only a newer entry replaces it, or opening the log (l) dismisses it (Model.activity's
+		// own doc comment, TestNoticeSurvivesKeypress).
 		switch msg.String() {
 		case "ctrl+c":
 			// Immediate, no confirm, regardless of what is running: promotion state is durable
@@ -349,9 +409,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// itself had moved on. matrixRepo() reads back whatever the matrix screen's own
 		// RepoRefreshedMsg handling just decided (WithRepo's nil-repo and stale-generation
 		// guards live there, once, not duplicated here) and adopts it as the root's own.
-		m = m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms })
+		//
+		// A failed refresh used to become the matrix's own clear-on-next-key notice — exactly
+		// the #164 shape the activity log exists to end (P2 #7, t2-review.md): F5 is async, so
+		// the operator can easily have pressed another key by the time this lands, and the
+		// refusal disappeared before it was ever read. TakeRefreshError hands back that error
+		// (and clears it on the matrix) so it goes to the activity log instead, which survives.
+		var refreshErr string
+		m = m.withMatrix(func(ms matrix.Model) matrix.Model {
+			ms, _ = ms.Update(msg)
+			refreshErr, ms = ms.TakeRefreshError()
+			return ms
+		})
 		if r := m.matrixRepo(); r != nil {
 			m.repo = r
+		}
+		if refreshErr != "" {
+			m = m.noteErr(refreshErr)
 		}
 		return m, nil
 	case session.Event:
@@ -367,10 +441,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, applyCmd := m.apply(changes)
 		return m, tea.Batch(sessCmd, applyCmd)
 	case matrix.ResumeMsg:
+		if msg.ID == "" {
+			// A still-Building pane entry (P1 #2): it has no promotion id for Resume(id) to look
+			// up yet — Resume("") used to reach Backend.Resume(ctx, "") and fail every time,
+			// popping the freshly-pushed flight screen right back off with "could not start
+			// promotion". The build is already tracked (session.Controller.Start put it there);
+			// re-attaching is just mirroring its current Snapshot onto a fresh flight screen, the
+			// same as m.start does the instant Start succeeds — no new command, nothing to wait
+			// on. A build that has since finished/failed and dropped out of Controller entirely
+			// is reported rather than silently pushing a stale screen.
+			snap, ok := m.sess.BuildSnapshot(msg.Build)
+			if !ok {
+				m = m.noteErr("that promotion is no longer tracked")
+				return m, nil
+			}
+			m = m.popIfBuilding()
+			fs := flightScreen{flight.NewAttached(snap, m.poll)}
+			m = m.push(fs)
+			return m, fs.Init()
+		}
 		sess, build, cmd, err := m.sess.Resume(msg.ID)
 		m.sess = sess
 		if err != nil {
-			m.notice = "resuming a promotion is not wired up"
+			m = m.noteErr("resuming a promotion is not wired up")
 			return m, nil
 		}
 		m = m.popIfBuilding()
@@ -416,7 +509,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// per-promotion decision, never a default).
 		sess, cmd, err := m.sess.OverrideCINone(msg.ID)
 		if err != nil {
-			m.notice = fmt.Sprintf("override ignored for %s: %v", msg.ID, err)
+			m = m.noteErr(fmt.Sprintf("override ignored for %s: %v", msg.ID, err))
 			return m, nil
 		}
 		m.sess = sess
@@ -431,7 +524,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// still Abandoning, otherwise, with nothing on screen ever explaining why).
 		sess, cmd, err := m.sess.Poke(msg.ID)
 		if err != nil {
-			m.notice = fmt.Sprintf("cannot re-observe %s: %v", msg.ID, err)
+			m = m.noteErr(fmt.Sprintf("cannot re-observe %s: %v", msg.ID, err))
 			return m, nil
 		}
 		m.sess = sess
@@ -464,14 +557,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// on failure — preserving the original pre-preferences behavior for any caller that
 		// never set this field.
 		if m.openPRMode == "display" {
-			m.notice = msg.URL
+			m = m.note(activity.Info, msg.URL, "", msg.URL)
 			return m, nil
 		}
 		if m.openURL == nil {
 			// Mirrors startPromotion's own nil convention above: a caller that hasn't
 			// wired a browser opener in gets a clear notice instead of a nil-pointer
 			// panic (documented follow-up work, per PR #39's own report).
-			m.notice = fmt.Sprintf("open PR not wired yet: %s", msg.URL)
+			m = m.note(activity.Err, fmt.Sprintf("open PR not wired yet: %s", msg.URL), "", msg.URL)
 			return m, nil
 		}
 		// The launcher can block for up to browser_launch_timeout; it runs as a command and
@@ -479,13 +572,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		open, url := m.openURL, msg.URL
 		return m, func() tea.Msg { return openURLResultMsg{url: url, err: open(url)} }
 	case openURLResultMsg:
+		// Every branch that shows anything carries msg.url as the entry's own URL — "openURLResultMsg
+		// entries carry the URL" (Train 2 design PR9) — so the activity screen and the bottom row
+		// alike can show it; the quiet-success "launch" case adds no entry at all, unchanged from
+		// the old notice convention's own silence there.
 		switch {
 		case m.openPRMode == "both" && msg.err != nil:
-			m.notice = fmt.Sprintf("%s (could not open automatically: %v)", msg.url, msg.err)
+			m = m.note(activity.Err, fmt.Sprintf("%s (could not open automatically: %v)", msg.url, msg.err), "", msg.url)
 		case m.openPRMode == "both":
-			m.notice = msg.url
+			m = m.note(activity.Info, msg.url, "", msg.url)
 		case msg.err != nil:
-			m.notice = fmt.Sprintf("could not open %s: %v", msg.url, msg.err)
+			m = m.note(activity.Err, fmt.Sprintf("could not open %s: %v", msg.url, msg.err), "", msg.url)
 		}
 		return m, nil
 	case flight.AbandonMsg:
@@ -499,13 +596,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case matrix.OpenConfigMsg:
 		if m.configText == "" {
-			m.notice = "no config to show: the launcher supplied none"
+			m = m.noteErr("no config to show: the launcher supplied none")
 			return m, nil
 		}
 		cs := configScreen{appconfig.New(m.configPath, m.configFound, m.configText)}
 		m = m.push(cs)
 		return m, cs.Init()
 	case appconfig.BackMsg:
+		return m.pop(), nil
+	case matrix.OpenActivityMsg:
+		// A snapshot of the log as it stands right now — activity.Model's own doc comment: the
+		// screen never re-fetches while it is open, mirroring config.Model's identical "what was
+		// true when it opened" convention.
+		as := activityScreen{activity.New(m.activity, time.Now)}
+		m = m.push(as)
+		return m, as.Init()
+	case activity.BackMsg:
 		return m.pop(), nil
 	case matrix.OpenRestartMsg:
 		return m.openRestart(msg.Family, msg.Target)
@@ -602,30 +708,50 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 			// a re-merge of what this session already knows against the last full listing.
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 			m = m.remergeInFlight()
-		case session.ChangeLanded, session.ChangeDone:
-			// A landed or finished drive can have moved exactly what the matrix's own drift
-			// column and repo read describe (a merge, a direct push) — refresh both the way F5
-			// does (matrix.Model.RequestRefresh, its own repoGen guard and refreshAgain
-			// coalescing unchanged) so the operator sees the new tag without pressing F5
-			// themselves, and relist right away so the pane doesn't wait for the next tick to
-			// drop this entry (Done) or show it landed (Landed).
+		case session.ChangeBuilt:
+			// PR9's own "started" entry — the PR URL is almost never known this early (the
+			// preflight that produces this Change runs before anything is pushed), but a resumed
+			// drive can already have one, and noteStarted names it when so.
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			m = m.noteStarted(ch.Build, ch.ID)
+		case session.ChangeLanded:
+			// A landed drive can have moved exactly what the matrix's own drift column and repo
+			// read describe (a merge, a direct push) — refresh both the way F5 does
+			// (matrix.Model.RequestRefresh, its own repoGen guard and refreshAgain coalescing
+			// unchanged) so the operator sees the new tag without pressing F5 themselves, and
+			// relist right away so the pane doesn't wait for the next tick to show it landed.
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			m = m.note(activity.OK, ch.ID+" landed", "", "")
+			needsRefresh = true
+			needsRelist = true
+		case session.ChangeDone:
+			// Silent here (already reported once, at ChangeLanded, on the same or an earlier
+			// batch — session.Controller.Update's own doc comment on "a stepMsg that both lands
+			// and finishes"): a direct promotion with no separate PR/landed step still needs the
+			// refresh and relist, just not a second activity entry for the same event.
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 			needsRefresh = true
 			needsRelist = true
-		case session.ChangeBlocked, session.ChangeFailed:
-			// Relist only: a blocked or failed drive hasn't landed anything new for drift or the
-			// repo to reflect, but the pane's own phase has moved and should not wait either.
+		case session.ChangeBlocked:
 			m = m.mirrorAttached(ch.Build, ch.Snap)
+			m = m.note(activity.Err, fmt.Sprintf("%s blocked: %s", ch.ID, errText(ch.Err)), "", "")
+			needsRelist = true
+		case session.ChangeFailed:
+			// The short Text is what the bottom row can show on one line; the full error goes in
+			// Detail, read in full only on the activity screen (l) — PR9's own "failed with full
+			// error" (TestLongErrorFullInActivityView is this case's own regression test).
+			m = m.mirrorAttached(ch.Build, ch.Snap)
+			m = m.note(activity.Err, ch.ID+" failed", errText(ch.Err), "")
 			needsRelist = true
 		case session.ChangeRefused:
 			// A whole-listing failure (the forge/state directory unreachable) — left for a
 			// later train PR to surface; the pane simply keeps its last good listing.
 		case session.ChangeAbandoned:
-			m.notice = "abandoned " + ch.ID
+			m = m.note(activity.OK, "abandoned "+ch.ID, "", "")
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 			needsRelist = true
 		case session.ChangeAbandonFailed:
-			m.notice = fmt.Sprintf("abandon %s failed: %v", ch.ID, ch.Err)
+			m = m.note(activity.Err, fmt.Sprintf("abandon %s failed: %v", ch.ID, ch.Err), "", "")
 			m = m.mirrorAttached(ch.Build, ch.Snap)
 		default:
 			m = m.mirrorAttached(ch.Build, ch.Snap)
@@ -724,7 +850,7 @@ func (m Model) popBuildFailed(build session.BuildID, err error) Model {
 			m.stack[top] = sr.ResetStarting()
 		}
 	}
-	m.notice = fmt.Sprintf("could not start promotion: %v", err)
+	m = m.noteErr(fmt.Sprintf("could not start promotion: %v", err))
 	return m
 }
 
@@ -780,32 +906,61 @@ func summaryForSnapshot(s session.Snapshot) flight.Summary {
 	// listing (summaryFor's own path never sets this) — so the pane can say so (Train 2 design
 	// PR 3, matrix.compactLine/expandedSections).
 	sum.Live = true
+	// Carried through even once ID is known, so a caller never has to branch on phase to decide
+	// which handle to use — matrix.ResumeMsg always has this session's own BuildID available for
+	// a still-Building entry, which has no promotion id yet for Resume(id) to look up (P1 #2:
+	// enter on a Building pane entry used to call Backend.Resume("") and fail).
+	sum.Build = s.Build
 	return sum
 }
 
-// View renders the top screen in the alternate screen buffer, with the root's own transient
-// notice (see Model.notice) on the terminal's last rows when one is set.
+// bottomLine is the root's own activity row (Model.activity's own doc comment, replacing the old
+// transient notice): the latest entry's Text, truncated to leave room for a fixed "· l: activity
+// (N)" suffix so the row is always exactly one line, never the old notice's up-to-NoticeMaxLines
+// wrap — the full text (and Detail, and URL) is still there in full on the activity screen (l);
+// this row only ever has to name enough of it to be worth reading, and how many more there are.
+// Empty when nothing has happened yet.
+func (m Model) bottomLine() string {
+	e, ok := m.activity.Latest()
+	if !ok {
+		return ""
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	suffix := fmt.Sprintf(" · l: activity (%d)", m.activity.Len())
+	room := width - ansi.StringWidth(suffix)
+	text := redact.Strings(e.Text)
+	if room > 0 {
+		text = ansi.Truncate(text, room, "…")
+	} else {
+		text = ""
+	}
+	return text + suffix
+}
+
+// View renders the top screen in the alternate screen buffer, with the root's own activity row
+// (bottomLine, above) on the terminal's last row when there is at least one entry.
 //
-// The notice's rows are taken OUT of the screen above rather than appended after it. Every
-// screen draws through ui.Frame.Render, which emits exactly `height` lines, so a notice
-// merely appended to that landed on row height+1 and the alternate screen buffer never
-// showed it: pressing enter on the deploy confirm screen and having the promotion refused —
-// an in-flight conflict, a missing repos[].github, a claim conflict — was indistinguishable
-// from a dead key, and the only way to read the reason was to re-run the equivalent command
-// on the CLI (#164). Re-sizing the top screen here rather than on the Update that set the
-// notice keeps this a pure render concern: nothing in the stack is mutated, and the screen
-// returns to full height on the next keypress, which clears the notice.
+// The row's own line is taken OUT of the screen above rather than appended after it. Every
+// screen draws through ui.Frame.Render, which emits exactly `height` lines, so a row merely
+// appended to that landed on row height+1 and the alternate screen buffer never showed it:
+// pressing enter on the deploy confirm screen and having the promotion refused — an in-flight
+// conflict, a missing repos[].github, a claim conflict — was indistinguishable from a dead key,
+// and the only way to read the reason was to re-run the equivalent command on the CLI (#164).
+// Re-sizing the top screen here, on every render, rather than once when the entry was added,
+// keeps this a pure render concern: nothing in the stack is mutated, and unlike the old notice
+// this row is NOT cleared on the next keypress (Model.activity's own doc comment,
+// TestNoticeSurvivesKeypress) — it only goes away once the log itself is empty, which never
+// happens once the first entry lands.
 func (m Model) View() tea.View {
-	// Every notice set above (a start failure whose error can embed a git/forge transport
-	// message, an open-URL failure) passes through redact.Strings here, once, at the render
-	// boundary — the same convention plan.Model.View and flight.Model.View already use,
-	// rather than wrapping each setter individually.
-	notice := ui.NoticeLines(m.styles, redact.Strings(m.notice), m.width)
+	notice := ui.NoticeLines(m.styles, m.bottomLine(), m.width)
 	content := ""
 	if n := len(m.stack); n > 0 {
 		top := m.stack[n-1]
 		// Never shrink the screen to nothing: a terminal too short to hold both keeps the
-		// screen at full height and the notice is the thing that goes missing, which is no
+		// screen at full height and the row is the thing that goes missing, which is no
 		// worse than today and leaves the screen legible.
 		if h := m.height - len(notice); len(notice) > 0 && h > 0 {
 			top = top.SetSize(m.width, h)
@@ -891,11 +1046,11 @@ func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 // backing out of the confirmation should land on the cell it started from.
 func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 	if m.restartFn.Read == nil {
-		return m.withMatrixNotice("restarting needs a cluster connection, and none is configured"), nil
+		return m.noteErr("restarting needs a cluster connection, and none is configured"), nil
 	}
 	names, err := restart.Targets(m.repo, target, []string{family})
 	if err != nil {
-		return m.withMatrixNotice(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
+		return m.noteErr(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
 	}
 	rs := restartScreen{apprestart.New(target, family, names, m.envs.IsProduction(target), m.restartFn, m.styles)}
 	m = m.push(rs)
@@ -907,11 +1062,11 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 // openRestart makes: the matrix names a choice, the root asks what it means.
 func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 	if m.watchFn == nil {
-		return m.withMatrixNotice("watching needs a cluster connection, and none is configured"), nil
+		return m.noteErr("watching needs a cluster connection, and none is configured"), nil
 	}
 	funcs, err := m.watchFn(family, target)
 	if err != nil {
-		return m.withMatrixNotice(fmt.Sprintf("cannot watch %s in %s: %v", family, target, err)), nil
+		return m.noteErr(fmt.Sprintf("cannot watch %s in %s: %v", family, target, err)), nil
 	}
 	ws := watchScreen{watch.New(family, target, funcs, m.styles)}
 	m = m.push(ws)
@@ -939,7 +1094,7 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, direct bool, h 
 	defer cancel()
 	pc, err := m.planFn(ctx, service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
 	if err != nil {
-		return m.pop().withMatrixNotice(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
+		return m.pop().noteErr(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
@@ -1056,8 +1211,10 @@ func (m Model) truncateToMatrix() (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// withMatrix applies f to the matrix screen wherever it sits in the stack (see
-// withMatrixNotice for why the whole stack is searched).
+// withMatrix applies f to the matrix screen wherever it sits in the stack — today always the
+// bottom, and (after tags.SelectedMsg/DirectRequestedMsg's own pop) always the new top too,
+// since matrix.OpenTagsMsg is the only thing that ever pushes a tags screen, always directly
+// onto the matrix.
 func (m Model) withMatrix(f func(matrix.Model) matrix.Model) Model {
 	for i, s := range m.stack {
 		ms, ok := s.(matrixScreen)
@@ -1084,24 +1241,6 @@ func (m Model) matrixRepo() *gitops.Repo {
 		}
 	}
 	return nil
-}
-
-// withMatrixNotice sets notice on the matrix screen, wherever it actually sits in the stack —
-// today always the bottom, and (after tags.SelectedMsg/DirectRequestedMsg's own pop above)
-// always the new top too, since matrix.OpenTagsMsg is the only thing that ever pushes a tags
-// screen, always directly onto the matrix. A no-op if the matrix isn't on the stack at all.
-func (m Model) withMatrixNotice(notice string) Model {
-	for i, s := range m.stack {
-		ms, ok := s.(matrixScreen)
-		if !ok {
-			continue
-		}
-		stack := append([]Screen(nil), m.stack...)
-		stack[i] = matrixScreen{ms.WithNotice(notice)}
-		m.stack = stack
-		return m
-	}
-	return m
 }
 
 // capturesText reports whether the top screen is currently mid-text-entry (see Screen.

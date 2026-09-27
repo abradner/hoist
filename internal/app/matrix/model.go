@@ -152,6 +152,10 @@ type Model struct {
 	refreshingRepo bool
 	refreshAgain   bool
 	repoGen        uint64
+	// refreshErr is a failed F5's own reason, held here (rather than in notice, which the next
+	// keypress clears — P2 #7, t2-review.md) until the root's own RepoRefreshedMsg case takes it
+	// with TakeRefreshError and logs it to the activity log, which survives.
+	refreshErr string
 
 	// chooser is open when d found several first-party images in the cell and the operator
 	// has to say which one to deploy (#85: "d picks the first sorted image, silently").
@@ -168,7 +172,7 @@ type Model struct {
 }
 
 type keyMap struct {
-	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Watch, Resume, OpenPR, Refresh, Config, Help, Quit key.Binding
+	Up, Down, Left, Right, Promote, PromoteAs, DeployNew, Restart, Watch, Resume, OpenPR, Refresh, Config, Activity, Help, Quit key.Binding
 }
 
 // ShortHelp is the hint set shown in the footer: the writes first, since they are what an
@@ -179,15 +183,18 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 // FullHelp is what ? expands to; one group, rendered on a single line.
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Watch, k.Resume, k.OpenPR, k.Refresh, k.Config, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Left, k.Right, k.Promote, k.PromoteAs, k.DeployNew, k.Restart, k.Watch, k.Resume, k.OpenPR, k.Refresh, k.Config, k.Activity, k.Help, k.Quit}}
 }
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Left:      key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "env")),
-		Right:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "env")),
+		Up:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		// h/l retired as Left/Right aliases (docs/audit/2026-09-ux-arch-audit.md "Proposed
+		// keymap" rule 7: "h/l retire as aliases because l is the log") — l now opens the
+		// activity screen (Activity, below); the arrow keys are unaffected.
+		Left:      key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "env")),
+		Right:     key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "env")),
 		Promote:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "promote")),
 		PromoteAs: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "promote to…")),
 		DeployNew: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy")),
@@ -208,8 +215,15 @@ func defaultKeyMap() keyMap {
 		// Capital C, like R: the lower-case letters open screens about the cell under the
 		// cursor; C is about the session itself (the effective config, #104).
 		Config: key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "config")),
-		Help:   key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:   key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		// l: the root's own activity log, on the matrix (proposed keymap rule 6, "one verb per
+		// concept" — docs/audit/2026-09-ux-arch-audit.md). Lower-case: like w and C, it only
+		// opens a screen to look at something, never writes. Not "everywhere" yet (P3 #8,
+		// t2-review.md): the flight screen's own `l` still toggles ITS drive log
+		// (internal/app/flight's own keymap), a different screen and a different log — the two
+		// have not been unified.
+		Activity: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "activity")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -232,6 +246,12 @@ type OpenTagsMsg struct {
 // OpenConfigMsg is emitted when the operator asks to read the effective config (C, #104):
 // the TUI's `hoist config show`. It carries nothing — the root holds the text and the path.
 type OpenConfigMsg struct{}
+
+// OpenActivityMsg is emitted when the operator asks to read the session's activity log in full
+// (l — docs/audit/2026-09-ux-arch-audit.md "Proposed keymap", Train 2 design PR9). It carries
+// nothing — the root holds the log (app.Model's own activity.Log) and passes a snapshot of it to
+// activity.New.
+type OpenActivityMsg struct{}
 
 // OpenRestartMsg is emitted when the operator asks to restart the family under the cursor in
 // CurrentEnv (R). It names a family rather than an image because a restart changes no image:
@@ -407,8 +427,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			// internal/service.Service.LoadRepo's own boot-time fallback (RepoFromOrigin
 			// falling back to RepoFromClone) — an F5 that can't reach origin (offline, a
 			// transient network blip) leaves the table showing what it already had rather
-			// than blanking or refusing.
-			m.notice = redact.Strings(msg.Err.Error())
+			// than blanking or refusing. The reason goes to refreshErr, not notice — this is
+			// an async result the operator may well have already pressed another key past by
+			// the time it lands (P2 #7), and notice does not survive that.
+			m.refreshErr = redact.Strings(msg.Err.Error())
 			nm := m.layout()
 			if again {
 				return nm.askRepoRefresh()
@@ -437,6 +459,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m.layout(), nil
 		case key.Matches(msg, m.keys.Config):
 			return m, func() tea.Msg { return OpenConfigMsg{} }
+		case key.Matches(msg, m.keys.Activity):
+			return m, func() tea.Msg { return OpenActivityMsg{} }
 		case key.Matches(msg, m.keys.Refresh):
 			return m.RequestRefresh()
 		case key.Matches(msg, m.keys.Left):
@@ -497,8 +521,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 				return m, nil
 			case 1:
-				id := m.inflight[0].ID
-				return m, func() tea.Msg { return ResumeMsg{ID: id} }
+				// A still-Building entry has no promotion id yet (P1 #2) — Build is the only
+				// handle the root can re-attach by until one exists.
+				s := m.inflight[0]
+				if s.ID == "" {
+					return m, func() tea.Msg { return ResumeMsg{Build: s.Build} }
+				}
+				return m, func() tea.Msg { return ResumeMsg{ID: s.ID} }
 			default:
 				return m.openInFlightChooser(chooserResume, m.inflight)
 			}
@@ -555,11 +584,23 @@ func (m Model) openChooser(env string, repos []string) (Model, tea.Cmd) {
 	return m, tea.Batch(sel.Init(), sel.Focus())
 }
 
+// chooserKey is the huh.Option value one in-flight Summary is chosen by — s.ID for anything with
+// a real promotion id, or a Build-keyed placeholder for a still-Building entry (P1 #2), which the
+// resume chooser can be offered several of before any of them has an id. chooserOpenPR never
+// meets an id-less entry (withPR's own filter: nothing has a PR before it has an id), so this
+// only actually falls to the Build branch from the resume path.
+func chooserKey(s flight.Summary) string {
+	if s.ID != "" {
+		return s.ID
+	}
+	return fmt.Sprintf("build:%d", s.Build)
+}
+
 // openInFlightChooser asks which of several in-flight promotions r or o meant.
 func (m Model) openInFlightChooser(kind chooserKind, from []flight.Summary) (Model, tea.Cmd) {
 	opts := make([]huh.Option[string], 0, len(from))
 	for _, s := range from {
-		opts = append(opts, huh.NewOption(s.ID+"  "+pair(s)+"  "+s.Verdict(), s.ID))
+		opts = append(opts, huh.NewOption(paneID(s)+"  "+pair(s)+"  "+s.Verdict(), chooserKey(s)))
 	}
 	title := "resume which promotion?"
 	if kind == chooserOpenPR {
@@ -604,7 +645,17 @@ func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		switch kind {
 		case chooserResume:
-			return m, func() tea.Msg { return ResumeMsg{ID: choice} }
+			for _, s := range m.inflight {
+				if chooserKey(s) != choice {
+					continue
+				}
+				if s.ID == "" {
+					return m, func() tea.Msg { return ResumeMsg{Build: s.Build} }
+				}
+				return m, func() tea.Msg { return ResumeMsg{ID: s.ID} }
+			}
+			m.notice = "that promotion is no longer in flight"
+			return m, nil
 		case chooserOpenPR:
 			for _, s := range m.withPR() {
 				if s.ID == choice {
@@ -913,6 +964,16 @@ func (m Model) Cursor() int { return m.tbl.Cursor() }
 
 // Matrix is the computed matrix the screen shows.
 func (m Model) Matrix() Table { return m.matrix }
+
+// TakeRefreshError returns and clears a failed F5's own reason (the RepoRefreshedMsg error
+// branch above) — exported so the root can log it to the activity log instead of leaving it as
+// the matrix's own clear-on-next-key notice (P2 #7, t2-review.md), since an async refresh's
+// failure can easily land after the operator has already pressed another key.
+func (m Model) TakeRefreshError() (string, Model) {
+	err := m.refreshErr
+	m.refreshErr = ""
+	return err, m
+}
 
 // WithNotice sets the notice shown under the table — exported so the root can surface an
 // honest message on the matrix after popping back to it from another screen whose own

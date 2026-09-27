@@ -68,8 +68,8 @@ func TestFlightAbandonMsgReturnsToMatrixAndCallsAbandonFn(t *testing.T) {
 	if gotID != "abcd1234" {
 		t.Errorf("AbandonFn called with id %q, want abcd1234", gotID)
 	}
-	if !strings.Contains(root.notice, "abandoned abcd1234") {
-		t.Errorf("notice = %q, want it to report the successful abandon", root.notice)
+	if got := latestActivityText(root); !strings.Contains(got, "abandoned abcd1234") {
+		t.Errorf("latest activity entry = %q, want it to report the successful abandon", got)
 	}
 }
 
@@ -89,8 +89,8 @@ func TestFlightAbandonMsgFailureShowsNotice(t *testing.T) {
 	}
 	tm2, _ := root.Update(cmd())
 	root = tm2.(Model)
-	if !strings.Contains(root.notice, "abandon abcd1234 failed") || !strings.Contains(root.notice, "not a rollback") {
-		t.Errorf("notice = %q, want it to report the real failure", root.notice)
+	if got := latestActivityText(root); !strings.Contains(got, "abandon abcd1234 failed") || !strings.Contains(got, "not a rollback") {
+		t.Errorf("latest activity entry = %q, want it to report the real failure", got)
 	}
 }
 
@@ -249,8 +249,8 @@ func TestAbandonDuringBusyStepCannotBeOutlived(t *testing.T) {
 	if cmd3 != nil {
 		t.Error("R produced a command while the promotion is abandoning")
 	}
-	if !strings.Contains(root2.notice, "abcd1234") {
-		t.Errorf("notice = %q, want it to name the refused promotion", root2.notice)
+	if got := latestActivityText(root2); !strings.Contains(got, "abcd1234") {
+		t.Errorf("latest activity entry = %q, want it to name the refused promotion", got)
 	}
 	if stepCalls != before {
 		t.Errorf("Step called %d additional time(s) after the refused R, want 0", stepCalls-before)

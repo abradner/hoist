@@ -126,8 +126,8 @@ func TestFlightOverrideCINoneMsgRedrivesThatPromotion(t *testing.T) {
 	if cmd != nil {
 		t.Error("a message naming a promotion that is not tracked must not drive anything")
 	}
-	if got := m.(Model).notice; !strings.Contains(got, "other-promotion") {
-		t.Errorf("notice should name the ignored promotion, got %q", got)
+	if got := latestActivityText(m.(Model)); !strings.Contains(got, "other-promotion") {
+		t.Errorf("the latest activity entry should name the ignored promotion, got %q", got)
 	}
 	if _, n := drv.last(); n != 1 {
 		t.Fatalf("%d drive calls after an ignored override, want the setup's one", n)
@@ -137,7 +137,7 @@ func TestFlightOverrideCINoneMsgRedrivesThatPromotion(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("the override produced no re-drive command")
 	}
-	stepMsg := cmd()
+	stepMsg := firstStepOfPokeBatch(t, cmd)()
 	m, _ = m.Update(stepMsg)
 	seen, n := drv.last()
 	if n != 2 {

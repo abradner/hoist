@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
@@ -32,6 +33,12 @@ type Summary struct {
 	// pane's own way to say "hoist itself is driving this, right now" versus "re-observed, last
 	// seen at this state" (Train 2 design PR 3's own "the pane marks drives running here").
 	Live bool
+	// Build identifies the session.Controller entry this Summary was built from
+	// (summaryForSnapshot, app.go) — the only handle a still-Building entry has, since Summarize
+	// leaves ID empty until a real promotion id exists. Zero (session.BuildID's own zero value)
+	// for anything built purely from a listing (summaryFor), which never has a live Controller
+	// entry to point at.
+	Build session.BuildID
 }
 
 // Summarize builds a Summary from a state and engine.Status's result for it.

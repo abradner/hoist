@@ -134,6 +134,11 @@ var registry = []op{
 		CLI:  "promote --digest-sources --registry-auth --cluster-secret --op-ref plan --digest-sources --registry-auth --cluster-secret --op-ref",
 		TUI:  "(launch) --digest-sources --registry-auth --cluster-secret --op-ref — the root flags every subcommand's own flag defaults to (#132)",
 	},
+	{
+		Name: "read recent results and errors in full",
+		CLI:  "promote resume abandon",
+		TUI:  "matrix.OpenActivityMsg l on the matrix",
+	},
 }
 
 const launch = "(launch)"
