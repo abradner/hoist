@@ -3,6 +3,7 @@ package app
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/activity"
 	appconfig "github.com/abradner/hoist/internal/app/config"
 	"github.com/abradner/hoist/internal/app/deploy"
 	"github.com/abradner/hoist/internal/app/flight"
@@ -228,3 +229,27 @@ func (s watchScreen) SetStyles(st ui.Styles) Screen {
 // CapturesText implements Screen, delegating to watch.Model: false today, since the watch
 // screen has no text-entry mode — but the model, not this adapter, is what says so.
 func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }
+
+// activityScreen adapts activity.Model. Pushed on top of whatever screen is current by l
+// (matrix.OpenActivityMsg — the proposed keymap binds l to the activity log everywhere, but
+// only the matrix's own l actually opens this screen today, PR9's own scope); read-only, so
+// nothing beneath it changes while it is open and esc lands back where it started.
+type activityScreen struct{ activity.Model }
+
+func (s activityScreen) Init() tea.Cmd { return s.Model.Init() }
+
+func (s activityScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
+	m, cmd := s.Model.Update(msg)
+	return activityScreen{m}, cmd
+}
+
+func (s activityScreen) SetSize(width, height int) Screen {
+	return activityScreen{s.Model.SetSize(width, height)}
+}
+
+func (s activityScreen) SetStyles(st ui.Styles) Screen {
+	return activityScreen{s.Model.SetStyles(st)}
+}
+
+// CapturesText implements Screen: the activity screen has no text-entry mode.
+func (s activityScreen) CapturesText() bool { return false }

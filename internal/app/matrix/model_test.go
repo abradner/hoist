@@ -47,6 +47,37 @@ func TestColumnCursor(t *testing.T) {
 	}
 }
 
+// TestMatrixHLNoLongerMoveColumns is the proposed keymap's own regression (docs/audit/2026-09-
+// ux-arch-audit.md "Proposed keymap" rule 7: "h/l retire as aliases because l is the log"): h and
+// l must no longer move the column cursor the way TestColumnCursor's left/right do — h is simply
+// unbound now (falls through to the table's own key handling, which has no use for it either),
+// and l instead opens the activity screen (TestMatrixLKeyOpensActivity).
+func TestMatrixHLNoLongerMoveColumns(t *testing.T) {
+	m := uitest.Keys(newFixture(), update, "right") // col 1 = "b"
+	if got := m.CurrentEnv(); got != "b" {
+		t.Fatalf("setup: CurrentEnv() = %q, want b", got)
+	}
+	m = uitest.Keys(m, update, "h")
+	if got := m.CurrentEnv(); got != "b" {
+		t.Errorf("h moved the column cursor: CurrentEnv() = %q, want b (h retired as a Left alias)", got)
+	}
+	if msg, ok := emitted(t, m, "l").(OpenActivityMsg); !ok {
+		t.Fatalf("l emitted %#v, want OpenActivityMsg — l is retired as a Right alias and bound to the activity log instead", msg)
+	}
+	if got := m.CurrentEnv(); got != "b" {
+		t.Errorf("l moved the column cursor: CurrentEnv() = %q, want b (l retired as a Right alias)", got)
+	}
+}
+
+// TestMatrixLKeyOpensActivity: l on the matrix opens the activity screen, driven through a real
+// keypress (AGENTS.md §9 entry 6: a gesture's test presses the key and asserts the emitted
+// message, never a field a key would have set).
+func TestMatrixLKeyOpensActivity(t *testing.T) {
+	if msg, ok := emitted(t, newFixture(), "l").(OpenActivityMsg); !ok {
+		t.Fatalf("l emitted %#v, want OpenActivityMsg", msg)
+	}
+}
+
 func emitted(t *testing.T, m Model, k string) tea.Msg {
 	t.Helper()
 	_, cmd := m.Update(uitest.Key(k))
@@ -404,8 +435,10 @@ func TestWithRepoToEmptyRepoDoesNotPanic(t *testing.T) {
 
 // TestRefreshRepoFailureKeepsTheOldRepo: a failed refresh (network down, origin unreachable)
 // must not blank the table or crash — the same graceful-degradation boot's own fallback
-// applies (repoview.go). The matrix keeps showing what it already had and surfaces the
-// error as a notice, never a silent drop.
+// applies (repoview.go). The matrix keeps showing what it already had, and hands the error to
+// TakeRefreshError for the root to log to the activity log (P2 #7, t2-review.md) rather than
+// rendering it as the matrix's own notice, which the very next keypress used to clear before an
+// async F5 failure was even likely to have been read.
 func TestRefreshRepoFailureKeepsTheOldRepo(t *testing.T) {
 	m := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, nil).
 		WithRefreshRepo(func(_ context.Context) (*gitops.Repo, string, error) {
@@ -415,8 +448,15 @@ func TestRefreshRepoFailureKeepsTheOldRepo(t *testing.T) {
 
 	m = uitest.Keys(m, update, "f5")
 
-	if got := ansi.Strip(m.View()); !strings.Contains(got, "no route to host") {
-		t.Errorf("view missing the refresh failure notice:\n%s", got)
+	if got := ansi.Strip(m.View()); strings.Contains(got, "no route to host") {
+		t.Errorf("the matrix must not render the refresh failure itself any more — the root logs it:\n%s", got)
+	}
+	err, m2 := m.TakeRefreshError()
+	if !strings.Contains(err, "no route to host") {
+		t.Errorf("TakeRefreshError() = %q, want it to carry the refresh failure", err)
+	}
+	if err2, _ := m2.TakeRefreshError(); err2 != "" {
+		t.Errorf("TakeRefreshError() = %q, want empty once already taken", err2)
 	}
 	if m.repo.Root != "repo" {
 		t.Errorf("repo root changed to %q after a failed refresh, want unchanged %q", m.repo.Root, "repo")

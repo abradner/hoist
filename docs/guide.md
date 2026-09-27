@@ -74,6 +74,16 @@ marked "driving" — it is still running here, in this process, whether or not a
 currently watching it; `r`/`enter` on one of those re-attaches the flight screen to it without
 starting anything new.
 
+Whatever last happened — a promotion started, landed, blocked or failed, an abandon, a browser
+launch that couldn't find a browser — shows on the terminal's last line: one line, naming the
+result and how many entries are on record, for example `abcd1234 landed · l: activity (4)`. It is
+never cleared by pressing another key (a real refusal that vanished the moment you pressed `j` used
+to be unreadable except by re-running the equivalent CLI command) — only a newer event replaces it,
+or `l` opens the full activity log: every entry this session has seen, oldest first, with nothing
+truncated — a multi-line transport error is there in full, not just its first line. `esc` closes
+it. `h`/`l` used to alias `←`/`→` on the matrix; they no longer do, since `l` now opens this log
+everywhere it is bound.
+
 ## Promote a pair
 
 `p` promotes the cursor column's paired source into it (`envs.pairs` in the config); `P` asks
@@ -155,9 +165,11 @@ behind a confirm, it retires the state file and, if it opened a PR, closes it an
 branch. It refuses outright if the promotion has already landed — abandoning is not a rollback, so
 a landed one needs `hoist deploy` or a fresh promotion to undo, not a state-file delete — and it is
 never offered at all once the promotion is done. `l` shows the log. `q` quits hoist itself; with
-any drive still running (here or anywhere else in the matrix) it asks first, behind a confirm —
-nothing is rolled back, `hoist resume` picks every one back up later, but it is a deliberate step
-rather than a silent one. `ctrl+c` is the one always-immediate quit, with no confirm — state is
+any drive this session started still Building, Stepping or Waiting, it asks first, behind a
+confirm — nothing is rolled back, `hoist resume` picks every one back up later, but it is a
+deliberate step rather than a silent one. A promotion merely listed on the pane (started earlier,
+by this session or another) does not count toward that: nothing here is driving it, so quitting
+does not interrupt anything already in flight for it. `ctrl+c` is the one always-immediate quit, with no confirm — state is
 durable either way. The CLI prints the same steps as lines, with
 `waiting: …` naming what it is waiting for; `hoist abandon <id> --confirm-abandon=<id>` is `X`'s
 own CLI form (the repeated id is the confirmation, same shape as `--confirm-direct`).

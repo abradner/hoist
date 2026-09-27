@@ -19,6 +19,6 @@
 │                                                                              │
 │                                                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│↑/k up • ↓/j down • ←/h env • →/l env • p promote • P promote to… • d deploy …│
+│↑/k up • ↓/j down • ← env • → env • p promote • P promote to… • d deploy …    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 env a                p promote • d deploy • w watch • r resume • ? help • q quit
