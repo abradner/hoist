@@ -250,7 +250,7 @@ registries:
 		_, authCfgs := installFakes(t, &k8s.Fake{}, &registry.Fake{})
 		svc := service.New(service.Settings{Config: gotCfg, Repo: got.cfg, KubeContext: got.kubeContext, Resolve: regOpts}, serviceDeps())
 		buildTagsFunc(got.cfg, svc)("ghcr.io/example/app")
-		h := buildHistoryFuncs(got.cfg, nil, &forge.Fake{}, nil, "head", got.base, svc)
+		h := buildHistoryFuncs(got.cfg, &forge.Fake{}, nil, got.base, svc)
 		_, _ = h.Revision(context.Background(), image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"})
 		if len(*authCfgs) != 2 {
 			t.Fatalf("%v: registries built %d, want the picker's and the history's", tc.args, len(*authCfgs))

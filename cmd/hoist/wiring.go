@@ -16,7 +16,6 @@ import (
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // buildPollDurations translates config.PollConfig's CI/Approval/Argo/Rollout/Deadline into
@@ -128,12 +127,30 @@ func runLauncher(timeout time.Duration, name string, args ...string) error {
 // a watch.Func that makes the same Get/Deployment/JobLike reads `hoist watch` makes
 // (readWatchSnapshot) at the same cadence (watchInterval). It never calls Refresh: the Func
 // closes over readWatchSnapshot only, and the screen package cannot name argo.Argo at all.
-// A missing cluster is a nil builder, and w on the matrix says so instead of opening a screen.
-func buildWatchFunc(r *gitops.Repo, a argo.Argo, ro rollout.Rollout, clusterErr error, argoNamespace string, poll config.PollConfig) watch.BuildFunc {
-	if clusterErr != nil || a == nil || ro == nil {
-		return nil
-	}
+//
+// Every read below goes through svc, not a boot-time capture (Train 2 design PR 7): the Argo
+// and rollout clients come from svc.Argo/svc.Rollout, which cache only on success (service.go's
+// own doc comment) — a cluster that could not be reached when the TUI opened is retried on the
+// very next w, never wedged for the rest of the session — and the repo comes from svc.Repo(),
+// the service's own current view, so a family an F5 refresh (or a landed promotion, PR 4) just
+// added is visible the moment w is pressed rather than only after a restart. The returned
+// BuildFunc is never nil: a cluster that cannot be reached is reported as the real client error
+// from the call that failed, not as a generic "none is configured" the operator cannot act on
+// (AGENTS.md §4.5-adjacent principle 5 — warn with the actual reason).
+func buildWatchFunc(svc *service.Service, kubeContext, argoNamespace string, poll config.PollConfig) watch.BuildFunc {
 	return func(family, env string) (watch.Funcs, error) {
+		a, err := svc.Argo(kubeContext)
+		if err != nil {
+			return watch.Funcs{}, err
+		}
+		ro, err := svc.Rollout(kubeContext)
+		if err != nil {
+			return watch.Funcs{}, err
+		}
+		r := svc.Repo().Repo
+		if r == nil {
+			return watch.Funcs{}, fmt.Errorf("watch: no repo loaded yet")
+		}
 		e, ok := r.Envs[env]
 		if !ok {
 			return watch.Funcs{}, fmt.Errorf("no env %q in the repo", env)
@@ -161,24 +178,37 @@ func buildWatchFunc(r *gitops.Repo, a argo.Argo, ro rollout.Rollout, clusterErr 
 // (AGENTS.md §4.8) — the same shape svc.Plan and buildTagsFunc already give the plan
 // and picker screens.
 //
-// A zero Funcs when the cluster could not be reached: the screen's own Read is then nil, and
-// the root says so on the matrix rather than opening a screen that can do nothing.
-func buildRestartFuncs(ro rollout.Rollout, rolloutErr error, poll config.PollConfig) apprestart.Funcs {
-	if rolloutErr != nil || ro == nil {
-		return apprestart.Funcs{}
-	}
+// Each of Read/Do/Observe asks svc.Rollout(kubeContext) itself, at call time, rather than
+// closing over a client built once at boot (Train 2 design PR 7): a boot-time cluster failure
+// is retried on R exactly as buildWatchFunc's is, since svc.Rollout only memoizes a success.
+// The returned Funcs is never the zero value; a cluster that cannot be reached surfaces as the
+// real error from whichever call needed it, and the root shows that instead of a generic "none
+// is configured" (see openRestart's own doc comment).
+func buildRestartFuncs(svc *service.Service, kubeContext string, poll config.PollConfig) apprestart.Funcs {
 	interval := time.Duration(poll.Rollout)
 	if interval <= 0 {
 		interval = 3 * time.Second
 	}
 	return apprestart.Funcs{
 		Read: func(ctx context.Context, env string, names []string) (restart.Plan, error) {
+			ro, err := svc.Rollout(kubeContext)
+			if err != nil {
+				return restart.Plan{}, err
+			}
 			return restart.Read(ctx, ro, env, names)
 		},
 		Do: func(ctx context.Context, p restart.Plan, at time.Time) ([]string, error) {
+			ro, err := svc.Rollout(kubeContext)
+			if err != nil {
+				return nil, err
+			}
 			return restart.Do(ctx, ro, p, at)
 		},
 		Observe: func(ctx context.Context, env string, names []string, at time.Time) ([]restart.Progress, error) {
+			ro, err := svc.Rollout(kubeContext)
+			if err != nil {
+				return nil, err
+			}
 			return restart.Observe(ctx, ro, env, names, at)
 		},
 		Interval: interval,

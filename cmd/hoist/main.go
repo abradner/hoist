@@ -634,27 +634,20 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		githubRepo = eff.cfg.GitHub
 	}
 	f, forgeErr := newForge(githubRepo)
-	// The Argo/Deployment adaptors, built once alongside f and deferred the same way. Every
-	// promotion the flight screen drives now reaches the Argo/rollout steps — both modes
-	// (issues #64, #66) — so these are needed for any confirm, but a session that only browses
-	// the matrix should not fail to open because the cluster is unreachable.
-	a, _, argoErr := newArgo(eff.kubeContext)
-	ro, _, rolloutErr := newRollout(eff.kubeContext)
 	promo := app.Promotion{
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
 	tagsFn := buildTagsFunc(eff.cfg, svc)
-	restartFn := buildRestartFuncs(ro, rolloutErr, cfg.Poll)
-	// The checkout's HEAD is what the plan's line numbers were read from, so it is what the
-	// live-age blame asks the forge about; the default branch is the fallback for a HEAD that
-	// was never pushed. Resolving it is one local git call and never a reason not to open.
-	blameRef := ""
-	if sha, ok, err := newGit.RevParse(context.Background(), r.Root, "HEAD"); err == nil && ok {
-		blameRef = sha
-	}
-	historyFn := buildHistoryFuncs(eff.cfg, r, f, forgeErr, blameRef, eff.base, svc)
+	// buildRestartFuncs/buildWatchFunc/buildHistoryFuncs below read the Argo/rollout clients and
+	// the current repo through svc itself, per call, rather than a client or a repo captured
+	// once here at boot (Train 2 design PR 7): svc.Argo/svc.Rollout memoize only a success, so a
+	// cluster unreachable this instant is retried on the next w/R/F5 rather than wedged for the
+	// rest of the session, and svc.Repo() always answers with whatever LoadRepo/RefreshRepo most
+	// recently stored, so a family an F5 refresh just added is visible immediately.
+	restartFn := buildRestartFuncs(svc, eff.kubeContext, cfg.Poll)
+	historyFn := buildHistoryFuncs(eff.cfg, f, forgeErr, eff.base, svc)
 	configText, err := configViewText(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
@@ -665,7 +658,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithHistory(historyFn).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
-		WithWatch(buildWatchFunc(r, a, ro, errors.Join(argoErr, rolloutErr), argoNamespaceOf(eff.cfg), cfg.Poll)).
+		WithWatch(buildWatchFunc(svc, eff.kubeContext, argoNamespaceOf(eff.cfg), cfg.Poll)).
 		WithRun(eff.base, eff.kubeContext)
 	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)

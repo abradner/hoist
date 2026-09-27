@@ -26,27 +26,32 @@ import (
 // yet) is reported as unmapped through the Delta error, never as a failure to open a screen.
 // gitopsForge/forgeErr are the gitops repo's own forge as runTUI built it — LiveAge blames the
 // manifest there; with forgeErr set it returns that error and the screen says the age is
-// unavailable. blameRef is the checkout's HEAD sha (line numbers were read from that tree);
-// the default branch is the fallback when HEAD was never pushed; "" when unknown.
-// base is the root --base (#105): the blame fallback for a HEAD that was never pushed. svc is
-// the session's own Service (its Settings carry the root --kube-context/--registry-auth/
-// --cluster-secret/--op-ref, #132): historyAdaptor.registry below calls svc.RegistryFor exactly
-// as buildTagsFunc does, so both adaptors pick the same registries[] entry the identical way
-// (F4) rather than each re-deriving it.
-func buildHistoryFuncs(rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.Forge, forgeErr error, blameRef, base string, svc *service.Service) history.Funcs {
+// unavailable. base is the root --base (#105): the blame fallback for a HEAD that was never
+// pushed. svc is the session's own Service (its Settings carry the root --kube-context/
+// --registry-auth/--cluster-secret/--op-ref, #132): historyAdaptor.registry below calls
+// svc.RegistryFor exactly as buildTagsFunc does, so both adaptors pick the same registries[]
+// entry the identical way (F4) rather than each re-deriving it.
+//
+// repoRoot and blameRef are no longer captured once at boot (Train 2 design PR 7): every
+// LiveAge call reads svc.Repo(), the service's own current view, through historyAdaptor.blame
+// below, which memoises the resolved HEAD per view directory so an F5 refresh that lands mid-
+// session is picked up by the very next LiveAge call rather than only after a restart, while a
+// repeated ask against the same view costs no extra git call.
+func buildHistoryFuncs(rc *config.RepoConfig, gitopsForge forge.Forge, forgeErr error, base string, svc *service.Service) history.Funcs {
 	if rc == nil {
 		return history.Funcs{}
 	}
-	var repoRoot string
-	if r != nil {
-		repoRoot = r.Root
-	}
 	blamer := migrate.Blamer{Forge: gitopsForge}
+	h := &historyAdaptor{rc: rc, svc: svc, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	// LiveAge blames the gitops repo, which needs no app mapping at all: a repo with an empty
 	// repos[].apps still gets "declares v1 · since 4 weeks ago" — only the delta needs apps.
 	liveAge := func(ctx context.Context, occ gitops.Occurrence) (migrate.LineAge, error) {
 		if forgeErr != nil {
 			return migrate.LineAge{}, fmt.Errorf("live age needs the gitops repo's forge: %w", forgeErr)
+		}
+		repoRoot, blameRef, err := h.blame(ctx)
+		if err != nil {
+			return migrate.LineAge{}, err
 		}
 		if blameRef == "" {
 			return migrate.LineAge{}, fmt.Errorf("live age: the checkout at %s has no resolvable HEAD", repoRoot)
@@ -64,7 +69,6 @@ func buildHistoryFuncs(rc *config.RepoConfig, r *gitops.Repo, gitopsForge forge.
 	if len(rc.Apps) == 0 {
 		return history.Funcs{Mapped: func(string) bool { return false }, LiveAge: liveAge}
 	}
-	h := &historyAdaptor{rc: rc, svc: svc, forges: map[string]forgeOrErr{}, regs: map[string]registryOrErr{}}
 	return history.Funcs{
 		Mapped: func(imageRepo string) bool { _, ok := rc.Apps[imageRepo]; return ok },
 		Revision: func(ctx context.Context, ref image.Ref) (migrate.Revision, error) {
@@ -97,6 +101,55 @@ type historyAdaptor struct {
 	regs     map[string]registryOrErr // image repo -> registry
 	policies map[string]policyResult  // app repo + " " + sha -> migrations prefix
 	cache    migrate.Cache
+
+	// blameFor/blameSHA memoise the last HEAD h.blame resolved via newGit, keyed by the exact
+	// *gitops.Repo the view held at the time — never by the root path string alone. Every
+	// LoadRepo/RefreshRepo call allocates a brand-new *gitops.Repo (gitops.Discover's own
+	// return), so this key changes on every refresh even when the root path is unchanged,
+	// which is what lets a moved HEAD be picked up on the very next LiveAge call rather than
+	// staying pinned to whatever HEAD happened to be current the first time this ran.
+	blameFor *gitops.Repo
+	blameSHA string
+}
+
+// blame answers the checkout root and the ref LiveAge should blame, read from svc.Repo()'s
+// CURRENT view every call (Train 2 design PR 7) rather than a value captured once at TUI boot —
+// a repo view an F5 refresh (or a landed promotion, PR 4) just replaced is picked up
+// immediately. For a RepoFromOrigin view, RepoView.SHA is already the exact HEAD that view's
+// directory was checked out to (repo.go's own doc comment), so no git call is needed at all; for
+// a RepoFromClone view (no configured repo, or origin unreachable) HEAD is read via
+// newGit.RevParse and cached per view (blameFor's own doc comment), so a burst of LiveAge calls
+// against one unchanged view costs one git call, not one per occurrence, while a view a later
+// LoadRepo replaces is never read from the stale cache. ("", "", nil) — never an error — when
+// the checkout has no resolvable HEAD at all (a brand new repo with no commits): the caller
+// reports that as its own named gap rather than a blame failure.
+func (h *historyAdaptor) blame(ctx context.Context) (root, ref string, err error) {
+	view := h.svc.Repo()
+	if view.Repo == nil {
+		return "", "", fmt.Errorf("live age: no repo loaded")
+	}
+	root = view.Repo.Root
+	if view.SHA != "" {
+		return root, view.SHA, nil
+	}
+	h.mu.Lock()
+	if h.blameFor == view.Repo {
+		ref = h.blameSHA
+		h.mu.Unlock()
+		return root, ref, nil
+	}
+	h.mu.Unlock()
+	sha, ok, gerr := newGit.RevParse(ctx, root, "HEAD")
+	if gerr != nil {
+		return root, "", gerr
+	}
+	if ok {
+		ref = sha
+	}
+	h.mu.Lock()
+	h.blameFor, h.blameSHA = view.Repo, ref
+	h.mu.Unlock()
+	return root, ref, nil
 }
 
 type policyResult struct {
