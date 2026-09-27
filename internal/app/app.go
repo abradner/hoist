@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/activity"
@@ -957,6 +958,26 @@ func (m Model) bottomLine() string {
 	return text + suffix
 }
 
+// activityStyle colours the root's activity row by the latest entry's own Kind (T3-02): Info
+// for a plain report, Good for a landed or completed outcome, Bad for a refusal or failure —
+// replacing the uniform amber every entry used to render in regardless of what happened, the
+// same colour a bare warning or a genuine failure got. Info is also the default for the empty
+// case (no entry yet), though bottomLine returns "" then and NoticeLinesStyled renders nothing.
+func (m Model) activityStyle() lipgloss.Style {
+	e, ok := m.activity.Latest()
+	if !ok {
+		return m.styles.Info
+	}
+	switch e.Kind {
+	case activity.OK:
+		return m.styles.Good
+	case activity.Err:
+		return m.styles.Bad
+	default:
+		return m.styles.Info
+	}
+}
+
 // View renders the top screen in the alternate screen buffer, with the root's own activity row
 // (bottomLine, above) on the terminal's last row when there is at least one entry.
 //
@@ -972,7 +993,7 @@ func (m Model) bottomLine() string {
 // TestNoticeSurvivesKeypress) — it only goes away once the log itself is empty, which never
 // happens once the first entry lands.
 func (m Model) View() tea.View {
-	notice := ui.NoticeLines(m.styles, m.bottomLine(), m.width)
+	notice := ui.NoticeLinesStyled(m.activityStyle(), m.bottomLine(), m.width)
 	content := ""
 	if n := len(m.stack); n > 0 {
 		top := m.stack[n-1]

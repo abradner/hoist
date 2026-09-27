@@ -248,6 +248,14 @@ const NoticeMaxLines = 3
 // on row height+1 and the alternate screen buffer never shows it — the whole defect this
 // exists to close (#164).
 func NoticeLines(st Styles, text string, width int) []string {
+	return NoticeLinesStyled(st.Notice, text, width)
+}
+
+// NoticeLinesStyled is NoticeLines with the rendering style named explicitly, rather than
+// always st.Notice (T3-02): the root's activity row colours itself by the entry's own kind —
+// Info for a plain report, Good for a landed/completed outcome, Bad for a refusal or failure —
+// instead of every entry reading in the same amber regardless of what happened.
+func NoticeLinesStyled(style lipgloss.Style, text string, width int) []string {
 	if text == "" || width <= 0 {
 		return nil
 	}
@@ -259,7 +267,7 @@ func NoticeLines(st Styles, text string, width int) []string {
 	}
 	out := make([]string, len(wrapped))
 	for i, line := range wrapped {
-		out[i] = st.Notice.Render(fit(line, width))
+		out[i] = style.Render(fit(line, width))
 	}
 	return out
 }
