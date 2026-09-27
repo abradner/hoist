@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
@@ -121,7 +122,7 @@ func TestEnterRestartsAndFollowsTheRollout(t *testing.T) {
 	m = drain(t, m, cmd)
 	// Tick through until it settles.
 	for i := 0; i < 10 && m.state != stateDone && m.state != stateFailed; i++ {
-		m, cmd = m.Update(tickMsg{})
+		m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{}})
 		m = drain(t, m, cmd)
 	}
 	if m.state != stateDone {
@@ -189,7 +190,7 @@ func TestSupersededRestartIsNotReportedAsSuccess(t *testing.T) {
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = drain(t, m, cmd)
 	for i := 0; i < 5 && m.state == stateRolling; i++ {
-		m, cmd = m.Update(tickMsg{})
+		m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{}})
 		m = drain(t, m, cmd)
 	}
 	if m.state != stateFailed {
@@ -212,7 +213,7 @@ func TestReadFailureIsReported(t *testing.T) {
 	}
 	// And enter does nothing from there.
 	if _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
-		if _, ok := cmd().(startedMsg); ok {
+		if _, ok := cmd().(scope.Result[startedMsg]); ok {
 			t.Error("enter must not restart after a failed read")
 		}
 	}
@@ -243,4 +244,25 @@ func TestRestartGolden(t *testing.T) {
 		t.Fatalf("dialog must sit over the screen:\n%s", v)
 	}
 	uitest.Golden(t, "restart-confirm", m.View(), 80, 24)
+}
+
+// TestStartedMsgFromAnotherInstanceIsForeign is the package-local half of app's own
+// TestRestartEarlierStartedDropped: scope.Foreign drops a startedMsg stamped by an instance
+// other than this one before it can touch this screen's state at all, without needing a whole
+// root Model to prove it.
+func TestStartedMsgFromAnotherInstanceIsForeign(t *testing.T) {
+	f := &fakeFuncs{plan: onePlan()}
+	a := ready(t, f, false)
+	b := New("app-staging", "web", []string{"web"}, false, f.funcs(), ui.NewStyles(true)).SetSize(120, 30)
+	if b.state != stateReading {
+		t.Fatalf("setup: state = %v, want stateReading", b.state)
+	}
+	foreign := scope.Result[startedMsg]{From: a.id, V: startedMsg{done: []string{"web"}}}
+	got, cmd := b.Update(foreign)
+	if cmd != nil {
+		t.Error("a foreign startedMsg produced a command")
+	}
+	if got.state != stateReading {
+		t.Fatalf("a foreign startedMsg was accepted onto a screen that never asked for it: state=%v", got.state)
+	}
 }

@@ -904,6 +904,88 @@ func TestBackingOutNoLongerCancelsOutstandingBuild(t *testing.T) {
 	}
 }
 
+// extractPlanLoadCmd descends into plan.Model.Init()'s own tea.Batch(spinner.Tick, loadCmd()) —
+// the same shape sessionBuildCmd descends into a different batch for — to reach the load call
+// itself, still uncalled, so a test can run two plan screens' loads in whatever order it likes
+// without either one blocking on the other.
+func extractPlanLoadCmd(t *testing.T, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil plan Init cmd")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) < 2 || batch[1] == nil {
+		t.Fatalf("plan Init cmd = %#v, want tea.Batch(spinner.Tick, loadCmd)", cmd)
+	}
+	return batch[1]
+}
+
+// TestPlanEarlierResolveCannotLandOnNewPlan proves internal/app/scope's own Foreign guard (Train
+// 2 design PR 5, audit FB-H3): a plan screen's async load is still a live tea.Cmd after the
+// operator backs out of it — esc pops the screen, but nothing cancels the outstanding call, that
+// is a separate piece of work (PR 6's owned context.Context) — so a second p press for a
+// different source env can already be showing its own answer by the time the first one's load
+// finally resolves. Attacker: the first plan screen's own loadedMsg, released last. Control: the
+// second plan's own result is what actually lands, checked before the attacker is ever released.
+func TestPlanEarlierResolveCannotLandOnNewPlan(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production", "app-production": "app-staging"}}
+	planFn := func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, []string{"ghcr.io/"}, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, planFn, nil, Promotion{}, nil, apprestart.Funcs{})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+
+	source1 := tm.(Model).stack[0].(matrixScreen).CurrentEnv()
+
+	// p: opens the first plan screen instance, for source1.
+	tm, cmd := press(t, tm, uitest.Key("p"))
+	tm, cmd = tm.Update(cmd()) // matrix.OpenPlanMsg -> pushes the screen, returns its Init()
+	loadCmd1 := extractPlanLoadCmd(t, cmd)
+
+	// esc: plan.BackMsg pops back to the matrix, but the outstanding load above is untouched.
+	tm, cmd = press(t, tm, uitest.Key("esc"))
+	tm, _ = tm.Update(cmd())
+	if n := len(tm.(Model).stack); n != 1 {
+		t.Fatalf("stack has %d screens after esc, want 1 (matrix only)", n)
+	}
+
+	// Move the column cursor so the second plan is for a different source env.
+	tm, _ = press(t, tm, uitest.Key("l"))
+	source2 := tm.(Model).stack[0].(matrixScreen).CurrentEnv()
+	if source2 == "" || source2 == source1 {
+		t.Fatalf("setup: moving the column did not change the source env (%q -> %q)", source1, source2)
+	}
+
+	// p again: a second, distinct plan screen instance, for source2.
+	tm, cmd = press(t, tm, uitest.Key("p"))
+	tm, cmd = tm.Update(cmd())
+	loadCmd2 := extractPlanLoadCmd(t, cmd)
+
+	// Control: the second instance's own load lands, and its answer is what shows.
+	tm, _ = tm.Update(loadCmd2())
+	want := plain(tm)
+	if !strings.Contains(want, source2) {
+		t.Fatalf("second plan's header does not name its own source %q:\n%s", source2, want)
+	}
+
+	// Attacker, released last: the first instance's load, superseded before it ever answered.
+	// Without internal/app/scope's Foreign guard this lands on the screen now on top (the
+	// second instance) and overwrites what the operator is looking at with source1's rows.
+	tm, _ = tm.Update(loadCmd1())
+	got := plain(tm)
+	if got != want {
+		t.Fatalf("an earlier plan screen's late result changed what is on screen:\nbefore:\n%s\nafter:\n%s", want, got)
+	}
+}
+
 // TestSupersedingStartMsgCancelsPreviousBuild is removed: the scenario it guarded (a second
 // StartMsg for the same target env silently superseding an outstanding first one) can no longer
 // occur at all — session.Controller.Start refuses a second Start for a target env it is already
@@ -1801,6 +1883,81 @@ func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
 	}
 	if v := plain(tm); !strings.Contains(v, "hoist · restart") {
 		t.Errorf("the screen should name the operation:\n%s", v)
+	}
+}
+
+// TestRestartEarlierStartedDropped proves internal/app/scope's own Foreign guard for the restart
+// screen (Train 2 design PR 5): the DoFunc call enter starts is still a live tea.Cmd after the
+// operator backs out with esc — nothing cancels it, that is PR 6's owned context.Context, a
+// separate piece of work — so a second restart screen, for a different env, can already be
+// mid-start (its own state == stateStarting) by the time the first screen's Do call finally
+// answers. Attacker: the first instance's own startedMsg, landing on a second instance that is
+// ALSO in stateStarting — the one state restart.Model's own guard (state == stateStarting) would
+// let through on its own, so this proves the scope.Foreign guard is doing real work, not just
+// restating a check the state machine already made. Control: the second instance's own started
+// answer, landing afterward, is what actually moves it past stateStarting.
+func TestRestartEarlierStartedDropped(t *testing.T) {
+	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		p := restart.Plan{Env: env}
+		for _, n := range names {
+			p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+		}
+		return p, nil
+	}
+	do := func(_ context.Context, p restart.Plan, _ time.Time) ([]string, error) {
+		var names []string
+		for _, tg := range p.Targets {
+			names = append(names, tg.Name)
+		}
+		return names, nil
+	}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
+		apprestart.Funcs{Read: read, Do: do, Interval: time.Minute})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+
+	// R: the first restart screen instance, for the current column's env.
+	tm, cmd := press(t, tm, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	tm, cmd = tm.Update(cmd()) // matrix.OpenRestartMsg -> pushes the screen, returns Init() (the plan read)
+	tm, _ = tm.Update(cmd())   // the read resolves synchronously: state -> stateConfirm
+
+	// enter: not production (config.EnvsConfig{} names none), so this starts directly.
+	tm, cmd = press(t, tm, tea.KeyPressMsg{Code: tea.KeyEnter})
+	startedCmd1 := cmd // the Do call, uncalled: answering it would flip state -> stateRolling
+
+	// esc: pops back to the matrix; the start above is still outstanding.
+	tm, cmd = press(t, tm, tea.KeyPressMsg{Code: tea.KeyEsc})
+	tm, _ = tm.Update(cmd())
+	if n := len(tm.(Model).stack); n != 1 {
+		t.Fatalf("stack has %d screens after esc, want 1 (matrix only)", n)
+	}
+
+	// l: move the column so the second restart instance targets a different env.
+	tm, _ = press(t, tm, tea.KeyPressMsg{Code: 'l', Text: "l"})
+
+	// R again: a second, distinct restart screen instance, driven to stateStarting exactly like
+	// the first — the shared state a state-only guard could not tell apart.
+	tm, cmd = press(t, tm, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	tm, cmd = tm.Update(cmd())
+	tm, _ = tm.Update(cmd())
+	tm, cmd = press(t, tm, tea.KeyPressMsg{Code: tea.KeyEnter})
+	startedCmd2 := cmd
+
+	// Attacker, released first: the first instance's started answer, landing on the second
+	// instance while it is itself still in stateStarting.
+	before := plain(tm)
+	tm, _ = tm.Update(startedCmd1())
+	if got := plain(tm); got != before {
+		t.Fatalf("an earlier restart screen's late started answer changed the screen:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+
+	// Control: the second instance's own started answer is what actually moves it on.
+	tm, _ = tm.Update(startedCmd2())
+	if v := plain(tm); strings.Contains(v, "not yet restarted") {
+		t.Fatalf("the second restart's own started answer should have moved it past confirm/starting:\n%s", v)
 	}
 }
 

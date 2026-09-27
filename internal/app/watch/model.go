@@ -20,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -75,6 +76,10 @@ type BuildFunc func(family, env string) (Funcs, error)
 // BackMsg asks whatever composes screens to pop this one.
 type BackMsg struct{}
 
+// snapshotMsg is delivered once a poll finishes. Returned wrapped as scope.Result[snapshotMsg]
+// (poll), so a read this screen instance is no longer the current one for — the operator backed
+// out with w still outstanding, then opened w again for a different family — cannot land here
+// (AGENTS.md §4.8).
 type snapshotMsg struct {
 	snap Snapshot
 	err  error
@@ -83,7 +88,10 @@ type snapshotMsg struct {
 
 // tickMsg carries the generation of the tick that scheduled it; a stale one (r, or a later
 // snapshot, has scheduled a newer tick since) is ignored, so a manual poll never leaves a
-// second timer chain running beside the cadence — the same guard as app.go's listGen.
+// second timer chain running beside the cadence — the same guard as app.go's listGen. Also
+// returned wrapped as scope.Result[tickMsg] (tick), since gen alone only dedups chains within
+// one screen instance — it says nothing about a tick scheduled by an instance for a family this
+// screen was never showing.
 type tickMsg struct{ gen uint64 }
 
 // Model is the screen.
@@ -92,6 +100,10 @@ type Model struct {
 	funcs  Funcs
 
 	family, env string
+
+	// id is this instance's scope.ID (New): a snapshotMsg/tickMsg stamped by any other value
+	// is Foreign and dropped at the top of Update (AGENTS.md §4.8).
+	id scope.ID
 
 	snap       Snapshot
 	err        string
@@ -113,49 +125,53 @@ func New(family, env string, funcs Funcs, styles ui.Styles) Model {
 	if funcs.Now == nil {
 		funcs.Now = time.Now
 	}
-	return Model{styles: styles, funcs: funcs, family: family, env: env, body: viewport.New()}
+	return Model{styles: styles, funcs: funcs, family: family, env: env, id: scope.New(), body: viewport.New()}
 }
 
 // Init takes the first snapshot — `hoist watch --once` is this screen's first paint.
 func (m Model) Init() tea.Cmd { return m.poll() }
 
 func (m Model) poll() tea.Cmd {
-	read, now := m.funcs.Read, m.funcs.Now
+	read, now, id := m.funcs.Read, m.funcs.Now, m.id
 	if read == nil {
-		return func() tea.Msg { return snapshotMsg{err: fmt.Errorf("watching is not wired up"), at: now()} }
+		return scope.Do(id, func() snapshotMsg { return snapshotMsg{err: fmt.Errorf("watching is not wired up"), at: now()} })
 	}
-	return func() tea.Msg {
+	return scope.Do(id, func() snapshotMsg {
 		at := now()
 		snap, err := read(context.Background())
 		return snapshotMsg{snap: snap, err: err, at: at}
-	}
+	})
 }
 
 // tick schedules the next poll and retires every tick scheduled before it.
 func (m Model) tick() (Model, tea.Cmd) {
 	m.tickGen++
 	gen := m.tickGen
-	return m, tea.Tick(m.interval(), func(time.Time) tea.Msg { return tickMsg{gen: gen} })
+	return m, scope.After(m.id, m.interval(), tickMsg{gen: gen})
 }
 
 // Update implements the screen contract.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if scope.Foreign(m.id, msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
-	case snapshotMsg:
+	case scope.Result[snapshotMsg]:
+		sm := msg.V
 		m.polling = false
-		m.lastPolled = msg.at
+		m.lastPolled = sm.at
 		m.polls++
-		if msg.err != nil {
+		if sm.err != nil {
 			// The last good snapshot stays on screen under the error: a transient plumbing
 			// failure should not blank what the operator was reading.
-			m.err = redact.Strings(msg.err.Error())
+			m.err = redact.Strings(sm.err.Error())
 		} else {
 			m.err = ""
-			m.snap = msg.snap
+			m.snap = sm.snap
 		}
 		return m.render().tick()
-	case tickMsg:
-		if msg.gen != m.tickGen {
+	case scope.Result[tickMsg]:
+		if msg.V.gen != m.tickGen {
 			return m, nil // retired by r or a later snapshot; its replacement is already pending
 		}
 		if m.polling {

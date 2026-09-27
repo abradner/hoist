@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/app/history"
+	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
@@ -641,7 +642,7 @@ func TestViewGoldenCollidingLabels(t *testing.T) {
 		same("ghcr.io/example/web-frontend-service-beta"),
 		same("ghcr.io/example/db"),
 	}}
-	m, _ = m.Update(loadedMsg{plan: pl})
+	m, _ = m.Update(scope.Result[loadedMsg]{From: m.id, V: loadedMsg{plan: pl}})
 	m = m.SetSize(80, 24).SetStyles(ui.NewStyles(true))
 	v := ansi.Strip(m.View())
 	for _, want := range []string{"…alpha", "…beta"} {
@@ -715,5 +716,26 @@ func TestSwitchingTheRightPaneStartsAtTheTop(t *testing.T) {
 	m, _ = m.Update(uitest.Key("d"))
 	if m.showYAML || m.viewport.YOffset() != 0 {
 		t.Fatalf("back: yaml=%v offset=%d", m.showYAML, m.viewport.YOffset())
+	}
+}
+
+// TestLoadedMsgFromAnotherInstanceIsForeign is the package-local half of app's own
+// TestPlanEarlierResolveCannotLandOnNewPlan: scope.Foreign drops a loadedMsg stamped by an
+// instance other than this one before onLoaded ever sees it, without needing a whole root
+// Model to prove it.
+func TestLoadedMsgFromAnotherInstanceIsForeign(t *testing.T) {
+	a := readyModel(t, config.EnvsConfig{})
+	r := discoverFixture(t)
+	b := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, noneFunc([]string{"ghcr.io/"}), history.Funcs{})
+	if b.state != stateLoading {
+		t.Fatalf("setup: state = %v, want stateLoading", b.state)
+	}
+	foreign := scope.Result[loadedMsg]{From: a.id, V: loadedMsg{plan: a.plan}}
+	got, cmd := b.Update(foreign)
+	if cmd != nil {
+		t.Error("a foreign loadedMsg produced a command")
+	}
+	if got.state != stateLoading || len(got.rows) != 0 {
+		t.Fatalf("a foreign loadedMsg was accepted onto a screen that never asked for it: state=%v rows=%d", got.state, len(got.rows))
 	}
 }
