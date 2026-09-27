@@ -262,10 +262,13 @@ func (m Model) ResetStarting() Model {
 // newViewport is the impact pane's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in
 // the T3 review) rather than left on viewport.New()'s bubbles-library default — which binds
 // space/f/b to page and bare "d"/"u" to half-page, none of it shown anywhere and "d" already
-// meaning "toggle yaml diff" on this screen.
+// meaning "toggle yaml diff" on this screen. SoftWrap is on (T3 followup, group 2): the yaml
+// diff's whole point is the digest, and a hard-truncated line hides it past the pane's right
+// edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
 	v := viewport.New()
 	v.KeyMap = keys.ViewportKeyMap()
+	v.SoftWrap = true
 	return v
 }
 

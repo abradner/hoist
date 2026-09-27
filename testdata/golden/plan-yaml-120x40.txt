@@ -9,7 +9,9 @@
 │┃                                              │       containers:                                                    │
 │┃                                              │         - name: counta                                               │
 │┃                                              │-          image: 'ghcr.io/example/counta:v202601151010@sha256:abad1de│
+│┃                                              │aabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea'            │
 │┃                                              │+          image: 'ghcr.io/example/counta:v202602201200@sha256:c0c0a12│
+│┃                                              │3c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123'            │
 │┃                                              │           envFrom:                                                   │
 │┃                                              │             - configMapRef:                                          │
 │┃                                              │                 name: counta-config                                  │
@@ -18,7 +20,9 @@
 │┃                                              │       containers:                                                    │
 │┃                                              │         - name: worker                                               │
 │┃                                              │-          image: ghcr.io/example/counta:v202601151010@sha256:abad1dea│
+│┃                                              │abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea              │
 │┃                                              │+          image: ghcr.io/example/counta:v202602201200@sha256:c0c0a123│
+│┃                                              │c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123              │
 │┃                                              │           args: ["worker"]                                           │
 │┃                                              │                                                                      │
 │┃                                              │--- a/cluster/apps/app-production/counta/purge-cronjob.yaml           │
@@ -28,13 +32,9 @@
 │┃                                              │           containers:                                                │
 │┃                                              │             - name: purge                                            │
 │┃                                              │-              image: ghcr.io/example/counta:v202601151010@sha256:abad│
+│┃                                              │1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea # keep in│
+│┃                                              │ step with app.yaml                                                   │
 │┃                                              │+              image: ghcr.io/example/counta:v202602201200@sha256:c0c0│
-│┃                                              │               command: ["bin/rails", "counta:purge"]                 │
-│┃                                              │                                                                      │
-│┃                                              │--- a/cluster/apps/app-production/marketing/app.yaml                  │
-│┃                                              │+++ b/cluster/apps/app-production/marketing/app.yaml                  │
-│┃                                              │@@ -15,6 +15,6 @@                                                     │
-│┃                                              │     spec:                                                            │
-│┃                                              │       containers:                                                    │
+│┃                                              │a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123c0c0a123 # keep in│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
    enter promote · space tick · d yaml · e digest · shift+d direct · r fresh · tab pane · l activity · esc back · ? help

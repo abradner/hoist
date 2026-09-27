@@ -8,16 +8,16 @@
 │+++ b/cluster/apps/app-production/web/app.yaml                                │
 │@@ -20,7 +20,7 @@                                                             │
 │       # Production runs three processes from the one image; staging folds que│
+│ue into worker.                                                               │
 │       containers:                                                            │
 │         - name: web                                                          │
 │-          image: ghcr.io/example/web:v202601010101@sha256:0a1b2c3d4e5f6071829│
+│3a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9                                 │
 │+          image: ghcr.io/example/web:v9@sha256:dddddddddddddddddddddddddddddd│
+│dddddddddddddddddddddddddddddddddd                                            │
 │           imagePullPolicy: IfNotPresent                                      │
 │           ports:                                                             │
 │             - containerPort: 3000                                            │
-│@@ -28,11 +28,11 @@                                                           │
-│             - name: RAILS_ENV                                                │
-│               value: production                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │3 image references in 1 file · digest dddddddddddd · verified before commit   │
 ╰──────────────────────────────────────────────────────────────────────────────╯

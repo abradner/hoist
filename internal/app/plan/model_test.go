@@ -731,6 +731,40 @@ func TestViewGolden(t *testing.T) {
 	uitest.Golden(t, "plan-yaml", m.View(), 120, 40)
 }
 
+// flattenHex drops everything from s except lowercase hex characters and ':' — box-drawing
+// borders, padding, diff markers and the newline a soft-wrapped line breaks on all disappear,
+// leaving a continuous run of the underlying text's hex/':' characters in order. A digest that
+// survives wrapping intact (just spread over more rows) still reads back as one unbroken
+// substring this way; a digest that was hard-cropped does not, since the cut characters are
+// simply gone rather than moved to another line.
+func flattenHex(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == ':' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// The impact pane's yaml diff exists so a reviewer can check the digest — a hard-cropped line
+// hid it past the pane's right edge, and Left/Right (the usual way to see the rest) are
+// deliberately unbound on this shared keymap (internal/ui/keys/viewport.go). T3 followup, group
+// 2: the viewport now sets SoftWrap instead, so the full digest is on screen at any width —
+// proven to fail by unsetting v.SoftWrap in newViewport.
+func TestImpactYAMLShowsTheFullDigestEvenNarrow(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
+	wantDigest := flattenHex("sha256:" + strings.Repeat("c0c0a123", 8))
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := readyModel(t, envs).SetSize(size[0], size[1])
+		m = uitest.Keys(m, updateFn, "d")
+		v := ansi.Strip(m.View())
+		if !strings.Contains(flattenHex(v), wantDigest) {
+			t.Errorf("%dx%d: yaml view does not show the full digest %q:\n%s", size[0], size[1], wantDigest, v)
+		}
+	}
+}
+
 func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
 // #121: a width change rebuilds the huh.MultiSelect to re-truncate its labels, and huh has
