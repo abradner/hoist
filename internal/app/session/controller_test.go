@@ -555,6 +555,61 @@ func TestAbandonDuringResumeBuildErrorStillCallsAbandon(t *testing.T) {
 	}
 }
 
+// TestFailedAbandonOfNeverBuiltDriveRemovesEntry: Abandon fired against an entry whose own
+// Backend.Resume call is still in flight (Building), where that call then fails AND
+// Backend.Abandon itself also fails, must not leave a Stopped entry with a nil Driver behind — a
+// later Poke against it would call Step on a nil interface and panic. Before the fix, onAbandoned's
+// error path always kept the entry (phase=Stopped, busy=false) regardless of whether a driver
+// had ever been attached; this pins that a driver-less failed abandon instead drops the entry
+// entirely, and Poke afterward is a clean ErrNotFound rather than a panic.
+func TestFailedAbandonOfNeverBuiltDriveRemovesEntry(t *testing.T) {
+	now := fixedClock(time.Now())
+	backend := &fakeBackend{
+		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return nil, context.Canceled },
+		abandonFn: func(context.Context, string) ([]string, error) { return nil, errors.New("forge down") },
+	}
+	c := New(backend, testConfig(now))
+	c, _, resumeCmd, err := c.Resume("promo-1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := harness{c: c}
+
+	c2, _ := h.c.Abandon("promo-1")
+	h.c = c2
+
+	h, followUp := started(h, resumeCmd) // the Resume call fails; onBuilt's abandoning branch calls Backend.Abandon
+	if followUp == nil {
+		t.Fatal("onBuilt-while-abandoning (build error) produced no command")
+	}
+	h = h.drain(followUp) // Backend.Abandon itself fails too
+
+	if _, ok := h.c.Snapshot("promo-1"); ok {
+		t.Fatal("BUG: a driver-less entry survives a failed abandon — Poke against it would panic")
+	}
+
+	// Defence in depth: even if some future path left such an entry behind, Poke/OverrideCINone
+	// refuse it outright rather than reaching Step on a nil Driver.
+	if _, _, err := h.c.Poke("promo-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Poke after the entry was removed = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPokeRefusesADriverLessEntry directly pins Poke/OverrideCINone's own ErrNoDriver guard
+// (the "defence in depth" half of TestFailedAbandonOfNeverBuiltDriveRemovesEntry): an entry
+// stopped with no Driver ever attached must never reach Driver.Step.
+func TestPokeRefusesADriverLessEntry(t *testing.T) {
+	now := fixedClock(time.Now())
+	c := New(&fakeBackend{}, testConfig(now))
+	c = c.withEntry(entry{build: 1, id: "promo-1", phase: Stopped})
+	if _, _, err := c.Poke("promo-1"); !errors.Is(err, ErrNoDriver) {
+		t.Fatalf("Poke on a driver-less entry = %v, want ErrNoDriver", err)
+	}
+	if _, _, err := c.OverrideCINone("promo-1"); !errors.Is(err, ErrNoDriver) {
+		t.Fatalf("OverrideCINone on a driver-less entry = %v, want ErrNoDriver", err)
+	}
+}
+
 // TestBlockedDuringAbandonKeepsAbandoningPhase: a Blocked tick reported for a Step that Abandon
 // is waiting on must not overwrite phase Abandoning with Stopped — doing so let Poke re-arm
 // (bumping gen), which drops the abandonWaitMsg already scheduled and the abandon silently

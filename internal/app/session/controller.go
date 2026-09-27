@@ -226,6 +226,17 @@ var (
 	// target env — AGENTS.md invariant 5, enforced here at the same layer service.claimTarget
 	// enforces it against the forge/state file.
 	ErrTargetBusy = errors.New("session: a promotion is already running for this target env")
+	// ErrNoDriver is returned by Poke/OverrideCINone when the tracked entry has no live Driver
+	// to step — a Resume whose Backend.Resume call itself failed (Building never reached
+	// onBuilt's success path) and was then abandoned, or any other entry that reached Stopped
+	// without ever getting a driver. Poke/OverrideCINone would otherwise call Step on a nil
+	// interface value and panic (found in review: onAbandoned's error path used to leave exactly
+	// such an entry behind, driver-less and Poke-able). Enforced twice, deliberately (AGENTS.md
+	// §8's layered-checks rule): onAbandoned also refuses to leave a driver-less entry behind at
+	// all (see its own doc comment) — deleting either check would make a new state possible
+	// (Poke reaching a nil driver), so both are real enforcement, not one enforcement plus
+	// politeness.
+	ErrNoDriver = errors.New("session: this promotion has no driver to step")
 )
 
 // entry is one tracked build/promotion. Never exported: Snapshot is the read-only view a caller
@@ -543,6 +554,12 @@ func (c Controller) Poke(id string) (Controller, tea.Cmd, error) {
 	if e.busy || e.phase == Abandoning {
 		return c, nil, ErrBusy
 	}
+	if e.driver == nil {
+		// A driver-less Stopped entry — a Resume whose own Backend.Resume call failed and was
+		// then abandoned (see onAbandoned's own doc comment). Stepping a nil Driver panics;
+		// refuse instead, the same nil-safe convention every other Controller method uses.
+		return c, nil, ErrNoDriver
+	}
 	e = c.rearm(e)
 	c = c.withEntry(e)
 	// rearm cancelled the old ctx, which stops the old listenCmd (it returns nil the instant it
@@ -564,6 +581,10 @@ func (c Controller) OverrideCINone(id string) (Controller, tea.Cmd, error) {
 	e := c.entries[build]
 	if e.busy || e.phase == Abandoning {
 		return c, nil, ErrBusy
+	}
+	if e.driver == nil {
+		// Same driver-less-Stopped-entry guard as Poke's own — see its comment and ErrNoDriver's.
+		return c, nil, ErrNoDriver
 	}
 	e = c.rearm(e)
 	c = c.withEntry(e)
@@ -968,6 +989,18 @@ func (c Controller) onAbandoned(msg abandonedMsg) (Controller, tea.Cmd, []Change
 		return c, nil, nil
 	}
 	if msg.err != nil {
+		if e.driver == nil {
+			// A failed abandon of a never-built drive (e.g. Resume's own Backend.Resume call
+			// returned an error and was then abandoned before any driver ever existed) must not
+			// leave a Stopped, driver-less entry behind: Poke/OverrideCINone's own ErrNoDriver
+			// guard refuses it, but that guard is defence in depth — the actual enforcement is
+			// here, not leaving a state Poke would ever have to refuse in the first place. There
+			// is nothing left to retry (no driver to step, no PR/branch this attempt ever
+			// created), so this entry is simply gone; the operator sees the failure and can
+			// Resume/Start fresh.
+			c = c.withoutEntry(e.build)
+			return c, nil, []Change{{Kind: ChangeAbandonFailed, Build: e.build, ID: e.id, Err: msg.err}}
+		}
 		e.phase = Stopped
 		e.abandoning = false
 		c = c.withEntry(e)
