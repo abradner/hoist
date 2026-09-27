@@ -10,10 +10,11 @@ pair](#promote-a-pair) · [deploy a build](#deploy-a-build) · [restart a family
 · [when it stops](#when-it-stops) · [resuming](#resuming) · [registry
 credentials](#registry-credentials) · [direct mode](#direct-mode)
 
-Three keys work the same everywhere: `?` opens a full help overlay naming every key the current
-screen honours (`esc`, `?` or `enter` closes it); `l` opens the activity log — every result and
-error this session has recorded, oldest first, nothing truncated — from whatever screen you are
-on; `q` quits hoist, but only from the matrix (with a confirm if a drive is still running) —
+Three keys work the same everywhere `?` and `q` do; `l` is close but not universal (see the table
+below): `?` opens a full help overlay naming every key the current screen honours (`esc`, `?` or
+`enter` closes it); `l` opens the activity log — every result and error this session has recorded,
+oldest first, nothing truncated — from most screens; `q` quits hoist, but only from the matrix
+(with a confirm if a drive is still running) —
 pressed anywhere else it does nothing but remind you to go back first. `ctrl+c` quits immediately
 from any screen, no confirm, and on the way out names every promotion still in flight with its own
 `hoist resume <id>`.
@@ -30,7 +31,7 @@ since a legacy terminal cannot tell a real shift from caps lock pressed by mista
 | `enter` | the one primary action — open the menu, run the highlighted item, start a promotion/deploy/restart, review a tag | every screen except flight, watch, config, activity |
 | `esc` | back — never cancels a drive that's running | every screen |
 | `?` | help overlay | every screen |
-| `l` | activity log | every screen |
+| `l` | activity log | matrix, plan, deploy, tags, flight, watch, restart, config |
 | `q` | quit; only from the bare matrix (confirms if a drive is running) | matrix |
 | `ctrl+c` | quit immediately, no confirm | every screen |
 | `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
@@ -235,7 +236,7 @@ exact same running drive later, never starting a second one. `shift+x` (a write,
 it and deletes the branch. It refuses outright if the promotion has already landed — abandoning is
 not a rollback, so a landed one needs `hoist deploy` or a fresh promotion to undo, not a
 state-file delete — and it is never offered at all once the promotion is done. `l` shows the
-activity log — from every screen, not only this one. `q` quits hoist, but only from the matrix:
+activity log here too, not only from the matrix. `q` quits hoist, but only from the matrix:
 pressed here it does nothing but remind you ("q quits from the matrix · esc goes back") — `esc`
 back to the matrix first, then `q` there. With any drive this session started still Building,
 Stepping or Waiting, quitting from the matrix asks first, behind a confirm — nothing is rolled
