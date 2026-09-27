@@ -125,7 +125,7 @@ func TestTickRereadsAndMovesLastPolled(t *testing.T) {
 	if got := ansi.Strip(m.headerSection()); !strings.Contains(got, "polled 3m ago") {
 		t.Fatalf("header before the tick: %q, want 'polled 3m ago'", got)
 	}
-	m, cmd := m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: m.tickGen}})
+	m, cmd := m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{gen: m.tickGen}})
 	if cmd == nil {
 		t.Fatal("tick produced no read")
 	}
@@ -189,14 +189,14 @@ func TestRRetiresThePendingTick(t *testing.T) {
 	if live == pending {
 		t.Fatalf("the manual snapshot's tick shares generation %d with the pending one", live)
 	}
-	m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: pending}})
+	m, cmd = m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{gen: pending}})
 	if cmd != nil || m.polling || r.calls != 2 {
 		t.Fatalf("the stale tick was not ignored: cmd=%v polling=%v calls=%d — r left a second chain", cmd != nil, m.polling, r.calls)
 	}
 	if m.tickGen != live {
 		t.Fatalf("the stale tick rescheduled: generation %d, want %d", m.tickGen, live)
 	}
-	m, cmd = m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: live}})
+	m, cmd = m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{gen: live}})
 	if cmd == nil {
 		t.Fatal("the live tick produced no read")
 	}
@@ -221,7 +221,7 @@ func TestReadErrorKeepsLastSnapshot(t *testing.T) {
 	r := &reader{snaps: []Snapshot{healthy()}}
 	m := ready(t, r, &clock{t0}, 80, 24)
 	r.err = errors.New("dial tcp my-cluster:6443: i/o timeout")
-	m, cmd := m.Update(scope.Result[tickMsg]{From: m.id, V: tickMsg{gen: m.tickGen}})
+	m, cmd := m.Update(scope.Result[tickMsg]{From: m.scope.ID, V: tickMsg{gen: m.tickGen}})
 	m, _ = m.Update(cmd())
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "Deployment web") || !strings.Contains(v, "i/o timeout") {
@@ -277,7 +277,7 @@ func TestSnapshotMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	if b.polls != 0 {
 		t.Fatalf("setup: polls = %d, want 0", b.polls)
 	}
-	foreign := scope.Result[snapshotMsg]{From: a.id, V: snapshotMsg{snap: a.snap, at: t0}}
+	foreign := scope.Result[snapshotMsg]{From: a.scope.ID, V: snapshotMsg{snap: a.snap, at: t0}}
 	got, cmd := b.Update(foreign)
 	if cmd != nil {
 		t.Error("a foreign snapshotMsg produced a command")

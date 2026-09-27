@@ -44,6 +44,32 @@ type Funcs struct {
 	Observe ObserveFunc
 	// Interval is how often the rollout is re-read once it is running.
 	Interval time.Duration
+	// ReadTimeout/DoTimeout/ObserveTimeout bound the Read/Do/Observe call respectively; zero
+	// means scope.RestartRead/RestartDo/RestartObserve (AGENTS.md §4.8, "every command has a
+	// deadline"). Only ever set away from zero by a test proving a call is actually bounded
+	// (AGENTS.md §8: "prove a new test can fail") — cmd/hoist's own wiring never sets these.
+	ReadTimeout, DoTimeout, ObserveTimeout time.Duration
+}
+
+func (f Funcs) readTimeout() time.Duration {
+	if f.ReadTimeout > 0 {
+		return f.ReadTimeout
+	}
+	return scope.RestartRead
+}
+
+func (f Funcs) doTimeout() time.Duration {
+	if f.DoTimeout > 0 {
+		return f.DoTimeout
+	}
+	return scope.RestartDo
+}
+
+func (f Funcs) observeTimeout() time.Duration {
+	if f.ObserveTimeout > 0 {
+		return f.ObserveTimeout
+	}
+	return scope.RestartObserve
 }
 
 type state int
@@ -93,9 +119,11 @@ type Model struct {
 	names      []string
 	production bool
 
-	// id is this instance's scope.ID (New): a planMsg/startedMsg/progressMsg/tickMsg stamped
-	// by any other value is Foreign and dropped at the top of Update (AGENTS.md §4.8).
-	id scope.ID
+	// scope is this instance's owned context plus its ID: a planMsg/startedMsg/progressMsg/
+	// tickMsg stamped by any other value is Foreign and dropped at the top of Update (AGENTS.md
+	// §4.8), and Close (called by the root's pop when this screen is removed) cancels
+	// whatever Read/Do/Observe call is outstanding at that moment.
+	scope scope.Scope
 
 	state  state
 	plan   restart.Plan
@@ -118,31 +146,52 @@ type Model struct {
 
 // New builds the screen for one family in one env. names are the Deployments the repo says that
 // family declares; nothing is read from the cluster until Init runs.
+//
+// New refuses a Funcs with Do set but Observe left nil (FB-L3): without Observe, onProgress's
+// own tick chain has nothing to call once a restart is under way (observe's own `obs == nil`
+// guard returns a nil cmd, silently breaking the chain), so the screen would strand in
+// "rolling" forever with no way to tell the operator the rollout finished, or even that it
+// started successfully. That is a wiring mistake, not a runtime condition to render around, so
+// it fails at construction with a named reason instead of reproducing FB-L3 live.
 func New(env, family string, names []string, production bool, funcs Funcs, styles ui.Styles) Model {
-	return Model{
+	m := Model{
 		styles: styles, funcs: funcs,
 		env: env, family: family, names: names, production: production,
-		id:    scope.New(),
+		scope: scope.Open(),
 		state: stateReading,
 		body:  viewport.New(),
 	}
+	if funcs.Do != nil && funcs.Observe == nil {
+		m.state = stateFailed
+		m.notice = "restart screen misconfigured: Do is set without Observe, so a restart here would have no way to tell whether it finished"
+	}
+	return m
 }
 
-// Init reads the cluster.
+// Close cancels this instance's outstanding Read/Do/Observe call. Called by the root's own pop
+// when this screen is actually removed from the stack (AGENTS.md §4.8).
+func (m Model) Close() { m.scope.Close() }
+
+// Init reads the cluster — or, for a screen New already refused (see New's own doc comment),
+// does nothing at all: there is nothing left to read from a misconfiguration a real cluster
+// call could not fix.
 func (m Model) Init() tea.Cmd {
-	read, env, names, id := m.funcs.Read, m.env, m.names, m.id
-	if read == nil {
-		return scope.Do(id, func() planMsg { return planMsg{err: fmt.Errorf("restarting is not wired up")} })
+	if m.state == stateFailed {
+		return nil
 	}
-	return scope.Do(id, func() planMsg {
-		p, err := read(context.Background(), env, names)
+	read, env, names, sc := m.funcs.Read, m.env, m.names, m.scope
+	if read == nil {
+		return scope.DoCtx(sc, m.funcs.readTimeout(), func(context.Context) planMsg { return planMsg{err: fmt.Errorf("restarting is not wired up")} })
+	}
+	return scope.DoCtx(sc, m.funcs.readTimeout(), func(ctx context.Context) planMsg {
+		p, err := read(ctx, env, names)
 		return planMsg{plan: p, err: err}
 	})
 }
 
 // Update implements the screen contract.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if scope.Foreign(m.id, msg) {
+	if scope.Foreign(m.scope.ID, msg) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
@@ -276,7 +325,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) start() (Model, tea.Cmd) {
-	do, pl, id := m.funcs.Do, m.plan, m.id
+	do, pl, sc := m.funcs.Do, m.plan, m.scope
 	if do == nil {
 		m.state, m.notice = stateFailed, "restarting is not wired up"
 		return m.render(), nil
@@ -284,8 +333,8 @@ func (m Model) start() (Model, tea.Cmd) {
 	at := time.Now().UTC()
 	m.state = stateStarting
 	m.notice = ""
-	return m.render(), scope.Do(id, func() startedMsg {
-		done, err := do(context.Background(), pl, at)
+	return m.render(), scope.DoCtx(sc, m.funcs.doTimeout(), func(ctx context.Context) startedMsg {
+		done, err := do(ctx, pl, at)
 		return startedMsg{at: at, done: done, err: err}
 	})
 }
@@ -295,17 +344,17 @@ func (m Model) tick() tea.Cmd {
 	if d <= 0 {
 		d = 3 * time.Second
 	}
-	return scope.After(m.id, d, tickMsg{})
+	return scope.After(m.scope.ID, d, tickMsg{})
 }
 
 func (m Model) observe() tea.Cmd {
-	obs, env, at, id := m.funcs.Observe, m.env, m.at, m.id
+	obs, env, at, sc := m.funcs.Observe, m.env, m.at, m.scope
 	names := m.pending()
 	if obs == nil || len(names) == 0 {
 		return nil
 	}
-	return scope.Do(id, func() progressMsg {
-		pr, err := obs(context.Background(), env, names, at)
+	return scope.DoCtx(sc, m.funcs.observeTimeout(), func(ctx context.Context) progressMsg {
+		pr, err := obs(ctx, env, names, at)
 		return progressMsg{progress: pr, err: err}
 	})
 }
