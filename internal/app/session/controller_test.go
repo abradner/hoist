@@ -622,7 +622,9 @@ func TestAbandonIssuedOnceWhenWaitExpiresBeforeBuildLands(t *testing.T) {
 	now := fixedClock(time.Now())
 	abandoned := 0
 	backend := &fakeBackend{
-		resumeFn:  func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return &fakeDrive{id: "promo-1"}, nil },
+		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) {
+			return &fakeDrive{id: "promo-1"}, nil
+		},
 		abandonFn: func(context.Context, string) ([]string, error) { abandoned++; return nil, nil },
 	}
 	c := New(backend, testConfig(now))
@@ -1006,7 +1008,9 @@ func TestStartLandingFirstSurvivesADedupedResume(t *testing.T) {
 	startDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
 	resumeDrive := &resumedStateDrive{fakeDrive: fakeDrive{id: "promo-1"}, state: engine.PromotionState{ID: "promo-1", SourceEnv: "staging", TargetEnv: "prod"}}
 	backend := &fakeBackend{
-		startFn:  func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) { return startDrive, nil },
+		startFn: func(context.Context, service.StartRequest, service.Hooks) (service.Drive, error) {
+			return startDrive, nil
+		},
 		resumeFn: func(context.Context, string, service.ResumeOpts) (service.Drive, error) { return resumeDrive, nil },
 	}
 	c := New(backend, testConfig(now))
