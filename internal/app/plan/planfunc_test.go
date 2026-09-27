@@ -74,3 +74,19 @@ func errFunc(err error) Func {
 		return service.PlannedChange{}, err
 	}
 }
+
+// viewFunc wraps noneFunc so the returned PlannedChange carries a caller-chosen, non-zero View —
+// for tests pinning the loadedMsg.view -> Model.view -> StartMsg.View plumbing (t1-review.md P2-a
+// follow-through, PR #202 review): noneFunc alone always leaves View at its zero value, which is
+// indistinguishable from the bug under test (a dropped view assignment) without this.
+func viewFunc(promotable []string, view service.RepoView) Func {
+	inner := noneFunc(promotable)
+	return func(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pc, err := inner(ctx, req)
+		if err != nil {
+			return pc, err
+		}
+		pc.View = view
+		return pc, nil
+	}
+}

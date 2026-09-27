@@ -365,6 +365,45 @@ func TestEnterEmitsStartMsg(t *testing.T) {
 	}
 }
 
+// TestLoadedPlanViewCarriesThroughToStartMsg pins the loadedMsg.view -> Model.view -> StartMsg.View
+// chain (PR #202 review): planFn returns a service.PlannedChange whose View is non-zero
+// (service.Plan's own frozen origin-mode snapshot in production), and that exact value must
+// survive onLoaded (loadedMsg.view -> m.view) and a real Enter keypress (m.view -> StartMsg.View)
+// unchanged, since the root's StartPromotion call trusts StartMsg.View as "the view THIS plan was
+// built from" without re-deriving it.
+//
+// Mutation check: dropping `view: pc.View` at the planFn call site (~model.go:449), `m.view =
+// msg.view` in onLoaded (~model.go:524), or `View: view` in the Enter handler's StartMsg literal
+// (~model.go:594) each leave StartMsg.View at its zero value instead of wantView, and each must
+// fail this test.
+func TestLoadedPlanViewCarriesThroughToStartMsg(t *testing.T) {
+	wantView := service.RepoView{Dir: "/plan-loaded-view", FromOrigin: true, SHA: "plan-loaded-view-sha"}
+	r := discoverFixture(t)
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, viewFunc([]string{"ghcr.io/"}, wantView), history.Funcs{})
+	m = runInit(t, m)
+	if m.state != stateReady {
+		t.Fatalf("state = %v, want stateReady", m.state)
+	}
+	if m.view != wantView {
+		t.Fatalf("m.view = %+v after onLoaded, want %+v", m.view, wantView)
+	}
+	if len(m.ticked) == 0 {
+		t.Fatal("setup: fixture produced no tickable rows")
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter produced no command")
+	}
+	msg, ok := cmd().(StartMsg)
+	if !ok {
+		t.Fatalf("enter's command yields %T, want StartMsg", cmd())
+	}
+	if msg.View != wantView {
+		t.Errorf("StartMsg.View = %+v, want the planned view %+v", msg.View, wantView)
+	}
+}
+
 // TestEnterWithNothingTickedShowsNotice: unticking every row and pressing enter must not
 // emit StartMsg for an empty promotion — it shows a notice instead.
 func TestEnterWithNothingTickedShowsNotice(t *testing.T) {

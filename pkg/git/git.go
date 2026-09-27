@@ -330,10 +330,10 @@ func (e Exec) RemoveWorktree(ctx context.Context, cloneDir, worktreeDir string) 
 	// the directory can still be sitting there (a leftover plain directory, an interrupted
 	// checkout). Either way there is a real, still-possibly-present directory left to clear,
 	// and guardDisposablePath has already confirmed this exact path is safe to remove
-	// outright — a caller that skipped this (repoview.go's refreshRepoView, reusing one fixed
-	// cache path across every TUI boot and F5 refresh) would otherwise wedge permanently: the
-	// next WorktreeAtRef at the identical path fails "already exists", forever, with no way to
-	// recover short of the operator manually deleting the cache directory.
+	// outright — a caller that skipped this (internal/service's own refreshRepoView, repo.go,
+	// reusing one fixed cache path across every TUI boot and F5 refresh) would otherwise wedge
+	// permanently: the next WorktreeAtRef at the identical path fails "already exists", forever,
+	// with no way to recover short of the operator manually deleting the cache directory.
 	if err := os.RemoveAll(worktreeDir); err != nil {
 		return fmt.Errorf("removing %s: %w", worktreeDir, err)
 	}

@@ -34,7 +34,7 @@ package engine
 // touching the clone's own checked-out branch directly, and nothing else refreshes it), so a
 // promotable image repo can gain a whole new occurrence on origin/<base> that the clone's disk
 // has no record of at all — silently left on the old image, since nothing ever asked about it.
-// cmd/hoist's own checkNoMissingOccurrenceAtFreshBase closes that gap alongside
+// internal/service's own checkFreshBase (fresh.go) closes that gap alongside
 // checkCloneCurrentForBase, direct mode only: it discovers and plans a second time, from a
 // throwaway detached checkout of origin/<base>'s actual current tree (pkg/git.Git.WorktreeAtRef),
 // and refuses if that finds an occurrence — by file/line/column, never by its current value, since

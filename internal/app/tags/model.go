@@ -1379,7 +1379,7 @@ func (m Model) tableSection() string {
 	// Fewer tags than the page has room for (or fewer dividers than dividerRows() budgeted
 	// for) must not shrink the box below what pageSize/BodyHeight reserved for it — every
 	// other screen fills its scrolling section to the room it was given so the closing
-	// border always lands directly above the footer (#T1-02); a table with real content
+	// border always lands directly above the footer; a table with real content
 	// still fits within its budget, so this only ever adds rows, never removes any.
 	want := 1 + m.pageSize() + m.dividerRows() // header + rows + dividers
 	if have := strings.Count(b.String(), "\n") + 1; have < want {

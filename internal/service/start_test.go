@@ -266,3 +266,82 @@ func TestStartPromotionDirectNoOpRefusesUnseenOriginOccurrence(t *testing.T) {
 		t.Fatalf("error should name the missing occurrence's file (app2), got: %v", err)
 	}
 }
+
+// TestStartPromotionRefusesOriginModeWithNoOriginView is PR #202's own review-found gap closed
+// structurally (AGENTS.md §10 meta-rule 5): once this Service has read origin via
+// LoadRepo(RepoFromOrigin) (TUI boot or F5), a nil StartRequest.View — or one whose FromOrigin is
+// false, or whose SHA is empty — must be REFUSED rather than silently treated as "no view given,
+// fall back to s.Repo()". That fallback is exactly the fail-open two TUI paths could reach with
+// every existing test green: dropping deploy.Model.WithView(pc.View) in openDeploy, or breaking
+// the loadedMsg.view -> plan.StartMsg.View chain, both send a zero RepoView (FromOrigin false)
+// through to here, which used to downgrade the freshness check from CheckRepoViewCurrent (the
+// tight origin-tip comparison) to checkCloneCurrentForBase (the CLI's own looser local-disk
+// check) instead of failing the request outright.
+func TestStartPromotionRefusesOriginModeWithNoOriginView(t *testing.T) {
+	fx := newInflightFixture(t)
+	ctx := context.Background()
+
+	if _, err := fx.svc.LoadRepo(ctx, RepoFromOrigin); err != nil {
+		t.Fatalf("LoadRepo: %v", err)
+	}
+	pc, err := fx.svc.Plan(ctx, PlanRequest{Source: "app-staging", Target: "app-production"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if !pc.View.FromOrigin || pc.View.SHA == "" {
+		t.Fatalf("PlannedChange.View = %+v, want a real FromOrigin view (setup precondition)", pc.View)
+	}
+
+	cases := []struct {
+		name string
+		view *RepoView
+	}{
+		{"nil view", nil},
+		{"zero view", &RepoView{}},
+		{"FromOrigin false with a repo", &RepoView{Repo: pc.Repo}},
+		{"FromOrigin true but no SHA", &RepoView{Repo: pc.Repo, FromOrigin: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := fx.svc.StartPromotion(ctx, StartRequest{
+				Plan: pc.Plan,
+				Repo: pc.Repo,
+				View: c.view,
+				Mode: Mode{Direct: false, Confirmed: false},
+			}, Hooks{})
+			if err == nil {
+				t.Fatal("expected StartPromotion to refuse a TUI-mode request with no usable origin view")
+			}
+			var usage *UsageError
+			if !errors.As(err, &usage) {
+				t.Fatalf("expected a *UsageError, got %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "go back and reopen the plan") {
+				t.Fatalf("err = %v, want it to name the fix", err)
+			}
+		})
+	}
+
+	// Control: the real, correctly-plumbed view (pc.Request's own shape) is accepted.
+	if _, err := fx.svc.StartPromotion(ctx, pc.Request(Mode{Direct: false, Confirmed: false}), Hooks{}); err != nil {
+		t.Fatalf("expected the correctly-plumbed origin view to be accepted, got: %v", err)
+	}
+}
+
+// TestStartPromotionCLIModeAcceptsNilView is the control half of
+// TestStartPromotionRefusesOriginModeWithNoOriginView: a Service that never called
+// LoadRepo(RepoFromOrigin) — the CLI's own shape, which never sends a View at all — must be
+// unaffected by the new refusal. Proves the refusal is keyed on the SERVICE's own current view
+// (TUI vs CLI), never merely on req.View being nil.
+func TestStartPromotionCLIModeAcceptsNilView(t *testing.T) {
+	fx := newInflightFixture(t)
+	plan, repo := mustPlan(t, fx)
+
+	if _, err := fx.svc.StartPromotion(context.Background(), StartRequest{
+		Plan: plan,
+		Repo: repo,
+		Mode: Mode{Direct: false, Confirmed: false},
+	}, Hooks{}); err != nil {
+		t.Fatalf("expected a CLI-mode (never LoadRepo'd) request with a nil View to succeed, got: %v", err)
+	}
+}

@@ -134,6 +134,15 @@ type fakeService struct {
 	PlanFn    func(context.Context, service.PlanRequest) (service.PlannedChange, error)
 	RefreshFn func(context.Context) (service.RepoView, error)
 	RepoFn    func() service.RepoView
+	// onStart, when set, is called with the FULL service.StartRequest StartPromotion received,
+	// before startFn's own narrower (Plan, startOpts, progress) shape strips everything else
+	// out — startFn's shape predates StartRequest.View (fakeservice_test.go's own doc comment:
+	// it exists purely so old fixtures need no signature change) and has no way to observe it.
+	// Added for TestPlanStartMsgCarriesItsOwnPlannedView/TestDeployStartMsgCarriesItsOwnPlannedView
+	// (app_test.go, t1-review.md P2-a): the root's job is to pass StartRequest.View as the
+	// view THIS plan/deploy was actually built against, and startFn alone cannot see whether it
+	// did.
+	onStart func(service.StartRequest)
 }
 
 func (f *fakeService) Plan(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error) {
@@ -144,6 +153,9 @@ func (f *fakeService) Plan(ctx context.Context, req service.PlanRequest) (servic
 }
 
 func (f *fakeService) StartPromotion(ctx context.Context, req service.StartRequest, h service.Hooks) (service.Drive, error) {
+	if f.onStart != nil {
+		f.onStart(req)
+	}
 	if f.startFn == nil {
 		panic("fakeService: StartPromotion called but startFn not set")
 	}

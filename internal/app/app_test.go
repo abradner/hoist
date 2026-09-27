@@ -2031,3 +2031,149 @@ func TestSummaryForUnconfiguredRepoNamesWhyAndCannotReobserve(t *testing.T) {
 		t.Fatalf("summaryFor(Unconfigured).Verdict() = %q, want %q", v, "cannot re-observe")
 	}
 }
+
+// TestPlanStartMsgCarriesItsOwnPlannedView pins t1-review.md's P2-a finding: the plan.StartMsg
+// case (app.go, the plan.StartMsg branch building service.StartRequest) must pass THIS message's
+// own View through to svc.StartPromotion as StartRequest.View — not nil (which would make
+// StartPromotion silently read s.Repo() at call time instead, service.StartRequest.View's own
+// doc comment) and not some other view. This is the freshness-check plumbing t1-review.md P2 #6
+// added: a plan built against view A must be checked against view A, even if the service's own
+// current view has since moved to B (an F5 refresh landing between building the plan and
+// confirming it). Mutation check: replacing `View: &view` with `View: nil` at the plan.StartMsg
+// call site (app.go, ~line 652) makes this test fail with "StartRequest.View = <nil>, want ...".
+func TestPlanStartMsgCarriesItsOwnPlannedView(t *testing.T) {
+	wantView := service.RepoView{Dir: "/plan-view-a", FromOrigin: true, SHA: "plan-view-a-sha"}
+	var got *service.RepoView
+	svc := &fakeService{
+		onStart: func(req service.StartRequest) { got = req.View },
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+			return engine.PromotionState{}, driverAlways(engine.PromotionState{}), nil
+		},
+	}
+	m := sizedWithService(t, svc, Promotion{})
+	msg := plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}, View: wantView}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("plan.StartMsg produced no command")
+	}
+	buildResultFrom(t, cmd)
+	if got == nil {
+		t.Fatal("StartRequest.View = <nil>, want a pointer to the plan.StartMsg's own View")
+	}
+	if *got != wantView {
+		t.Errorf("StartRequest.View = %+v, want the plan.StartMsg's own View %+v", *got, wantView)
+	}
+}
+
+// TestDeployStartMsgCarriesItsOwnPlannedView is TestPlanStartMsgCarriesItsOwnPlannedView's twin
+// for the deploy.StartMsg path (app.go's deploy.StartMsg case, ~line 1007), including the
+// WithView plumbing that carries service.PlannedChange.View from the matrix's openDeploy through
+// deploy.Model.WithView into this message (deploy/model.go's own StartMsg.View doc comment).
+// Mutation check: replacing `View: &view` with `View: nil` at the deploy.StartMsg call site
+// makes this test fail the same way.
+func TestDeployStartMsgCarriesItsOwnPlannedView(t *testing.T) {
+	wantView := service.RepoView{Dir: "/deploy-view-b", FromOrigin: true, SHA: "deploy-view-b-sha"}
+	var got *service.RepoView
+	svc := &fakeService{
+		onStart: func(req service.StartRequest) { got = req.View },
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+			return engine.PromotionState{}, driverAlways(engine.PromotionState{}), nil
+		},
+	}
+	m := sizedWithService(t, svc, Promotion{})
+	msg := deploy.StartMsg{
+		Plan:   gitops.Plan{Variant: gitops.VariantDeploy, TargetEnv: "app-production"},
+		Mode:   deploy.ModePR,
+		Target: "app-production",
+		Image:  "ghcr.io/example/web:v2",
+		View:   wantView,
+	}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("deploy.StartMsg produced no command")
+	}
+	buildResultFrom(t, cmd)
+	if got == nil {
+		t.Fatal("StartRequest.View = <nil>, want a pointer to the deploy.StartMsg's own View")
+	}
+	if *got != wantView {
+		t.Errorf("StartRequest.View = %+v, want the deploy.StartMsg's own View %+v", *got, wantView)
+	}
+}
+
+// TestOpenDeployPlumbsPlannedViewToStartRequest closes the gap
+// TestDeployStartMsgCarriesItsOwnPlannedView leaves open: that test builds deploy.StartMsg BY
+// HAND, with its View already populated, so it never exercises openDeploy (app.go) itself —
+// it would stay green even if openDeploy's own `.WithView(pc.View)` call were deleted. This test
+// drives the real flow instead: tags.SelectedMsg (a picker selection) into openDeploy, which
+// calls m.planFn and must carry the returned PlannedChange.View into deploy.New(...).WithView(...);
+// pressing Enter on the resulting deploy confirm screen must then carry that same view, unbroken,
+// through deploy.StartMsg into service.StartRequest.View.
+//
+// Mutation check: deleting the `.WithView(pc.View)` call in openDeploy (app.go, ~line 1124) makes
+// this test fail with the zero RepoView instead of wantView.
+func TestOpenDeployPlumbsPlannedViewToStartRequest(t *testing.T) {
+	wantView := service.RepoView{Dir: "/open-deploy-view", FromOrigin: true, SHA: "open-deploy-view-sha"}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := testPlanFunc([]string{"ghcr.io/"}, config.EnvsConfig{})
+	planFn := func(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		pc, err := inner(ctx, req)
+		if err != nil {
+			return pc, err
+		}
+		pc.View = wantView
+		return pc, nil
+	}
+	var got *service.RepoView
+	svc := &fakeService{
+		onStart: func(req service.StartRequest) { got = req.View },
+		startFn: func(_ context.Context, _ gitops.Plan, _ startOpts, _ func(string)) (engine.PromotionState, flight.Driver, error) {
+			return engine.PromotionState{}, driverAlways(engine.PromotionState{}), nil
+		},
+	}
+
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, planFn, svc, Promotion{}, nil, apprestart.Funcs{})
+	_ = tm.Init()
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+
+	// The real flow: a picker selection reaches the root as tags.SelectedMsg, which openDeploy
+	// (app.go) turns into a plan (via planFn) and a pushed deploy confirm screen.
+	tm, _ = tm.Update(tags.SelectedMsg{
+		ImageRepo: "ghcr.io/example/web",
+		Tag:       "v2",
+		Digest:    "sha256:" + strings.Repeat("a", 64),
+		Target:    "app-production",
+	})
+	stack := tm.(Model).stack
+	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
+		t.Fatalf("top screen is %T, want the deploy confirm", stack[len(stack)-1])
+	}
+
+	// Enter on the confirm screen: the screen itself emits deploy.StartMsg (unpacked one level,
+	// the same shape TestSelectedMsgOpensTheDeployConfirmScreen and friends drive by hand — the
+	// real tea runtime would do this same re-dispatch).
+	var cmd tea.Cmd
+	tm, cmd = tm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on the deploy confirm screen produced no command")
+	}
+	startMsg := cmd()
+	if _, ok := startMsg.(deploy.StartMsg); !ok {
+		t.Fatalf("enter yields %T, want deploy.StartMsg", startMsg)
+	}
+	_, cmd = tm.Update(startMsg)
+	if cmd == nil {
+		t.Fatal("deploy.StartMsg produced no command")
+	}
+	buildResultFrom(t, cmd)
+
+	if got == nil {
+		t.Fatal("StartRequest.View = <nil>, want a pointer to the plan's own PlannedChange.View")
+	}
+	if *got != wantView {
+		t.Errorf("StartRequest.View = %+v, want openDeploy's planned view %+v", *got, wantView)
+	}
+}

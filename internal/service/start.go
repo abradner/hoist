@@ -184,6 +184,26 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	}
 
 	view := req.View
+	// s.Repo() is the service's own CURRENT view, not necessarily the one req.View names — the
+	// two are compared here only to answer "is this Service running the TUI's origin-mode read at
+	// all", never to substitute one for the other. When it is (cur.FromOrigin — LoadRepo(RepoFromOrigin)
+	// has run, at TUI boot or a later F5), the caller MUST have supplied its own PlannedChange.View
+	// (Plan's own frozen snapshot, plumbed through a screen's WithView and back through its
+	// StartMsg.View) verbatim: a nil req.View, or one whose FromOrigin is false or SHA is empty, is
+	// not "no view given, use the service's" here — it is a caller that built a plan through the
+	// origin-mode Plan() (which always stamps a real FromOrigin view, or fails closed itself,
+	// service:Plan) and then lost that view on the way to StartPromotion, most likely a dropped
+	// WithView call or a broken loadedMsg/StartMsg.View plumb. Falling back to s.Repo() in that case
+	// would silently downgrade the freshness check from CheckRepoViewCurrent (the tight
+	// origin-tip comparison) to checkCloneCurrentForBase (the looser local-disk check the CLI
+	// alone is supposed to get) — exactly the fail-open this refusal closes. The CLI never calls
+	// LoadRepo(RepoFromOrigin), so cur.FromOrigin is always false there and this branch never
+	// fires: req.View nil (or zero) is that path's own normal shape.
+	if cur := s.Repo(); cur.FromOrigin {
+		if view == nil || !view.FromOrigin || view.SHA == "" {
+			return nil, &UsageError{Msg: "the repo view changed while this plan was being built — go back and reopen the plan"}
+		}
+	}
 	if view == nil {
 		v := s.Repo()
 		view = &v
