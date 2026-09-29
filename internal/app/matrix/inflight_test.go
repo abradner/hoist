@@ -52,14 +52,14 @@ func TestInFlightPaneSizesToTheTerminal(t *testing.T) {
 	}
 	uitest.Golden(t, "matrix-inflight", withPane(80, 24, p).View(), 80, 24)
 
-	compact := ansi.Strip(withPane(80, 16, p).View())
+	compact := ansi.Strip(withPane(80, 19, p).View())
 	if !strings.Contains(compact, "⟳ 5pr6sd333t → app-production   blocked on approval · 12m") {
 		t.Errorf("compact pane lacks the one-liner:\n%s", compact)
 	}
 	if strings.Contains(compact, "hoist approve") {
 		t.Errorf("compact pane must drop the evidence, keeping the verdict:\n%s", compact)
 	}
-	uitest.Golden(t, "matrix-inflight", withPane(80, 16, p).View(), 80, 16)
+	uitest.Golden(t, "matrix-inflight", withPane(80, 19, p).View(), 80, 19)
 
 	folded := ansi.Strip(withPane(80, 12, p).View())
 	if !strings.Contains(folded, "⟳ 1 in flight: 5pr6sd333t blocked on approval") {
@@ -95,56 +95,46 @@ func TestInFlightPaneAbsentWhenNothingIsInFlight(t *testing.T) {
 	}
 }
 
-// r resumes the one in-flight promotion; with several it asks which; with none it says so.
-func TestResumeKeys(t *testing.T) {
+// TestTabEnterResumes is T3-04's own replacement for the retired r-as-resume gesture (train3-
+// design.md): tab moves the cursor keys onto the in-flight pane, and enter there resumes/re-
+// attaches to the promotion under the pane's own cursor — up/down move between several,
+// exactly like the grid's own row cursor, rather than a modal chooser.
+func TestTabEnterResumes(t *testing.T) {
 	p := parked("5pr6sd333t", "app-staging", "app-production", 12)
 	one := withPane(80, 24, p)
-	for _, k := range []string{"r", "enter"} {
-		msg, ok := emitted(t, one, k).(ResumeMsg)
-		if !ok || msg.ID != "5pr6sd333t" {
-			t.Fatalf("%s emitted %+v, want ResumeMsg for 5pr6sd333t", k, msg)
-		}
+	if one.focus != FocusGrid {
+		t.Fatalf("setup: focus = %v, want FocusGrid", one.focus)
+	}
+	one = uitest.Keys(one, update, "tab")
+	if one.focus != FocusPane {
+		t.Fatal("tab must move the cursor onto the pane when something is in flight")
+	}
+	if msg, ok := emitted(t, one, "enter").(ResumeMsg); !ok || msg.ID != "5pr6sd333t" {
+		t.Fatalf("enter on the pane emitted %+v, want ResumeMsg for 5pr6sd333t", msg)
 	}
 	if msg, ok := emitted(t, one, "o").(flight.OpenPRMsg); !ok || msg.URL != "https://forge.example.invalid/pr/103" {
 		t.Fatalf("o emitted %+v", msg)
 	}
 
 	none := withPane(80, 24)
-	if got := emitted(t, none, "r"); got != nil {
-		t.Fatalf("r with nothing in flight emitted %+v", got)
-	}
-	m, _ := none.Update(uitest.Key("r"))
-	if !strings.Contains(ansi.Strip(m.View()), "nothing in flight to resume") {
-		t.Fatal("r with nothing in flight must say so")
-	}
-	if got := emitted(t, none, "enter"); got != nil {
-		t.Fatalf("enter with nothing in flight emitted %+v (it must stay silent: it is the table's key too)", got)
+	m, _ := none.Update(uitest.Key("tab"))
+	if m.focus != FocusGrid {
+		t.Fatal("tab with nothing in flight must not move focus off the grid")
 	}
 
 	q := parked("9xy8wv777u", "", "app-staging", 3)
 	two := withPane(120, 40, p, q)
-	two, _ = two.Update(uitest.Key("r"))
-	if two.chooser == nil || two.chooserKind != chooserResume {
-		t.Fatal("r with two in flight must ask which")
+	two = uitest.Keys(two, update, "tab", "down")
+	if two.paneCursor != 1 {
+		t.Fatalf("paneCursor = %d, want 1 after tab+down over two entries", two.paneCursor)
 	}
-	if v := ansi.Strip(two.View()); !strings.Contains(v, "resume which promotion?") || !strings.Contains(v, "9xy8wv777u") {
-		t.Fatalf("chooser not drawn:\n%s", v)
-	}
-	two = uitest.Keys(two, update, "down")
-	two, cmd := two.Update(uitest.Key("enter"))
-	if cmd == nil {
-		t.Fatal("enter in the resume chooser emitted nothing")
-	}
-	if msg, ok := cmd().(ResumeMsg); !ok || msg.ID != "9xy8wv777u" {
-		t.Fatalf("chose %+v", cmd())
-	}
-	if two.chooser != nil || two.chooserKind != chooserImage {
-		t.Fatal("the chooser must close and reset")
+	if msg, ok := emitted(t, two, "enter").(ResumeMsg); !ok || msg.ID != "9xy8wv777u" {
+		t.Fatalf("enter on the second pane row emitted %+v, want ResumeMsg for 9xy8wv777u", msg)
 	}
 }
 
-// A finished promotion is not in flight: the pane lists what is still moving, and r resumes
-// the one active promotion without asking about the done one.
+// A finished promotion is not in flight: the pane lists what is still moving, and tab+enter
+// resumes the one active promotion without asking about the done one.
 func TestFinishedPromotionsLeaveThePane(t *testing.T) {
 	active := parked("5pr6sd333t", "app-staging", "app-production", 12)
 	done := parked("0d0n3d0n3d", "app-staging", "app-production", 90)
@@ -156,9 +146,10 @@ func TestFinishedPromotionsLeaveThePane(t *testing.T) {
 	if v := ansi.Strip(m.View()); strings.Contains(v, "0d0n3d0n3d") || !strings.Contains(v, "in flight (1)") {
 		t.Fatalf("view:\n%s", v)
 	}
-	msg := emitted(t, m, "r")
+	m = uitest.Keys(m, update, "tab")
+	msg := emitted(t, m, "enter")
 	if rm, ok := msg.(ResumeMsg); !ok || rm.ID != "5pr6sd333t" {
-		t.Fatalf("r emitted %+v; want the active promotion resumed without a chooser", msg)
+		t.Fatalf("enter emitted %+v; want the active promotion resumed", msg)
 	}
 }
 

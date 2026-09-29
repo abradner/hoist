@@ -248,10 +248,10 @@ func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }
 
 // KeyScreen (implementing keyed) is promoted from watch.Model's own method.
 
-// activityScreen adapts activity.Model. Pushed on top of whatever screen is current by l
-// (matrix.OpenActivityMsg — the proposed keymap binds l to the activity log everywhere, but
-// only the matrix's own l actually opens this screen today, PR9's own scope); read-only, so
-// nothing beneath it changes while it is open and esc lands back where it started.
+// activityScreen adapts activity.Model. Pushed on top of whatever screen is current by l,
+// handled generically by the root for any screen that implements keyed (T3-03/T3-04: every
+// screen in this package now qualifies, the matrix included); read-only, so nothing beneath it
+// changes while it is open and esc lands back where it started.
 type activityScreen struct{ activity.Model }
 
 func (s activityScreen) Init() tea.Cmd { return s.Model.Init() }

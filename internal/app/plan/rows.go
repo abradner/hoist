@@ -370,6 +370,21 @@ func TargetsFor(r *gitops.Repo, source string) []string {
 	return out
 }
 
+// SourcesFor lists the candidate source envs for target: every other discovered env,
+// sorted. It backs the huh.Select shown when p (matrix.OpenPlanMsg, T3-04) named a target
+// with no unambiguous reverse pair — the mirror of TargetsFor, above, which is still used
+// where a source is known but has no configured target of its own.
+func SourcesFor(r *gitops.Repo, target string) []string {
+	out := make([]string, 0, len(r.Envs))
+	for name := range r.Envs {
+		if name != target {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // SkippedStaging reports the configured staging env for source when target is production
 // but is not that configured pair — the "deploying straight to production, skipping
 // <staging>" warning (AGENTS.md §4.5). It never blocks (principle 5); skip is false when

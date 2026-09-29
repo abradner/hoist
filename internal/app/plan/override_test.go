@@ -34,7 +34,7 @@ func overrideFixture(t *testing.T) (Model, *[]map[string]image.Ref) {
 		}
 		return service.Resolution{KubeContext: "test-context", Res: res}, true, nil
 	})
-	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", false, fake, history.Funcs{})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
 	m = uitest.Drain(m, m.Init(), updateFn)
 	if m.state != stateReady || len(m.rows) == 0 {
 		t.Fatalf("state = %v rows = %d, want a ready screen with rows", m.state, len(m.rows))

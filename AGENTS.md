@@ -279,7 +279,14 @@ no rule stated for any of them:
   screen names the transition, the root decides what it means.
 - **The matrix keeps a column cursor** (`matrix.Model.col`, moved by Left/Right) so "current env"
   is real state (`CurrentEnv()`), not a value only derivable from the table's row cursor — a
-  promotion is planned from an env, not a family, and the two cursors are independent.
+  promotion is planned from an env, not a family, and the two cursors are independent. Amended
+  T3-04: columns come in pipeline order (`config.EnvsConfig.PipelineOrder`, derived from
+  `envs.pairs`) rather than alphabetically, the cursor starts on the first non-production
+  column, and it now names the **target** of a promotion, not the source — `p` promotes INTO
+  the cursor's env, taking the source from the one reverse pair (`SourcesOf`) when exactly one
+  exists and leaving it for the plan screen to ask ("promote into `<target>` from…") otherwise.
+  This replaces the earlier `p`/`P` pair (promote the paired target / force a prompt for any
+  target), which read the cursor as a source.
 - **`internal/service` is the one use-case layer both faces call; the root depends on the
   narrow `app.Service` interface, not on `*service.Service` itself.** Superseded (2026-09, the
   service-design train's PR F): this bullet used to read "`cmd/hoist` owns the adapter from CLI

@@ -1,24 +1,24 @@
 ╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
-│ FAMILY     ▸ APP-PRODUCTION                 APP-STAGING                      │
-│ counta     2 images                 pinned  v202602201200             pinned │
-│ marketing  sha-000011112222333344…  pinned  sha-1a2b3c4d5e6f708192a…  pinned │
-│ temporal   2 images               external  2 images                external │
-│ web        v202601010101          unpinned  2 versions                 split │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+│repo · base main                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│─────────────┬────────────────────────────────┬──────────────────────────────…│
+│ FAMILY      │ ▸ APP-PRODUCTION               │ APP-STAGING                  …│
+│─────────────┼────────────────────────────────┼──────────────────────────────…│
+│ ▸ counta    │ 2 images                pinned │ v202602201200            pinn…│
+│ marketing   │ sha-00001111222233334…  pinned │ sha-1a2b3c4d5e6f708192…  pinn…│
+│ temporal    │ 2 images              external │ 2 images               extern…│
+│ web         │ v202601010101         unpinned │ 2 versions                spl…│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
+│             │                                │                              …│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-env app-production   p promote • d deploy • w watch • r resume • ? help • q quit
+        actions · promote into · tag · watch · refresh · restart · quit · ? more

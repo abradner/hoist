@@ -1,0 +1,24 @@
+╭─ hoist · matrix · repo ──────────────────────────────────────────────────────╮
+│repo · base main                                                              │
+├──────╭─ help · matrix ───────────────────────────────────────────────╮───────┤
+│──────│NAVIGATE                       │ ACT                           │──────…│
+│ FAMIL│esc      close the menu or ove │ enter    open the action menu │      …│
+│──────│↑        move row              │ p        promote into the curs│──────…│
+│ ▸ cou│↓        move row              │ t        deploy a tag (tag pic│  pinn…│
+│ marke│←        move column           │ w        watch the cell's fami│  pinn…│
+│ tempo│→        move column           │ shift+r  restart the cell's fa│extern…│
+│ web  │pgup     page                  │ shift+x  abandon the in-flight│   spl…│
+│      │pgdn     page                  │                               │      …│
+│      │tab      table ⇄ in-flight pan │                               │      …│
+│      │VIEW                           │ APP                           │      …│
+│      │r        re-read the cluster a │ q        quit (confirm if a pr│      …│
+│      │o        open the PR of the in │ ctrl+c   quit now, printing wh│      …│
+│      │c        config view           │                               │      …│
+│      │l        activity log          │                               │      …│
+│      │                                                               │      …│
+│      │shift+ keys always ask before they write                       │      …│
+│      │                                                               │      …│
+│      │a capital counts as shift                                      │      …│
+│      ╰───────────────────────────────────────────────────────────────╯      …│
+╰──────────────────────────────────────────────────────────────────────────────╯
+        actions · promote into · tag · watch · refresh · restart · quit · ? more

@@ -13,9 +13,10 @@ import (
 	"github.com/abradner/hoist/internal/ui/keys"
 )
 
-// BackMsg is emitted on esc; the root pops the screen (internal/app/app.go, matrix.OpenActivityMsg
-// is what pushes it — the same New-on-open, adapter-in-app.go shape every other read-only screen
-// in this package uses, config.Model in particular).
+// BackMsg is emitted on esc; the root pops the screen (internal/app/app.go — l, handled
+// generically for any keyed screen since T3-03/T3-04, is what pushes it: the same New-on-open,
+// adapter-in-app.go shape every other read-only screen in this package uses, config.Model in
+// particular).
 type BackMsg struct{}
 
 // keyMap is this screen's own key vocabulary on top of the viewport's own paging bindings

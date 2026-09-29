@@ -51,7 +51,7 @@ var registry = []op{
 	{
 		Name: "plan a promotion, read-only",
 		CLI:  "plan --from --to --dry-run --repo --apps-root --promotable --digest-sources",
-		TUI:  "matrix.OpenPlanMsg p (the paired target) P (any target, what --to gives the CLI); the plan screen writes nothing until enter",
+		TUI:  "matrix.OpenPlanMsg p promotes INTO the cursor column (T3-04): the source is the one reverse pair when exactly one exists, else the plan screen itself asks; the plan screen writes nothing until enter",
 	},
 	{
 		Name: "promote: drive the pipeline to rollout",
@@ -66,12 +66,12 @@ var registry = []op{
 	{
 		Name: "deploy one named image into an env",
 		CLI:  "deploy --env --image --dry-run --repo --apps-root --promotable",
-		TUI:  "matrix.OpenTagsMsg d, tags.SelectedMsg space, deploy.StartMsg enter; d on the deploy screen is the dry run's diff",
+		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg space, deploy.StartMsg enter; d on the deploy screen is the dry run's diff",
 	},
 	{
 		Name: "restart an env's Deployments without changing what they declare",
 		CLI:  "restart --env --family --confirm-production --dry-run --repo --apps-root",
-		TUI:  "matrix.OpenRestartMsg R on the family under the cursor; the target list is the dry run, production takes a huh.Confirm",
+		TUI:  "matrix.OpenRestartMsg shift+r on the family under the cursor (T3-04: was capital R, still accepted as a legacy shift); the target list is the dry run, production takes a huh.Confirm",
 	},
 	{
 		Name: "what an env is running right now, from its pods",
@@ -87,7 +87,7 @@ var registry = []op{
 	{
 		Name: "resume a promotion from wherever Observe finds it",
 		CLI:  "resume --env --kube-context",
-		TUI:  "matrix.ResumeMsg r (or enter on the pane) re-attaches to a drive already running here without starting a second one, driven in the launch's --kube-context when given",
+		TUI:  "matrix.ResumeMsg tab focuses the in-flight pane, enter there re-attaches to the promotion under the pane's own cursor (T3-04: was r) without starting a second one, driven in the launch's --kube-context when given",
 	},
 	{
 		Name: "open the promotion's PR",
@@ -102,7 +102,7 @@ var registry = []op{
 	{
 		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",
 		CLI:  "abandon --confirm-abandon",
-		TUI:  "flight.AbandonMsg X on the flight screen, behind a huh.Confirm",
+		TUI:  "flight.AbandonMsg X on the flight screen, behind a huh.Confirm; shift+x on the matrix's own in-flight pane (T3-04) reuses the same message rather than a second matrix-owned one",
 	},
 	{
 		Name: "watch one Application converge, outside any promotion",
@@ -122,7 +122,7 @@ var registry = []op{
 	{
 		Name: "show the effective config and where it came from",
 		CLI:  "config show path",
-		TUI:  "matrix.OpenConfigMsg C — the same redacted, defaults-filled text, titled with the path (or the CLI's no-file sentence)",
+		TUI:  "matrix.OpenConfigMsg c (T3-04: was capital C — it only opens a screen to look at something, like every other lower-case verb) — the same redacted, defaults-filled text, titled with the path (or the CLI's no-file sentence)",
 	},
 	{
 		Name: "per-run overrides of what the config file says: base branch and kube context",
@@ -137,7 +137,7 @@ var registry = []op{
 	{
 		Name: "read recent results and errors in full",
 		CLI:  "promote resume abandon",
-		TUI:  "matrix.OpenActivityMsg l on the matrix; T3-03 makes l open the same activity log from watch, restart, config and the activity screen itself too, handled as a root key rather than a per-screen message",
+		TUI:  "l on the matrix, watch, restart, config and the activity screen itself — the root's own generic keyed handling (T3-03/T3-04), not a per-screen message; the matrix's own former per-screen open-activity message is retired now that it too implements keyed",
 	},
 }
 

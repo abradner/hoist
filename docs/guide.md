@@ -58,12 +58,17 @@ The words:
 | `drifted` | the cluster is running a build the manifest does not declare — with the running reference named under the table |
 | `resolving…` | the cluster has not answered for that column yet |
 
-`←`/`→` move the environment cursor (`▸`), `↑`/`↓` the family; the column under the cursor is
-what `p`, `d` and `R` act on. A production column is marked `⚠` in its header and named under the
-table. `F5` re-reads origin/`<base>` and asks the cluster again — the same re-read that makes `w`,
-`R` and `d` see a family or a cluster fix moments after it lands, not just after a restart. When
-something is promoting, it is listed under the table with
-its step strip and — when it is waiting on you — the exact command:
+Columns come in pipeline order (the chain `envs.pairs` describes, source before target — an
+unpaired env sorts alphabetically among the heads), not alphabetically, and the cursor starts on
+the first non-production column so a fresh session never opens pointed at a write that asks for
+approval. `←`/`→` move the environment cursor (`▸`), `↑`/`↓` the family; the column under the
+cursor is what `p`, `t`, `w` and `shift+r` act on. A production column is marked `⚠` in its
+header and named under the table. `enter` opens an action menu for the cell under the cursor,
+listing what each key would do there — including "promote into … from…" when the source is
+ambiguous — so a letter never has to be guessed. `r`/`F5`/`ctrl+r` re-read origin/`<base>` and
+ask the cluster again — the same re-read that makes `w`, `shift+r` and `t` see a family or a
+cluster fix moments after it lands, not just after a restart. When something is promoting, it is
+listed under the table with its step strip and — when it is waiting on you — the exact command:
 
 ```
 ╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
@@ -76,11 +81,12 @@ its step strip and — when it is waiting on you — the exact command:
 ```
 
 That list is re-observed against GitHub and the cluster at boot and on every poll, never read
-from a log; `r` (or `enter` on it) reopens one on its flight screen, `o` opens its PR, and each
-asks which when several are in flight. A promotion this session itself started or resumed is
-marked "driving" — it is still running here, in this process, whether or not any screen is
-currently watching it; `r`/`enter` on one of those re-attaches the flight screen to it without
-starting anything new.
+from a log; `tab` moves the cursor onto the pane (`↑`/`↓` between several), where `enter` reopens
+the one under the cursor on its flight screen and `shift+x` abandons it behind a confirm; `o`
+opens its PR and asks which when several are in flight. A promotion this session itself started
+or resumed is marked "driving" — it is still running here, in this process, whether or not any
+screen is currently watching it; `tab`+`enter` on one of those re-attaches the flight screen to
+it without starting anything new.
 
 Whatever last happened — a promotion started, landed, blocked or failed, an abandon, a browser
 launch that couldn't find a browser — shows on the terminal's last line: one line, naming the
@@ -94,8 +100,9 @@ everywhere it is bound.
 
 ## Promote a pair
 
-`p` promotes the cursor column's paired source into it (`envs.pairs` in the config); `P` asks
-which target. The CLI is the same operation:
+`p` promotes INTO the cursor column: the source is the one reverse pair (`envs.pairs` in the
+config) when exactly one exists, or the plan screen asks "promote into `<target>` from…" when
+there is none or several (a fan-in). The CLI is the same operation:
 
 ```bash
 hoist plan    --from app-staging --to app-production --dry-run
@@ -190,7 +197,7 @@ the identical promotion twice finds the first one's branch and PR rather than op
 
 ## Deploy a build
 
-`d` on a cell (a chooser first, when the family runs several first-party images) opens the tag
+`t` on a cell (a chooser first, when the family runs several first-party images) opens the tag
 picker for that image in the cursor column:
 
 ```
@@ -259,7 +266,8 @@ gates.
 
 ## Restart a family
 
-`R` on a cell, or:
+`shift+r` on a cell (a legacy terminal's bare capital `R` still works — there is no way for it
+to tell that apart from shift), or:
 
 ```bash
 hoist restart --env app-staging --family web            # --dry-run to only list
@@ -395,9 +403,10 @@ deletable JSON file, just out of the default listing. This never happens on age 
 has to be re-observed as done first, every time, so a genuinely stuck one (however old) is never
 touched — `--repo`/`--archived` only change what's *listed*, never what gets archived.
 
-On the matrix, `r` does the same for what the in-flight pane lists. A finished promotion leaves
-the pane; its state file is archived (see above) after `state.retain`, or you can delete it, or
-run `hoist abandon` (refused outright once the promotion has landed — that's what retention's own
+On the matrix, `tab` then `enter` on the pane does the same for what it lists, and `shift+x`
+there abandons the one under the cursor behind a confirm. A finished promotion leaves the pane;
+its state file is archived (see above) after `state.retain`, or you can delete it, or run
+`hoist abandon` (refused outright once the promotion has landed — that's what retention's own
 archiving is for instead).
 
 Restarts are the exception: they keep no state, so there is nothing to resume, and re-running
