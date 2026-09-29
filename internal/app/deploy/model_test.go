@@ -48,7 +48,7 @@ func fixture(t *testing.T, envs config.EnvsConfig) Model {
 // The screen's whole reason to exist: the operator sees the bytes before anything is written.
 func TestViewShowsTheDecisionAndTheDiff(t *testing.T) {
 	v := fixture(t, config.EnvsConfig{}).View()
-	for _, want := range []string{"ghcr.io/example/web:v9", "app-production", "mode: PR", "occurrence", "image:"} {
+	for _, want := range []string{"ghcr.io/example/web:v9", "app-production", "mode: PR", "image reference", "image:"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view missing %q:\n%s", want, v)
 		}
@@ -100,43 +100,48 @@ func TestWithViewCarriesIntoStartMsg(t *testing.T) {
 	}
 }
 
-// §4.5: production always opens a PR. The key refuses with the reason rather than doing
-// nothing, which reads as a broken keybinding.
-func TestModeKeyRefusesDirectOnAProductionTarget(t *testing.T) {
+// TestShiftDNotOfferedForProduction is T3-08's own retirement/gating test (rule 5, §4.5): on a
+// production target shift+d must not open the confirmation, must not change the mode, and must
+// not even set a notice — it is not offered at all (hidden from the footer and help overlay),
+// so pressing it anyway is a silent no-op, never a refusal that reads as a broken keybinding for
+// a key the operator was never shown. This is the test the mutant proof in the PR body is run
+// against: reverting toggleDirect's production guard to the old "refuse with a notice" shape
+// must make it fail.
+func TestShiftDNotOfferedForProduction(t *testing.T) {
 	envs := config.EnvsConfig{Production: []string{"app-production"}}
 	m := fixture(t, envs)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
-	if m.mode != ModePR {
-		t.Errorf("mode = %q, want it held at PR for a production target", m.mode)
+	before := m.View()
+	m2, cmd := m.Update(uitest.Key("shift+d"))
+	if cmd != nil {
+		t.Fatalf("shift+d on a production target must not emit a command, got %v", cmd())
 	}
-	if m.confirm != nil {
+	if m2.mode != ModePR {
+		t.Errorf("mode = %q, want it held at PR for a production target", m2.mode)
+	}
+	if m2.confirm != nil {
 		t.Error("production must not even open the direct-mode confirmation")
 	}
-	if !strings.Contains(m.View(), "always open a PR") {
-		t.Errorf("view should say why m did nothing:\n%s", m.View())
+	if m2.notice != "" {
+		t.Errorf("production gets no notice either — the key is simply not offered, got %q", m2.notice)
 	}
-}
-
-// WithDirectMode is the picker's D path, whose gesture already happened. It must not bypass
-// the production rule.
-func TestWithDirectModeHonoursTheProductionRule(t *testing.T) {
-	nonProd := fixture(t, config.EnvsConfig{}).WithDirectMode()
-	if nonProd.mode != ModeDirect {
-		t.Errorf("mode = %q, want direct: the picker's gesture already ran", nonProd.mode)
+	if got := m2.View(); got != before {
+		t.Errorf("shift+d on a production target must change nothing on screen:\nbefore:\n%s\nafter:\n%s", before, got)
 	}
-	prod := fixture(t, config.EnvsConfig{Production: []string{"app-production"}}).WithDirectMode()
-	if prod.mode != ModePR {
-		t.Errorf("mode = %q, want PR: production has no direct path (§4.5)", prod.mode)
-	}
-	if !strings.Contains(prod.View(), "always open a PR") {
-		t.Errorf("view should say why direct mode was dropped:\n%s", prod.View())
+	if strings.Contains(before, "shift+d") {
+		t.Errorf("the footer/header must not advertise shift+d on a production target:\n%s", before)
 	}
 }
 
 // A direct-mode confirm carries Confirmed, which is what engine.DirectCommitGateStep reads as
 // the record of the operator's gesture.
 func TestDirectModeConfirmCarriesConfirmed(t *testing.T) {
-	m := fixture(t, config.EnvsConfig{}).WithDirectMode()
+	m := fixture(t, config.EnvsConfig{})
+	m, _ = m.Update(uitest.Key("shift+d"))
+	if m.confirm == nil {
+		t.Fatal("shift+d on a non-production target should open the confirmation")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("enter produced no command")
@@ -182,10 +187,10 @@ func TestEnterRefusesWhenTheDiffCouldNotBeRendered(t *testing.T) {
 }
 
 // TestModeToggleCompletesThroughRealInput is the deploy screen's half of the same defect the
-// tag picker had: huh.NewConfirm leaves its keymap zero-valued, so a standalone Confirm
-// matched no key at all and the advertised `m` toggle could never be completed — and the
-// screen then read m.confirmV, a field on a Model copy every Update supersedes, so even a
-// working keypress would not have been seen (Copilot, PR #72).
+// tag picker had: huh.NewConfirm leaves its keymap zero-valued, so a standalone Confirm matched
+// no key at all and the advertised toggle could never be completed — and the screen then read
+// m.confirmV, a field on a Model copy every Update supersedes, so even a working keypress would
+// not have been seen (Copilot, PR #72). T3-08 moves the toggle from `m` to `shift+d`.
 //
 // Driven only through keypresses: nothing here may touch m.confirmV.
 func TestModeToggleCompletesThroughRealInput(t *testing.T) {
@@ -193,9 +198,9 @@ func TestModeToggleCompletesThroughRealInput(t *testing.T) {
 	if m.mode != ModePR {
 		t.Fatalf("fixture precondition: mode = %q, want %q", m.mode, ModePR)
 	}
-	m2, _ := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m2, _ := m.Update(uitest.Key("shift+d"))
 	if !m2.CapturesText() {
-		t.Fatal("m did not open the confirmation")
+		t.Fatal("shift+d did not open the confirmation")
 	}
 	m3, _ := m2.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m4, _ := m3.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -205,11 +210,23 @@ func TestModeToggleCompletesThroughRealInput(t *testing.T) {
 
 	// Answering no must leave the mode alone, so the above cannot pass by the confirmation
 	// being bypassed.
-	n, _ := fixture(t, config.EnvsConfig{}).Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	n, _ := fixture(t, config.EnvsConfig{}).Update(uitest.Key("shift+d"))
 	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	n, _ = n.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if n.mode != ModePR {
 		t.Errorf("mode = %q after declining, want %q", n.mode, ModePR)
+	}
+
+	// The toggle also flips back off without a confirmation, on a real keypress this time.
+	off, _ := m4.Update(uitest.Key("shift+d"))
+	if off.mode != ModePR {
+		t.Errorf("mode = %q after a second shift+d, want %q (no confirm needed to turn it off)", off.mode, ModePR)
+	}
+
+	// capslock+d must not toggle anything — only shift+d counts (rule 5's own caps-lock test).
+	cl, cmd := m.Update(uitest.Key("capslock+d"))
+	if cmd != nil || cl.confirm != nil || cl.mode != ModePR {
+		t.Errorf("capslock+d must do nothing: mode=%q confirm=%v cmd=%v", cl.mode, cl.confirm, cmd)
 	}
 }
 
@@ -285,7 +302,7 @@ func TestSplitEnvSummaryNamesBothReferences(t *testing.T) {
 	m := withHistory(t, config.EnvsConfig{Production: []string{"app-production"}})
 	m.history.DeclaredRefs = []image.Ref{m.history.Declared, {Repo: "ghcr.io/example/web", Tag: "v202512120000"}}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "replacing v202601010101 and v202512120000 (split), live 4 weeks") {
+	if !strings.Contains(v, "replacing v202601010101 and v202512120000 (split), declared 4 weeks") {
 		t.Fatalf("a split env must name every declared reference:\n%s", v)
 	}
 	uitest.Golden(t, "deploy-split", m.SetSize(80, 24).View(), 80, 24)
@@ -312,11 +329,11 @@ func TestWithHistoryLeadsWithCommitsAndYAMLIsOneKeyAway(t *testing.T) {
 	v := ansi.Strip(m.View())
 	for _, want := range []string{
 		"ghcr.io/example/web:v9   →   app-production", "mode: PR · production",
-		"rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks",
+		"rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 weeks",
 		"4a1c2ef  Add rate limiting to the public API",
 		"77c0ffe  db: add index on events.created_at", "migration",
 		"2 migrations run on this deploy:", "20260301T090200_backfill_events_tenant_id.rb",
-		"writes 3 occurrences in 1 file", "d  see the yaml",
+		"writes 3 image references in 1 file", "d  see the yaml",
 	} {
 		if !strings.Contains(v, want) {
 			t.Errorf("commits view lacks %q:\n%s", want, v)
@@ -330,7 +347,7 @@ func TestWithHistoryLeadsWithCommitsAndYAMLIsOneKeyAway(t *testing.T) {
 
 	y := uitest.Keys(m, updateFn, "d")
 	vy := ansi.Strip(y.View())
-	for _, want := range []string{"hoist · confirm deploy · yaml", "image:", "verified before commit", "d  back to commits"} {
+	for _, want := range []string{"hoist · deploy · confirm · yaml", "image:", "verified before commit", "d  back to commits"} {
 		if !strings.Contains(vy, want) {
 			t.Errorf("yaml view lacks %q:\n%s", want, vy)
 		}
@@ -368,7 +385,7 @@ func TestWithoutHistoryTheYAMLIsTheBodyWithTheReason(t *testing.T) {
 // The direct-mode confirmation is a dialog over the screen: the commits stay visible.
 func TestModeDialogKeepsTheScreenVisible(t *testing.T) {
 	m := withHistory(t, config.EnvsConfig{})
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m, _ = m.Update(uitest.Key("shift+d"))
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "straight to app-production with no PR?") || !strings.Contains(v, "rolling out 14 commits") {
 		t.Fatalf("dialog must sit over the screen:\n%s", v)

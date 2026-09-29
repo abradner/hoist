@@ -1878,8 +1878,11 @@ func TestSelectedMsgOpensTheDeployConfirmScreen(t *testing.T) {
 		Target:    "app-production",
 	})
 	stack := m.(Model).stack
-	if n := len(stack); n != 2 {
-		t.Fatalf("stack has %d screens, want 2 (matrix + deploy confirm)", n)
+	// T3-08: openDeploy no longer pops the tags picker before pushing the deploy confirm
+	// screen, so the stack is matrix + tags + deploy — esc from here (deploy.BackMsg) lands
+	// back on that same tags.Model instance, not on the matrix.
+	if n := len(stack); n != 3 {
+		t.Fatalf("stack has %d screens, want 3 (matrix + tags + deploy confirm)", n)
 	}
 	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
 		t.Fatalf("top screen is %T, want the deploy confirm", stack[len(stack)-1])
@@ -1945,8 +1948,12 @@ func TestSelectedMsgReportsAnUndeployableChoice(t *testing.T) {
 		Digest:    "sha256:" + strings.Repeat("a", 64),
 		Target:    "app-production",
 	})
-	if n := len(m.(Model).stack); n != 1 {
-		t.Fatalf("an undeployable choice should return to the matrix: stack has %d screens", n)
+	// T3-08: openDeploy no longer pops the tags picker before it can fail — an undeployable
+	// choice leaves the picker on screen (the operator's next move is most likely picking a
+	// different tag from the very list they were just looking at), with the reason as a notice
+	// rather than a screen of its own.
+	if n := len(m.(Model).stack); n != 2 {
+		t.Fatalf("an undeployable choice should leave the tags picker on screen: stack has %d screens", n)
 	}
 	if v := plain(m); !strings.Contains(v, "cannot deploy") {
 		t.Errorf("notice should say why it cannot be deployed:\n%s", v)
@@ -2158,8 +2165,10 @@ func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 		Digest:    "sha256:" + strings.Repeat("a", 64),
 		Target:    "app-production",
 	})
-	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("fixture precondition: stack has %d screens, want 2", n)
+	// T3-08: matrix + tags + deploy confirm — the picker stays on the stack under the confirm
+	// screen now.
+	if n := len(m.(Model).stack); n != 3 {
+		t.Fatalf("fixture precondition: stack has %d screens, want 3", n)
 	}
 
 	// Esc goes to the screen, which asks the root to pop it; the root must act on that ask.
@@ -2168,8 +2177,13 @@ func TestEscOnTheDeployScreenPopsIt(t *testing.T) {
 		t.Fatal("esc on the deploy screen produced no command")
 	}
 	m3, _ := m2.Update(escCmd())
-	if n := len(m3.(Model).stack); n != 1 {
-		t.Fatalf("esc left %d screens on the stack, want 1 (back to the matrix)", n)
+	// T3-08: esc lands back on the tags picker, not the matrix.
+	stack := m3.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("esc left %d screens on the stack, want 2 (back to the tags picker)", n)
+	}
+	if _, ok := stack[len(stack)-1].(tagsScreen); !ok {
+		t.Fatalf("top screen is %T, want the tags picker", stack[len(stack)-1])
 	}
 }
 
@@ -2194,8 +2208,9 @@ func TestEscFromDeployFlightTruncatesPastTheDeployConfirmScreenUnderneath(t *tes
 		Digest:    "sha256:" + strings.Repeat("a", 64),
 		Target:    "app-production",
 	})
-	if n := len(m.(Model).stack); n != 2 {
-		t.Fatalf("fixture precondition: stack has %d screens after opening the deploy confirm, want 2", n)
+	// T3-08: matrix + tags + deploy confirm.
+	if n := len(m.(Model).stack); n != 3 {
+		t.Fatalf("fixture precondition: stack has %d screens after opening the deploy confirm, want 3", n)
 	}
 
 	// enter, on the real deploy confirm screen — not deploy.StartMsg constructed by hand — so this
@@ -2208,8 +2223,8 @@ func TestEscFromDeployFlightTruncatesPastTheDeployConfirmScreenUnderneath(t *tes
 	if cmd2 == nil {
 		t.Fatal("deploy.StartMsg with a wired startPromotion produced no command")
 	}
-	if n := len(m2.(Model).stack); n != 3 {
-		t.Fatalf("stack has %d screens right after enter, want 3 (matrix, deploy confirm, the building flight screen)", n)
+	if n := len(m2.(Model).stack); n != 4 {
+		t.Fatalf("stack has %d screens right after enter, want 4 (matrix, tags, deploy confirm, the building flight screen)", n)
 	}
 	mm, _ := attach(t, m2.(Model), cmd2) // Busy=true: the entry is Running the instant it's built
 
@@ -2225,6 +2240,71 @@ func TestEscFromDeployFlightTruncatesPastTheDeployConfirmScreenUnderneath(t *tes
 		t.Fatal("truncating to the matrix must re-list at once")
 	}
 	cmd3()
+}
+
+// TestEscReturnsToPicker is T3-08's own routing test (v2·05a): the stack is matrix, tags,
+// deploy — esc leaves the SAME tags.Model instance on top, with its cursor exactly where the
+// operator left it, not a freshly-opened picker reset to its own default row. This is the test
+// the mutant proof in the PR body is run against: reverting openDeploy to pop the picker before
+// pushing the deploy screen (this train's own predecessor behaviour) must make it fail.
+func TestEscReturnsToPicker(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagsFn := func(string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
+		regTagsFn := func(context.Context) ([]string, error) { return []string{"v1", "v2"}, nil }
+		metaFn := func(_ context.Context, _ string) (registry.ImageMeta, error) {
+			return registry.ImageMeta{Digest: "sha256:" + strings.Repeat("a", 64)}, nil
+		}
+		return false, regTagsFn, nil, metaFn
+	}
+	envs := config.EnvsConfig{}
+	m := New(r, []string{"ghcr.io/"}, envs, testPlanFunc([]string{"ghcr.io/"}, envs), nil, Promotion{}, tagsFn, apprestart.Funcs{})
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+
+	tm, cmd := tm.Update(matrix.OpenTagsMsg{ImageRepo: "ghcr.io/example/web", Target: "app-production"})
+	tm = drainTags(tm, cmd)
+
+	// Move the cursor down, off the default first row, onto v2 — the choice that must survive
+	// the round trip through the deploy confirm screen.
+	tm, _ = tm.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if v := plain(tm); !strings.Contains(v, "▸ v2") {
+		t.Fatalf("fixture precondition: cursor should be on v2 after one down:\n%s", v)
+	}
+
+	// enter reviews v2, opening the deploy confirm screen on top of the same picker instance.
+	tm, reviewCmd := tm.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if reviewCmd == nil {
+		t.Fatal("enter on the tags screen produced no command")
+	}
+	tm, _ = tm.Update(reviewCmd())
+	stack := tm.(Model).stack
+	if n := len(stack); n != 3 {
+		t.Fatalf("stack has %d screens, want 3 (matrix, tags, deploy confirm)", n)
+	}
+	if _, ok := stack[len(stack)-1].(deployScreen); !ok {
+		t.Fatalf("top screen is %T, want the deploy confirm", stack[len(stack)-1])
+	}
+
+	// esc leaves the deploy confirm screen and lands back on the picker — the identical
+	// instance, cursor still on v2.
+	tm, escCmd := tm.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if escCmd == nil {
+		t.Fatal("esc on the deploy confirm screen produced no command")
+	}
+	tm, _ = tm.Update(escCmd())
+	stack = tm.(Model).stack
+	if n := len(stack); n != 2 {
+		t.Fatalf("esc left %d screens on the stack, want 2 (matrix, tags)", n)
+	}
+	if _, ok := stack[len(stack)-1].(tagsScreen); !ok {
+		t.Fatalf("top screen is %T, want the tags picker", stack[len(stack)-1])
+	}
+	if v := plain(tm); !strings.Contains(v, "▸ v2") {
+		t.Fatalf("esc must return to the same picker instance, cursor intact on v2:\n%s", v)
+	}
 }
 
 // R on the matrix opens the restart screen for the family under the cursor, and the matrix stays

@@ -1,5 +1,5 @@
-╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
-│ghcr.io/example/web:v9   →   app-production                           mode: PR│
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
+│ghcr.io/example/web:v9   →   app-production          mode: PR · shift+d direct│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │no commit history — ghcr.io/example/web has no app repo in repos[].apps — the │
 │yaml below is the change                                                      │
@@ -19,6 +19,6 @@
 │             - name: RAILS_ENV                                                │
 │               value: production                                              │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│3 occurrences in 1 file · digest dddddddddddd · verified before commit        │
+│3 image references in 1 file · digest dddddddddddd · verified before commit   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                   enter deploy · ↑/↓ scroll · m mode · esc back
+    enter deploy · shift+d direct · ↑/↓ · l activity · esc back to tags · ? help

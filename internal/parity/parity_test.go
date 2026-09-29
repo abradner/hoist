@@ -66,7 +66,7 @@ var registry = []op{
 	{
 		Name: "deploy one named image into an env",
 		CLI:  "deploy --env --image --dry-run --repo --apps-root --promotable",
-		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff",
+		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff; esc on the deploy confirm (deploy.BackMsg) returns to the tag picker, not the matrix (T3-08: the picker stays on the stack underneath)",
 	},
 	{
 		Name: "restart an env's Deployments without changing what they declare",

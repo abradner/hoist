@@ -238,10 +238,10 @@ could not be read is not selectable, for the same reason a bare tag is never wri
 The confirm screen then leads with the delta and the migrations:
 
 ```
-╭─ hoist · confirm deploy ─────────────────────────────────────────────────────╮
-│ghcr.io/example/web:v9   →   app-production              mode: PR · production│
+╭─ hoist · deploy · confirm ─────────────────────────────────────────────────────╮
+│ghcr.io/example/web:v9   →   app-production          mode: PR · shift+d direct│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│rolling out 14 commits · 2 migrations · replacing v202601010101, live 4 weeks │
+│rolling out 14 commits · 2 migrations · replacing v202601010101, declared 4 weeks│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  4a1c2ef  Add rate limiting to the public API                                │
 │  e9b0d31  Fix N+1 query when resolving digests                               │
@@ -251,10 +251,18 @@ The confirm screen then leads with the delta and the migrations:
 │  db/migrate/20260225T101500_add_events_created_at_index.rb                   │
 │  db/migrate/20260301T090200_backfill_events_tenant_id.rb                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│writes 3 occurrences in 1 file · digest dddddddddddd           d  see the yaml│
+│writes 3 image references in 1 file · digest dddddddddddd      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                              enter deploy · ↑/↓ scroll · d yaml diff · esc back
+                    enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags
 ```
+
+The chip always also names the key that flips the mode — `shift+d direct` (or `shift+d PR` once
+direct mode is on) — never a bare capital, since a capital in a footer reads as "press this
+letter" and invites the caps-lock press a legacy terminal cannot tell apart from shift. `shift+d`
+is not offered at all on a production target: the chip and the footer both drop it, and pressing
+it anyway does nothing — the actual enforcement is `internal/engine.DirectCommitGateStep`
+(§4.5), never this screen. `esc` returns to the tag picker underneath, cursor and filter intact,
+not all the way back to the matrix.
 
 Migrations are called out twice on purpose: they are the one class of change that is not
 trivially reversible, and on a repo whose entrypoint runs `db:prepare`, the merge *is* the
@@ -455,8 +463,12 @@ approving yourself.
 
 It is never offered for an env listed under `envs.production`, whatever a flag or a key asked
 for, and that refusal is in the engine, not the screen: the step that would commit checks the
-list itself. On the plan and deploy screens `m` toggles it (behind a confirmation dialog); in the
-picker `D` picks a tag straight into it. At the CLI it takes the env's name twice:
+list itself. On the plan and deploy confirm screens `shift+d` toggles it (behind a confirmation
+dialog turning it on; turning it back off needs no second confirmation) — not offered at all for
+production, so the key does nothing there rather than refusing with a reason for a gesture the
+footer never advertised. The tag picker's own direct-commit gesture retired: reviewing a tag
+(`enter`) always opens the deploy confirm screen now, and `shift+d` there is the only way to
+choose direct mode from the TUI. At the CLI it takes the env's name twice:
 
 ```bash
 hoist promote --from app-staging --to app-dev --direct --confirm-direct=app-dev
