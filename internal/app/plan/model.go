@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -29,6 +28,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/migrate"
@@ -150,20 +150,14 @@ type historyMsg struct {
 	err   error
 }
 
-type keyMap struct {
-	SwitchPane, Mode, Override, YAML, Enter, Back key.Binding
-}
-
-func defaultKeyMap() keyMap {
-	return keyMap{
-		SwitchPane: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
-		Mode:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mode")),
-		Override:   key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "override")),
-		YAML:       key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "yaml")),
-		Enter:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),
-		Back:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-	}
-}
+// RefreshMsg is r/F5/ctrl+r (T3-09): rebuild the plan at fresh origin. The screen has no way to
+// fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection;
+// service.Plan itself never fetches either, it only reads whatever repo the service currently
+// holds), so this asks the root to run the matrix's own completion-triggered refresh
+// (requestMatrixRefresh, the same fetch F5 already runs there) and rebuild this screen's plan
+// once matrix.RepoRefreshedMsg lands with the new *gitops.Repo — internal/app/app.go's own new
+// case, mirroring deploy.RefreshMsg exactly (T3-09's own shared "r" path).
+type RefreshMsg struct{}
 
 // Model is the plan screen. It is a value: Update, SetSize and SetStyles return the
 // updated model, matching internal/app/matrix's convention.
@@ -254,7 +248,6 @@ type Model struct {
 	starting bool
 
 	styles        ui.Styles
-	keys          keyMap
 	width, height int
 	leftWidth     int
 }
@@ -286,7 +279,6 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 		scope:      scope.Open(),
 		source:     source,
 		target:     target,
-		keys:       defaultKeyMap(),
 		mode:       ModePR,
 		spinner:    spinner.New(spinner.WithSpinner(spinner.Line)),
 		viewport:   viewport.New(),
@@ -323,13 +315,33 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
+// Reload is RefreshMsg's own rebuild (T3-09): the root calls this once matrix.RepoRefreshedMsg
+// lands with a fresh *gitops.Repo, from origin, so this screen's plan is rebuilt against exactly
+// what F5 just fetched rather than the boot-time snapshot it was opened with. A no-op outside
+// stateReady: a load already in flight (stateLoading) or a still-open env prompt has nothing yet
+// to rebuild FROM. keepTicked/a fresh scope ID mirror the override rebuild's own shape
+// (updateOverride) — the operator's ticked set survives, intersected against whatever the fresh
+// plan's rows turn out to be, and a load already outstanding for the stale repo is dropped by
+// the scope.Foreign guard rather than landing on rows this reload never asked for.
+func (m Model) Reload(repo *gitops.Repo) (Model, tea.Cmd) {
+	if m.state != stateReady || repo == nil {
+		return m, nil
+	}
+	m.repo = repo
+	m.keepTicked = true
+	m.scope.ID = scope.New()
+	m.state = stateLoading
+	m.status = fmt.Sprintf("resolving digests from %s pods…", m.source)
+	return m, tea.Batch(m.spinner.Tick, m.loadCmd())
+}
+
 func (m *Model) buildEnvSelect() {
 	candidates := TargetsFor(m.repo, m.source)
 	sel := huh.NewSelect[string]().Title(fmt.Sprintf("promote %s to…", m.source)).Value(&m.target)
 	// Wires Down/Up/"/" filtering the same way a huh.Form/Group would, without adopting either
 	// (AGENTS.md §4.7 — this is component wiring, not layout). See CapturesText's own doc
 	// comment for why this call has to happen here rather than being left to a Form/Group.
-	sel.WithKeyMap(huh.NewDefaultKeyMap())
+	sel.WithKeyMap(keys.HuhKeyMap())
 	if len(candidates) > 0 {
 		opts := make([]huh.Option[string], 0, len(candidates))
 		for _, e := range candidates {
@@ -348,7 +360,7 @@ func (m *Model) buildEnvSelect() {
 func (m *Model) buildSourceSelect() {
 	candidates := SourcesFor(m.repo, m.target)
 	sel := huh.NewSelect[string]().Title(fmt.Sprintf("promote into %s from…", m.target)).Value(&m.source)
-	sel.WithKeyMap(huh.NewDefaultKeyMap())
+	sel.WithKeyMap(keys.HuhKeyMap())
 	if len(candidates) > 0 {
 		opts := make([]huh.Option[string], 0, len(candidates))
 		for _, e := range candidates {
@@ -402,8 +414,8 @@ func (m *Model) rebuildMultiSelect() {
 	}
 	ms := huh.NewMultiSelect[string]().Value(&m.ticked)
 	// Same wiring as buildEnvSelect's own WithKeyMap call — see CapturesText's doc comment.
-	// This is what makes Down/Space("x")/"/" actually reach the field's Update.
-	ms.WithKeyMap(huh.NewDefaultKeyMap())
+	// This is what makes Down/space("x" retired, T3-09)/"/" actually reach the field's Update.
+	ms.WithKeyMap(keys.HuhKeyMap())
 	if len(opts) > 0 {
 		ms = ms.Options(opts...)
 	}
@@ -552,7 +564,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		if key.Matches(msg, m.keys.Back) && !m.confirming && !m.overriding {
+		if keys.Esc.Matches(msg) && !m.confirming && !m.overriding {
 			// No cancel here any more (FB-M3): the root's own pop, triggered by this BackMsg,
 			// calls Close on this screen the moment it is actually removed from the stack —
 			// see Close's own doc comment.
@@ -642,8 +654,15 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.notice = ""
+	// T3-09: shift+d toggles direct mode — checked ahead of the switch below since
+	// keys.Direct.Matches is the stateless write-binding test (rule 5's shift-vs-caps-lock
+	// distinction), not a string a switch case could match directly (mirrors deploy.Model.onKey,
+	// T3-08).
+	if keys.Direct.Matches(kmsg) {
+		return m.toggleDirect()
+	}
 	switch {
-	case key.Matches(kmsg, m.keys.Override):
+	case keys.Edit.Matches(kmsg):
 		r, ok := m.hoveredRow()
 		if !ok || m.err != nil {
 			m.notice = "no repo under the cursor to override"
@@ -652,7 +671,7 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		m.overriding = true
 		m.buildOverride(r.Repo)
 		return m, tea.Batch(m.overrideInput.Init(), m.overrideInput.Focus())
-	case key.Matches(kmsg, m.keys.Enter):
+	case keys.Enter.Matches(kmsg):
 		if m.starting {
 			// #PR8/FB-L4: a repeated Enter before the root has reacted at all — see starting's
 			// own doc comment.
@@ -672,20 +691,16 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			return StartMsg{Plan: plan, Outcome: outcome, Mode: mode, Ticked: ticked, Source: source, Target: target, View: view}
 		}
-	case key.Matches(kmsg, m.keys.Mode):
-		if m.envs.IsProduction(m.target) {
-			m.notice = fmt.Sprintf("direct mode is not offered for %s: it is a production env, so every change goes through a PR", m.target)
-			return m, nil
-		}
-		m.confirming = true
-		m.buildConfirm()
-		return m, tea.Batch(m.confirmDirect.Init(), m.confirmDirect.Focus())
-	case key.Matches(kmsg, m.keys.YAML):
+	case keys.Refresh.Matches(kmsg):
+		// T3-09: r/F5/ctrl+r rebuilds the plan at fresh origin — see RefreshMsg's own doc
+		// comment for why this only asks the root rather than fetching origin itself.
+		return m, func() tea.Msg { return RefreshMsg{} }
+	case keys.Diff.Matches(kmsg):
 		m.showYAML = !m.showYAML
 		m = m.refreshRight()
 		m.viewport.GotoTop() // two unrelated documents; a scroll offset from one hides the other's head
 		return m, nil
-	case key.Matches(kmsg, m.keys.SwitchPane):
+	case keys.Tab.Matches(kmsg):
 		if m.focus == focusLeft {
 			m.focus = focusRight
 			if m.multiSelect != nil {
@@ -726,19 +741,39 @@ func (m Model) updateReady(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// buildConfirm builds the direct-mode dialog. WithKeyMap is not decoration: huh.NewConfirm
+// toggleDirect is shift+d (T3-09, was m): behind a confirmation only when turning direct mode
+// ON — turning it back off is silent, mirroring deploy.Model's own toggleDirect (T3-08) and the
+// approved keymap's own "confirm when turning on" wording (the retired m gesture had confirmed
+// both directions, which the keymap never asked for). Never offered at all for a production
+// target: hidden from the footer/help (hints' own registry row) and, pressed anyway, a silent
+// no-op here too — politeness only (rule 5's note); the real, unbypassable enforcement is
+// engine.DirectCommitGateStep, which refuses a production env regardless of what this screen
+// believed.
+func (m Model) toggleDirect() (Model, tea.Cmd) {
+	if m.envs.IsProduction(m.target) {
+		return m, nil
+	}
+	if m.mode == ModeDirect {
+		m.mode = ModePR
+		return m, nil
+	}
+	m.confirming = true
+	m.buildConfirm()
+	return m, tea.Batch(m.confirmDirect.Init(), m.confirmDirect.Focus())
+}
+
+// buildConfirm builds the direct-mode dialog, only ever reached (via toggleDirect above) while
+// turning direct mode on, so the verb is fixed. WithKeyMap is not decoration: huh.NewConfirm
 // leaves its keymap zero-valued, and a zero key.Binding matches nothing, so a standalone
 // Confirm ignored y, n and the arrows — this screen's m gesture could not be completed by a
 // real operator until M10, and its test had set the bound bool directly (#85's named trap;
 // internal/app/tags and internal/app/deploy had already been fixed the same way).
 func (m *Model) buildConfirm() {
-	verb := "Switch to direct mode (commit straight to the default branch, no PR)?"
-	if m.mode == ModeDirect {
-		verb = "Switch back to PR mode?"
-	}
 	m.confirmValue = false
-	m.confirmDirect = huh.NewConfirm().Title(verb).Value(&m.confirmValue)
-	m.confirmDirect.WithKeyMap(huh.NewDefaultKeyMap())
+	m.confirmDirect = huh.NewConfirm().
+		Title("Switch to direct mode (commit straight to the default branch, no PR)?").
+		Value(&m.confirmValue)
+	m.confirmDirect.WithKeyMap(keys.HuhKeyMap())
 	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.confirmDirect.WithWidth(m.dialogWidth())
 }
@@ -755,11 +790,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 			// field on the Model copy that built the widget, which every Update since has
 			// superseded.
 			if m.confirmAgreed() {
-				if m.mode == ModeDirect {
-					m.mode = ModePR
-				} else {
-					m.mode = ModeDirect
-				}
+				m.mode = ModeDirect
 			}
 			return m, nil
 		}
@@ -785,7 +816,7 @@ func (m *Model) buildOverride(repo string) {
 		Title("override the digest for " + repo).
 		Description("repo=repo:tag@sha256:<digest> — wins over every digest source, as --digest does").
 		Value(&m.overrideValue)
-	m.overrideInput.WithKeyMap(huh.NewDefaultKeyMap())
+	m.overrideInput.WithKeyMap(keys.HuhKeyMap())
 	m.overrideInput.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.overrideInput.WithWidth(m.dialogWidth())
 }
@@ -952,7 +983,17 @@ func (m Model) layout() Model {
 	}
 	if m.multiSelect != nil {
 		m.multiSelect.WithWidth(m.leftWidth)
-		m.multiSelect.WithHeight(max(body-len(Disabled(m.rows))-boolInt(len(Disabled(m.rows)) > 0), 3))
+		// T3-09: the greyed no-op section (leftBody's own NoOps loop, above Disabled's) takes
+		// rows out of the multiSelect's own height budget exactly as Disabled's already did, or
+		// the left pane would overflow past what layout() budgeted for it.
+		extra := 0
+		if n := len(NoOps(m.rows)); n > 0 {
+			extra += n + 1
+		}
+		if n := len(Disabled(m.rows)); n > 0 {
+			extra += n + 1
+		}
+		m.multiSelect.WithHeight(max(body-extra, 3))
 	}
 	if m.confirmDirect != nil {
 		m.confirmDirect.WithWidth(m.dialogWidth())
@@ -1028,10 +1069,14 @@ func (m Model) View() string {
 
 func (m Model) title() string {
 	if m.showYAML && m.state == stateReady {
-		return "hoist · confirm promotion · yaml"
+		return "hoist · promotion · confirm · yaml"
 	}
-	return "hoist · confirm promotion"
+	return "hoist · promotion · confirm"
 }
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go): the help overlay
+// and the activity log ("l") only reach this screen once it names its own registry row.
+func (m Model) KeyScreen() keys.Screen { return keys.ScrPlan }
 
 // headerSection is "source → target", the shared image-repo prefix when every row has one,
 // and the mode chip: amber and named for a production target, which changes this screen's
@@ -1119,6 +1164,11 @@ func (m Model) totalsSection() string {
 	} else if capped > 0 {
 		parts = append(parts, m.styles.Warn.Render(fmt.Sprintf("migrations unknown for %d", capped)))
 	}
+	// T3-09 (v2·05b): "N image references, M files" — the plan's own version of deploy.scale's
+	// identical count (T3-08), over the same ticked set every other part of this line counts.
+	if refs, files := ImageRefStats(m.plan, ticked); refs > 0 {
+		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("%s, %s", plural(refs, "image reference"), plural(files, "file"))))
+	}
 	if loading > 0 {
 		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("history loading for %d", loading)))
 	}
@@ -1152,27 +1202,48 @@ func (m Model) notes() string {
 		return m.styles.Notice.Render(ansi.Wordwrap(m.notice, inner, ""))
 	case m.state == stateReady && m.err == nil:
 		if skip := m.skipNotice(); skip != "" {
-			return m.styles.Warn.Render(ansi.Wordwrap("! "+skip, inner, ""))
+			// T3-09 (UX-M17): a sentence, never a bare "!" marker.
+			return m.styles.Warn.Render(ansi.Wordwrap(skip, inner, ""))
 		}
 	}
 	return ""
 }
 
+// hints is the screen's own footer (T3-09), built through keys.Footer like every other
+// migrated screen rather than a hand-joined string, so a narrow terminal drops the lowest-
+// priority keys first instead of wrapping or truncating (train3-design.md's own Footer rules).
 func (m Model) hints() string {
-	var help string
 	switch {
 	case m.state == stateSelectEnv:
-		help = "↑/↓ choose · enter confirm · esc back"
+		return keys.Footer(m.styles, m.width, "", []keys.Hint{
+			{B: keys.Up, Long: "↑/↓ choose", Short: "↑/↓", Pri: 1},
+			{B: keys.Enter, Long: "enter confirm", Pri: 0},
+			{B: keys.Esc, Long: "esc back", Short: "esc", Pri: -1},
+		}, true)
 	case m.state == stateLoading:
-		help = "esc back"
+		return keys.Footer(m.styles, m.width, "", []keys.Hint{{B: keys.Esc, Long: "esc back", Pri: -1}}, true)
 	case m.overriding:
-		help = "enter apply · esc cancel"
-	case m.envs.IsProduction(m.target):
-		help = "tab pane · x toggle · d yaml · o override · enter confirm · esc back"
-	default:
-		help = "tab pane · x toggle · d yaml · o override · m mode · enter confirm · esc back"
+		return keys.Footer(m.styles, m.width, "", []keys.Hint{
+			{B: keys.Enter, Long: "enter apply", Pri: 0},
+			{B: keys.Esc, Long: "esc cancel", Pri: -1},
+		}, true)
 	}
-	return ui.StatusBar(m.width, "", m.styles.Hint.Render(help))
+	hints := []keys.Hint{
+		{B: keys.Enter, Long: "enter promote", Pri: 0},
+		{B: keys.Space, Long: "space tick", Pri: 1},
+		{B: keys.Diff, Long: "d yaml", Short: "d", Pri: 2},
+		{B: keys.Edit, Long: "e edit digest", Short: "e", Pri: 3},
+	}
+	if !m.envs.IsProduction(m.target) {
+		hints = append(hints, keys.Hint{B: keys.Direct, Long: "shift+d direct", Pri: 4})
+	}
+	hints = append(hints,
+		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r", Pri: 5},
+		keys.Hint{B: keys.Tab, Long: "tab pane", Pri: 6},
+		keys.Hint{B: keys.Log, Long: "l activity", Pri: 7},
+		keys.Hint{B: keys.Esc, Long: "esc back", Short: "esc", Pri: -1},
+	)
+	return keys.Footer(m.styles, m.width, "", hints, true)
 }
 
 // render draws a frame at the screen's size, or a default one before the root has sized it
@@ -1228,6 +1299,17 @@ func (m Model) leftBody() string {
 	var b strings.Builder
 	if m.multiSelect != nil {
 		b.WriteString(m.multiSelect.View())
+	}
+	// T3-09 (UX-M17, v2·05b): rows already current — nothing to tick, since promoting them
+	// would write nothing (Row.NoOp) — shown greyed with the reason, "· <repo> · already
+	// current", the mockup's own wording. Listed before the unresolved rows below: a repo with
+	// nothing to write is not a failure the way an unresolved digest is.
+	if noops := NoOps(m.rows); len(noops) > 0 {
+		b.WriteString("\n")
+		for _, r := range noops {
+			line := fmt.Sprintf("  · %s · already current", strings.TrimPrefix(r.Repo, m.prefix))
+			fmt.Fprintf(&b, "%s\n", m.styles.Dim.Render(ansi.Wordwrap(line, max(m.leftWidth, 20), "")))
+		}
 	}
 	if dis := Disabled(m.rows); len(dis) > 0 {
 		b.WriteString("\n")
@@ -1305,11 +1387,15 @@ func (m Model) impactBody() string {
 	if len(r.Warnings) > 0 {
 		lines = append(lines, "")
 		for _, w := range r.Warnings {
-			lines = append(lines, m.styles.Warn.Render(ansi.Wrap("! "+redact.Strings(w.Message), width, "")))
+			// T3-09 (UX-M17): a sentence, never a bare "!" marker.
+			lines = append(lines, m.styles.Warn.Render(ansi.Wrap(redact.Strings(w.Message), width, "")))
 		}
 	}
 	if r.Disabled {
 		lines = append(lines, "", m.styles.Warn.Render(ansi.Wrap("not offered: "+redact.Strings(r.Reason), width, "")))
+	}
+	if r.NoOp {
+		lines = append(lines, "", m.styles.Dim.Render("already current in "+m.target+": promoting this repo would write nothing"))
 	}
 	return strings.Join(lines, "\n")
 }

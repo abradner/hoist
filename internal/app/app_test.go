@@ -1262,9 +1262,9 @@ func TestFailedStartThenOverrideLoadsHistory(t *testing.T) {
 	// o, a valid override, enter: the operator's own follow-up, which re-loads history through
 	// the SAME scope this screen has held since before Enter (only its ID changes).
 	tm = tea.Model(m2)
-	tm, _ = tm.Update(uitest.Key("o"))
+	tm, _ = tm.Update(uitest.Key("e"))
 	if !strings.Contains(plain(tm), "override digest") {
-		t.Fatalf("o did not open the override dialog:\n%s", plain(tm))
+		t.Fatalf("e did not open the override dialog:\n%s", plain(tm))
 	}
 	tm = typeIntoRoot(t, tm, "ghcr.io/example/counta:v9@sha256:"+strings.Repeat("a", 64))
 	deltaCalls = 0
@@ -2773,6 +2773,73 @@ func TestRepoRefreshedMsgFailureSurvivesAKeypress(t *testing.T) {
 	m3, _ := press(t, m2, tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if got := latestActivityText(m3.(Model)); !strings.Contains(got, "no route to host") {
 		t.Errorf("the refresh failure was cleared by an unrelated keypress: latest activity is now %q", got)
+	}
+}
+
+// TestRRebuildsAtFreshOrigin is T3-09's own "r" gesture, driven through the root with a fake
+// refresh: the plan screen has no way to fetch origin itself (AGENTS.md §4.3), so r asks the
+// root to run exactly the fetch F5 already runs on the matrix (WithRefreshRepo), and once that
+// lands (matrix.RepoRefreshedMsg) the root rebuilds the plan screen against the fresh repo
+// rather than the one it was opened with.
+func TestRRebuildsAtFreshOrigin(t *testing.T) {
+	envs := config.EnvsConfig{Pairs: map[string]string{"app-staging": "app-production"}}
+	var seenRepos []*gitops.Repo
+	planFn := func(_ context.Context, req service.PlanRequest) (service.PlannedChange, error) {
+		seenRepos = append(seenRepos, req.Repo)
+		pl, err := gitops.BuildPlanWith(req.Repo, req.Source, req.Target, []string{"ghcr.io/"}, req.Overrides, nil)
+		if err != nil {
+			return service.PlannedChange{}, err
+		}
+		return service.PlannedChange{Plan: pl, Repo: req.Repo}, nil
+	}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tm tea.Model = New(r, []string{"ghcr.io/"}, envs, planFn, nil, Promotion{}, nil, apprestart.Funcs{})
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	if tm.(Model).stack[0].(matrixScreen).CurrentEnv() != "app-production" {
+		tm, _ = tm.Update(uitest.Key("right"))
+	}
+	tm, cmd := press(t, tm, uitest.Key("p"))
+	tm = drainRoot(tm.(Model), cmd)
+	if n := len(tm.(Model).stack); n != 2 {
+		t.Fatalf("stack has %d screens after p, want 2 (matrix, plan)", n)
+	}
+	if len(seenRepos) != 1 || seenRepos[0] != r {
+		t.Fatalf("setup: planFn seen repos = %v, want exactly [%p] (the boot-time repo)", seenRepos, r)
+	}
+
+	fresh, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshCalls int
+	m := tm.(Model).WithRefreshRepo(func(context.Context) (*gitops.Repo, string, error) {
+		refreshCalls++
+		return fresh, "", nil
+	})
+
+	m2raw, cmd := press(t, m, uitest.Key("r"))
+	if cmd == nil {
+		t.Fatal("r on the plan screen produced no command")
+	}
+	if _, ok := cmd().(plan.RefreshMsg); !ok {
+		t.Fatalf("r emitted %T, want plan.RefreshMsg", cmd())
+	}
+	m3 := drainRoot(m2raw.(Model), cmd)
+
+	if refreshCalls != 1 {
+		t.Fatalf("RefreshRepoFunc called %d times, want exactly 1", refreshCalls)
+	}
+	if m3.repo != fresh {
+		t.Errorf("root repo = %p, want the fresh repo %p adopted, matching F5's own RepoRefreshedMsg handling", m3.repo, fresh)
+	}
+	if len(seenRepos) != 2 || seenRepos[1] != fresh {
+		t.Fatalf("planFn seen repos = %v, want the second call to have used the fresh repo %p — the plan screen must rebuild against it, not the stale boot-time snapshot", seenRepos, fresh)
+	}
+	if _, ok := m3.stack[len(m3.stack)-1].(planScreen); !ok {
+		t.Fatalf("top screen after the refresh is %T, want the plan screen still on top", m3.stack[len(m3.stack)-1])
 	}
 }
 

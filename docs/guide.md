@@ -120,9 +120,9 @@ added. A bare tag that nothing can pin is refused — hoist never writes a tag w
 **The confirm screen** leads with what ships, not with the bytes:
 
 ```
-╭─ hoist · confirm promotion ──────────────────────────────────────────────────╮
+╭─ hoist · promotion · confirm ────────────────────────────────────────────────╮
 │app-staging  →  app-production   images under ghcr.io/example/        mode: PR│
-│3 repos ticked · no history for 3                              d  see the yaml│
+│3 repos ticked · 7 image references, 4 files · no history for… d  see the yaml│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ counta  → v202602201200       │counta                                   │
 │┃   ✓ marketing  → sha-1a2b3c4d5e6f…│v202601151010 → v202602201200            │
@@ -133,16 +133,22 @@ added. A bare tag that nothing can pin is refused — hoist never writes a tag w
 │┃                                   │ghcr.io/example/counta has no app repo in│
 │┃                                   │repos[].apps                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                tab pane · x toggle · d yaml · m mode · enter confirm · esc back
+          enter promote · space tick · d · e · shift+d direct · r · esc · ? more
 ```
 
-Left: the repos, ticked (`x` untick one to leave it out; `!` marks a repo with a warning). Right:
-the repo under the cursor — the versions in full, where its digest came from, its warnings, and,
-when `repos[].apps` maps the image to its source repo, the commits between what the target
-declares and what is about to be written, with any migration among them. `d` swaps the right pane
-for the YAML diff; `enter` means the same from either view. `m` switches to direct mode on a
-non-production target (see [direct mode](#direct-mode)); on a production target it says why it
-cannot.
+The totals line above the columns names what the ticked set actually ships: repos, commits,
+migrations, and the image references and files this promotion would write. A row already at the
+target's declared reference is shown greyed with no checkbox at all — `· worker · already
+current` — since ticking it would write nothing. Left: the repos, ticked (`space` untick one to
+leave it out; `!` marks a repo with a warning). Right: the repo under the cursor — the versions in
+full, where its digest came from, its warnings as plain sentences, and, when `repos[].apps` maps
+the image to its source repo, the commits between what the target declares and what is about to be
+written, with any migration among them. `d` swaps the right pane for the YAML diff; `enter` means
+the same from either view. `e` opens a dialog to override the hovered repo's digest by hand (the
+CLI's `--digest`, validated the same way). `shift+d` switches to direct mode on a non-production
+target (see [direct mode](#direct-mode)); it is not offered at all on a production target — the
+key does nothing there, rather than refusing with a notice. `r`/`F5`/`ctrl+r` rebuild the plan at
+fresh origin, the same fetch `F5` already runs on the matrix.
 
 **What happens after enter**, in order: a worktree under `$XDG_CACHE_HOME/hoist/worktrees/<id>`
 from your own clone, a branch `hoist/<env>/<id>`, one commit with only the image lines changed

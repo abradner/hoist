@@ -558,6 +558,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the operator can easily have pressed another key by the time this lands, and the
 		// refusal disappeared before it was ever read. TakeRefreshError hands back that error
 		// (and clears it on the matrix) so it goes to the activity log instead, which survives.
+		before := m.repo
 		var refreshErr string
 		m = m.withMatrix(func(ms matrix.Model) matrix.Model {
 			ms, _ = ms.Update(msg)
@@ -569,6 +570,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if refreshErr != "" {
 			m = m.noteErr(refreshErr)
+			return m, nil
+		}
+		if m.repo == nil || m.repo == before {
+			return m, nil
+		}
+		// T3-09: plan.RefreshMsg/deploy.RefreshMsg's own rebuild. A fresh repo genuinely landed
+		// (not a failed fetch, not the same pointer this root already held) — if the plan or
+		// deploy confirm screen asked for it (r), rebuild it against m.repo now rather than the
+		// snapshot it was pushed with; every other screen (including a matrix-only stack) is
+		// left alone, since nothing else in this train reads a repo it does not re-derive on its
+		// own next open.
+		if top := len(m.stack) - 1; top >= 1 {
+			switch s := m.stack[top].(type) {
+			case planScreen:
+				nm, cmd := s.Reload(m.repo)
+				m.stack = append([]Screen(nil), m.stack...)
+				m.stack[top] = planScreen{nm}
+				return m, cmd
+			case deployScreen:
+				// A deploy plan never resolves a digest (the reference is caller-supplied), so
+				// calling planFn directly here is exactly as pure as openDeploy's own call —
+				// AGENTS.md §4.3's reasoning is about a call that can talk to a cluster/registry.
+				ref, perr := image.Parse(s.ImageRef())
+				if perr != nil {
+					return m, nil
+				}
+				ctx, cancel := scope.Timeout(scope.Resolve)
+				pc, perr := m.planFn(ctx, service.PlanRequest{Repo: m.repo, Target: s.Target(), Deploy: &ref})
+				cancel()
+				if perr != nil {
+					m = m.noteErr(fmt.Sprintf("could not rebuild the deploy at fresh origin: %v", perr))
+					return m, nil
+				}
+				m.stack = append([]Screen(nil), m.stack...)
+				m.stack[top] = deployScreen{s.Reload(pc.Plan, pc.View)}
+				return m, nil
+			}
 		}
 		return m, nil
 	case session.Event:
@@ -635,6 +673,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.popAndRelist()
 	case plan.BackMsg:
 		return m.popAndRelist()
+	case plan.RefreshMsg, deploy.RefreshMsg:
+		// T3-09: r on the plan or deploy confirm screen asks for exactly the fetch F5 already
+		// runs on the matrix (requestMatrixRefresh) — neither screen can fetch origin itself
+		// (AGENTS.md §4.3), and service.Plan never does either (it only reads whatever repo the
+		// service currently holds). The actual rebuild happens once matrix.RepoRefreshedMsg
+		// lands, below: that is the one place the fresh *gitops.Repo becomes available, for
+		// exactly the same reason F5's own drift/table refresh is two-step.
+		return m.requestMatrixRefresh()
 	case plan.StartMsg:
 		p := filterTicked(msg.Plan, msg.Ticked)
 		direct := msg.Mode == plan.ModeDirect
