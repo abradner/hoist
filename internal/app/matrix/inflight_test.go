@@ -190,6 +190,94 @@ func TestOpenPRAsksWhichWhenSeveralHaveOne(t *testing.T) {
 	}
 }
 
+// TestPaneCursorMarksTheSelectedRow proves the pane-row cursor (commit 1 of the T3-06 train)
+// only ever marks the entry under paneCursor while focus is on the pane — never the grid's own
+// cursor, and never any row when focus is still FocusGrid — at both a golden width and a wide
+// one, since paneMarker's width must stay fixed (two cells) either way or every other row would
+// shift depending on which one is selected.
+func TestPaneCursorMarksTheSelectedRow(t *testing.T) {
+	p := parked("5pr6sd333t", "app-staging", "app-production", 12)
+	q := parked("9xy8wv777u", "", "app-staging", 3)
+
+	for _, size := range []struct{ w, h int }{{80, 24}, {120, 40}} {
+		m := withPane(size.w, size.h, p, q)
+		if containsPrefixed(strings.Split(ansi.Strip(m.View()), "\n"), "▸ 5pr6sd333t") {
+			t.Fatalf("%dx%d: no pane row should carry the cursor while focus is on the grid:\n%s", size.w, size.h, ansi.Strip(m.View()))
+		}
+		m = uitest.Keys(m, update, "tab") // FocusGrid -> FocusPane, cursor starts on row 0
+		if !paneRowHasCursor(m.View(), "5pr6sd333t") {
+			t.Fatalf("%dx%d: row 0 must carry the cursor once focus is on the pane:\n%s", size.w, size.h, ansi.Strip(m.View()))
+		}
+		if paneRowHasCursor(m.View(), "9xy8wv777u") {
+			t.Fatalf("%dx%d: only the selected row may carry the cursor:\n%s", size.w, size.h, ansi.Strip(m.View()))
+		}
+		m = uitest.Keys(m, update, "down")
+		if !paneRowHasCursor(m.View(), "9xy8wv777u") || paneRowHasCursor(m.View(), "5pr6sd333t") {
+			t.Fatalf("%dx%d: cursor must move to row 1 after down:\n%s", size.w, size.h, ansi.Strip(m.View()))
+		}
+	}
+}
+
+// paneRowHasCursor reports whether the frame row naming id starts (right after the frame's own
+// left border) with the pane cursor marker — true for either the expanded or the compact form,
+// since the marker sits before "⟳" on a compact row and before the id itself on an expanded one.
+func containsPrefixed(lines []string, prefix string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func paneRowHasCursor(view, id string) bool {
+	for _, l := range strings.Split(ansi.Strip(view), "\n") {
+		if !strings.Contains(l, id) {
+			continue
+		}
+		content := strings.TrimPrefix(l, "│")
+		return strings.HasPrefix(content, "▸")
+	}
+	return false
+}
+
+// TestNextCheckCountdownForAWaitingEntry proves a Waiting entry's own NextPoll is worded as
+// "next check in Ns" against a fixed now — the pane's counterpart to flight.Model's identical
+// actionSection wording (commit 1 of the T3-06 train) — and that an entry with no NextPoll set
+// (Summarize never sets one; only a Live snapshot does, app.go's summaryForSnapshot) shows no
+// countdown at all rather than a nonsensical one counting down from the zero time.
+// waiting builds a bare Summary with nothing yet Active (Verdict/Action both fall back to their
+// short default, "starting") so the countdown text this test cares about is never crowded out
+// of a narrow line by an unrelated long approval sentence (parked's own fixture).
+func waiting(id, target string, next time.Time) flight.Summary {
+	s := flight.Summarize(engine.PromotionState{ID: id, TargetEnv: target}, false, nil, nil)
+	s.NextPoll = next
+	return s
+}
+
+func TestNextCheckCountdownForAWaitingEntry(t *testing.T) {
+	p := waiting("5pr6sd333t", "app-production", fixedNow.Add(45*time.Second))
+	q := waiting("9xy8wv777u", "app-staging", time.Time{}) // no NextPoll: not a waiting entry
+
+	v := ansi.Strip(withPane(80, 24, p, q).View())
+	if !strings.Contains(v, "next check in 45s") {
+		t.Fatalf("waiting entry must show its own countdown:\n%s", v)
+	}
+	if strings.Count(v, "next check in") != 1 {
+		t.Fatalf("only the entry with a real NextPoll may show a countdown:\n%s", v)
+	}
+
+	// Rounds to the nearest second and never goes negative once the deadline has passed.
+	p.NextPoll = fixedNow.Add(400 * time.Millisecond)
+	if v := ansi.Strip(withPane(80, 24, p).View()); !strings.Contains(v, "next check in 0s") {
+		t.Fatalf("sub-second remainder must round, never show a fraction:\n%s", v)
+	}
+	p.NextPoll = fixedNow.Add(-5 * time.Second)
+	if v := ansi.Strip(withPane(80, 24, p).View()); !strings.Contains(v, "next check in 0s") {
+		t.Fatalf("a NextPoll already in the past must clamp to 0s, never negative:\n%s", v)
+	}
+}
+
 // TestInFlightInsideFrame proves the in-flight pane is drawn INSIDE the matrix's own frame
 // (T3-05: Frame.Panes is retired, the pane is a Section like any other) rather than as a
 // separately-bordered block stacked below it: the box's own closing border (╰) sits on the

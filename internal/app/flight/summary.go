@@ -39,6 +39,16 @@ type Summary struct {
 	// for anything built purely from a listing (summaryFor), which never has a live Controller
 	// entry to point at.
 	Build session.BuildID
+	// NextPoll mirrors session.Snapshot.NextPoll — when this session will next re-observe this
+	// promotion on its own, the same field flight.Model's own waiting() reads. Zero for anything
+	// not Live (a plain listing has no controller entry telling it when it will next be asked
+	// for again), and zero for a Live entry that isn't in the plain "waiting on the next
+	// scheduled check" state either (building, busy, done, stopped — session.Controller only
+	// ever sets it for a Waiting entry). The matrix's own in-flight pane is this field's one
+	// consumer today (commit 1 of the T3-06 train): each Waiting entry's "next check in Ns" text
+	// is worded straight off it, never recomputed from a duration this package would have to
+	// keep in step with session.Controller's own poll interval by hand.
+	NextPoll time.Time
 }
 
 // Summarize builds a Summary from a state and engine.Status's result for it.

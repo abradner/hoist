@@ -14,6 +14,6 @@
 │ thirdparty   │ 7           external │ 8          external │ 8   external     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │in flight · 1                                                                 │
-│⟳ 5pr6sd333t → app-production   blocked on approval · 12m                     │
+│  ⟳ 5pr6sd333t → app-production   blocked on approval · 12m                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
         actions · p promote into · t tag · w watch · r refresh · q quit · ? more

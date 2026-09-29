@@ -193,6 +193,13 @@ type Model struct {
 	// (§9 entry 10) — hint simply takes priority over the activity row while it is set, since
 	// only one bottom row exists on the terminal's last line.
 	hint string
+
+	// matrixTick/matrixTicking are the in-flight pane's own countdown redraw chain
+	// (armMatrixCountdown/matrixCountdownTick): a scope.ID allocated once at New, and whether a
+	// scope.After for it is currently outstanding, so armMatrixCountdown starts exactly one
+	// chain per waiting-to-not-waiting transition rather than one per Update call.
+	matrixTick    scope.ID
+	matrixTicking bool
 }
 
 // New returns the root model with the matrix screen on the stack. promotable lists the
@@ -226,6 +233,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, planFn 
 		openPRMode: promo.OpenPRMode,
 		tagsFn:     tagsFn,
 		restartFn:  restartFn,
+		matrixTick: scope.New(),
 	}
 	// The matrix starts without a cluster question; WithDrift supplies one. Deriving it from
 	// planFn (as before #122) collapsed a partial rollout to the one digest a plan picks.
@@ -379,10 +387,67 @@ func (m Model) noteStarted(build session.BuildID, id string) Model {
 	return m.note(activity.Info, text, "", url)
 }
 
+// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (commit 1 of T3-06's own
+// train, matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
+// purely so a message stamped with m.matrixTick reaches this root's Update once a second while
+// matrixWantsCountdown() holds, making the pane's "next check in Ns" text advance instead of
+// looking the same whether the next poll is one second away or wedged. scope.Result[T]'s own
+// Stamped implementation and scope.Foreign are what let a stale chain from before a screen
+// change get silently dropped rather than firing a second, redundant redraw loop.
+type matrixCountdownTick struct{}
+
+// matrixWantsCountdown reports whether the pane has something worth counting down: the matrix is
+// the only screen on the stack (armMatrixCountdown never lets a chain outlive the matrix leaving
+// the top, though nothing bad happens if it did — a stray redraw of a screen not on top costs
+// nothing) and at least one in-flight entry has a real NextPoll (session.Snapshot's own Waiting
+// signal — flight.Model's own waiting() reasons about the identical field).
+func (m Model) matrixWantsCountdown() bool {
+	if !m.matrixOnTop() {
+		return false
+	}
+	ms, ok := m.stack[0].(matrixScreen)
+	if !ok {
+		return false
+	}
+	for _, s := range ms.InFlight() {
+		if !s.NextPoll.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+// armMatrixCountdown starts the countdown chain the moment matrixWantsCountdown becomes true,
+// and does nothing while it already is running (m.matrixTicking) — the chain reschedules itself
+// from its own delivery (the scope.Result[matrixCountdownTick] case below), exactly like
+// flight.Model's countdownTick does. Called from the handful of places the in-flight list itself
+// can change (apply, below, and Init) rather than from every Update return: batching a tick onto
+// every single Update result — including one whose caller reads its returned tea.Cmd directly,
+// invokes it once, and expects a specific concrete message back (several tests do exactly this
+// for flight.AbandonMsg/ReobserveMsg/OverrideCINoneMsg) — silently turned that cmd into a
+// tea.BatchMsg instead, which broke every one of them (caught by TestFlightAbandonMsg... going
+// red the moment a first draft armed this from a blanket Update wrapper).
+func (m Model) armMatrixCountdown() (Model, tea.Cmd) {
+	if m.matrixTicking || !m.matrixWantsCountdown() {
+		return m, nil
+	}
+	m.matrixTicking = true
+	return m, scope.After(m.matrixTick, time.Second, matrixCountdownTick{})
+}
+
 // Update handles window size, theme and the global keys, and forwards everything else to
 // the top screen.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case scope.Result[matrixCountdownTick]:
+		if scope.Foreign(m.matrixTick, msg) {
+			return m, nil
+		}
+		if !m.matrixWantsCountdown() {
+			m.matrixTicking = false
+			return m, nil
+		}
+		return m, scope.After(m.matrixTick, time.Second, matrixCountdownTick{})
 	case tea.KeyboardEnhancementsMsg:
 		// Skipped by internal/parity's parser (tea.* messages, not a pkg.XMsg case), so this
 		// needs no registry row (train3-design.md's own acceptance check). m.kbd's only
@@ -845,6 +910,13 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 		m.sess, relistCmd = m.sess.Relist()
 		cmds = append(cmds, relistCmd)
 	}
+	// Every case above can change what the matrix's in-flight pane shows (a fresh listing, a
+	// live entry's own Step landing with a new NextPoll) — apply already batches its own cmds,
+	// so this is a safe place to also arm the countdown redraw, unlike Update's own many other
+	// single-cmd return points (armMatrixCountdown's own doc comment).
+	var tickCmd tea.Cmd
+	m, tickCmd = m.armMatrixCountdown()
+	cmds = append(cmds, tickCmd)
 	return m, tea.Batch(cmds...)
 }
 
@@ -989,6 +1061,11 @@ func summaryForSnapshot(s session.Snapshot) flight.Summary {
 	// a still-Building entry, which has no promotion id yet for Resume(id) to look up (P1 #2:
 	// enter on a Building pane entry used to call Backend.Resume("") and fail).
 	sum.Build = s.Build
+	// s.NextPoll is only ever set for a Waiting live entry (Mirror's own doc comment in
+	// internal/app/flight/model.go) — carried straight through so the matrix's in-flight pane
+	// can word its own countdown off the identical field flight.Model's waiting() already reads,
+	// rather than re-deriving "is this entry waiting" a second way.
+	sum.NextPoll = s.NextPoll
 	return sum
 }
 

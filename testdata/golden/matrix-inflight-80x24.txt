@@ -16,7 +16,7 @@
 │              │                      │                     │                  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │in flight · 1                                                                 │
-│5pr6sd333t   app-staging → app-production   started 12m ago                   │
+│  5pr6sd333t   app-staging → app-production   started 12m ago                 │
 │✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
 │· argo refresh  · argo sync  · rollout                                        │
 │waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
