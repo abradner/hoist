@@ -207,15 +207,15 @@ func TestHistoryPaneShowsTheDeltaUnderTheCursor(t *testing.T) {
 		"v3 is 14 commits ahead of v1 · 1 migration",
 		"4a1c2ef  Add rate limiting to the public API",
 		"77c0ffe  db: add index on events.created_at", "migration",
-		"…", "more",
-		"tab commits · enter read commit · space review the change",
+		"↓ 8 more commits",
+		"enter review v3", "→ read commit",
 	} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view lacks %q:\n%s", want, v)
 		}
 	}
-	if strings.Contains(v, "D direct") {
-		t.Errorf("production must not offer D:\n%s", v)
+	if strings.Contains(v, "direct") {
+		t.Errorf("T3-07 retired the direct-commit gesture from this screen entirely:\n%s", v)
 	}
 	uitest.Golden(t, "tags-history", m.View(), 100, 30)
 
@@ -231,12 +231,12 @@ func TestHistoryPaneShowsTheDeltaUnderTheCursor(t *testing.T) {
 	if m.focus != focusCommits || m.commitIdx != 2 {
 		t.Fatalf("focus=%v idx=%d", m.focus, m.commitIdx)
 	}
-	m = uitest.Keys(m, updateFn, "enter")
+	m = uitest.Keys(m, updateFn, "right")
 	if !m.reading {
 		t.Fatal("enter on a commit must open the detail view")
 	}
 	v = ansi.Strip(m.View())
-	for _, want := range []string{"hoist · deploy · commit", "77c0ffe   db: add index on events.created_at", "3 of 14 in v3 · not in v1", "Expect around 4 minutes on production-sized data.", "migrations in this commit:", "20260225T101500_add_events_created_at_index.rb"} {
+	for _, want := range []string{"hoist · tags · app-production · commit", "77c0ffe   db: add index on events.created_at", "3 of 14 in v3 · not in v1", "Expect around 4 minutes on production-sized data.", "migrations in this commit:", "20260225T101500_add_events_created_at_index.rb"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("detail lacks %q:\n%s", want, v)
 		}
@@ -248,7 +248,7 @@ func TestHistoryPaneShowsTheDeltaUnderTheCursor(t *testing.T) {
 	}
 
 	// space reviews the change, carrying the loaded delta and the declared reference.
-	_, cmd := m.Update(uitest.Key("space"))
+	_, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
 		t.Fatal("space emitted nothing")
 	}
@@ -307,9 +307,9 @@ func longBody(ctx context.Context, from, to image.Ref) (migrate.Delta, error) {
 // switch commits rather than scroll, and a switched-to commit is read from its top (#120).
 func TestReadingScrollsALongBody(t *testing.T) {
 	m := historyModelOver(t, unsplitRepo(), longBody, liveAge34Days).SetSize(80, 24)
-	m = uitest.Keys(m, updateFn, "tab", "enter")
+	m = uitest.Keys(m, updateFn, "tab", "right")
 	if !m.reading {
-		t.Fatal("enter must open the commit")
+		t.Fatal("→ must open the commit")
 	}
 	first := ansi.Strip(m.View())
 	if !strings.Contains(first, "body line 01") || strings.Contains(first, "body line 30") || strings.Contains(first, "add_rate_limits") {
@@ -327,11 +327,11 @@ func TestReadingScrollsALongBody(t *testing.T) {
 	}
 	uitest.Golden(t, "tags-commit-long-paged", m.View(), 80, 24)
 
-	m = uitest.Keys(m, updateFn, "G")
+	m = uitest.Keys(m, updateFn, "end")
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "add_rate_limits") || !strings.Contains(v, "body 100%") {
 		t.Fatalf("G must reach the migration list at the end of the body:\n%s", v)
 	}
-	m = uitest.Keys(m, updateFn, "g")
+	m = uitest.Keys(m, updateFn, "home")
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "body line 01") {
 		t.Fatalf("g must return to the top:\n%s", v)
 	}
@@ -341,7 +341,7 @@ func TestReadingScrollsALongBody(t *testing.T) {
 	}
 
 	// ↓ is still the next commit, not a scroll, and that commit is read from its top.
-	m = uitest.Keys(m, updateFn, "G", "down")
+	m = uitest.Keys(m, updateFn, "end", "down")
 	if m.commitIdx != 1 || !m.reading {
 		t.Fatalf("down must switch commits in the detail view: idx=%d reading=%v", m.commitIdx, m.reading)
 	}
@@ -372,8 +372,8 @@ func TestHistoryPaneNamesEveryGap(t *testing.T) {
 		t.Errorf("forge error:\n%s", v)
 	}
 	// enter with nothing to read says so instead of doing nothing.
-	m, _ = m.Update(uitest.Key("enter"))
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "no commit to read here — space reviews the change") {
+	m, _ = m.Update(uitest.Key("right"))
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "no commit to read here — enter reviews the change") {
 		t.Errorf("enter notice:\n%s", v)
 	}
 	// No declared reference at all (a first deploy).
@@ -401,7 +401,7 @@ func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 func TestSpaceWaitsForTheCursorTagsHistory(t *testing.T) {
 	m := historyModel(t, fourteenAhead, liveAge34Days)
 	m.deltas["v3"] = history.State{} // asked, not answered — a fetch in flight
-	m, cmd := m.Update(uitest.Key("space"))
+	m, cmd := m.Update(uitest.Key("enter"))
 	if cmd != nil {
 		t.Fatalf("space emitted %T while the history was pending", cmd())
 	}
@@ -411,7 +411,7 @@ func TestSpaceWaitsForTheCursorTagsHistory(t *testing.T) {
 	// Positive control: once answered, the same key reviews the change.
 	d, _ := fourteenAhead(context.Background(), image.Ref{}, image.Ref{Tag: "v3"})
 	m.deltas["v3"] = history.State{Loaded: true, Delta: d}
-	if _, cmd = m.Update(uitest.Key("space")); cmd == nil {
+	if _, cmd = m.Update(uitest.Key("enter")); cmd == nil {
 		t.Fatal("space emitted nothing once the history had loaded")
 	} else if msg, ok := cmd().(SelectedMsg); !ok || msg.Delta == nil {
 		t.Fatalf("got %+v", cmd())
@@ -458,7 +458,7 @@ func TestRollbackDetailReadsTheOtherWay(t *testing.T) {
 		return d, err
 	}
 	m := historyModel(t, rollback, liveAge34Days)
-	m = uitest.Keys(m, updateFn, "tab", "enter")
+	m = uitest.Keys(m, updateFn, "tab", "right")
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "1 of 14 in v1 · not in v3") {
 		t.Fatalf("rollback detail must say the commit is in v1 and not in v3:\n%s", v)

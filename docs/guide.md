@@ -207,9 +207,9 @@ the identical promotion twice finds the first one's branch and PR rather than op
 picker for that image in the cursor column:
 
 ```
-╭─ hoist · deploy ─────────────────────────────────────────────────────────────────────────────────╮
-│ghcr.io/example/app  →  app-production   production                                               │
-│app-production declares  v1 · 111111111111 · since 4 weeks ago                                    │
+╭─ hoist · tags · app-production ────────────────────────────────────────────────────────────────────╮
+│ghcr.io/example/app  →  app-production   production                                                │
+│app-production declares  v1 · 111111111111 · since 4 weeks ago                                     │
 │note: app-staging (paired staging)'s committed manifest tag is v3; v3 is the tag committed there —│
 │tags move, so this is not proof of the same build                                                 │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -222,17 +222,18 @@ picker for that image in the cursor column:
 │  4a1c2ef  Add rate limiting to the public API                                                    │
 │  e9b0d31  Fix N+1 query when resolving digests                                                   │
 │  77c0ffe  db: add index on events.created_at  migration                                          │
-│…8 more                                                                                           │
+│                                                                                    ↓ 8 more commits│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-                     ↑/↓ move · tab commits · enter read commit · space review the change · esc back
+                enter review v3 · → read commit · / filter · r reload · esc back · ? help
 ```
 
 The header says what the environment *declares* (the manifest, dated by when that line last
 changed) — never "runs", because this screen does not read the cluster. Each tag has its build
 age, whether the paired staging environment has committed it, and, under the cursor, the commits
-between the declared build and that tag with any migration marked. `tab` moves into the commits
-and `enter` reads one in full; `space` reviews the change. A tag whose digest could not be read is
-not selectable, for the same reason a bare tag is never written.
+between the declared build and that tag with any migration marked. `enter` reviews the change —
+this screen's one primary action; `→` reads a commit in full and `tab` moves focus into the
+commit list first (`←`, or `esc`, back to the list). `r` reloads the tag list. A tag whose digest
+could not be read is not selectable, for the same reason a bare tag is never written.
 
 The confirm screen then leads with the delta and the migrations:
 

@@ -28,7 +28,7 @@ func TestLinesKeepTheCursorVisible(t *testing.T) {
 		return idx, texts
 	}
 	// No cursor: the first page and a "more" trailer, five lines under the head.
-	if idx, texts := indexes(-1); fmt.Sprint(idx) != "[-1 0 1 2 3 -1]" || !strings.HasSuffix(texts[5], "10 more") {
+	if idx, texts := indexes(-1); fmt.Sprint(idx) != "[-1 0 1 2 3 -1]" || !strings.Contains(texts[5], "10 more") {
 		t.Fatalf("no cursor: idx=%v texts=%v", idx, texts)
 	}
 	// Cursor on 6: an "earlier" trailer, a window that holds 6, and a "more" trailer.

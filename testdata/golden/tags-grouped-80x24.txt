@@ -1,4 +1,4 @@
-╭─ hoist · deploy ─────────────────────────────────────────────────────────────╮
+╭─ hoist · tags · app-staging ─────────────────────────────────────────────────╮
 │ghcr.io/example/app  →  app-staging                                           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │   TAG                         BUILT          DIGEST                          │
@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │no commit history — app-staging does not declare ghcr.io/example/app yet, so …│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-             ↑/↓ move · / filter · space review the change · D direct · esc back
+             enter review · / filter · r reload · l activity · esc back · ? help

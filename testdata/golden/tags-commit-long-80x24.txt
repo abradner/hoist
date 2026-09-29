@@ -1,4 +1,4 @@
-╭─ hoist · deploy · commit ────────────────────────────────────────────────────╮
+╭─ hoist · tags · app-production · commit ─────────────────────────────────────╮
 │4a1c2ef   Add rate limiting to the public API                                 │
 │1 of 14 in v3 · not in v1 · dev · 2 days ago · body 0% (pgdn scrolls)         │
 ├──────────────────────────────────────────────────────────────────────────────┤
@@ -21,4 +21,4 @@
 │body line 17 of the rate-limiting design note                                 │
 │body line 18 of the rate-limiting design note                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-       ↑/↓ next commit · pgup/pgdn ctrl+u/d g/G scroll · space review · esc back
+         ↑/↓ · pgup/pgdn · home/end · enter review · ← back to the list · ? help

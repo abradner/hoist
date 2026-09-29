@@ -61,12 +61,12 @@ var registry = []op{
 	{
 		Name: "direct mode: commit to the base branch, no PR (non-production only)",
 		CLI:  "promote --direct --confirm-direct deploy --direct --confirm-direct",
-		TUI:  "m on the plan and deploy screens; D in the picker emits tags.DirectRequestedMsg — each behind a huh.Confirm dialog",
+		TUI:  "shift+d on the plan and deploy confirm screens (T3-08: was m; the tag picker's own direct-commit gesture retired in T3-07 — direct mode is only ever offered on a confirm screen now, after the diff is already on screen), each behind a huh.Confirm dialog and never offered for a production target",
 	},
 	{
 		Name: "deploy one named image into an env",
 		CLI:  "deploy --env --image --dry-run --repo --apps-root --promotable",
-		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg space, deploy.StartMsg enter; d on the deploy screen is the dry run's diff",
+		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff",
 	},
 	{
 		Name: "restart an env's Deployments without changing what they declare",
