@@ -14,11 +14,11 @@
 │ thirdparty   │ 7           external │ 8          external │ 8   external                                             │
 │              │                      │                     │                                                          │
 │              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │! c: cluster not asked: kube context "my-cluster" is not in the kubeconfig                                            │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│pinned · c                                                                                                            │
+│v1                                                                                                                    │
+│  pinned                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c                      actions · promote into c · deploy tag · watch · refresh · restart · in flight · quit · ? help
+      enter actions · p promote into c · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help

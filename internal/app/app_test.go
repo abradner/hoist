@@ -2467,7 +2467,7 @@ func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing
 	if listed != 1 {
 		t.Fatalf("listed %d times, want 1", listed)
 	}
-	if v := plain(m); !strings.Contains(v, "in flight (1)") || !strings.Contains(v, "hoist approve 5pr6sd333t") {
+	if v := plain(m); !strings.Contains(v, "in flight · 1") || !strings.Contains(v, "hoist approve 5pr6sd333t") {
 		t.Fatalf("the matrix did not receive the listing:\n%s", v)
 	}
 	// tab then enter (T3-04: was r): resume the pane's own cursor, via session.Controller.Resume

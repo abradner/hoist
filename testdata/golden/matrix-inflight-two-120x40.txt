@@ -24,17 +24,17 @@
 │              │                      │                     │                                                          │
 │              │                      │                     │                                                          │
 │              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ in flight (2) ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│absent · a                                                                                                            │
+│v1                                                                                                                    │
+│  pinned                                                                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│in flight · 2                                                                                                         │
 │5pr6sd333t   app-staging → app-production   started 12m ago                                                           │
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge  ○ argo refresh  ○ argo sync  ○ rollout              │
-├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t                                        │
-├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge  · argo refresh  · argo sync  · rollout              │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103                                              │
 │9xy8wv777u   deploy → app-staging   started 3m ago                                                                    │
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge  ○ argo refresh  ○ argo sync  ○ rollout              │
-├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:    hoist approve 9xy8wv777u                                        │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge  · argo refresh  · argo sync  · rollout              │
+│waiting for an approver to comment `hoist approve 9xy8wv777u` on PR #103                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env a                      actions · promote into a · deploy tag · watch · refresh · restart · in flight · quit · ? help
+      enter actions · p promote into a · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help

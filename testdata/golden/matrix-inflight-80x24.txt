@@ -13,12 +13,12 @@
 │ sidecar      │ v1            pinned │ v1           pinned │                  │
 │ thirdparty   │ 7           external │ 8          external │ 8   external     │
 │              │                      │                     │                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
-│5pr6sd333t   app-staging → app-production   started 12m ago                   │
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge              │
-│○ argo refresh  ○ argo sync  ○ rollout                                        │
+│              │                      │                     │                  │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t│
+│in flight · 1                                                                 │
+│5pr6sd333t   app-staging → app-production   started 12m ago                   │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-        actions · promote into · tag · watch · refresh · restart · quit · ? more
+        actions · p promote into · t tag · w watch · r refresh · q quit · ? more

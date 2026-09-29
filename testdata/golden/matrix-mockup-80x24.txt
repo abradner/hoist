@@ -1,0 +1,24 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
+│my-gitops · base main                                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│─────────────┬───────────────────────────────┬─────────────────────────────── │
+│ FAMILY      │ ▸ APP-STAGING                 │ APP-PRODUCTION ⚠               │
+│─────────────┼───────────────────────────────┼─────────────────────────────── │
+│ marketing   │ sha256:aaaaaaaaaaaa    pinned │ sha256:aaaaaaaaaaaa    pinned  │
+│ ▸ orders    │ v202602201200          pinned │ v202601151010          pinned  │
+│ temporal    │ 2 images             external │ 2 images             external  │
+│ web         │ 2 versions              split │ v202601010101          pinned  │
+│ worker      │ v3                   unpinned │ v2                   unpinned  │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+│             │                               │                                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│in flight · 1                                                                 │
+│5pr6sd333t   app-staging → app-production   started 12m ago                   │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+        actions · p promote into · t tag · w watch · r refresh · q quit · ? more

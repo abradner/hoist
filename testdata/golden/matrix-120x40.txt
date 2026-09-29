@@ -28,13 +28,13 @@
 │              │                      │                     │                                                          │
 │              │                      │                     │                                                          │
 │              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
-│              │                      │                     │                                                          │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │⚠ c is a production env: writes there always open a PR                                                                │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│drift · c                                                                                                             │
+│v2                                                                                                                    │
+│  unpinned                                                                                                            │
+│                                                                                                                      │
+│⚠ production: writes here always open a PR                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c (production)         actions · promote into c · deploy tag · watch · refresh · restart · in flight · quit · ? help
+      enter actions · p promote into c · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help

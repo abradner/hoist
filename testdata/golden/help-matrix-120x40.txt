@@ -32,9 +32,9 @@
 │             │                                              │                                                         │
 │             │                                              │                                                         │
 │             │                                              │                                                         │
-│             │                                              │                                                         │
-│             │                                              │                                                         │
-│             │                                              │                                                         │
-│             │                                              │                                                         │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│counta · app-production                                                                                               │
+│2 images                                                                                                              │
+│  pinned                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env app-prod… actions · promote into app-production · deploy tag · watch · refresh · restart · in flight · quit · ? help
+        enter actions · p promote into · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help

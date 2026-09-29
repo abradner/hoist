@@ -191,6 +191,9 @@ func TestCurrentEnvEmptyRepo(t *testing.T) {
 		t.Errorf("View() lacks the notice:\n%s", m.View())
 	}
 	uitest.Golden(t, "matrix-empty", m.View(), 80, 24)
+	// T3-05 (v2·06b): the empty-matrix guidance at the mockup's own size.
+	m12 := New(&gitops.Repo{Root: "r", Envs: map[string]*gitops.Env{}}, []string{"ghcr.io/"}, config.EnvsConfig{}, nil).SetSize(80, 12)
+	uitest.Golden(t, "matrix-empty", m12.View(), 80, 12)
 }
 
 // TestShiftRRestart proves the write binding's own four-rule test (AGENTS.md §9 entry 13):
@@ -213,15 +216,19 @@ func TestShiftRRestart(t *testing.T) {
 	}
 }
 
+// T3-04/05: the selected env's own name no longer appears as a literal "env <name>" phrase in
+// the footer (the mockups reserve that room for the write verbs instead — TestViewSnapshot's
+// own note); the header's cursor marker is the one place a plain-text golden can still prove
+// which column is selected.
 func TestSelectedEnvIsVisible(t *testing.T) {
 	m := newFixture().SetSize(120, 20)
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, selectedMarker+"A") || !strings.Contains(v, "env a") {
-		t.Errorf("the selected env should be marked in the header and named in the footer:\n%s", v)
+	if !strings.Contains(v, selectedMarker+"A") {
+		t.Errorf("the selected env should be marked in the header:\n%s", v)
 	}
 	m = uitest.Keys(m, update, "right")
 	v = ansi.Strip(m.View())
-	if !strings.Contains(v, selectedMarker+"B") || strings.Contains(v, selectedMarker+"A") || !strings.Contains(v, "env b") {
+	if !strings.Contains(v, selectedMarker+"B") || strings.Contains(v, selectedMarker+"A") {
 		t.Errorf("the marker should follow the cursor to b:\n%s", v)
 	}
 }
@@ -244,9 +251,8 @@ func TestProductionColumnIsMarkedEverywhere(t *testing.T) {
 	}
 	m = uitest.Keys(m, update, "right")
 	v = ansi.Strip(m.View())
-	if !strings.Contains(v, "env b (production)") {
-		t.Errorf("footer lacks the production word with the cursor on b:\n%s", v)
-	}
+	// T3-04/05: the footer's own room goes to the write verbs (TestViewSnapshot's own note);
+	// the notes sentence is what actually carries the production warning to the operator.
 	if !strings.Contains(v, "⚠ b is a production env: writes there always open a PR") {
 		t.Errorf("notes lack the production sentence:\n%s", v)
 	}

@@ -71,14 +71,17 @@ cluster fix moments after it lands, not just after a restart. When something is 
 listed under the table with its step strip and — when it is waiting on you — the exact command:
 
 ```
-╭─ in flight (1) ──────────────────────────────────────────────────────────────╮
-│5pr6sd333t   app-staging → app-production   started 12m ago                   │
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge              │
-│○ argo refresh  ○ argo sync  ○ rollout                                        │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:    hoist approve 5pr6sd333t│
+│in flight · 1                                                                 │
+│5pr6sd333t   app-staging → app-production   started 12m ago                   │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
+│waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
+
+The pane is drawn inside the matrix's own frame (T3-05) rather than as a separate box stacked
+under it — it ends at the same closing border the table does.
 
 That list is re-observed against GitHub and the cluster at boot and on every poll, never read
 from a log; `tab` moves the cursor onto the pane (`↑`/`↓` between several), where `enter` reopens
