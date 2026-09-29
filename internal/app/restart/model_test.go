@@ -98,8 +98,39 @@ func TestScreenShowsTheTargetsAndTheirWarnings(t *testing.T) {
 	if !strings.Contains(v, "unpinned image") {
 		t.Errorf("a mutable tag should be called out:\n%s", v)
 	}
+	// P2-13 (T3 review): pkg/rollout's own literal is "unpinned image(s)" — it cannot import
+	// ui.Plural (§4.3), so this screen corrects it at the render point. One image must never
+	// still show the parenthesized form.
+	if strings.Contains(v, "image(s)") {
+		t.Errorf("view still shows the unfixed \"image(s)\" literal for a single image:\n%s", v)
+	}
 	if f.restarts != 0 {
 		t.Error("nothing may be restarted before the operator confirms")
+	}
+}
+
+// TestFixImageParenPlural exercises the render-point plural fix directly: one image reads
+// "unpinned image", several read "unpinned images", and any other concern sentence — one that
+// does not start with pkg/rollout's own "unpinned image(s) " literal — passes through unchanged.
+func TestFixImageParenPlural(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{
+			"unpinned image(s) ghcr.io/example/web:v1: a replacement pod can pull a different build",
+			"unpinned image ghcr.io/example/web:v1: a replacement pod can pull a different build",
+		},
+		{
+			"unpinned image(s) ghcr.io/example/web:v1, ghcr.io/example/worker:v1: a replacement pod can pull a different build",
+			"unpinned images ghcr.io/example/web:v1, ghcr.io/example/worker:v1: a replacement pod can pull a different build",
+		},
+		{
+			"only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails",
+			"only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails",
+		},
+	}
+	for _, c := range cases {
+		if got := fixImageParenPlural(c.in); got != c.want {
+			t.Errorf("fixImageParenPlural(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -431,5 +462,104 @@ func TestNewRefusesDoWithoutObserve(t *testing.T) {
 	}
 	if cmd := m.Init(); cmd != nil {
 		t.Error("Init on a refused screen must do nothing")
+	}
+}
+
+// TestHomeEndScrollBody is P2-8 from the T3 review: the design's own home/end row was missing
+// on this viewport-backed screen.
+func TestHomeEndScrollBody(t *testing.T) {
+	funcs := Funcs{
+		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
+	m.body.SetContent(strings.Repeat("line\n", 40))
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !m.body.AtBottom() {
+		t.Error("end did not scroll the body to the bottom")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if !m.body.AtTop() {
+		t.Error("home did not scroll the body to the top")
+	}
+}
+
+// TestRRereadsThePlan is P2-8 from the T3 review: the design's own re-read row was missing
+// entirely for this screen. r (and F5/ctrl+r) re-runs Funcs.Read from stateConfirm, going
+// through stateReading and landing back on stateConfirm (or stateFailed) with whatever the
+// cluster answers this time.
+func TestRRereadsThePlan(t *testing.T) {
+	calls := 0
+	funcs := Funcs{
+		Read: func(context.Context, string, []string) (restart.Plan, error) {
+			calls++
+			return onePlan(), nil
+		},
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m, cmd := m.Update(m.Init()())
+	if m.state != stateConfirm {
+		t.Fatalf("setup: state = %v, want stateConfirm", m.state)
+	}
+	if calls != 1 {
+		t.Fatalf("setup: Read called %d times, want 1", calls)
+	}
+	_ = cmd
+
+	m, cmd = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if cmd == nil {
+		t.Fatal("r produced no command")
+	}
+	if m.state != stateReading {
+		t.Fatalf("state after r = %v, want stateReading", m.state)
+	}
+	m, _ = m.Update(cmd())
+	if m.state != stateConfirm {
+		t.Fatalf("state after the re-read landed = %v, want stateConfirm", m.state)
+	}
+	if calls != 2 {
+		t.Errorf("Read called %d times, want 2 (the initial load plus one re-read)", calls)
+	}
+}
+
+// TestRereadRefusedForConstructionMisconfiguration proves reread() cannot bypass New's own
+// Do-without-Observe refusal (FB-L3) — a wiring mistake, not something a fresh Read could ever
+// fix, and re-reading into stateConfirm would let the operator reach enter and start a restart
+// this screen could never observe finishing.
+func TestRereadRefusedForConstructionMisconfiguration(t *testing.T) {
+	funcs := Funcs{
+		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+		Do:   func(context.Context, restart.Plan, time.Time) ([]string, error) { return nil, nil },
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	if m.state != stateFailed || !m.refused {
+		t.Fatalf("setup: state=%v refused=%v, want stateFailed/true", m.state, m.refused)
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if cmd != nil {
+		t.Error("r produced a command against a construction-refused screen")
+	}
+	if m.state != stateFailed {
+		t.Errorf("state after r = %v, want stateFailed (unchanged)", m.state)
+	}
+}
+
+// TestDUnboundDoesNotScrollTheBody is P2-6 from the T3 review: the body viewport was left on
+// viewport.New()'s bubbles-library default keymap, which binds bare "d" to half-page down —
+// the registry lists "d" as unbound on this screen.
+func TestDUnboundDoesNotScrollTheBody(t *testing.T) {
+	funcs := Funcs{
+		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+	}
+	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
+	m.body.SetContent(strings.Repeat("line\n", 40))
+
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if got := m2.body.YOffset(); got != 0 {
+		t.Errorf("\"d\" scrolled the body: YOffset=%d, want 0", got)
+	}
+	// Positive control: pgdown must still scroll.
+	m3, _ := m2.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := m3.body.YOffset(); got == 0 {
+		t.Error("pgdown did not scroll the body — the positive control is broken")
 	}
 }

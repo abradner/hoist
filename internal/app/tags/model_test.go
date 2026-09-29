@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/internal/ui/uitest"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/registry"
@@ -182,6 +183,43 @@ func TestMappedRepoFallsBackToCreatedWhenForgeLookupFailsAtRuntime(t *testing.T)
 	}
 }
 
+// TestHomeEndJumpTheListCursor is P2-7 from the T3 review: the registry has always listed
+// Home/End on this list ("top"/"bottom"), but only the commit-detail reader's own body handled
+// them — the list itself had no case at all.
+func TestHomeEndJumpTheListCursor(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	rows := m.filtered()
+	if len(rows) < 2 {
+		t.Fatalf("test setup: fixture has %d rows, want at least 2", len(rows))
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m.selectedTag != rows[len(rows)-1].Tag {
+		t.Errorf("end: selection = %q, want %q (the last row)", m.selectedTag, rows[len(rows)-1].Tag)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if m.selectedTag != rows[0].Tag {
+		t.Errorf("home: selection = %q, want %q (the first row)", m.selectedTag, rows[0].Tag)
+	}
+}
+
+// TestKeyScreenNamesTheReaderWhileReading is P2-7 from the T3 review: KeyScreen always
+// answered ScrTags, even while m.reading showed the commit-detail pane — so ? named the list's
+// own keys (Right, Filter, Tab…), none of which do anything there, instead of the reader's
+// actual keys (Home/End/PgUp/PgDn/Left/Enter).
+func TestKeyScreenNamesTheReaderWhileReading(t *testing.T) {
+	m := historyModel(t, fourteenAhead, liveAge34Days)
+	if m.KeyScreen() != keys.ScrTags {
+		t.Fatalf("KeyScreen() = %v before reading, want ScrTags", m.KeyScreen())
+	}
+	m = uitest.Keys(m, updateFn, "tab", "right")
+	if !m.reading {
+		t.Fatal("test setup: tab, right did not enter reading mode")
+	}
+	if m.KeyScreen() != keys.ScrTagsReader {
+		t.Errorf("KeyScreen() while reading = %v, want ScrTagsReader", m.KeyScreen())
+	}
+}
+
 func TestCursorMoveSelectsNextRow(t *testing.T) {
 	m := readyModel(t, "app-staging", true, false)
 	if m.selectedTag != "v3" {
@@ -321,7 +359,7 @@ func TestUnmappedLazyOrderingMarksUnevaluatedRows(t *testing.T) {
 	if !strings.Contains(got, "haven't been evaluated yet") {
 		t.Fatalf("view should honestly mark that rows outside the window remain unevaluated, rather than silently claim a complete Created-sort:\n%s", got)
 	}
-	if want := fmt.Sprintf("%d tag(s)", n-page); !strings.Contains(got, want) {
+	if want := ui.Plural(n-page, "tag"); !strings.Contains(got, want) {
 		t.Fatalf("%s (everything outside the %d-row window) should be counted as unevaluated:\n%s", want, page, got)
 	}
 }

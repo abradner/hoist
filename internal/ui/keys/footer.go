@@ -23,7 +23,7 @@ type Hint struct {
 }
 
 // Footer lays out one status-bar line: status on the left, hints on the right, joined by
-// " · " in the order given (train3-design.md, "Footer rules"). help, when true, appends the ?
+// " · " in the order given (the audit doc, "Footer rules"). help, when true, appends the ?
 // hint itself — the caller never builds one — so "? help" becomes "? more" once anything else
 // is dropped is Footer's own bookkeeping rather than something every call site has to get
 // right (spec wins over any mockup still showing "? help" once a screen is that narrow, this
@@ -66,7 +66,7 @@ type hintItem struct {
 }
 
 // pinned reports whether a hint's binding is exempt from both shortening and dropping — esc
-// and help, by Name, per train3-design.md's "esc and ? are never dropped".
+// and help, by Name, per the audit doc's "esc and ? are never dropped".
 func pinned(b Binding) bool {
 	return b.Name == Esc.Name || b.Name == Help.Name
 }

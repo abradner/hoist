@@ -247,10 +247,10 @@ func TestHistoryPaneShowsTheDeltaUnderTheCursor(t *testing.T) {
 		t.Fatal("esc must return to the list, not leave the picker")
 	}
 
-	// space reviews the change, carrying the loaded delta and the declared reference.
+	// enter reviews the change, carrying the loaded delta and the declared reference.
 	_, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
-		t.Fatal("space emitted nothing")
+		t.Fatal("enter emitted nothing")
 	}
 	msg, ok := cmd().(SelectedMsg)
 	if !ok || msg.Tag != "v3" || msg.Delta == nil || len(msg.Delta.Commits) != 14 || msg.Declared == nil || msg.Declared.Ref.Tag != "v1" {
@@ -329,7 +329,7 @@ func TestReadingScrollsALongBody(t *testing.T) {
 
 	m = uitest.Keys(m, updateFn, "end")
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "add_rate_limits") || !strings.Contains(v, "body 100%") {
-		t.Fatalf("G must reach the migration list at the end of the body:\n%s", v)
+		t.Fatalf("end must reach the migration list at the end of the body:\n%s", v)
 	}
 	m = uitest.Keys(m, updateFn, "home")
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "body line 01") {
@@ -397,13 +397,13 @@ func updateFn(m Model, msg tea.Msg) (Model, tea.Cmd) { return m.Update(msg) }
 
 // The confirm screen leads with the history it is handed and never refetches it; leaving the
 // picker while the cursor tag's delta is still loading would cancel that load and show the
-// no-history form for a mapped image. space waits until the answer is in.
+// no-history form for a mapped image. enter waits until the answer is in.
 func TestSpaceWaitsForTheCursorTagsHistory(t *testing.T) {
 	m := historyModel(t, fourteenAhead, liveAge34Days)
 	m.deltas["v3"] = history.State{} // asked, not answered — a fetch in flight
 	m, cmd := m.Update(uitest.Key("enter"))
 	if cmd != nil {
-		t.Fatalf("space emitted %T while the history was pending", cmd())
+		t.Fatalf("enter emitted %T while the history was pending", cmd())
 	}
 	if !strings.Contains(m.notice, "still reading v3's commits") {
 		t.Fatalf("notice = %q", m.notice)
@@ -412,7 +412,7 @@ func TestSpaceWaitsForTheCursorTagsHistory(t *testing.T) {
 	d, _ := fourteenAhead(context.Background(), image.Ref{}, image.Ref{Tag: "v3"})
 	m.deltas["v3"] = history.State{Loaded: true, Delta: d}
 	if _, cmd = m.Update(uitest.Key("enter")); cmd == nil {
-		t.Fatal("space emitted nothing once the history had loaded")
+		t.Fatal("enter emitted nothing once the history had loaded")
 	} else if msg, ok := cmd().(SelectedMsg); !ok || msg.Delta == nil {
 		t.Fatalf("got %+v", cmd())
 	}

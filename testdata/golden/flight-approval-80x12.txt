@@ -1,8 +1,8 @@
 ╭─ hoist · promotion · waiting for approval ───────────────────────────────────╮
 │abcd1234   app-staging → app-production                     started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│● branch  ● commit  ● push  ● PR #103  ● CI  ◍ approval  ○ merge              │
-│○ argo refresh  ○ argo sync  ○ rollout                                        │
+│✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge              │
+│· argo refresh  · argo sync  · rollout                                        │
 │    no approval comment yet                                                   │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │waiting for an approver to comment `hoist approve abcd1234` on PR #103 · o    │

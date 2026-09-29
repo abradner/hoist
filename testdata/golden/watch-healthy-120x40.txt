@@ -3,7 +3,7 @@
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │sync Synced   health Healthy   revision 0123456789ab   operation Succeeded   reconciled 2m ago                        │
 │                                                                                                                      │
-│Deployment web  rolled out · 2 replica(s)                                                                             │
+│Deployment web  rolled out · 2 replicas                                                                               │
 │    deployment "web" successfully rolled out                                                                          │
 │    container web=ghcr.io/example/web:v1.4.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  │
 │                                                                                                                      │

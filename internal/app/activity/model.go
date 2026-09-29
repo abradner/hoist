@@ -20,13 +20,19 @@ import (
 type BackMsg struct{}
 
 // keyMap is this screen's own key vocabulary on top of the viewport's own paging bindings
-// (newViewport).
+// (newViewport). Home/End (P2-8, T3 review) jump the log to its ends — the design's own row
+// for this screen, missing until now.
 type keyMap struct {
-	Back key.Binding
+	Back      key.Binding
+	Home, End key.Binding
 }
 
 func defaultKeyMap() keyMap {
-	return keyMap{Back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))}
+	return keyMap{
+		Back: keys.Esc.Bubbles(),
+		Home: keys.Home.Bubbles(),
+		End:  keys.End.Bubbles(),
+	}
 }
 
 // Model is the activity log screen (l on the matrix and, per the proposed keymap, every other
@@ -63,14 +69,7 @@ func New(log Log, now func() time.Time) Model {
 // newViewport binds only the paging keys, the same set config.Model's own body uses.
 func newViewport() viewport.Model {
 	v := viewport.New()
-	v.KeyMap = viewport.KeyMap{
-		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
-		PageUp:       key.NewBinding(key.WithKeys("pgup")),
-		HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
-		HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
-		Down:         key.NewBinding(key.WithKeys("down", "j")),
-		Up:           key.NewBinding(key.WithKeys("up", "k")),
-	}
+	v.KeyMap = keys.ViewportKeyMap()
 	v.MouseWheelEnabled = false
 	return v
 }
@@ -91,6 +90,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	// otherwise still be the zero-sized one New built (config.Model's own comment on the same
 	// gotcha, Copilot #124).
 	m = m.layout()
+	if key.Matches(kp, m.keys.Home) {
+		m.body.GotoTop()
+		return m, nil
+	}
+	if key.Matches(kp, m.keys.End) {
+		m.body.GotoBottom()
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.body, cmd = m.body.Update(kp)
 	return m, cmd
@@ -123,10 +130,20 @@ func (m Model) layout() Model {
 	return m
 }
 
+// pluralEntries is ui.Plural's own "%ss" rule corrected for entry's irregular plural
+// ("entries", never "entrys") — the one noun on this screen ui.Plural cannot be used for as-is
+// (P2-13, T3 review: this always read "N entries", even "1 entries").
+func pluralEntries(n int) string {
+	if n == 1 {
+		return "1 entry"
+	}
+	return fmt.Sprintf("%d entries", n)
+}
+
 // View renders the frame: the title, the log in its viewport, and the footer.
 func (m Model) View() string {
 	m = m.layout()
-	status := fmt.Sprintf("%d entries", m.log.Len())
+	status := pluralEntries(m.log.Len())
 	title := fmt.Sprintf("hoist · activity · %s", status)
 	hints := []keys.Hint{{B: keys.Esc, Long: "esc back", Pri: 0}}
 	return ui.Frame{

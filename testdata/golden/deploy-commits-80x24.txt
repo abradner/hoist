@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │writes 3 image references in 1 file · digest dddddddddddd      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-enter deploy · d yaml · ↑/↓ commits · r · l activity · esc back to tags · ? help
+  enter deploy · d yaml · ↑/↓ · r fresh · l activity · esc back to tags · ? help

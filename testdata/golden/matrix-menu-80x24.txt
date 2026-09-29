@@ -6,14 +6,14 @@
 │──────────────┼──────────────────────┼─────────────────────┼──────────────    │
 │ ▸ absent     │ v1            pinned │                     │ v9    pinned     │
 │ drift        │ v1          unpinned │ v2           pinned │ v2  unpinned     │
-╭─ absent · c ⚠ ───────────────────────────────────────────────────────────────╮
-│▸ p        promote into c from…                                               │
-│  t        deploy a tag to c                                                  │
-│  w        watch the rollout                                                  │
-│  shift+r  restart absent in c                                                │
-│                                                                              │
-│⚠ production: every write opens a PR and waits for an approver's `hoist appro…│
-╰──────────────────────────────────────────────────────────────────────────────╯
+│ empty ╭─ absent · c ⚠ ───────────────────────────────────────────────╮       │
+│ mixedt│▸ p        promote into c from…                               │       │
+│ multi │  t        deploy a tag to c                                  │       │
+│ pinned│  w        watch the rollout                                  │ed     │
+│ sideca│  shift+r  restart absent in c                                │       │
+│ thirdp│                                                              │al     │
+│       │⚠ production: every write opens a PR, gated on `hoist approve`│       │
+│       ╰──────────────────────────────────────────────────────────────╯       │
 │              │                      │                     │                  │
 │              │                      │                     │                  │
 │              │                      │                     │                  │
@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │⚠ c is a production env: writes there always open a PR                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-        actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more

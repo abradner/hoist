@@ -218,9 +218,9 @@ func (m Model) countdownText(s flight.Summary) string {
 // hand. Kept as a thin local alias rather than rewriting every call site in this file.
 func approvalCopy(s flight.Summary) (text, command string) { return flight.ApprovalCopy(s) }
 
-// styleStrip renders the step strip with the shared ui.Step glyph set (T3-05: "one glyph set",
-// retiring this pane's own ●/◍/✗/○ in favour of the same ✓/◐/·/✗/⏸ set flight.Model itself
-// will move to in T3-06) — derived from each Row's own Glyph rather than parsing
+// styleStrip renders the step strip with the shared ui.Step glyph set (T3-05/T3-06: "one glyph
+// set" — flight.RowState is the one mapping from a Row's Glyph to ui.StepState, shared with
+// flight.Summary.StepStrip) — derived from each Row's own Glyph rather than parsing
 // Summary.StepStrip()'s pre-rendered string, since the mapping needs the state, not the glyph
 // character. When the whole pipeline does not fit the width, it breaks after the merge (or the
 // direct push) so the post-merge steps sit on their own line, as the mockup draws them, rather
@@ -235,7 +235,7 @@ func (m Model) styleStrip(s flight.Summary) string {
 		if r.Step == engine.StepPROpened && s.PR != nil && s.PR.Number > 0 {
 			labels[i] = fmt.Sprintf("PR #%d", s.PR.Number)
 		}
-		state := stepState(r)
+		state := flight.RowState(r)
 		plain[i] = ui.StepGlyph(state) + " " + labels[i]
 		styled[i] = m.styles.Step(state, labels[i])
 		width += ansi.StringWidth(plain[i]) + 2
@@ -248,24 +248,6 @@ func (m Model) styleStrip(s flight.Summary) string {
 		}
 	}
 	return strings.Join(styled, "  ")
-}
-
-// stepState maps a flight.Row's own Glyph string to the shared ui.StepState enum — the one
-// place that translation happens, so the matrix's pane and (once T3-06 lands) the flight
-// screen itself read the same five states off the same Row data.
-func stepState(r flight.Row) ui.StepState {
-	switch r.Glyph {
-	case flight.GlyphDone:
-		return ui.StepDone
-	case flight.GlyphActive:
-		return ui.StepActive
-	case flight.GlyphWaiting:
-		return ui.StepWaiting
-	case flight.GlyphBlocked:
-		return ui.StepFailed
-	default:
-		return ui.StepPending
-	}
 }
 
 // compactLine is the narrow form: "⟳ 5pr6sd333t → app-production   blocked on approval · 12m".

@@ -21,7 +21,7 @@ func fg(s lipgloss.Style) string {
 }
 
 // TestPaletteRolesDistinct asserts T3-02's own reason for existing: Info, Warn and Production
-// used to all resolve to the same amber (train3-design.md's "today Notice, Warn and
+// used to all resolve to the same amber (the audit doc's "today Notice, Warn and
 // Production all share one amber"). Each must now render a different foreground, in both a
 // dark and a light terminal, or the visual distinction the redesign promises does not exist.
 func TestPaletteRolesDistinct(t *testing.T) {

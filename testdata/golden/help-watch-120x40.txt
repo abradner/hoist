@@ -10,7 +10,6 @@
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                                                                                                      │
 │                          ╭─ help · watch ────────────────────────────────────────────────╮                           │
 │                          │NAVIGATE                       │                               │                           │
 │                          │esc      back                  │                               │                           │
@@ -18,13 +17,14 @@
 │                          │↓        scroll                │                               │                           │
 │                          │pgup     page                  │                               │                           │
 │                          │pgdn     page                  │                               │                           │
+│                          │home     top                   │                               │                           │
+│                          │end      bottom                │                               │                           │
 │                          │VIEW                           │ APP                           │                           │
 │                          │r        refresh               │ ctrl+c   quit now             │                           │
 │                          │l        activity log          │                               │                           │
 │                          │                                                               │                           │
 │                          │a capital counts as shift                                      │                           │
 │                          ╰───────────────────────────────────────────────────────────────╯                           │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

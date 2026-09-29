@@ -7,6 +7,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -66,35 +67,39 @@ func Summarize(s engine.PromotionState, done bool, statuses []engine.StepStatus,
 	return out
 }
 
-// Compact glyphs for the one-line step row the pane draws: done, active or waiting, blocked,
-// not reached — the same states Row.Glyph carries, in a form that reads as a strip.
-const (
-	StripDone       = "●"
-	StripActive     = "◍"
-	StripBlocked    = "✗"
-	StripNotReached = "○"
-)
+// RowState maps a Row's own Glyph string to the shared ui.StepState enum (internal/ui/glyph.go)
+// — the one place that translation happens, so every step strip in this app (this package's own
+// compact StepStrip, and the matrix's in-flight pane) reads the same five states off the same
+// Row data rather than each drawing its own glyph set (AGENTS.md §9's "one glyph set" note,
+// P2-13 in the T3 review).
+func RowState(r Row) ui.StepState {
+	switch r.Glyph {
+	case GlyphDone:
+		return ui.StepDone
+	case GlyphActive:
+		return ui.StepActive
+	case GlyphWaiting:
+		return ui.StepWaiting
+	case GlyphBlocked:
+		return ui.StepFailed
+	default:
+		return ui.StepPending
+	}
+}
 
-// StepStrip is the whole pipeline on one line: "● branch ● commit ● push ● PR #103 ● CI ◍
-// approval ○ merge ○ argo refresh ○ argo sync ○ rollout". The PR step names its number once
-// one exists.
+// StepStrip is the whole pipeline on one line: "✓ branch ✓ commit ✓ push ✓ PR #103 ◐ CI ⏸
+// approval · merge · argo refresh · argo sync · rollout" — ui.StepGlyph's own set (T3-06),
+// retiring this package's former ●/◍/✗/○ strip glyphs, which duplicated rows.go's own Glyph
+// characters under a third, inconsistent set (P2-13, T3 review). The PR step names its number
+// once one exists.
 func (s Summary) StepStrip() string {
 	parts := make([]string, 0, len(s.Rows))
 	for _, r := range s.Rows {
-		glyph := StripNotReached
-		switch r.Glyph {
-		case GlyphDone:
-			glyph = StripDone
-		case GlyphActive, GlyphWaiting:
-			glyph = StripActive
-		case GlyphBlocked:
-			glyph = StripBlocked
-		}
 		label := Label(r.Step)
 		if r.Step == engine.StepPROpened && s.PR != nil && s.PR.Number > 0 {
 			label = fmt.Sprintf("PR #%d", s.PR.Number)
 		}
-		parts = append(parts, glyph+" "+label)
+		parts = append(parts, ui.StepGlyph(RowState(r))+" "+label)
 	}
 	return strings.Join(parts, "  ")
 }

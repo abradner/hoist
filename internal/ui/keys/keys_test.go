@@ -109,7 +109,7 @@ func TestNoBareCapital(t *testing.T) {
 	}
 }
 
-// TestWriteMatches drives the four-rule Matches test from train3-design.md directly, one
+// TestWriteMatches drives the four-rule Matches test from the audit doc directly, one
 // tea.KeyPressMsg at a time, rather than through key.Matches (which cannot see a write binding
 // at all — Binding.Bubbles only exists for components that need a fixed key.Binding).
 func TestWriteMatches(t *testing.T) {

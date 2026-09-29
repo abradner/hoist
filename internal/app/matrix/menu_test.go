@@ -116,7 +116,7 @@ func TestRetiredKeysUnbound(t *testing.T) {
 
 // TestCursorCellStyled proves the cell cursor is drawn with the shared Cursor style at exactly
 // the (row, col) intersection — the one thing about it that only shows as colour, since
-// goldens are ANSI-stripped (train3-design.md's own "Facts" section) and so cannot catch a
+// goldens are ANSI-stripped (the audit doc's own "Facts" section) and so cannot catch a
 // regression here on their own.
 func TestCursorCellStyled(t *testing.T) {
 	m := newFixture().SetStyles(ui.NewStyles(true)).SetSize(80, 24)

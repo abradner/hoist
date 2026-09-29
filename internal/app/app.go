@@ -171,7 +171,7 @@ type Model struct {
 	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
 	// records whether the terminal granted it). Its one use is a single line in T3-03's help
 	// overlay ("caps lock ignored" vs "a capital counts as shift"), never passed down into any
-	// value-typed screen (train3-design.md's own "needs your decision", resolved as: match
+	// value-typed screen (the audit doc's own "needs your decision", resolved as: match
 	// without tracking state per-screen, record once here for that one line instead).
 	kbd tea.KeyboardEnhancementsMsg
 
@@ -184,7 +184,7 @@ type Model struct {
 	helpOpen   bool
 	helpScreen keys.Screen
 
-	// hint is the transient "q quits from the matrix · esc goes back" row (train3-design.md's
+	// hint is the transient "q quits from the matrix · esc goes back" row (the audit doc's
 	// own T3-03 decision): unlike the activity row (Model.activity), it is not an entry in the
 	// log — it is cleared unconditionally at the top of every keypress, so it survives exactly
 	// one more key after the one that set it, then disappears whether or not that next key did
@@ -450,7 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scope.After(m.matrixTick, time.Second, matrixCountdownTick{})
 	case tea.KeyboardEnhancementsMsg:
 		// Skipped by internal/parity's parser (tea.* messages, not a pkg.XMsg case), so this
-		// needs no registry row (train3-design.md's own acceptance check). m.kbd's only
+		// needs no registry row (the audit doc's own acceptance check). m.kbd's only
 		// consumer is T3-03's help overlay.
 		m.kbd = msg
 		return m, nil
@@ -523,7 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "l":
 			// The activity log, from any screen that has opted into the registry (keyed) —
-			// generic root-level handling, not a per-screen message (train3-design.md's own
+			// generic root-level handling, not a per-screen message (the audit doc's own
 			// "the root intercepts ?, l and q as keys, not as *Msgs"). Since T3-04, matrixScreen
 			// implements keyed too, so this now covers the matrix itself as well — its own
 			// former l handling (matrix.OpenActivityMsg) is retired.
@@ -1227,13 +1227,26 @@ func (m Model) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
-	// T3-01: ask every run for the one Kitty-protocol feature that can tell a caps-lock letter
+	// T3-01: ask every run for the Kitty-protocol features that can tell a caps-lock letter
 	// apart from a real shift (internal/ui/keys.Binding.Matches, point 3) — a terminal that
 	// doesn't support it, or hasn't opted in, just never sends a KeyboardEnhancementsMsg back,
-	// and the legacy path (point 4 of Matches) is what every terminal runs today regardless
-	// (train3-design.md's own "Modifier" note). Requesting it costs nothing on a terminal that
-	// ignores it (tmux, Terminal.app default sessions verified in that note).
+	// and the legacy path (point 4 of Matches) is what every terminal runs today regardless.
+	// Requesting it costs nothing on a terminal that ignores it (tmux, Terminal.app default
+	// sessions verified during design).
+	//
+	// ReportAllKeysAsEscapeCodes alone (flag 8) is not enough: the kitty protocol only
+	// includes the shifted-key component of a CSI-u sequence when ReportAlternateKeys (flag
+	// 4) is also requested. Without it, a terminal reporting shift+/ sends only the base
+	// codepoint '/' plus the Shift modifier, and the decoder upper-cases '/' — which is still
+	// '/' — instead of substituting the shifted key '?'. That broke '?' (open help), ':' (the
+	// digest-override input) and '@' on every kitty-protocol terminal, found in review before
+	// the T3 chain shipped. ReportAssociatedText (flag 16) is requested alongside it so a
+	// terminal that prefers to report the literal produced text (rather than a codepoint the
+	// client must reinterpret) has a route to do that too; the decoder prefers Text when the
+	// terminal sends it. See internal/app/kitty_decode_test.go for the byte-level regression.
 	v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
+	v.KeyboardEnhancements.ReportAlternateKeys = true
+	v.KeyboardEnhancements.ReportAssociatedText = true
 	return v
 }
 
@@ -1247,7 +1260,7 @@ func (m Model) openQuitConfirm() (Model, tea.Cmd) {
 	m.quitConfirm = huh.NewConfirm().Title(title).Value(&m.quitConfirmValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
 	// (AGENTS.md §9 entry 6).
-	m.quitConfirm.WithKeyMap(huh.NewDefaultKeyMap())
+	m.quitConfirm.WithKeyMap(keys.HuhKeyMap())
 	m.quitConfirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.quitConfirm.WithWidth(m.dialogWidth())
 	return m, tea.Batch(m.quitConfirm.Init(), m.quitConfirm.Focus())
@@ -1516,7 +1529,7 @@ func (m Model) top() Screen {
 }
 
 // updateHelp handles every key while the help overlay is open: esc, ? and enter all close it
-// (train3-design.md's T3-03 scope); ctrl+c still quits immediately, exactly as it does
+// (the audit doc's T3-03 scope); ctrl+c still quits immediately, exactly as it does
 // everywhere else; every other key is swallowed rather than reaching the screen underneath,
 // so the overlay behaves like a real modal rather than a transparent one that happens to also
 // draw a box.

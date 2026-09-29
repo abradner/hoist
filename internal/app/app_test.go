@@ -332,6 +332,21 @@ func TestViewSnapshot(t *testing.T) {
 	uitest.Golden(t, "matrix-root", m.View().Content, width, height)
 }
 
+// TestMatrixStateWordsNeverClippedAt80 is P1-4 from the T3 review, at the level a golden read
+// catches by eye: every cell's state word — the cell's own meaning (#118) — must appear whole
+// at 80 columns, never cut into "pinn…"/"extern…"/"spl…" by fitWidths under-budgeting the
+// grid's own column separators (internal/app/matrix/grid_test.go has the unit-level proof
+// against fitWidths directly).
+func TestMatrixStateWordsNeverClippedAt80(t *testing.T) {
+	m := sized(t)
+	got := plain(m)
+	for _, word := range []string{"pinned", "unpinned", "external", "split"} {
+		if !strings.Contains(got, word) {
+			t.Errorf("state word %q not shown whole at 80 columns:\n%s", word, got)
+		}
+	}
+}
+
 func TestQuitKeys(t *testing.T) {
 	for _, k := range []tea.KeyPressMsg{{Code: 'q', Text: "q"}, {Code: 'c', Mod: tea.ModCtrl}} {
 		_, cmd := press(t, sized(t), k)
@@ -370,13 +385,16 @@ func TestHelpToggleKeepsHeight(t *testing.T) {
 	if n := len(strings.Split(v, "\n")); n != height {
 		t.Errorf("with help: %d lines, want %d", n, height)
 	}
-	// The two-column help layout (T3-04) truncates a long Desc to its own column width, so the
-	// substring checked here is short enough to survive that.
-	if !strings.Contains(v, "promote into the curs") {
-		t.Errorf("help line missing:\n%s", v)
+	// P1-3 (T3 review): the two-column help layout (T3-04) truncates a Desc to its own column
+	// width with no ellipsis and no wrap, so every registry Desc must be short enough to fit
+	// whole — this asserts the complete word, which a truncating regression would cut (an
+	// earlier version of this test asserted the truncated "promote into the curs", which
+	// archived the defect instead of catching it).
+	if !strings.Contains(v, "promote into column") {
+		t.Errorf("help line missing or cut:\n%s", v)
 	}
 	m, _ = press(t, m, tea.KeyPressMsg{Code: '?', Text: "?"})
-	if v := plain(m); strings.Contains(v, "promote into the curs") {
+	if v := plain(m); strings.Contains(v, "promote into column") {
 		t.Error("help line still shown after second ?")
 	}
 }
@@ -1259,7 +1277,7 @@ func TestFailedStartThenOverrideLoadsHistory(t *testing.T) {
 		t.Fatalf("top screen after the failed build is %T, want the plan screen", m2.stack[1])
 	}
 
-	// o, a valid override, enter: the operator's own follow-up, which re-loads history through
+	// e, a valid override, enter: the operator's own follow-up, which re-loads history through
 	// the SAME scope this screen has held since before Enter (only its ID changes).
 	tm = tea.Model(m2)
 	tm, _ = tm.Update(uitest.Key("e"))
@@ -3301,9 +3319,17 @@ func TestOpenDeployPlumbsPlannedViewToStartRequest(t *testing.T) {
 // TestViewRequestsAllKeysAsEscapeCodes: T3-01 asks every render for the Kitty-protocol feature
 // that can tell a real shift+letter from a caps-lock letter — the one signal
 // internal/ui/keys.Binding.Matches needs to reject caps lock on a terminal that grants it
-// (train3-design.md's "Modifier" note). A terminal that doesn't support the request, or
+// (the audit doc's "Modifier" note). A terminal that doesn't support the request, or
 // doesn't grant it, simply never sends a KeyboardEnhancementsMsg back — see
 // TestKeyboardEnhancementsRecorded below for what happens when it does.
+//
+// ReportAllKeysAsEscapeCodes alone is not sufficient: a kitty-protocol terminal only includes
+// the shifted-key component of a CSI-u sequence when ReportAlternateKeys is also requested,
+// and without it shift+/, shift+; and shift+2 decode to the unshifted "/", ";" and "2" instead
+// of "?", ":" and "@" (found in review; see internal/app/kitty_decode_test.go for the
+// byte-level proof). ReportAssociatedText is requested too so a terminal that reports literal
+// text directly has a route to do that. All three are asserted here so a regression that drops
+// either of the two later flags is caught the same way a regression dropping the first was.
 func TestViewRequestsAllKeysAsEscapeCodes(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -3311,13 +3337,19 @@ func TestViewRequestsAllKeysAsEscapeCodes(t *testing.T) {
 	if !v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes {
 		t.Error("View did not request KeyboardEnhancements.ReportAllKeysAsEscapeCodes")
 	}
+	if !v.KeyboardEnhancements.ReportAlternateKeys {
+		t.Error("View did not request KeyboardEnhancements.ReportAlternateKeys — shifted punctuation (?, :, @) will misdecode")
+	}
+	if !v.KeyboardEnhancements.ReportAssociatedText {
+		t.Error("View did not request KeyboardEnhancements.ReportAssociatedText")
+	}
 }
 
 // TestKeyboardEnhancementsRecorded: the root stores whatever the terminal answers, for the one
 // consumer that needs it later (T3-03's help overlay line, "caps lock ignored" vs "a capital
 // counts as shift") — it is not itself a registry row, since internal/parity's parser only
 // collects `case pkg.XMsg:` from app.go and explicitly skips tea.* messages
-// (train3-design.md's "Parity and docs: parity has no change").
+// (the audit doc's "Parity and docs: parity has no change").
 func TestKeyboardEnhancementsRecorded(t *testing.T) {
 	m := sized(t)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
@@ -3441,7 +3473,7 @@ func TestQuitHintClearsOnNextKey(t *testing.T) {
 // at both terminal sizes every screen is goldened at (AGENTS.md §4.8) — compared by hand against
 // the approved v2·03 mockup's structure (NAVIGATE/ACT/VIEW/APP columns, the "shift+ keys always
 // ask" line) in this PR's own report, since no mockup fixture exists for these four screens
-// (train3-design.md's T3-03 scope: only help-matrix, in T3-04, gets a mockup diff).
+// (the audit doc's T3-03 scope: only help-matrix, in T3-04, gets a mockup diff).
 func TestHelpOverlayGoldens(t *testing.T) {
 	sizes := []struct{ w, h int }{{80, 24}, {120, 40}}
 
@@ -3646,7 +3678,7 @@ func TestEscInHelpClosesOnlyHelp(t *testing.T) {
 
 // TestLOpensActivityFromWatch: l opens the activity log from the watch screen (the proposed
 // keymap's "l activity log everywhere"), handled generically at the root for any keyed screen
-// rather than a per-screen message (train3-design.md's own scope note).
+// rather than a per-screen message (the audit doc's own scope note).
 func TestLOpensActivityFromWatch(t *testing.T) {
 	tm := openWatchScreenForTest(t).(Model).note(activity.Info, "something happened", "", "")
 	var tmodel tea.Model = tm

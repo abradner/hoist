@@ -48,8 +48,9 @@ func TestLongErrorFullInActivityView(t *testing.T) {
 // rendering by accident.
 func TestLinesEmptyLogSaysSo(t *testing.T) {
 	lines := Lines(Log{}, fixedNow(time.Now()), 80)
-	if len(lines) != 1 || lines[0] != "nothing yet" {
-		t.Fatalf("Lines(empty) = %v, want exactly [\"nothing yet\"]", lines)
+	const want = "nothing yet — promotions, deploys, restarts and abandons show up here"
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("Lines(empty) = %v, want exactly [%q]", lines, want)
 	}
 }
 

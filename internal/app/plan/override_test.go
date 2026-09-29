@@ -61,7 +61,7 @@ func typeInto(m Model, s string) Model {
 
 const overrideDigest = "sha256:c0ffee0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
-// TestOverrideGestureRebuildsThePlan: o, a pinned reference, enter — the fake resolver is
+// TestOverrideGestureRebuildsThePlan: e, a pinned reference, enter — the fake resolver is
 // handed the override for the hovered repo, the plan is rebuilt with it, and the row names
 // override as its source, the word the CLI's Resolution section prints (#102).
 func TestOverrideGestureRebuildsThePlan(t *testing.T) {
@@ -72,7 +72,7 @@ func TestOverrideGestureRebuildsThePlan(t *testing.T) {
 	}
 	m = uitest.Keys(m, updateFn, "e")
 	if !m.overriding {
-		t.Fatal("o did not open the override dialog")
+		t.Fatal("e did not open the override dialog")
 	}
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "override digest") || !strings.Contains(v, hovered.Repo+"=") {
 		t.Fatalf("the dialog must be up, pre-filled with the hovered repo:\n%s", v)

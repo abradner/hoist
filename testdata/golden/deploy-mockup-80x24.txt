@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │writes 3 image references in 1 file · digest 333333333333      d  see the yaml│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-            enter deploy · d yaml · shift+d direct · ↑/↓ · r · esc back · ? more
+      enter deploy · d yaml · shift+d direct · ↑/↓ · r fresh · esc back · ? more

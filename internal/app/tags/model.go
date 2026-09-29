@@ -659,6 +659,22 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.Review):
 		return m.selectCurrent()
+	case key.Matches(msg, m.keys.Home):
+		// P2-7 (T3 review): the registry has always listed Home/End on this list ("top"/
+		// "bottom"), but only updateReading's own commit-detail body handled them — the list
+		// itself had no case at all. moveCursor's own clamp (idx<0 -> 0) does the actual "jump
+		// to top" work; a delta at least as negative as the current index always lands there.
+		if m.focus == focusCommits {
+			m.commitIdx = 0
+			return m, nil
+		}
+		return m.moveCursor(-len(m.filtered()))
+	case key.Matches(msg, m.keys.End):
+		if m.focus == focusCommits {
+			m.commitIdx = max(len(m.currentCommits())-1, 0)
+			return m, nil
+		}
+		return m.moveCursor(len(m.filtered()))
 	}
 	return m, nil
 }
@@ -692,10 +708,10 @@ func (m Model) reload() (Model, tea.Cmd) {
 func newBodyViewport() viewport.Model {
 	v := viewport.New()
 	v.KeyMap = viewport.KeyMap{
-		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
-		PageUp:       key.NewBinding(key.WithKeys("pgup")),
-		HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
-		HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
+		PageDown:     keys.PgDn.Bubbles(),
+		PageUp:       keys.PgUp.Bubbles(),
+		HalfPageDown: keys.HalfPageDown.Bubbles(),
+		HalfPageUp:   keys.HalfPageUp.Bubbles(),
 	}
 	v.MouseWheelEnabled = false
 	return v
@@ -1079,8 +1095,16 @@ func (m Model) View() string {
 
 func (m Model) title() string { return fmt.Sprintf("hoist · tags · %s", m.target) }
 
-// KeyScreen implements the root's keyed interface (internal/app/screen.go).
-func (m Model) KeyScreen() keys.Screen { return keys.ScrTags }
+// KeyScreen implements the root's keyed interface (internal/app/screen.go). P2-7 (T3 review):
+// this always answered ScrTags, even while m.reading showed the commit-detail pane — so ? (the
+// help overlay) named the list's own keys (Right, Filter, Tab…) while none of them did
+// anything and the reader's actual keys (Home/End/PgUp/PgDn/Left/Enter) were nowhere on it.
+func (m Model) KeyScreen() keys.Screen {
+	if m.reading {
+		return keys.ScrTagsReader
+	}
+	return keys.ScrTags
+}
 
 // metaSection is the frame's first section: the repo and target, what the env declares
 // today and for how long, the staging note, and the filter line.
@@ -1310,8 +1334,8 @@ func (m Model) tableSection() string {
 		}
 		if pending > 0 {
 			b.WriteString("\n" + m.styles.Notice.Render(fmt.Sprintf(
-				"%d tag(s) outside the visible window haven't been evaluated yet — Created order isn't fully established",
-				pending,
+				"%s outside the visible window haven't been evaluated yet — created order isn't fully established",
+				ui.Plural(pending, "tag"),
 			)))
 		}
 	}

@@ -354,22 +354,28 @@ no rule stated for any of them:
   `scope.Foreign` — correct, but a second shape for the same problem. Porting them to `scope` is
   unticketed cleanup, not a defect; a new screen still uses `scope.Do`/`scope.Foreign` from the
   start rather than adding a third counter-based instance of this pattern.
-- **Keys come from `internal/ui/keys`, transitional until every screen migrates.** T3-01 lands
-  the whole approved screen × key table as data (`docs/audit/2026-09-ux-arch-audit.md`,
-  "Proposed keymap"), the stateless write-binding matcher that tells a real shift from caps lock
-  (§9 entry 13), and the footer helper, but wires none of it into a screen yet — every screen
-  keeps its own bubbles keymap and hand-built footer until its own PR in the T3 train switches
-  it over. Once every screen has migrated this bullet becomes a flat rule (T3-10's own scope);
-  until then, a screen being on its old keymap is not a bug to fix opportunistically — it is
-  this train's own ordering (train3-design.md's "Ordering and golden churn" table).
+- **Keys come from `internal/ui/keys`.** The whole approved screen × key table lives there as
+  data (`docs/audit/2026-09-ux-arch-audit.md`, "Proposed keymap"), transcribed once
+  (`registry.go`) rather than redeclared per screen; the stateless write-binding matcher that
+  tells a real shift from caps lock (§9 entry 13); `Footer` (the shared status-bar layout,
+  never a hand-joined string); and `HuhKeyMap()` (§9 entry 6). Every screen in `internal/app`
+  builds its key handling and footer through this package now (T3-01 through T3-10 finished the
+  migration screen by screen — the audit doc's "Ordering and golden churn" table) and
+  implements `KeyScreen() keys.Screen` so the root's help overlay and activity log reach it
+  generically. A raw `key.NewBinding` or `huh.NewDefaultKeyMap()` call anywhere under
+  `internal/app` outside this package is a regression, not a style choice — frozen by
+  `internal/copycheck`'s `TestNoKeyNewBindingOutsideKeys`/`TestNoHuhDefaultKeyMapOutsideKeys`
+  (T3-10) rather than left to review (§10 meta-rule 5). A new screen starts on `internal/ui/keys`
+  from its first commit.
 - **The root intercepts `?`, `l` and `q` as keys, not as `*Msg`s (T3-03).** `?` opens
   `ui.Dialog(..., keys.HelpTitle(s), keys.HelpView(s, kbd), ...)` for whatever screen is on top,
   but only when that screen implements `keyed` (`KeyScreen() keys.Screen` — promoted from the
   underlying package's own `Model`, never redeclared on the `app` adapter struct) and is not
   `CapturesText()`; `esc`, `?` and `enter` close it, every other key is swallowed except
   `ctrl+c`. `l` pushes the activity screen for the same `keyed` top screen, generically, rather
-  than each screen emitting its own `OpenActivityMsg` (the matrix keeps its own `l` handling —
-  it does not implement `keyed` until T3-04, so the two never double-fire). `q` quits only when
+  than each screen emitting its own `OpenActivityMsg` (the matrix implements `keyed` too, since
+  T3-04, and its own former `l` handling — `matrix.OpenActivityMsg` — is retired, so this covers
+  the matrix the same generic way as every other screen). `q` quits only when
   the matrix is the only screen on the stack (`top().(matrixScreen)` — true exactly when the
   stack has one screen, since the matrix always sits at index 0); anywhere else, and not mid-text
   entry, it sets `Model.hint` (a one-line, one-key-lifetime row rendered the same way the
@@ -539,9 +545,10 @@ same shape `--confirm-direct` uses. Before anything rolls it names every target 
 count, strategy and last restart, and warns — never blocks — where a restart will not be graceful,
 including where a container's reference is unpinned: a mutable tag can pull a different build when
 the replacement pod lands, so "the same images" is a claim only a digest can support.
-The same operation is on the matrix as `R`, which restarts the family under the cursor through
-the same `internal/restart` core — capital, because it asks for a write — and shows the target
-list with its warnings before taking the confirmation; production there takes a `huh.Confirm`
+The same operation is on the matrix as `shift+r`, which restarts the family under the cursor
+through the same `internal/restart` core — shift, because it asks for a write (`internal/ui/keys`'
+Write class, §9 entry 13) — and shows the target list with its warnings before taking the
+confirmation; production there takes a `huh.Confirm`
 rather than the CLI's `--confirm-production`. `hoist watch --app <name>` (M5) is a read-only companion, independent
 of any promotion: it prints one Application's current sync/health/revision and the rollout
 progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
@@ -559,10 +566,10 @@ default to the root's — #105; root `--digest-sources`, `--registry-auth`, `--c
 `--op-ref` likewise (#132): the plan screen resolves with them and the credential-chain
 overrides reach the tag picker's and the history's registry clients, the drift column stays
 pods-only, and an empty `--registry-auth`/`--digest-sources` is refused at the root with
-`plan`'s own message; `q` quits,
-`?` help; `C` opens a read-only view of the effective config — the same redacted,
+`plan`'s own message; `q` quits (asks first if a drive is running),
+`?` help; `c` opens a read-only view of the effective config — the same redacted,
 defaults-filled text as `hoist config show`, titled with the path `config path` prints (#104);
-`F5`/`ctrl+r` re-asks the cluster what each env runs — every running build per image
+`r`/`F5`/`ctrl+r` re-ask the cluster what each env runs — every running build per image
 repo straight from the pods (`k8s.Cluster.RunningImages`, never the planning resolver's one pick),
 so a partial rollout reads "2 builds running" and the drift sentence names whether it compared by
 digest or by tag (#122); every cell carries its state as a
@@ -571,10 +578,11 @@ tag pinned to two digests is split and a bare tag beside the same tag pinned is 
 header and named in the footer (#86, M10); what is promoting right now is listed under the table —
 re-observed against the forge and cluster at boot and every `poll.approval`, finished ones left
 out, expanded to the step strip and the `hoist approve <id>` command when the terminal has the
-rows, one line when it does not — and `r` (or `enter` on it) reopens it on the flight screen, `o`
-opens its PR, each asking which when several are in flight: the TUI's `hoist promotions` and
-`hoist resume` (M10). `d` opens the tag picker — `internal/app/tags`, M6; a chooser first when the
-cell holds several first-party images — for the current cell's first-party
+rows, one line when it does not — and `tab` focuses the in-flight pane, where `enter` resumes/
+re-attaches the selected promotion on the flight screen (the menu's own "resume in flight" item
+does the same), `o` opens its PR, each asking which when several are in flight: the TUI's
+`hoist promotions` and `hoist resume` (M10). `t` opens the tag picker — `internal/app/tags`, M6;
+a chooser first when the cell holds several first-party images — for the current cell's first-party
 image, listing the registry's own tags with created/digest columns, preferring the mapped app
 repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91) by
 `tags.Classify`, a stated convention since no registry marks a tag's kind: releases lead the list
@@ -583,15 +591,16 @@ then an optional `-`/`+` suffix — so `v1.2.3`, `1.2.3`, `v202609060428`, `rele
 digest-named tags (`sha-` or `sha256-` and at least seven hex) and moving tags (`latest`, branch
 names) each sit under their own divider; nothing is hidden and `/` filters across all three,
 since
-the operator is scanning for releases outnumbered several to one — and its own `D` key walks the
-same keypress-then-confirm gesture as `--direct`/`--confirm-direct`, and both keys now open the
+the operator is scanning for releases outnumbered several to one — `enter` on a tag opens the
 deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
 written: it shows the diff the pick would make and takes Enter, so no write in hoist skips a diff
-and a confirmation); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
+and a confirmation (direct mode there is `shift+d`, same as the plan confirm below — the matrix
+carries no separate direct-deploy shortcut of its own); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
 age relative to now and whether the paired staging env's manifest carries it, and under the cursor
 the commits between the declared build and the one under the cursor with the migrations among them
-(`pkg/migrate` — `tab` into the list, `enter` opens a commit in a scrolling view (`pgdn`/`pgup`,
-`g`/`G`; ↑/↓ still switch commits — #120), `space` reviews the change; a split target env names
+(`pkg/migrate` — `tab` into the list, `enter` opens a commit in a scrolling view (`pgdn`/`pgup`
+page the body, `home`/`end` jump to its ends; ↑/↓ still switch commits — #120), `space` reviews
+the change; a split target env names
 every declared reference in the header and says which one the count runs from — #119;
 a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
 the confirm screens lead with the work, not the mechanism (M10): the deploy confirm says
@@ -599,17 +608,20 @@ the confirm screens lead with the work, not the mechanism (M10): the deploy conf
 confirm keeps the ticked set on the left and the hovered repo's commits and migrations on the
 right with the common image-repo prefix lifted into the header so a version never wraps, and on
 both `d` toggles the yaml diff into view and `enter` means the same from either; on the plan
-confirm `o` is the TUI's `--digest` (#102): a `huh.Input` dialog pre-filled with the hovered
+confirm `e` is the TUI's `--digest` (#102): a `huh.Input` dialog pre-filled with the hovered
 repo's `<repo>=`, validated on `enter` by `image.ParseOverride` — the one predicate
 `digestFlag.Set` applies too, so both faces refuse the same inputs with the same words — that
 rebuilds the plan through `ResolveFunc` with the override in place, so the row's provenance,
 the resolution section and the plan's warnings read `override` exactly as the CLI's do; an
-invalid entry keeps the dialog open with the refusal, `esc` changes nothing; the flight and
-restart screens are framed the same way, with the blocked reason and its command
+invalid entry keeps the dialog open with the refusal, `esc` changes nothing; the flight screen
+itself (opened by starting a promotion, or by `tab`/`enter` from the matrix's in-flight pane)
+offers `r` to re-observe now, `o` to open the PR, `w` to watch the family/target, `shift+x` to
+abandon (`hoist abandon <id>`'s own TUI gesture) and `esc` to go back while the drive keeps
+running; the flight and restart screens are framed the same way, with the blocked reason and its command
 (`hoist approve <id>`) as their own section, which a short terminal keeps by collapsing the step
 list to a one-line strip rather than dropping the verdict; when that reason is `ci.none: prompt`'s
 "no checks reported" block — recognised by `engine.IsCINonePromptBlock`, the one Blocked reason with
-an override — the section offers `c`, which behind a `huh.Confirm` emits
+an override — the section offers `shift+c`, which behind a `huh.Confirm` emits
 `flight.OverrideCINoneMsg` and the root sets `CINoneOverride` on that promotion's state and
 re-drives it: the TUI's `hoist resume <id> --override-ci-none` (#103), per promotion, never a
 launch flag or config default (§4.5). Browsing the matrix, the picker and the
@@ -1149,7 +1161,20 @@ test lives** (if one exists).
    `TestWriteMatches` in `internal/ui/keys/keys_test.go` covers all seven cases (legacy shift,
    legacy bare capital, kitty shift, kitty caps lock alone — rejected, kitty shift+caps lock,
    lower case — rejected, ctrl+shift — rejected); `TestNoBareCapital` asserts no `Show`, `Desc`
-   or rendered footer in the registry shows a bare capital letter.
+   or rendered footer in the registry shows a bare capital letter. Addendum (T3 review P1-1):
+   requesting `ReportAllKeysAsEscapeCodes` alone (flag 8) without also requesting
+   `ReportAlternateKeys` (flag 4) and `ReportAssociatedText` sends a Kitty-protocol terminal no
+   shifted-key or text component for punctuation — a decoder then upper-cases the base rune, a
+   no-op for `/`, `;` or `2`, so shift+/ arrives as `/` (not `?`), shift+; as `;` (not `:`), and
+   shift+2 as `2` (not `@`): `?` never opens help and a digest override can't take `sha256:`.
+   Letters are unaffected (shift+c already arrives as `"C"`), which is why `TestWriteMatches`
+   passed while this sat unfixed. Rule: hoist's `View.KeyboardEnhancements` requests all three —
+   `ReportAllKeysAsEscapeCodes | ReportAlternateKeys | ReportAssociatedText` — every render
+   (`app.go`'s `View`); a terminal that doesn't support the request, or doesn't grant it, simply
+   never sends a `KeyboardEnhancementsMsg` back, so a legacy terminal is unaffected either way.
+   Regression test: `TestKittyShiftedPunctuationNeedsAlternateKeys` in
+   `internal/app/kitty_decode_test.go` decodes a raw Kitty escape sequence directly and asserts
+   the shifted punctuation survives.
 
 ## 10. Maintaining This Document
 

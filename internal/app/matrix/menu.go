@@ -122,7 +122,9 @@ func (m Model) menuView() string {
 		lines = append(lines, line)
 	}
 	if m.IsProduction(m.menuEnv) {
-		lines = append(lines, "", m.styles.Production.Render("⚠ production: every write opens a PR and waits for an approver's `hoist approve` comment"))
+		// P2-13 (T3 review): the longer wording truncated at 80 columns ("`hoist appro…"),
+		// hiding the command name a reviewer would actually type.
+		lines = append(lines, "", m.styles.Production.Render("⚠ production: every write opens a PR, gated on `hoist approve`"))
 	}
 	return strings.Join(lines, "\n")
 }

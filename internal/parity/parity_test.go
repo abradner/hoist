@@ -137,7 +137,7 @@ var registry = []op{
 	{
 		Name: "read recent results and errors in full",
 		CLI:  "promote resume abandon",
-		TUI:  "l on the matrix, watch, restart, config and the activity screen itself — the root's own generic keyed handling (T3-03/T3-04), not a per-screen message; the matrix's own former per-screen open-activity message is retired now that it too implements keyed",
+		TUI:  "l on every keyed screen — matrix, plan, deploy, tags, flight, watch, restart, config and the activity screen itself (T3-03 through T3-09 finished the migration screen by screen) — the root's own generic keyed handling, not a per-screen message; the matrix's own former per-screen open-activity message is retired now that it too implements keyed",
 	},
 }
 

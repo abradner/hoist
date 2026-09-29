@@ -149,6 +149,16 @@ func (m Model) ResetStarting() Model {
 	return m
 }
 
+// newViewport is this screen's own scrolling body — the diff pane and the commit list alike —
+// bound to keys.ViewportKeyMap (P2-6 in the T3 review) rather than left on viewport.New()'s
+// bubbles-library default, which binds space to page: the T3-08 redesign retired space as a
+// scroll gesture on this screen, and the default keymap left it live anyway.
+func newViewport() viewport.Model {
+	v := viewport.New()
+	v.KeyMap = keys.ViewportKeyMap()
+	return v
+}
+
 // New builds the screen for an already-constructed deploy plan. root is the repo checkout the
 // diff is read from; envs decides whether the target is production, which forces PR mode.
 func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.Styles) Model {
@@ -165,8 +175,8 @@ func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.S
 		production: envs.IsProduction(pl.TargetEnv),
 		mode:       ModePR,
 		ticked:     ticked,
-		diff:       viewport.New(),
-		commits:    viewport.New(),
+		diff:       newViewport(),
+		commits:    newViewport(),
 		now:        time.Now,
 		showYAML:   true, // until WithHistory supplies commits to lead with
 	}
@@ -272,6 +282,20 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		return m, func() tea.Msg { return BackMsg{} }
+	case "home":
+		if m.showYAML {
+			m.diff.GotoTop()
+		} else {
+			m.commits.GotoTop()
+		}
+		return m, nil
+	case "end":
+		if m.showYAML {
+			m.diff.GotoBottom()
+		} else {
+			m.commits.GotoBottom()
+		}
+		return m, nil
 	case "enter":
 		if m.starting {
 			// #PR8/FB-L4: a repeated Enter before the root has reacted at all — see starting's
@@ -699,7 +723,7 @@ func (m Model) hints() string {
 	}
 	hints = append(hints,
 		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓", Pri: 3},
-		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r", Pri: 4},
+		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r fresh", Pri: 4},
 		keys.Hint{B: keys.Log, Long: "l activity", Pri: 5},
 		keys.Hint{B: keys.Esc, Long: "esc back to tags", Short: "esc back", Pri: -1},
 	)

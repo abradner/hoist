@@ -27,7 +27,9 @@ func Lines(log Log, now func() time.Time, width int) []string {
 	}
 	entries := log.Entries()
 	if len(entries) == 0 {
-		return []string{"nothing yet"}
+		// T3-10 (UX-M18's own convention): name what to expect, not just that nothing is here
+		// yet — an operator opening this before doing anything should see WHY it's empty.
+		return []string{"nothing yet — promotions, deploys, restarts and abandons show up here"}
 	}
 	when := now()
 	var out []string

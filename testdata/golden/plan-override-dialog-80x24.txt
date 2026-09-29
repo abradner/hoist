@@ -4,8 +4,8 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │┃ > ✓ counta  → v202602201200       │counta                                   │
 │┃   ✓ marketing  → sha-1a2b3c4d5e6f…│v202601151010 → v202602201200            │
-│┃   ✓ ! web  → v202602150930        │3 occurrences · 2 files · digest from    │
-│┃                                   │manifest                                 │
+│┃   ✓ ! web  → v202602150930        │3 image references · 2 files · digest    │
+│┃                                   │from manifest                            │
 │┃                                   │                                         │
 │┃ ╭─ override digest ──────────────────────────────────────────────────────╮  │
 │┃ │┃ override the digest for ghcr.io/example/counta                        │in│

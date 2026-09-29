@@ -35,7 +35,7 @@ func HelpTitle(s Screen) string { return fmt.Sprintf("help · %s", s) }
 // write" line whenever the screen has at least one Write binding, and one line naming whether
 // this run can tell a caps-lock letter from a real shift — recorded once at the root from
 // tea.KeyboardEnhancementsMsg rather than threaded into every value-typed screen
-// (train3-design.md's own "needs your decision", resolved that way). The caller (app.go) draws
+// (the audit doc's own "needs your decision", resolved that way). The caller (app.go) draws
 // this inside ui.Dialog, which supplies the box, the title (HelpTitle) and the dimmed
 // background itself — HelpView returns plain content, never its own box, so the two are never
 // nested one inside the other.

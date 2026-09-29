@@ -24,6 +24,24 @@ func newFixture() Model { return New(fixture(), []string{"ghcr.io/"}, config.Env
 
 // TestColumnCursor exercises Left/Right moving CurrentEnv over fixture()'s three envs
 // (a, b, c — sorted), clamped at both ends.
+// TestHomeEndJumpRowCursor is P2-8 from the T3 review: the design's own home/end row
+// ("top"/"bottom") was listed nowhere and handled nowhere for the grid's row cursor.
+func TestHomeEndJumpRowCursor(t *testing.T) {
+	m := newFixture().SetSize(80, 24)
+	if m.Cursor() != 0 {
+		t.Fatalf("test setup: cursor = %d, want 0", m.Cursor())
+	}
+	m = uitest.Keys(m, update, "end")
+	want := len(m.matrix.Rows) - 1
+	if m.Cursor() != want {
+		t.Errorf("end: cursor = %d, want %d (the last row)", m.Cursor(), want)
+	}
+	m = uitest.Keys(m, update, "home")
+	if m.Cursor() != 0 {
+		t.Errorf("home: cursor = %d, want 0", m.Cursor())
+	}
+}
+
 func TestColumnCursor(t *testing.T) {
 	m := newFixture()
 	if got := m.CurrentEnv(); got != "a" {
@@ -74,7 +92,7 @@ func emitted(t *testing.T, m Model, k string) tea.Msg {
 	return cmd()
 }
 
-// TestPPromotesIntoCursorColumn is T3-04's own operator decision (train3-design.md): p
+// TestPPromotesIntoCursorColumn is T3-04's own operator decision (the audit doc): p
 // promotes INTO the cursor column, with the source taken from the reverse of envs.pairs when
 // exactly one exists. fixture()'s envs are a, b, c; pairing a->b puts them in pipeline order
 // a, b, c (Order/PipelineOrder), so Right from the default cursor (a) lands on b, whose one
@@ -255,6 +273,15 @@ func TestProductionColumnIsMarkedEverywhere(t *testing.T) {
 	// the notes sentence is what actually carries the production warning to the operator.
 	if !strings.Contains(v, "⚠ b is a production env: writes there always open a PR") {
 		t.Errorf("notes lack the production sentence:\n%s", v)
+	}
+	// P3 (T3 review): the footer's own status ("env b (production)") is still worth asserting
+	// on — it is what the previous assertion checked before the write-verb hints crowded it out
+	// at this width, truncating it to "env b (produc…" (ui.StatusBar's own "…" rule). That
+	// truncated prefix is what actually survives at 120 columns, so this checks for it rather
+	// than the untruncated string, which would fail here for a reason that has nothing to do
+	// with whether the production marker still reaches the footer at all.
+	if !strings.Contains(v, "env b (produc") {
+		t.Errorf("footer status lost the production marker entirely:\n%s", v)
 	}
 }
 

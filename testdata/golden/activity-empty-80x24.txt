@@ -1,5 +1,5 @@
 ╭─ hoist · activity · 0 entries ───────────────────────────────────────────────╮
-│nothing yet                                                                   │
+│nothing yet — promotions, deploys, restarts and abandons show up here         │
 │                                                                              │
 │                                                                              │
 │                                                                              │

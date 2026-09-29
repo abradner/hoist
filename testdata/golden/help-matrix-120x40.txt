@@ -7,20 +7,21 @@
 │ ▸ counta    │ 2 images                              pinned │ v202602201200                         pinned            │
 │ marketing   │ sha-0000111122223333444455556666777…  pinned │ sha-1a2b3c4d5e6f708192a3b4c5d6e7f80…  pinned            │
 │ temporal    │ 2 images                            external │ 2 images                            external            │
-│ web         │ v202601010101                       unpinned │ 2 versions                             split            │
-│             │            ╭─ help · matrix ───────────────────────────────────────────────╮                           │
+│ web         │ v2026010101╭─ help · matrix ───────────────────────────────────────────────╮          split            │
 │             │            │NAVIGATE                       │ ACT                           │                           │
-│             │            │esc      close the menu or ove │ enter    open the action menu │                           │
-│             │            │↑        move row              │ p        promote into the curs│                           │
-│             │            │↓        move row              │ t        deploy a tag (tag pic│                           │
-│             │            │←        move column           │ w        watch the cell's fami│                           │
-│             │            │→        move column           │ shift+r  restart the cell's fa│                           │
-│             │            │pgup     page                  │ shift+x  abandon the in-flight│                           │
+│             │            │esc      close menu/overlay    │ enter    open menu / flight   │                           │
+│             │            │↑        move row              │ p        promote into column  │                           │
+│             │            │↓        move row              │ t        deploy a tag         │                           │
+│             │            │←        move column           │ w        watch family         │                           │
+│             │            │→        move column           │ shift+r  restart family (asks)│                           │
+│             │            │pgup     page                  │ shift+x  abandon row (asks)   │                           │
 │             │            │pgdn     page                  │                               │                           │
-│             │            │tab      table ⇄ in-flight pan │                               │                           │
+│             │            │home     top                   │                               │                           │
+│             │            │end      bottom                │                               │                           │
+│             │            │tab      table/flight pane     │                               │                           │
 │             │            │VIEW                           │ APP                           │                           │
-│             │            │r        re-read the cluster a │ q        quit (confirm if a pr│                           │
-│             │            │o        open the PR of the in │ ctrl+c   quit now, printing wh│                           │
+│             │            │r        re-read cluster/repo  │ q        quit (asks if busy)  │                           │
+│             │            │o        open PR (chooser)     │ ctrl+c   quit, print flight   │                           │
 │             │            │c        config view           │                               │                           │
 │             │            │l        activity log          │                               │                           │
 │             │            │                                                               │                           │
@@ -31,10 +32,9 @@
 │             │                                              │                                                         │
 │             │                                              │                                                         │
 │             │                                              │                                                         │
-│             │                                              │                                                         │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │counta · app-production                                                                                               │
 │2 images                                                                                                              │
 │  pinned                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-        enter actions · p promote into · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help
+  enter actions · p promote into app-production · t deploy tag · w watch · r refresh · shift+r restart · q quit · ? help

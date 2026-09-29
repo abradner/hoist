@@ -282,6 +282,17 @@ UX-M8 and FB-L8. **Status: proposal. The operator approves it before T3 starts.*
    even bubbles' `key.Matches(msg, key.WithKeys("shift+c"))` never fires for a printable letter;
    only reading `msg.Key().Mod.Contains(tea.ModShift)` directly (with `ModCapsLock` excluded)
    distinguishes shift from caps lock, and only on that opted-in, protocol-capable path.
+
+   **Update, shipped (T3-01, T3 review P1-1):** hoist now requests
+   `ReportAllKeysAsEscapeCodes | ReportAlternateKeys | ReportAssociatedText` on every render
+   (`app.go`'s `View`) — not flag 8 alone. Flag 8 by itself was tried first and shipped a real
+   bug: without also asking for the alternate-key and associated-text components, a Kitty-capable
+   terminal reports a shifted punctuation key with no shifted-key or text component at all, so the
+   decoder's fallback (upper-casing the base rune) is a no-op for punctuation — shift+/ still
+   reads as `/`, never `?`, and shift+; as `;`, never `:`. All three flags together is what
+   AGENTS.md §9 entry 13 and `internal/app/kitty_decode_test.go` now cover; a legacy terminal
+   that doesn't support the request is unaffected either way, exactly as this paragraph
+   describes.
    Principle 1: hoist does not claim a mechanism it does not run. So: matching stays "the
    uppercase letter" everywhere (`key.WithKeys("C")`, unchanged from today) — legacy terminals
    have no other signal, and asking every screen to special-case an enhancement most sessions
