@@ -355,6 +355,21 @@ no rule stated for any of them:
   it over. Once every screen has migrated this bullet becomes a flat rule (T3-10's own scope);
   until then, a screen being on its old keymap is not a bug to fix opportunistically — it is
   this train's own ordering (train3-design.md's "Ordering and golden churn" table).
+- **The root intercepts `?`, `l` and `q` as keys, not as `*Msg`s (T3-03).** `?` opens
+  `ui.Dialog(..., keys.HelpTitle(s), keys.HelpView(s, kbd), ...)` for whatever screen is on top,
+  but only when that screen implements `keyed` (`KeyScreen() keys.Screen` — promoted from the
+  underlying package's own `Model`, never redeclared on the `app` adapter struct) and is not
+  `CapturesText()`; `esc`, `?` and `enter` close it, every other key is swallowed except
+  `ctrl+c`. `l` pushes the activity screen for the same `keyed` top screen, generically, rather
+  than each screen emitting its own `OpenActivityMsg` (the matrix keeps its own `l` handling —
+  it does not implement `keyed` until T3-04, so the two never double-fire). `q` quits only when
+  the matrix is the only screen on the stack (`top().(matrixScreen)` — true exactly when the
+  stack has one screen, since the matrix always sits at index 0); anywhere else, and not mid-text
+  entry, it sets `Model.hint` (a one-line, one-key-lifetime row rendered the same way the
+  activity row is — out of the top screen's own rows, never appended past them, §9 entry 10) to
+  "q quits from the matrix · esc goes back" and does nothing further. None of this is a
+  `pkg.XMsg` `internal/parity`'s parser would need a row for; the operation itself (quit, watch,
+  the activity log) already has one.
 
 ### 4.9 Configuration
 

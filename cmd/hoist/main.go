@@ -660,9 +660,18 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(svc, eff.kubeContext, argoNamespaceOf(eff.cfg), cfg.Poll)).
 		WithRun(eff.base, eff.kubeContext)
-	if _, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run(); err != nil {
+	final, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run()
+	if err != nil {
 		fmt.Fprintf(stderr, "hoist: %v\n", err)
 		return exitFailure
+	}
+	// Keymap rule 4: q (with a confirm) and ctrl+c (immediate) both leave any running drive
+	// tracked exactly where it was — nothing is cancelled, only this process's own watch of it
+	// ends — so on the way out, name every id still in flight and how to pick it back up.
+	if fm, ok := final.(app.Model); ok {
+		for _, id := range fm.InFlightIDs() {
+			fmt.Fprintf(stdout, "in flight: %s — hoist resume %s\n", id, id)
+		}
 	}
 	return 0
 }

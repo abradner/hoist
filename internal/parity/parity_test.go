@@ -97,7 +97,7 @@ var registry = []op{
 	{
 		Name: "stop driving a promotion; branch, PR and state stay",
 		CLI:  "promote ctrl-c",
-		TUI:  "q with drives running, behind a confirm; esc on the flight screen only stops watching — the drive continues and enter re-attaches",
+		TUI:  "q, only from the matrix (T3-03), with drives running, behind a confirm; esc on the flight screen only stops watching — the drive continues and enter re-attaches",
 	},
 	{
 		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",
@@ -107,7 +107,7 @@ var registry = []op{
 	{
 		Name: "watch one Application converge, outside any promotion",
 		CLI:  "watch --app --once --repo --apps-root",
-		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r polls now, esc pops (#101)",
+		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r refreshes (T3-03: the footer no longer says \"poll now\" or \"never refreshes\"), esc pops (#101)",
 	},
 	{
 		Name: "override one repo's digest before planning",
@@ -137,7 +137,7 @@ var registry = []op{
 	{
 		Name: "read recent results and errors in full",
 		CLI:  "promote resume abandon",
-		TUI:  "matrix.OpenActivityMsg l on the matrix",
+		TUI:  "matrix.OpenActivityMsg l on the matrix; T3-03 makes l open the same activity log from watch, restart, config and the activity screen itself too, handled as a root key rather than a per-screen message",
 	},
 }
 

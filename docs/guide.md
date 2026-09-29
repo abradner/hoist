@@ -10,6 +10,14 @@ build](#deploy-a-build) · [restart a family](#restart-a-family) · [when it
 stops](#when-it-stops) · [resuming](#resuming) · [registry credentials](#registry-credentials) ·
 [direct mode](#direct-mode)
 
+Three keys work the same everywhere: `?` opens a full help overlay naming every key the current
+screen honours (`esc`, `?` or `enter` closes it); `l` opens the activity log — every result and
+error this session has recorded, oldest first, nothing truncated — from whatever screen you are
+on; `q` quits hoist, but only from the matrix (with a confirm if a drive is still running) —
+pressed anywhere else it does nothing but remind you to go back first. `ctrl+c` quits immediately
+from any screen, no confirm, and on the way out names every promotion still in flight with its own
+`hoist resume <id>`.
+
 ## The matrix
 
 `hoist --repo <path>` (or just `hoist`, when the config file lists one repo) opens the matrix: one
@@ -164,13 +172,15 @@ like `R` on the matrix — a write, kept out of reach of a mistyped key) *abando
 behind a confirm, it retires the state file and, if it opened a PR, closes it and deletes the
 branch. It refuses outright if the promotion has already landed — abandoning is not a rollback, so
 a landed one needs `hoist deploy` or a fresh promotion to undo, not a state-file delete — and it is
-never offered at all once the promotion is done. `l` shows the log. `q` quits hoist itself; with
-any drive this session started still Building, Stepping or Waiting, it asks first, behind a
-confirm — nothing is rolled back, `hoist resume` picks every one back up later, but it is a
-deliberate step rather than a silent one. A promotion merely listed on the pane (started earlier,
-by this session or another) does not count toward that: nothing here is driving it, so quitting
-does not interrupt anything already in flight for it. `ctrl+c` is the one always-immediate quit, with no confirm — state is
-durable either way. The CLI prints the same steps as lines, with
+never offered at all once the promotion is done. `l` shows the log — from every screen, not only
+this one. `q` quits hoist, but only from the matrix: pressed here it does nothing but remind you
+("q quits from the matrix · esc goes back") — `esc` back to the matrix first, then `q` there. With
+any drive this session started still Building, Stepping or Waiting, quitting from the matrix asks
+first, behind a confirm — nothing is rolled back, `hoist resume` picks every one back up later, but
+it is a deliberate step rather than a silent one. A promotion merely listed on the pane (started
+earlier, by this session or another) does not count toward that: nothing here is driving it, so
+quitting does not interrupt anything already in flight for it. `ctrl+c` is the one
+always-immediate quit, from any screen, with no confirm — state is durable either way. The CLI prints the same steps as lines, with
 `waiting: …` naming what it is waiting for; `hoist abandon <id> --confirm-abandon=<id>` is `X`'s
 own CLI form (the repeated id is the confirmation, same shape as `--confirm-direct`).
 
@@ -263,10 +273,10 @@ So there is no plan, no branch, no PR, no state file, and nothing to resume: run
 restarts again, which is the operation.
 
 ```
-╭─ hoist · restart ────────────────────────────────────────────────────────────╮
+╭─ hoist · restart · web/app-staging ───────────────────────────────────────────╮
 │app-staging / web                               production   not yet restarted│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│1 Deployment(s) in app-staging                                                │
+│1 Deployment in app-staging                                                   │
 │                                                                              │
 │   web  1 replica(s) · RollingUpdate · last restart: never restarted this way │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but   │
@@ -277,13 +287,16 @@ restarts again, which is the operation.
 │       a different build than the one running now, so this restart may not be │
 │       a no-op                                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                                        enter restart · esc back
+                                    l activity · enter restart · esc back · ? help
 ```
 
 Every target is named first, with its replica count, strategy and last restart, and every reason
 the restart will not be graceful is a sentence. None of them blocks. A production env takes a
 second acknowledgement — a confirmation dialog on the screen, `--confirm-production=<env>` at the
-CLI — because nothing is committed and nothing reviews it.
+CLI — because nothing is committed and nothing reviews it. `esc` while a confirmed restart is
+still starting or rolling still leaves the screen — it never blocks on it — but adds "rollout
+continues" to the activity log (`l`), since the restart itself is a live cluster operation this
+screen does not cancel.
 
 ## When it stops
 

@@ -1,4 +1,4 @@
-╭─ activity ───────────────────────────────────────────────────────────────────╮
+╭─ hoist · activity · 3 entries ───────────────────────────────────────────────╮
 │2h ago  info  started app-staging → app-production                            │
 │                                                                              │
 │1h 30m ago  error  abcd1234 blocked: ci.none: prompt                          │
@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-3 entries                               ↑/↓ pgup/pgdn ctrl+u/d scroll · esc back
+3 entries                                                      esc back · ? help

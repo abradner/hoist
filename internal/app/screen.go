@@ -13,7 +13,18 @@ import (
 	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 )
+
+// keyed is implemented by a screen adapter whose underlying screen has a stated row in
+// internal/ui/keys' registry (T3-03) — the root's own "?" and "l" key handling (app.go's
+// Update) only fires for a top screen that implements this, so the help overlay never lists
+// keys a screen doesn't honour yet (train3-design.md's T3-03 scope) and "l" never opens the
+// activity log from a screen that hasn't opted in. Every adapter embeds its package's Model by
+// value, so this is promoted automatically wherever the underlying Model itself exposes
+// KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own later PRs
+// (T3-04 onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
+type keyed interface{ KeyScreen() keys.Screen }
 
 // Screen is what the root drives. Screens are values: every method returns the updated
 // screen rather than mutating, so the root model stays a pure tea.Model.
@@ -184,6 +195,9 @@ func (s restartScreen) SetStyles(st ui.Styles) Screen {
 // CapturesText implements Screen: true only while the production confirmation is open.
 func (s restartScreen) CapturesText() bool { return s.Model.CapturesText() }
 
+// KeyScreen (implementing keyed) is promoted from restart.Model's own method — its embedded
+// field, by value (this file's own doc comment) — rather than redeclared here.
+
 // configScreen adapts config.Model (internal/app/config). Pushed on top of the matrix by C
 // (matrix.OpenConfigMsg, handled in app.go); read-only, so nothing beneath it changes while
 // it is open and esc lands back where it started.
@@ -206,6 +220,8 @@ func (s configScreen) SetStyles(st ui.Styles) Screen {
 
 // CapturesText implements Screen: the config screen has no text-entry mode.
 func (s configScreen) CapturesText() bool { return false }
+
+// KeyScreen (implementing keyed) is promoted from config.Model's own method.
 
 // watchScreen adapts watch.Model. Pushed on top of the matrix by w; the matrix stays beneath
 // it, since watching changes nothing and esc should land on the cell it started from.
@@ -230,6 +246,8 @@ func (s watchScreen) SetStyles(st ui.Styles) Screen {
 // screen has no text-entry mode — but the model, not this adapter, is what says so.
 func (s watchScreen) CapturesText() bool { return s.Model.CapturesText() }
 
+// KeyScreen (implementing keyed) is promoted from watch.Model's own method.
+
 // activityScreen adapts activity.Model. Pushed on top of whatever screen is current by l
 // (matrix.OpenActivityMsg — the proposed keymap binds l to the activity log everywhere, but
 // only the matrix's own l actually opens this screen today, PR9's own scope); read-only, so
@@ -253,3 +271,5 @@ func (s activityScreen) SetStyles(st ui.Styles) Screen {
 
 // CapturesText implements Screen: the activity screen has no text-entry mode.
 func (s activityScreen) CapturesText() bool { return false }
+
+// KeyScreen (implementing keyed) is promoted from activity.Model's own method.

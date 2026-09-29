@@ -69,10 +69,14 @@ type Binding struct {
 // letter is what Matches actually tests, since a legacy terminal sends the same byte for
 // shift+letter and caps-lock-then-letter and only Matches' own caps-lock check (point 3, from
 // train3-design.md) can tell them apart when a protocol-capable terminal reports it.
+// Every Write binding today lists under the mockup's ACT column (restart, abandon, direct,
+// ci-none are all actions, never a view or a navigation), so group is fixed here rather than
+// taken as a parameter with only one value ever passed (golangci-lint's unparam).
 func write(letter rune, name string) Binding {
 	return Binding{
 		Name:  name,
 		Class: Write,
+		Group: Act,
 		Show:  "shift+" + string(letter),
 		write: unicode.ToLower(letter),
 	}
@@ -132,32 +136,32 @@ func (b Binding) Bubbles() key.Binding {
 // The shared bindings every screen's table (registry.go) is built from. Zero value means
 // "unbound on this screen" — a Binding not listed in a Screen's On() result never fires there.
 var (
-	Enter  = Binding{Name: "primary", Class: Primary, Keys: []string{"enter"}, Show: "enter"}
-	Esc    = Binding{Name: "back", Class: Back, Keys: []string{"esc"}, Show: "esc"}
-	Up     = Binding{Name: "up", Class: Spatial, Keys: []string{"up", "k"}, Show: "↑"}
-	Down   = Binding{Name: "down", Class: Spatial, Keys: []string{"down", "j"}, Show: "↓"}
-	Left   = Binding{Name: "left", Class: Spatial, Keys: []string{"left"}, Show: "←"}
-	Right  = Binding{Name: "right", Class: Spatial, Keys: []string{"right"}, Show: "→"}
-	PgUp   = Binding{Name: "pgup", Class: Spatial, Keys: []string{"pgup"}, Show: "pgup"}
-	PgDn   = Binding{Name: "pgdn", Class: Spatial, Keys: []string{"pgdown"}, Show: "pgdn"}
-	Home   = Binding{Name: "home", Class: Spatial, Keys: []string{"home"}, Show: "home"}
-	End    = Binding{Name: "end", Class: Spatial, Keys: []string{"end"}, Show: "end"}
-	Tab    = Binding{Name: "tab", Class: Spatial, Keys: []string{"tab"}, Show: "tab"}
-	Space  = Binding{Name: "space", Class: Verb, Keys: []string{"space"}, Show: "space"}
-	Filter = Binding{Name: "filter", Class: Verb, Keys: []string{"/"}, Show: "/"}
-	Help   = Binding{Name: "help", Class: Verb, Keys: []string{"?"}, Show: "?"}
-	Quit   = Binding{Name: "quit", Class: App, Keys: []string{"q"}, Show: "q"}
-	CtrlC  = Binding{Name: "ctrl-c", Class: App, Keys: []string{"ctrl+c"}, Show: "ctrl+c"}
+	Enter  = Binding{Name: "primary", Class: Primary, Group: Act, Keys: []string{"enter"}, Show: "enter"}
+	Esc    = Binding{Name: "back", Class: Back, Group: Navigate, Keys: []string{"esc"}, Show: "esc"}
+	Up     = Binding{Name: "up", Class: Spatial, Group: Navigate, Keys: []string{"up", "k"}, Show: "↑"}
+	Down   = Binding{Name: "down", Class: Spatial, Group: Navigate, Keys: []string{"down", "j"}, Show: "↓"}
+	Left   = Binding{Name: "left", Class: Spatial, Group: Navigate, Keys: []string{"left"}, Show: "←"}
+	Right  = Binding{Name: "right", Class: Spatial, Group: Navigate, Keys: []string{"right"}, Show: "→"}
+	PgUp   = Binding{Name: "pgup", Class: Spatial, Group: Navigate, Keys: []string{"pgup"}, Show: "pgup"}
+	PgDn   = Binding{Name: "pgdn", Class: Spatial, Group: Navigate, Keys: []string{"pgdown"}, Show: "pgdn"}
+	Home   = Binding{Name: "home", Class: Spatial, Group: Navigate, Keys: []string{"home"}, Show: "home"}
+	End    = Binding{Name: "end", Class: Spatial, Group: Navigate, Keys: []string{"end"}, Show: "end"}
+	Tab    = Binding{Name: "tab", Class: Spatial, Group: Navigate, Keys: []string{"tab"}, Show: "tab"}
+	Space  = Binding{Name: "space", Class: Verb, Group: Act, Keys: []string{"space"}, Show: "space"}
+	Filter = Binding{Name: "filter", Class: Verb, Group: Act, Keys: []string{"/"}, Show: "/"}
+	Help   = Binding{Name: "help", Class: Verb, Group: AppGroup, Keys: []string{"?"}, Show: "?"}
+	Quit   = Binding{Name: "quit", Class: App, Group: AppGroup, Keys: []string{"q"}, Show: "q"}
+	CtrlC  = Binding{Name: "ctrl-c", Class: App, Group: AppGroup, Keys: []string{"ctrl+c"}, Show: "ctrl+c"}
 
-	Refresh = Binding{Name: "refresh", Class: Verb, Keys: []string{"r", "f5", "ctrl+r"}, Show: "r"}
-	Open    = Binding{Name: "open", Class: Verb, Keys: []string{"o"}, Show: "o"}
-	Diff    = Binding{Name: "diff", Class: Verb, Keys: []string{"d"}, Show: "d"}
-	Promote = Binding{Name: "promote", Class: Verb, Keys: []string{"p"}, Show: "p"}
-	Tag     = Binding{Name: "tag", Class: Verb, Keys: []string{"t"}, Show: "t"}
-	Watch   = Binding{Name: "watch", Class: Verb, Keys: []string{"w"}, Show: "w"}
-	Log     = Binding{Name: "log", Class: Verb, Keys: []string{"l"}, Show: "l"}
-	Config  = Binding{Name: "config", Class: Verb, Keys: []string{"c"}, Show: "c"}
-	Edit    = Binding{Name: "edit", Class: Verb, Keys: []string{"e"}, Show: "e"}
+	Refresh = Binding{Name: "refresh", Class: Verb, Group: View, Keys: []string{"r", "f5", "ctrl+r"}, Show: "r"}
+	Open    = Binding{Name: "open", Class: Verb, Group: View, Keys: []string{"o"}, Show: "o"}
+	Diff    = Binding{Name: "diff", Class: Verb, Group: View, Keys: []string{"d"}, Show: "d"}
+	Promote = Binding{Name: "promote", Class: Verb, Group: Act, Keys: []string{"p"}, Show: "p"}
+	Tag     = Binding{Name: "tag", Class: Verb, Group: Act, Keys: []string{"t"}, Show: "t"}
+	Watch   = Binding{Name: "watch", Class: Verb, Group: Act, Keys: []string{"w"}, Show: "w"}
+	Log     = Binding{Name: "log", Class: Verb, Group: View, Keys: []string{"l"}, Show: "l"}
+	Config  = Binding{Name: "config", Class: Verb, Group: View, Keys: []string{"c"}, Show: "c"}
+	Edit    = Binding{Name: "edit", Class: Verb, Group: Act, Keys: []string{"e"}, Show: "e"}
 
 	Restart = write('r', "restart")
 	Abandon = write('x', "abandon")

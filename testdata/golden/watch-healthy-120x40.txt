@@ -1,4 +1,4 @@
-╭─ hoist · watch ──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+╭─ hoist · watch · web/app-staging ────────────────────────────────────────────────────────────────────────────────────╮
 │app-staging / web · web-app-staging                                                         polled just now · every 5s│
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │sync Synced   health Healthy   revision 0123456789ab   operation Succeeded   reconciled 2m ago                        │
@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-read-only · never refreshes                                                           r poll now · ↑/↓ scroll · esc back
+next poll in 5s                                                               r refresh · l activity · esc back · ? help

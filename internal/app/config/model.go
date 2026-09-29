@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 )
 
 // BackMsg is emitted on esc; the root pops the screen (internal/app/app.go).
@@ -27,8 +28,8 @@ type keyMap struct {
 func defaultKeyMap() keyMap {
 	return keyMap{
 		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Top:    key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "top")),
-		Bottom: key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "end")),
+		Top:    key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
+		Bottom: key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 	}
 }
 
@@ -123,24 +124,31 @@ func (m Model) layout() Model {
 	return m
 }
 
-// Title is the frame's title: the file's path when it exists, otherwise the CLI's own
-// "no file at …; showing defaults" sentence (`hoist config show`), so both faces name the
-// flags-only case in the same words.
+// Title is the frame's title: "hoist · config · <path>" (AGENTS.md §4.8's titling pattern) when
+// the file exists, otherwise the CLI's own "no file at …; showing defaults" sentence (`hoist
+// config show`) as the state, so both faces name the flags-only case in the same words.
 func (m Model) Title() string {
 	if m.found {
-		return m.path
+		return "hoist · config · " + m.path
 	}
-	return "no file at " + m.path + "; showing defaults"
+	return "hoist · config · no file at " + m.path + "; showing defaults"
 }
 
 // View renders the frame: the title (Title), the YAML in its viewport, and the footer.
 func (m Model) View() string {
 	m = m.layout()
-	left := m.styles.Status.Render("read-only · op refs redacted")
-	right := m.styles.Hint.Render("↑/↓ pgup/pgdn ctrl+u/d g/G scroll · esc back")
+	hints := []keys.Hint{
+		{B: keys.Home, Long: "home top", Pri: 3},
+		{B: keys.End, Long: "end bottom", Pri: 3},
+		{B: keys.Log, Long: "l activity", Pri: 2},
+		{B: keys.Esc, Long: "esc back", Pri: 0},
+	}
 	return ui.Frame{
 		Title:    m.Title(),
 		Sections: []string{m.body.View()},
-		Footer:   ui.StatusBar(m.width, left, right),
+		Footer:   keys.Footer(m.styles, m.width, "read-only · op refs redacted", hints, true),
 	}.Render(m.styles, m.width, m.height)
 }
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go).
+func (m Model) KeyScreen() keys.Screen { return keys.ScrConfig }

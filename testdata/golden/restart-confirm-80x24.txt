@@ -1,16 +1,16 @@
-╭─ hoist · restart ────────────────────────────────────────────────────────────╮
+╭─ hoist · restart · web/app-staging ──────────────────────────────────────────╮
 │app-staging / web                               production   not yet restarted│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│1 Deployment(s) in app-staging                                                │
+│1 Deployment in app-staging                                                   │
 │                                                                              │
 │   web  1 replica(s) · RollingUpdate · last restart: never restarted this way │
 │     ! only 1 replica: it keeps serving until the replacement is ready, but   │
 │       there is no redundancy if the replacement fails                        │
 │     ! no readiness probe: a new pod counts as available the moment it        │
 │  ╭─ production ───────────────────────────────────────────────────────────╮  │
-│  │┃ Restart 1 Deployment(s) in app-staging? It is a production env.       │  │
+│  │┃ Restart 1 Deployment in app-staging? It is a production env.          │  │
 │  │┃                                                                       │e │
-│  │┃                           Yes     No                                  │  │
+│  │┃                         Yes     No                                    │  │
 │  ╰────────────────────────────────────────────────────────────────────────╯  │
 │                                                                              │
 │                                                                              │
@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                                                        enter restart · esc back
+                                  l activity · enter restart · esc back · ? help

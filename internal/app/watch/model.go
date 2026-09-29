@@ -22,6 +22,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
@@ -221,9 +222,29 @@ func (m Model) View() string {
 	if m.err != "" {
 		sections = append(sections, m.styles.Notice.Render(m.wrappedErr()))
 	}
-	view := ui.Frame{Title: "hoist · watch", Sections: sections, Footer: ui.StatusBar(m.width, m.styles.Dim.Render(m.status()), m.styles.Hint.Render("r poll now · ↑/↓ scroll · esc back"))}.Render(m.styles, m.width, m.height)
+	title := fmt.Sprintf("hoist · watch · %s/%s", m.family, m.env)
+	view := ui.Frame{Title: title, Sections: sections, Footer: m.footer()}.Render(m.styles, m.width, m.height)
 	return redact.Strings(view)
 }
+
+// footer renders through keys.Footer (T3-03) rather than a hand-built status bar, so this
+// screen's own row in internal/ui/keys' registry is what the operator actually sees — UX-H9:
+// the left side names the next poll countdown rather than the old "read-only · never
+// refreshes", which the audit flagged as claiming a mechanism ("never refreshes") this screen
+// does not run (it polls on m.interval()) right beside a verb ("poll now") that duplicates r's
+// own "refresh" meaning everywhere else in the app.
+func (m Model) footer() string {
+	hints := []keys.Hint{
+		{B: keys.Refresh, Long: "r refresh", Pri: 1},
+		{B: keys.Log, Long: "l activity", Pri: 2},
+		{B: keys.Esc, Long: "esc back", Pri: 0},
+	}
+	return keys.Footer(m.styles, m.width, m.status(), hints, true)
+}
+
+// KeyScreen implements the root's keyed interface (internal/app/screen.go): this screen's own
+// row in internal/ui/keys' registry, used by both the help overlay and this footer.
+func (m Model) KeyScreen() keys.Screen { return keys.ScrWatch }
 
 func (m Model) wrappedErr() string { return ansi.Wrap(m.err, max(m.width-2, 20), "") }
 
@@ -396,6 +417,10 @@ func workloadState(w Workload) string {
 	}
 }
 
+// status is the footer's own left-hand text (UX-H9): "next poll in Ns" replaces the old
+// "read-only · never refreshes", which claimed a mechanism this screen does not run (it polls
+// on m.interval() — Principle 1) right beside a verb ("poll now") that duplicated r's own
+// "refresh" meaning everywhere else in the app.
 func (m Model) status() string {
 	switch {
 	case m.polls == 0:
@@ -403,7 +428,11 @@ func (m Model) status() string {
 	case m.polling:
 		return "polling…"
 	default:
-		return "read-only · never refreshes"
+		remain := m.lastPolled.Add(m.interval()).Sub(m.funcs.Now())
+		if remain < 0 {
+			remain = 0
+		}
+		return fmt.Sprintf("next poll in %ds", int(remain.Round(time.Second).Seconds()))
 	}
 }
 

@@ -36,16 +36,22 @@ func pressRoot(m tea.Model, k string) (tea.Model, tea.Cmd) {
 // TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit is the composition the flight
 // screen's own CapturesText test cannot prove: with the flight screen on top, blocked on
 // ci.none and its c dialog up, q through the ROOT is handed to the dialog rather than
-// treated as the global quit — an operator mid-decision cannot quit the program by
-// mistake. Positive control: the same q, with no dialog up, quits.
+// falling through to the global "q" handling — an operator mid-decision cannot dismiss the
+// dialog by typing what they think is a command. Positive control: the same q, with no dialog
+// up, never quits either — the flight screen is not the matrix, so q is unbound there under the
+// audit keymap (rule 4) and only raises the transient hint.
 func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	drv := &recordingDrive{blocked: ciNoneBlocked(t, "abcd1234"), state: engine.PromotionState{ID: "abcd1234"}}
 	tm := blockedOnCINoneAtRoot(t, drv)
 	if !strings.Contains(plain(tm), "c treat as green") {
 		t.Fatalf("setup: the flight screen should offer c:\n%s", plain(tm))
 	}
-	if _, cmd := pressRoot(tm, "q"); !quits(cmd) {
-		t.Fatal("positive control: q with no dialog open must quit")
+	tm, cmd0 := pressRoot(tm, "q")
+	if quits(cmd0) {
+		t.Fatal("positive control: q on the (non-matrix) flight screen must never quit")
+	}
+	if !strings.Contains(plain(tm), "q quits from the matrix") {
+		t.Fatalf("q on flight should raise the transient hint:\n%s", plain(tm))
 	}
 
 	tm, _ = pressRoot(tm, "c")
@@ -66,7 +72,7 @@ func TestQuitKeyWhileFlightOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 
 // TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit: the same composition for the plan
 // screen's o dialog, a text input that takes q as a character. Positive control: q on the
-// ready plan screen with no dialog up quits.
+// ready plan screen with no dialog up never quits either — the plan screen is not the matrix.
 func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	r, err := gitops.Discover(fixtureRoot, "")
 	if err != nil {
@@ -83,8 +89,12 @@ func TestQuitKeyWhilePlanOverrideDialogIsOpenDoesNotQuit(t *testing.T) {
 	pm = uitest.Drain(pm, pm.Init(), plan.Model.Update)
 	root := sized(t).(Model).push(planScreen{pm})
 	var tm tea.Model = root
-	if _, cmd := pressRoot(tm, "q"); !quits(cmd) {
-		t.Fatal("positive control: q on the plan screen with no dialog open must quit")
+	tm, cmd0 := pressRoot(tm, "q")
+	if quits(cmd0) {
+		t.Fatal("positive control: q on the (non-matrix) plan screen must never quit")
+	}
+	if !strings.Contains(plain(tm), "q quits from the matrix") {
+		t.Fatalf("q on the plan screen should raise the transient hint:\n%s", plain(tm))
 	}
 
 	tm, _ = pressRoot(tm, "o")
@@ -133,7 +143,15 @@ func TestQuitWithRunningDriveAsksFirst(t *testing.T) {
 		t.Fatal("setup: the attached entry must count as running")
 	}
 
+	// q only asks (or quits) from the matrix (audit keymap rule 4) — esc back to it first,
+	// exactly as an operator leaving a running drive to quit the whole program would (Train 2
+	// design PR 3: leaving flight never cancels the drive underneath it).
 	var top tea.Model = mm
+	top, backCmd := pressRoot(top, "esc")
+	top = uitest.Drain(top, backCmd, func(m tea.Model, msg tea.Msg) (tea.Model, tea.Cmd) { return m.Update(msg) })
+	if _, ok := top.(Model).top().(matrixScreen); !ok {
+		t.Fatalf("setup: esc from flight must land back on the matrix:\n%s", plain(top))
+	}
 	top, cmd2 := pressRoot(top, "q")
 	if quits(cmd2) {
 		t.Fatal("q quit immediately with a drive running — it must ask first")
