@@ -18,7 +18,9 @@ type Styles struct {
 	// Status styles the status-bar summary, Notice a transient message shown in its place,
 	// Hint the key hints on the right of the bar.
 	Status, Notice, Hint lipgloss.Style
-	// Help styles the expanded help line toggled by ?.
+	// Help styles the expanded help line toggled by ? — its own shade since T3-02, distinct
+	// from Dim's grey (previously identical), so the two read as different things when a
+	// screen shows both at once (the help overlay's own body over a dimmed frame).
 	Help lipgloss.Style
 
 	// Chrome (M10). Border colours every frame and pane edge; Title the name in a frame's
@@ -28,9 +30,21 @@ type Styles struct {
 	// spelled out; colour is the second channel). Good: pinned, green CI, "in staging".
 	// Warn: drifted, split, a migration, a blocked step. Bad: a failed step, an error line.
 	// Dim: external, an unreached step, "…10 more". Accent: the cursor, an id, a command
-	// the operator should type. Production: the amber temperature a production target
-	// gives a header or a mode chip.
+	// the operator should type. Production: its own hue (T3-02), distinct from Warn — a
+	// production target is a fact about the env, not a warning about the current change.
 	Good, Warn, Bad, Dim, Accent, Production lipgloss.Style
+	// Info (T3-02) is its own colour, split out of what used to be Notice/Warn/Production
+	// sharing one amber: a plain "this happened" report (a promotion started, a URL shown),
+	// never itself a warning or a failure. Notice keeps its own field and colour — the
+	// transient-message role frame.go's NoticeLines still defaults to — so existing callers
+	// are unaffected; Info is what a caller now picks explicitly to colour by kind (the
+	// root's activity row, AGENTS.md §4.8/§9 — ui.NoticeLinesStyled takes the style a caller
+	// chose instead of always reaching for Notice).
+	Info lipgloss.Style
+	// Cursor (T3-02) is the cell-cursor style the matrix's grid renderer needs from T3-04
+	// on: a background fill (not just a foreground colour, the way Selected reinforces a
+	// row) plus bold, so a single highlighted cell reads clearly against a table of many.
+	Cursor lipgloss.Style
 	// Add and Del colour the + and - lines of a diff.
 	Add, Del lipgloss.Style
 }
@@ -45,6 +59,18 @@ func NewStyles(dark bool) Styles {
 	good := ld(lipgloss.Color("28"), lipgloss.Color("78"))
 	warn := ld(lipgloss.Color("166"), lipgloss.Color("214"))
 	bad := ld(lipgloss.Color("160"), lipgloss.Color("203"))
+	// T3-02: Info, Production and Help/Muted each get their own hue instead of sharing Warn's
+	// amber or Dim's grey (train3-design.md's own list of what today collapses to one colour).
+	// info is a calm blue — a plain report, never itself an exception. production is the
+	// mockups' own violet (docs/tui/mockups.html's `.c-prod`, #d9a0f0), picked specifically to
+	// read as "a fact about this env" rather than "something is wrong" the way Warn's amber
+	// would. help is a step lighter than muted so the two are still distinguishable side by
+	// side (the help overlay's own body drawn over a dimmed frame).
+	info := ld(lipgloss.Color("25"), lipgloss.Color("117"))
+	production := ld(lipgloss.Color("91"), lipgloss.Color("183"))
+	help := ld(lipgloss.Color("244"), lipgloss.Color("250"))
+	cursorBG := ld(lipgloss.Color("189"), lipgloss.Color("24"))
+	cursorFG := ld(lipgloss.Color("0"), lipgloss.Color("255"))
 	return Styles{
 		Dark:       dark,
 		Header:     lipgloss.NewStyle().Bold(true).Padding(0, 1),
@@ -53,7 +79,7 @@ func NewStyles(dark bool) Styles {
 		Status:     lipgloss.NewStyle().Foreground(muted),
 		Notice:     lipgloss.NewStyle().Bold(true).Foreground(notice),
 		Hint:       lipgloss.NewStyle().Foreground(muted),
-		Help:       lipgloss.NewStyle().Foreground(muted),
+		Help:       lipgloss.NewStyle().Foreground(help),
 		Border:     lipgloss.NewStyle().Foreground(border),
 		Title:      lipgloss.NewStyle().Bold(true),
 		Rule:       lipgloss.NewStyle().Foreground(muted),
@@ -62,7 +88,9 @@ func NewStyles(dark bool) Styles {
 		Bad:        lipgloss.NewStyle().Foreground(bad),
 		Dim:        lipgloss.NewStyle().Foreground(muted),
 		Accent:     lipgloss.NewStyle().Foreground(accent),
-		Production: lipgloss.NewStyle().Bold(true).Foreground(warn),
+		Production: lipgloss.NewStyle().Bold(true).Foreground(production),
+		Info:       lipgloss.NewStyle().Bold(true).Foreground(info),
+		Cursor:     lipgloss.NewStyle().Bold(true).Background(cursorBG).Foreground(cursorFG),
 		Add:        lipgloss.NewStyle().Foreground(good),
 		Del:        lipgloss.NewStyle().Foreground(bad),
 	}
