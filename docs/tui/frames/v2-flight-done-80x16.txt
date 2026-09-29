@@ -1,0 +1,16 @@
+╭─ hoist · promotion · done ───────────────────────────────────────────────────╮
+│ 5pr6sd333t  app-staging → app-production          finished 2m ago · took 41m │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ✓ approval  ✓ merge             │
+│ ✓ argo refresh  ✓ argo sync  ✓ rollout · 2/2 deployments available           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ app-production now declares and runs:                                        │
+│   orders     v2026022012   sha256:4f2a9c01e7…                                │
+│   marketing  sha-1a2b3c4   sha256:9b8c7d6e5f…                                │
+│                                                                              │
+│ PR #103 merged as 9f8e7d6 · the matrix has been refreshed                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  2m ago  rollout complete · 2/2                                              │
+│  4m ago  argo synced 9f8e7d6 · healthy                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+                                 esc back · o open PR · w watch · l log · ? help

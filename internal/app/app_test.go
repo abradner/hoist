@@ -3079,3 +3079,36 @@ func TestOpenDeployPlumbsPlannedViewToStartRequest(t *testing.T) {
 		t.Errorf("StartRequest.View = %+v, want openDeploy's planned view %+v", *got, wantView)
 	}
 }
+
+// TestViewRequestsAllKeysAsEscapeCodes: T3-01 asks every render for the Kitty-protocol feature
+// that can tell a real shift+letter from a caps-lock letter — the one signal
+// internal/ui/keys.Binding.Matches needs to reject caps lock on a terminal that grants it
+// (train3-design.md's "Modifier" note). A terminal that doesn't support the request, or
+// doesn't grant it, simply never sends a KeyboardEnhancementsMsg back — see
+// TestKeyboardEnhancementsRecorded below for what happens when it does.
+func TestViewRequestsAllKeysAsEscapeCodes(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	v := m.(Model).View()
+	if !v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes {
+		t.Error("View did not request KeyboardEnhancements.ReportAllKeysAsEscapeCodes")
+	}
+}
+
+// TestKeyboardEnhancementsRecorded: the root stores whatever the terminal answers, for the one
+// consumer that needs it later (T3-03's help overlay line, "caps lock ignored" vs "a capital
+// counts as shift") — it is not itself a registry row, since internal/parity's parser only
+// collects `case pkg.XMsg:` from app.go and explicitly skips tea.* messages
+// (train3-design.md's "Parity and docs: parity has no change").
+func TestKeyboardEnhancementsRecorded(t *testing.T) {
+	m := sized(t)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	msg := tea.KeyboardEnhancementsMsg{Flags: 1 << 3} // ReportAllKeysAsEscapeCodes bit
+	m, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Error("KeyboardEnhancementsMsg should produce no command")
+	}
+	if !m.(Model).kbd.SupportsAllKeysAsEscapeCodes() {
+		t.Error("Model did not record the terminal's KeyboardEnhancementsMsg")
+	}
+}

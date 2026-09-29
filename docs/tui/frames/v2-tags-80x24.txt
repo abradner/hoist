@@ -1,0 +1,24 @@
+╭─ hoist · tags · app-staging ─────────────────────────────────────────────────╮
+│ ghcr.io/example/app · app-staging declares v1, set 34 days ago               │
+├───────────────┬───────────────┬───────────────┬──────────────────────────────┤
+│ TAG           │ BUILT         │ DIGEST        │ SINCE v1                     │
+├───────────────┼───────────────┼───────────────┼──────────────────────────────┤
+│ ▸ v3          │ 3 days ago    │ 3333333333    │ 14 commits · 2 migrations    │
+│   v2          │ 4 weeks ago   │ 2222222222    │ 3 commits                    │
+│   v1          │ 2 months ago  │ 1111111111    │ ◂ declared here              │
+│ ── digest     │               │               │                              │
+│   sha-3333333 │ 3 days ago    │ 3333333333    │ same build as v3             │
+│ ── moving     │               │               │                              │
+│   latest      │ 3 days ago    │ 3333333333    │ same build as v3             │
+├───────────────┴───────────────┴───────────────┴──────────────────────────────┤
+│ v3 · 14 commits ahead of v1 · 2 migrations                                   │
+│   4a1c2ef  Add rate limiting to the public API                               │
+│   e9b0d31  Fix N+1 query when resolving digests                              │
+│   77c0ffe  db: add index on events.created_at                      migration │
+│   1b2d3e4  Bump temporal SDK to 1.31                                         │
+│   6f8a90c  Drop the legacy /v1/export endpoint                               │
+│   a3e91b2  db: backfill events.tenant_id                           migration │
+│   9d2c4e1  Retry the registry HEAD on 429                                    │
+│                                                             ↓ 7 more commits │
+╰──────────────────────────────────────────────────────────────────────────────╯
+       enter review v3 · → read commit · / filter · r reload · esc back · ? help

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import html
+import sys
 
 def esc(s): return html.escape(s, quote=False)
 
@@ -490,11 +491,33 @@ def footer(text, w):
     assert len(text) <= w, f"footer over {w}: {text!r} ({len(text)})"
     return '\n<span class="c-dim">' + esc(text.rjust(w)) + '</span>'
 
+# FRAMES holds the plain-text render of every v2 mockup frame, footer row included, keyed
+# by "v2-<name>-<w>x<h>" (T3-01, --txt below). record() is called at each frame function's
+# own footer() call site — the one place box.lines is complete (after check()) and the
+# footer text is still a plain string, before colour() or overlay() touch it — so the plain
+# and coloured renders can never drift apart the way two independently-written copies would.
+FRAMES = {}
+def record(name, lines, text, w):
+    assert len(text) <= w, f"footer over {w}: {text!r} ({len(text)})"
+    FRAMES[name] = list(lines) + [text.rjust(w)]
+    return footer(text, w)
+
 def check(box, height, w):
     ls = box.lines
     assert len(ls) == height - 1, f"frame is {len(ls)} lines, want {height - 1}"
     for l in ls:
         assert len(l) == w, f"line is {len(l)} wide, want {w}: {l!r}"
+
+def overlay_plain(base_lines, dlg_lines, top, left):
+    """Plain-text sibling of overlay() below, for FRAMES/record: no colour to dim, just the
+    dialog's cells written over the base's at (top, left) — the shape a real terminal shows,
+    which is what a golden eventually diffs against."""
+    out = list(base_lines)
+    for i, dl in enumerate(dlg_lines):
+        j = top + i
+        row = out[j]
+        out[j] = row[:left] + dl + row[left + len(dl):]
+    return out
 
 def overlay(base_lines, dlg_lines, dlg_html, top, left):
     """Composite a dialog over a dimmed frame (ui.Dialog's shape): every base cell
@@ -556,7 +579,8 @@ def matrix_v2_80(prod=False):
         h = words(h, w_, c_)
     # the cursor cell's own "pinned" was dimmed inside the highlight; that is intended —
     # the highlight carries the cell, the word stays quiet.
-    h += footer("enter actions · p promote into · t tag · w watch · r refresh · ? help · q quit", 80)
+    h += record("v2-matrix-80x24", b.lines,
+                "enter actions · p promote into · t tag · w watch · r refresh · ? help · q quit", 80)
     return h, b.lines
 
 # ── v2·1b MATRIX 120x40 with detail pane ──
@@ -627,7 +651,8 @@ def matrix_v2_120():
     for w_, c_ in (("pinned", "c-dim"), ("external", "c-dim"), ("drifted", "c-warn"),
                    ("split", "c-warn"), ("unpinned", "c-warn")):
         h = words(h, w_, c_)
-    h += footer("enter actions · p promote into app-staging · t deploy tag · w watch · shift+r restart · "
+    h += record("v2-matrix-120x40", b.lines,
+                "enter actions · p promote into app-staging · t deploy tag · w watch · shift+r restart · "
                 "tab in flight · ? help · q quit", 120)
     return h
 
@@ -655,7 +680,8 @@ def action_menu():
     ]) for l in d.lines]
     top, left = 6, (80 - d.width()) // 2
     h = overlay(base, d.lines, dh, top, left)
-    h += footer("↑/↓ move · enter run · the letter runs it directly · esc close", 80)
+    h += record("v2-action-menu-80x24", overlay_plain(base, d.lines, top, left),
+                "↑/↓ move · enter run · the letter runs it directly · esc close", 80)
     return h
 
 # ── v2·3 HELP OVERLAY ──
@@ -683,7 +709,7 @@ def help_overlay():
                      ("shift+ keys always ask before they write", "c-dim")]) for l in d.lines]
     top, left = 3, (80 - d.width()) // 2
     h = overlay(base, d.lines, dh, top, left)
-    h += footer("esc close", 80)
+    h += record("v2-help-overlay-80x24", overlay_plain(base, d.lines, top, left), "esc close", 80)
     return h
 
 # ── v2·4a FLIGHT, waiting ──
@@ -733,7 +759,8 @@ def flight_waiting():
         ("deadline in 3h 48m · leaving this screen keeps it running", "c-dim"),
         ("11m ago", "c-dim"), (" 6m ago", "c-dim"),
     ])
-    h += footer("esc back (keeps running) · o open PR · w watch · l log · ? help", 80)
+    h += record("v2-flight-waiting-80x24", b.lines,
+                "esc back (keeps running) · o open PR · w watch · l log · ? help", 80)
     return h
 
 # ── v2·4b FLIGHT, done (80x16) ──
@@ -766,7 +793,8 @@ def flight_done():
         ("the matrix has been refreshed", "c-good"),
         (" 2m ago", "c-dim"), (" 4m ago", "c-dim"),
     ])
-    h += footer("esc back · o open PR · w watch · l log · ? help", 80)
+    h += record("v2-flight-done-80x16", b.lines,
+                "esc back · o open PR · w watch · l log · ? help", 80)
     return h
 
 # ── v2·5a DEPLOY CONFIRM ──
@@ -813,7 +841,8 @@ def deploy_confirm():
         ("writes 3 image references in 1 file · verified before commit", "c-dim"),
     ])
     h = words(h, "migration", "c-warn")
-    h += footer("enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags · ? help", 80)
+    h += record("v2-deploy-confirm-80x24", b.lines,
+                "enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags · ? help", 80)
     return h
 
 # ── v2·5b PLAN CONFIRM ──
@@ -857,7 +886,8 @@ def plan_confirm():
         ("worker is already at v2026022012 in app-production and is left alone", "c-dim"),
     ])
     h = words(h, "migration", "c-warn")
-    h += footer("enter promote · space tick · d yaml · e edit digest · esc back · ? help", 80)
+    h += record("v2-plan-confirm-80x24", b.lines,
+                "enter promote · space tick · d yaml · e edit digest · esc back · ? help", 80)
     return h
 
 # ── v2·6a TAG PICKER, filling the body ──
@@ -898,7 +928,8 @@ def tags_v2():
                 ("↓ 7 more commits", "c-dim"),
     ])
     h = words(h, "migration", "c-warn")
-    h += footer("enter review v3 · → read commit · / filter · r reload · esc back · ? help", 80)
+    h += record("v2-tags-80x24", b.lines,
+                "enter review v3 · → read commit · / filter · r reload · esc back · ? help", 80)
     return h
 
 # ── v2·6b EMPTY / ERROR states (80x12 and 80x10) ──
@@ -920,7 +951,7 @@ def empty_matrix():
         ("no environments discovered under cluster/apps", "c-warn"),
         ("repos[].apps_root", "c-accent"), ("--apps-root", "c-accent"), ("--repo", "c-accent"),
     ])
-    h += footer("r refresh · c config · ? help · q quit", 80)
+    h += record("v2-empty-matrix-80x12", b.lines, "r refresh · c config · ? help · q quit", 80)
     return h
 
 def tags_error():
@@ -940,7 +971,7 @@ def tags_error():
         ("read:packages", "c-accent"), ("GHCR_TOKEN", "c-accent"),
         ("registries[].cluster", "c-accent"),
     ])
-    h += footer("r retry · esc back · ? help", 80)
+    h += record("v2-tags-error-80x10", b.lines, "r retry · esc back · ? help", 80)
     return h
 
 # ── HTML ──
@@ -1084,14 +1115,29 @@ V2 = [
 ]
 
 here = os.path.dirname(os.path.abspath(__file__))
-path = os.path.join(here, "mockups.html")
-doc = open(path, encoding="utf-8").read()
-block = "".join(V2)
-if "<!-- v2:begin" in doc:
-    doc = re.sub(r"<!-- v2:begin.*?<!-- v2:end -->\n", lambda _: block, doc, flags=re.S)
+
+# T3-01: `genframes.py --txt` writes the plain-text render of every v2 frame (FRAMES, above,
+# populated as a side effect of building the mockup HTML above) to docs/tui/frames/, one file
+# per frame, so a later redesign PR can `diff -u` its own golden against the approved mockup
+# without eyeballing HTML (train3-design.md, "How goldens get compared to mockups"). It writes
+# only those files — never mockups.html — so a normal run (no flag) is unaffected and a --txt
+# run leaves no stray files beyond docs/tui/frames/*.txt.
+if "--txt" in sys.argv:
+    frames_dir = os.path.join(here, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    for name, lines in sorted(FRAMES.items()):
+        with open(os.path.join(frames_dir, f"{name}.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    print(f"{len(FRAMES)} frames written to docs/tui/frames/")
 else:
-    anchor = "  <footer>"
-    assert anchor in doc, "mockups.html lost its <footer> anchor"
-    doc = doc.replace(anchor, block + "\n" + anchor, 1)
-open(path, "w", encoding="utf-8").write(doc)
-print("v2 written to mockups.html")
+    path = os.path.join(here, "mockups.html")
+    doc = open(path, encoding="utf-8").read()
+    block = "".join(V2)
+    if "<!-- v2:begin" in doc:
+        doc = re.sub(r"<!-- v2:begin.*?<!-- v2:end -->\n", lambda _: block, doc, flags=re.S)
+    else:
+        anchor = "  <footer>"
+        assert anchor in doc, "mockups.html lost its <footer> anchor"
+        doc = doc.replace(anchor, block + "\n" + anchor, 1)
+    open(path, "w", encoding="utf-8").write(doc)
+    print("v2 written to mockups.html")

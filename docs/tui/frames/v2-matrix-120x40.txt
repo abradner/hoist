@@ -1,0 +1,40 @@
+╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────────────────────────────────────────────╮
+│ cluster/apps · base main · context my-cluster · 2 envs · 5 families                                                  │
+├───────────────┬──────────────────────────────┬──────────────────────────────┬────────────────────────────────────────┤
+│ FAMILY        │ ▸ APP-STAGING                │ APP-PRODUCTION ⚠             │ orders · app-staging                   │
+├───────────────┼──────────────────────────────┼──────────────────────────────┼────────────────────────────────────────┤
+│ ▸ orders      │ v202602201200         pinned │ v202601151010         pinned │                                        │
+│   marketing   │ sha-1a2b3c4           pinned │ sha-0000111          drifted │ ghcr.io/example/orders                 │
+│   temporal    │ 2 images            external │ 2 images            external │   v202602201200                        │
+│   web         │ 2 builds               split │ v202601010101         pinned │   sha256:4f2a9c01e7…      pinned       │
+│   worker      │ v3                  unpinned │ v2                  unpinned │   declared 3 days ago · a1b2c3d        │
+│               │                              │                              │                                        │
+│               │                              │                              │ running   2/2 pods on this digest      │
+│               │                              │                              │ drift     none                         │
+│               │                              │                              │                                        │
+│               │                              │                              │ ahead of app-production                │
+│               │                              │                              │   18 commits · 2 migrations            │
+│               │                              │                              │                                        │
+│               │                              │                              │ last write  3 days ago                 │
+│               │                              │                              │   deploy v202602201200 · PR #101       │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+│               │                              │                              │                                        │
+├───────────────┴──────────────────────────────┴──────────────────────────────┴────────────────────────────────────────┤
+│ marketing in app-production runs sha-77c0ffe; manifest says sha-0000111 · compared by digest                         │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ in flight · 1                                                                                      next check in 12s │
+│ 5pr6sd333t   orders v2026011510 → v2026022012 · marketing sha-0000111 → sha-1a2b3c4                  started 12m ago │
+│ ✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI 4/4  ⏸ approval  · merge  · argo refresh  · argo sync  · rollout         │
+│ waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103 · deadline in 3h 48m                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ enter actions · p promote into app-staging · t deploy tag · w watch · shift+r restart · tab in flight · ? help · q quit

@@ -1,0 +1,24 @@
+╭─ hoist · deploy · confirm ───────────────────────────────────────────────────╮
+│ ghcr.io/example/app:v3  →  app-staging             mode: PR · shift+d direct │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ rolling out 14 commits · 2 migrations · replacing v1, declared 34 days       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ▸ 4a1c2ef  Add rate limiting to the public API                               │
+│   e9b0d31  Fix N+1 query when resolving digests                              │
+│   77c0ffe  db: add index on events.created_at                      migration │
+│   1b2d3e4  Bump temporal SDK to 1.31                                         │
+│   6f8a90c  Drop the legacy /v1/export endpoint                               │
+│   a3e91b2  db: backfill events.tenant_id                           migration │
+│   9d2c4e1  Retry the registry HEAD on 429                                    │
+│   c0ffee1  Log the resolved digest at startup                                │
+│   5e6f7a8  Move health checks to /healthz                                    │
+│   d4c3b2a  Tidy the Dockerfile layers                                        │
+│                                                             ↓ 4 more commits │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 2 migrations run on this deploy:                                             │
+│   20260225T101500_add_events_created_at_index.rb                             │
+│   20260301T090200_backfill_events_tenant_id.rb                               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ writes 3 image references in 1 file · verified before commit                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+enter deploy · d yaml · shift+d direct · ↑/↓ commits · esc back to tags · ? help
