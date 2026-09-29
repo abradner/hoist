@@ -21,4 +21,4 @@
 │· argo refresh  · argo sync  · rollout                                        │
 │waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+       enter actions · p promote · t tag · w watch · r refresh · q quit · ? more

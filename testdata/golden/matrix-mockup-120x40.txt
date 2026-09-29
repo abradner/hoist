@@ -37,4 +37,4 @@
 │✓ branch  ✓ commit  ✓ push  ✓ PR #103  ✓ CI  ⏸ approval  · merge  · argo refresh  · argo sync  · rollout              │
 │waiting for an approver to comment `hoist approve 5pr6sd333t` on PR #103                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-        enter actions · p promote into · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help
+env app-sta… enter actions · p promote · t tag · w watch · r refresh · shift+r restart · tab in flight · q quit · ? help

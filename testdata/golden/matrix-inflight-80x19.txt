@@ -16,4 +16,4 @@
 │in flight · 1                                                                 │
 │  ⟳ 5pr6sd333t → app-production   blocked on approval · 12m                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+       enter actions · p promote · t tag · w watch · r refresh · q quit · ? more

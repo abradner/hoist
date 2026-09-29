@@ -3,6 +3,17 @@
 // no hint what it does once a screen's real Long hint has already been dropped from view. This
 // file freezes that rule mechanically over every keys.Hint literal in internal/app, the same
 // AST-scan style as t3_10_test.go, rather than leaving it to review (AGENTS.md §10 meta-rule 5).
+//
+// Verification-review followup (T3 followup, group 1): the original rule ("has a space, or is a
+// pure arrow/page/home-end combo") passed two real bugs — the matrix's "p promote into" short
+// form (a key, a verb, and a dangling preposition with no object once the target name was
+// dropped for space) and the tags reader's "↑/↓" short form (a bare arrow with no verb at all,
+// because "↑/↓" was blanket-exempted as if it were always self-describing navigation like
+// pgup/pgdn or home/end — but unlike those, a plain ↑/↓ means something different on every
+// screen it appears on: choose, switch commit, scroll). The rule now also rejects a Short whose
+// last word is a bare preposition, and no longer exempts ↑/←/→ from the key-and-word check —
+// only pgup/pgdn and home/end are self-describing regardless of screen, since they only ever
+// mean "scroll".
 package copycheck
 
 import (
@@ -14,22 +25,45 @@ import (
 	"testing"
 )
 
-// bareNavigation is the one class of Short exempt from the "key and a word" rule: a pure
-// Spatial arrow/page/home-end combo is self-describing navigation with no verb to lose (the
-// audit's own rule 3 — Spatial keys are "movement, never a write"), and every screen that uses
-// one already spells the same shape out in its Long form too (e.g. "↑/↓ switch commit").
+// bareNavigation is the narrow class of Short exempt from the "key and a word" rule: pgup/pgdn
+// and home/end mean the same thing — scroll — on every screen that binds them, so the key alone
+// is self-describing. ↑/↓ (and the plain ←/→ arrows) are deliberately NOT in this set: a bare
+// arrow means something different per screen (choose, switch commit, scroll, move a cursor
+// between panes), so dropping its verb in the short form leaves a reader guessing. Two real
+// bugs shipped from an earlier, broader version of this exemption that included "↑/↓", "←" and
+// "→" (T3 followup, group 1) — a hint needs its own word, or a Long form callers can fall back
+// to, not a blanket pass for anything shaped like an arrow.
 var bareNavigation = map[string]bool{
-	"↑/↓": true, "←": true, "→": true,
 	"pgup/pgdn": true, "home/end": true, "pgup": true, "pgdn": true,
 }
 
+// danglingPreposition is a Short's last word that leaves it reading as a command with the
+// object cut off — "p promote into" once its target name was dropped for space. Passing the
+// "has a space" check isn't enough on its own; the trailing word has to actually land the hint.
+var danglingPreposition = map[string]bool{
+	"into": true, "to": true, "for": true, "with": true, "from": true,
+	"by": true, "at": true, "of": true, "on": true, "as": true,
+}
+
+func lastWord(s string) string {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToLower(fields[len(fields)-1])
+}
+
 // hasKeyAndWord reports whether a hint's Short text carries more than just its own key — a
-// space-separated word beyond the key/arrow token itself, or membership in bareNavigation.
+// space-separated word beyond the key/arrow token itself, or membership in bareNavigation — and
+// that the trailing word isn't a dangling preposition with its object cut off.
 func hasKeyAndWord(short string) bool {
 	if bareNavigation[short] {
 		return true
 	}
-	return strings.Contains(short, " ")
+	if !strings.Contains(short, " ") {
+		return false
+	}
+	return !danglingPreposition[lastWord(short)]
 }
 
 // TestFooterShortFormsKeepTheVerb: every `Short:` field of a keys.Hint composite literal under
@@ -38,6 +72,10 @@ func hasKeyAndWord(short string) bool {
 //
 // Proven to fail: reverting internal/app/plan/model.go's plan-confirm footer to
 // `{B: keys.Diff, Long: "d yaml", Short: "d", Pri: 2}` makes this fail on that literal.
+// Also proven to fail on each real bug this followup fixed: reverting
+// internal/app/matrix/model.go's Promote hint's Short back to "p promote into" fails on the
+// dangling preposition, and reverting internal/app/tags/model.go's reader Up hint's Short back
+// to "↑/↓" fails on the bare-arrow check now that ↑/↓ is no longer in bareNavigation.
 func TestFooterShortFormsKeepTheVerb(t *testing.T) {
 	fset := token.NewFileSet()
 	walkGoFiles(t, "../app", func(path string, src []byte) {

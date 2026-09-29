@@ -152,10 +152,13 @@ func (m Model) ResetStarting() Model {
 // newViewport is this screen's own scrolling body — the diff pane and the commit list alike —
 // bound to keys.ViewportKeyMap (P2-6 in the T3 review) rather than left on viewport.New()'s
 // bubbles-library default, which binds space to page: the T3-08 redesign retired space as a
-// scroll gesture on this screen, and the default keymap left it live anyway.
+// scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on
+// (T3 followup, group 2): the yaml diff's whole point is the digest, and a hard-truncated line
+// hides it past the pane's right edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
 	v := viewport.New()
 	v.KeyMap = keys.ViewportKeyMap()
+	v.SoftWrap = true
 	return v
 }
 
@@ -722,7 +725,7 @@ func (m Model) hints() string {
 		hints = append(hints, keys.Hint{B: keys.Direct, Long: "shift+d direct", Pri: 1})
 	}
 	hints = append(hints,
-		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓", Pri: 3},
+		keys.Hint{B: keys.Up, Long: "↑/↓ commits", Short: "↑/↓ commits", Pri: 3},
 		keys.Hint{B: keys.Refresh, Long: "r fresh origin", Short: "r fresh", Pri: 4},
 		keys.Hint{B: keys.Log, Long: "l activity", Pri: 5},
 		keys.Hint{B: keys.Esc, Long: "esc back to tags", Short: "esc back", Pri: -1},

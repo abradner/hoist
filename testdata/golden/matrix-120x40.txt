@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │⚠ production: writes here always open a PR                                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-env c (produc… enter actions · p promote into c · t deploy tag · w watch · r refresh · shift+r restart · q quit · ? help
+env c ⚠        enter actions · p promote into c · t deploy tag · w watch · r refresh · shift+r restart · q quit · ? help

@@ -703,7 +703,8 @@ func (m Model) reload() (Model, tea.Cmd) {
 }
 
 // newBodyViewport is the commit-detail viewport with only the paging keys bound: ↑/↓ (and
-// j/k) stay the picker's own "next commit", and space stays "review the change", so the
+// j/k) stay the picker's own "next commit", and enter (not space — space is unbound on this
+// screen since #120's v2 redesign) stays "review the change" from inside the reader, so the
 // viewport's defaults for those (line scroll, page down) are unbound rather than fought over.
 func newBodyViewport() viewport.Model {
 	v := viewport.New()
@@ -1569,7 +1570,7 @@ func (m Model) viewReading() string {
 // readingFooter is the commit-detail view's own footer (ScrTagsReader's registry row).
 func (m Model) readingFooter() string {
 	hints := []keys.Hint{
-		{B: keys.Up, Long: "↑/↓ switch commit", Short: "↑/↓", Pri: 3},
+		{B: keys.Up, Long: "↑/↓ switch commit", Short: "↑/↓ commit", Pri: 3},
 		{B: keys.PgUp, Long: "pgup/pgdn scroll", Short: "pgup/pgdn", Pri: 2},
 		{B: keys.Home, Long: "home/end scroll ends", Short: "home/end", Pri: 4},
 		{B: keys.Enter, Long: "enter review the change", Short: "enter review", Pri: 1},

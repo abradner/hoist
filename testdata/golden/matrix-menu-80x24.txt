@@ -21,4 +21,4 @@
 ├──────────────────────────────────────────────────────────────────────────────┤
 │⚠ c is a production env: writes there always open a PR                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+       enter actions · p promote · t tag · w watch · r refresh · q quit · ? more

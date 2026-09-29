@@ -367,6 +367,40 @@ func TestWithHistoryLeadsWithCommitsAndYAMLIsOneKeyAway(t *testing.T) {
 	}
 }
 
+// flattenHex drops everything from s except lowercase hex characters and ':' — box-drawing
+// borders, padding, diff markers ('+'/'-') and the newline a soft-wrapped line breaks on all
+// disappear, leaving a continuous run of the underlying text's hex/':' characters in order. A
+// digest that survives wrapping intact (just spread over more rows) still reads back as one
+// unbroken substring this way; a digest that was hard-cropped does not, since the cut characters
+// are simply gone rather than moved to another line.
+func flattenHex(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == ':' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// The yaml viewport's whole point is the digest — a reviewer checking the change needs it
+// in full, not cropped at the pane's right edge. T3 followup, group 2: the viewport used to
+// hard-crop rather than wrap (SoftWrap was never set), so a long image reference cut the digest
+// off before it scrolled into view, and Left/Right (the usual way to see the rest) are
+// deliberately unbound on this shared keymap (internal/ui/keys/viewport.go). SoftWrap fixes it
+// at both a wide and a narrow terminal — proven to fail by unsetting v.SoftWrap in newViewport.
+func TestYAMLViewportShowsTheFullDigestEvenNarrow(t *testing.T) {
+	wantDigest := flattenHex("sha256:" + strings.Repeat("d", 64))
+	for _, size := range []struct{ w, h int }{{120, 40}, {80, 24}} {
+		m := withHistory(t, config.EnvsConfig{}).SetSize(size.w, size.h)
+		y := uitest.Keys(m, updateFn, "d")
+		v := ansi.Strip(y.View())
+		if !strings.Contains(flattenHex(v), wantDigest) {
+			t.Errorf("%dx%d: yaml view does not show the full digest %q:\n%s", size.w, size.h, wantDigest, v)
+		}
+	}
+}
+
 // Without history the yaml is the body, the header says why there is no history, and d says
 // there is nothing else to show rather than doing nothing.
 func TestWithoutHistoryTheYAMLIsTheBodyWithTheReason(t *testing.T) {

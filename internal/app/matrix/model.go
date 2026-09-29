@@ -41,7 +41,6 @@ type chooserKind int
 
 const (
 	chooserImage  chooserKind = iota // t on a cell with several first-party images
-	chooserResume                    // several promotions in flight, resuming from o/menu
 	chooserOpenPR                    // o with several in flight that have PRs
 )
 
@@ -700,17 +699,7 @@ func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if choice == "" {
 			return m, nil
 		}
-		switch kind {
-		case chooserResume:
-			for _, s := range m.inflight {
-				if chooserKey(s) != choice {
-					continue
-				}
-				return m, func() tea.Msg { return resumeMsgFor(s) }
-			}
-			m.notice = "that promotion is no longer in flight"
-			return m, nil
-		case chooserOpenPR:
+		if kind == chooserOpenPR {
 			for _, s := range m.withPR() {
 				if s.ID == choice {
 					url := s.PR.URL
@@ -804,10 +793,7 @@ func (m Model) View() string {
 	}
 	if m.chooser != nil {
 		title := "deploy"
-		switch m.chooserKind {
-		case chooserResume:
-			title = "resume"
-		case chooserOpenPR:
+		if m.chooserKind == chooserOpenPR {
 			title = "open PR"
 		}
 		return ui.Dialog(m.styles, view, title, redact.Strings(m.chooser.View()), m.width, m.height)
@@ -1297,14 +1283,19 @@ const selectedMarker = "▸ "
 const productionMarker = " ⚠"
 
 // statusBar is the matrix's own footer, through keys.Footer (T3-03/04): the env under the
-// cursor on the left (named "(production)" there exactly as before — every write gesture is
-// gated on it), the writes and verbs an operator is actually looking for the key of on the
-// right, in priority order so a narrow terminal drops the least useful first.
+// cursor on the left, the writes and verbs an operator is actually looking for the key of on
+// the right, in priority order so a narrow terminal drops the least useful first. The cursor's
+// own production marker (T3 followup, group 3) is productionMarker — the same "⚠" the header
+// and the notes sentence already use — rather than the spelled-out " (production)" this used to
+// read: at 120 columns the write-verb hints leave the status too little room, and
+// ui.StatusBar's own truncation-with-ellipsis rule was cutting "env b (production)" down to
+// "env b (produc…", a fragment that reads worse than no suffix at all. The shorter marker fits,
+// and the notes sentence below is still what actually spells "production" out for the operator.
 func (m Model) statusBar() string {
 	env := m.CurrentEnv()
 	status := "env " + orNoEnv(env)
 	if env != "" && m.IsProduction(env) {
-		status = "env " + env + " (production)"
+		status = "env " + env + productionMarker
 	}
 	target := m.CurrentEnv()
 	promoteLong := "p promote into"
@@ -1313,7 +1304,7 @@ func (m Model) statusBar() string {
 	}
 	hints := []keys.Hint{
 		{B: keys.Enter, Long: "enter actions", Short: "enter actions", Pri: 0},
-		{B: keys.Promote, Long: promoteLong, Short: "p promote into", Pri: 1},
+		{B: keys.Promote, Long: promoteLong, Short: "p promote", Pri: 1},
 		{B: keys.Tag, Long: "t deploy tag", Short: "t tag", Pri: 2},
 		{B: keys.Watch, Long: "w watch", Short: "w watch", Pri: 3},
 		{B: keys.Refresh, Long: "r refresh", Short: "r refresh", Pri: 4},

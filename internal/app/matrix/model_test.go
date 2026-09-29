@@ -274,14 +274,16 @@ func TestProductionColumnIsMarkedEverywhere(t *testing.T) {
 	if !strings.Contains(v, "⚠ b is a production env: writes there always open a PR") {
 		t.Errorf("notes lack the production sentence:\n%s", v)
 	}
-	// P3 (T3 review): the footer's own status ("env b (production)") is still worth asserting
-	// on — it is what the previous assertion checked before the write-verb hints crowded it out
-	// at this width, truncating it to "env b (produc…" (ui.StatusBar's own "…" rule). That
-	// truncated prefix is what actually survives at 120 columns, so this checks for it rather
-	// than the untruncated string, which would fail here for a reason that has nothing to do
-	// with whether the production marker still reaches the footer at all.
-	if !strings.Contains(v, "env b (produc") {
+	// P3 (T3 review): the footer's own status is still worth asserting on. It used to spell out
+	// "env b (production)", which the write-verb hints at this width left too little room for —
+	// ui.StatusBar's own "…" truncation rule cut it to "env b (produc…", a fragment on screen.
+	// T3 followup, group 3: the status now uses the same ⚠ the header and notes sentence carry
+	// (productionMarker) instead of the spelled-out suffix, so it fits untruncated.
+	if !strings.Contains(v, "env b"+productionMarker) {
 		t.Errorf("footer status lost the production marker entirely:\n%s", v)
+	}
+	if strings.Contains(v, "env b (produc") {
+		t.Errorf("footer status should no longer be truncated mid-word:\n%s", v)
 	}
 }
 

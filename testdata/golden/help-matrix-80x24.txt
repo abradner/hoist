@@ -21,4 +21,4 @@
 │      │                                                               │       │
 │      │a capital counts as shift                                      │       │
 ╰──────╰───────────────────────────────────────────────────────────────╯───────╯
-  enter actions · p promote into · t tag · w watch · r refresh · q quit · ? more
+       enter actions · p promote · t tag · w watch · r refresh · q quit · ? more
