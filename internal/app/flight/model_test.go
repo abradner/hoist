@@ -132,12 +132,12 @@ func TestFlightNeverCallsDriver(t *testing.T) {
 	})
 	snap.Busy = false
 	m = m.Mirror(snap)
-	_, cmd = m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	_, cmd = m.Update(uitest.Key("r"))
 	if cmd == nil {
-		t.Fatal("R produced no command")
+		t.Fatal("r produced no command")
 	}
 	if _, ok := cmd().(ReobserveMsg); !ok {
-		t.Fatalf("R's command = %T, want ReobserveMsg — the screen must only ASK, never drive", cmd())
+		t.Fatalf("r's command = %T, want ReobserveMsg — the screen must only ASK, never drive", cmd())
 	}
 }
 
@@ -175,15 +175,15 @@ func TestNilDriveFuncNeverTicks(t *testing.T) {
 	}
 }
 
-// TestReobserveEmitsRequest: R fires ReobserveMsg immediately, without any local wait — the
+// TestReobserveEmitsRequest: r fires ReobserveMsg immediately, without any local wait — the
 // controller's own Poke is what decides whether it can actually happen.
 func TestReobserveEmitsRequest(t *testing.T) {
 	snap := stepping(fixtureState(), false, []engine.StepStatus{st(engine.StepBranched, engine.Observation{Satisfied: true})})
 	snap.Busy = false
 	m := NewAttached(snap, PollDurations{})
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	_, cmd := m.Update(uitest.Key("r"))
 	if cmd == nil {
-		t.Fatal("R produced no command")
+		t.Fatal("r produced no command")
 	}
 	msg, ok := cmd().(ReobserveMsg)
 	if !ok || msg.ID != "abcd1234" {
@@ -191,20 +191,20 @@ func TestReobserveEmitsRequest(t *testing.T) {
 	}
 }
 
-// TestReobserveIgnoredWhileBusy: R while Busy (a Step already outstanding) must not emit — the
+// TestReobserveIgnoredWhileBusy: r while Busy (a Step already outstanding) must not emit — the
 // same immediate-feedback guard the old busy check gave, now read off the mirrored Snapshot.
 func TestReobserveIgnoredWhileBusy(t *testing.T) {
 	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}) // Busy defaults true in stepping()
 	if !m.busy {
 		t.Fatal("setup: expected busy = true")
 	}
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	_, cmd := m.Update(uitest.Key("r"))
 	if cmd != nil {
-		t.Error("R while busy produced a command")
+		t.Error("r while busy produced a command")
 	}
 }
 
-// TestReobserveOnUnattachedScreenShowsNotice: R while still Building (no real id yet) shows a
+// TestReobserveOnUnattachedScreenShowsNotice: r while still Building (no real id yet) shows a
 // notice instead of emitting a request nothing could answer.
 func TestReobserveOnUnattachedScreenShowsNotice(t *testing.T) {
 	m := NewAttached(building("app-staging", "app-production", false), PollDurations{})
@@ -212,9 +212,9 @@ func TestReobserveOnUnattachedScreenShowsNotice(t *testing.T) {
 	// file's usual 10 there is one row too little for header+strip+action+notice, and the
 	// notice (already a single line) is dropped whole rather than trimmed.
 	m = m.SetSize(80, 11)
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m, cmd := m.Update(uitest.Key("r"))
 	if cmd != nil {
-		t.Error("R with no real id yet produced a command")
+		t.Error("r with no real id yet produced a command")
 	}
 	if !strings.Contains(m.View(), "nothing to re-observe") {
 		t.Errorf("view missing the read-only notice:\n%s", m.View())
@@ -277,20 +277,20 @@ func TestBackKey(t *testing.T) {
 	}
 }
 
-// TestLogToggle: the log is visible by default, and l still toggles it off and back on.
-func TestLogToggle(t *testing.T) {
+// TestLogAlwaysVisible: v2/T3-06 retires the log toggle — l now opens the root's shared activity
+// screen instead (KeyScreen, generic root handling), so this screen has nothing left to hide the
+// history behind, and pressing l here (never reaching this package's own Update outside the
+// root's generic interception, but proven anyway: this package must not reintroduce a local
+// toggle) leaves it exactly as visible as before.
+func TestLogAlwaysVisible(t *testing.T) {
 	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{})
 	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
 	if !strings.Contains(m.View(), "history") || !strings.Contains(m.View(), "acted") {
 		t.Fatalf("history not shown by default:\n%s", m.View())
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	if strings.Contains(m.View(), "acted") {
-		t.Error("history still shown after l")
-	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	m, _ = m.Update(uitest.Key("l"))
 	if !strings.Contains(m.View(), "history") || !strings.Contains(m.View(), "acted") {
-		t.Errorf("history not shown after a second l:\n%s", m.View())
+		t.Errorf("history must stay visible — l is no longer this screen's own toggle:\n%s", m.View())
 	}
 }
 
@@ -329,7 +329,7 @@ func TestMirrorRedactsRegisteredSecret(t *testing.T) {
 }
 
 // TestDoneShowsCompleteAndStopsOfferingReobserve: a Done snapshot shows "promotion complete" and
-// R is a no-op (nothing left to re-observe).
+// r is a no-op (nothing left to re-observe).
 func TestDoneShowsCompleteAndStopsOfferingReobserve(t *testing.T) {
 	snap := stepping(fixtureState(), true, []engine.StepStatus{
 		st(engine.StepMerged, engine.Observation{Satisfied: true, Detail: "merged as abc123; branch deleted"}),
@@ -342,9 +342,9 @@ func TestDoneShowsCompleteAndStopsOfferingReobserve(t *testing.T) {
 	if !strings.Contains(m.View(), "promotion complete") {
 		t.Errorf("view missing the done status:\n%s", m.View())
 	}
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	_, cmd := m.Update(uitest.Key("r"))
 	if cmd != nil {
-		t.Error("R after done produced a command")
+		t.Error("r after done produced a command")
 	}
 }
 
@@ -464,7 +464,7 @@ func TestViewFixedSize(t *testing.T) {
 		m.state.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"} // a PR exists, so o is offered
 		m = m.SetSize(100, 30).SetStyles(styles)
 		got := m.View()
-		for _, want := range []string{"app-staging → app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "R re-observe", "l log"} {
+		for _, want := range []string{"app-staging → app-production", "abcd1234", "CI: 2/3 checks complete", "o open PR", "r re-observe", "l log"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q:\n%s", want, got)
 			}
@@ -566,8 +566,8 @@ func TestLogScrollsByKeypress(t *testing.T) {
 		s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
 	}
 	m := NewAttached(stepping(s, false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
-	if !m.showLog || m.log.YOffset() != 0 {
-		t.Fatalf("log visible by default: showLog=%v offset=%d", m.showLog, m.log.YOffset())
+	if m.log.YOffset() != 0 {
+		t.Fatalf("log starts at the top: offset=%d", m.log.YOffset())
 	}
 	m = uitest.Keys(m, updateFn, "down", "down", "down")
 	if m.log.YOffset() != 3 {

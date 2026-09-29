@@ -152,7 +152,7 @@ Deployment the commit touched to roll out. The flight screen shows each step and
 one is waiting for:
 
 ```
-╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+╭─ hoist · promotion · waiting for approval ───────────────────────────────────╮
 │abcd1234   app-staging → app-production                     started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │✓ branch                                                                      │
@@ -167,32 +167,35 @@ one is waiting for:
 │· argo sync                                                                   │
 │· rollout                                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked on you — comment on PR #103 to release it:                            │
-│                                                                              │
-│    hoist approve abcd1234                                                    │
+│waiting for an approver to comment `hoist approve abcd1234` on PR #103 · o    │
+│opens it                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                        o open PR · X abandon · R re-observe · l log · esc back
+esc back · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help
 ```
 
-`R` re-observes now instead of at the next poll. `esc` leaves this screen — it stops *watching*
-only; the drive itself keeps running exactly as it was (branch, commit, push, PR, merge, Argo,
-rollout — whatever step is next still happens), and `enter`/`r` on the matrix's in-flight pane
-below re-attaches to the exact same running drive later, never starting a second one. `X` (shift,
-like `R` on the matrix — a write, kept out of reach of a mistyped key) *abandons* it instead:
-behind a confirm, it retires the state file and, if it opened a PR, closes it and deletes the
-branch. It refuses outright if the promotion has already landed — abandoning is not a rollback, so
-a landed one needs `hoist deploy` or a fresh promotion to undo, not a state-file delete — and it is
-never offered at all once the promotion is done. `l` shows the log — from every screen, not only
-this one. `q` quits hoist, but only from the matrix: pressed here it does nothing but remind you
-("q quits from the matrix · esc goes back") — `esc` back to the matrix first, then `q` there. With
-any drive this session started still Building, Stepping or Waiting, quitting from the matrix asks
-first, behind a confirm — nothing is rolled back, `hoist resume` picks every one back up later, but
-it is a deliberate step rather than a silent one. A promotion merely listed on the pane (started
-earlier, by this session or another) does not count toward that: nothing here is driving it, so
-quitting does not interrupt anything already in flight for it. `ctrl+c` is the one
-always-immediate quit, from any screen, with no confirm — state is durable either way. The CLI prints the same steps as lines, with
-`waiting: …` naming what it is waiting for; `hoist abandon <id> --confirm-abandon=<id>` is `X`'s
-own CLI form (the repeated id is the confirmation, same shape as `--confirm-direct`).
+The title itself names the state (`waiting for approval`, `blocked`, `done`, …), so it never
+disagrees with what the body says. `r` re-observes now instead of at the next poll. `w` watches
+this promotion's own family and target on the read-only watch screen (the same view `w` on the
+matrix opens for a cell) — it asks which family first when the promotion touches more than one.
+`esc` leaves this screen — it stops *watching* only; the drive itself keeps running exactly as it
+was (branch, commit, push, PR, merge, Argo, rollout — whatever step is next still happens), and
+`enter`/`r` on the matrix's in-flight pane below re-attaches to the exact same running drive
+later, never starting a second one. `shift+x` (a write, kept out of reach of a mistyped key)
+*abandons* it instead: behind a confirm, it retires the state file and, if it opened a PR, closes
+it and deletes the branch. It refuses outright if the promotion has already landed — abandoning is
+not a rollback, so a landed one needs `hoist deploy` or a fresh promotion to undo, not a
+state-file delete — and it is never offered at all once the promotion is done. `l` shows the
+activity log — from every screen, not only this one. `q` quits hoist, but only from the matrix:
+pressed here it does nothing but remind you ("q quits from the matrix · esc goes back") — `esc`
+back to the matrix first, then `q` there. With any drive this session started still Building,
+Stepping or Waiting, quitting from the matrix asks first, behind a confirm — nothing is rolled
+back, `hoist resume` picks every one back up later, but it is a deliberate step rather than a
+silent one. A promotion merely listed on the pane (started earlier, by this session or another)
+does not count toward that: nothing here is driving it, so quitting does not interrupt anything
+already in flight for it. `ctrl+c` is the one always-immediate quit, from any screen, with no
+confirm — state is durable either way. The CLI prints the same steps as lines, with `waiting: …`
+naming what it is waiting for; `hoist abandon <id> --confirm-abandon=<id>` is `shift+x`'s own CLI
+form (the repeated id is the confirmation, same shape as `--confirm-direct`).
 
 The promotion's id (`abcd1234` above) is a hash of the repo, the target env and the digest set.
 It names the branch, the PR body marker, the commit trailer and the approval token — so running
@@ -311,14 +314,14 @@ screen does not cancel.
 
 ## When it stops
 
-A stopped promotion says which step and why; this is what to do about each. `R` on the flight
+A stopped promotion says which step and why; this is what to do about each. `r` on the flight
 screen (or `hoist resume <id>`) re-observes once you have.
 
 **CI.** `CI: 2/3 checks complete` is waiting, not stopped. `1 of 3 checks failed: <name>` — or
 `… were skipped (never ran)`, which blocks the same way — names the check. Do not push a fix to
 `hoist/<env>/<id>`: the promotion only ever merges the head it pushed itself, and a branch
 someone else moved is refused at the merge. If the failure is transient, re-run the failed
-workflow on the same commit in GitHub and `R`. If it needs a real change in the GitOps repo,
+workflow on the same commit in GitHub and `r`. If it needs a real change in the GitOps repo,
 land that change on the base branch through its own PR, then abandon this promotion — close its
 PR and delete its branch on origin — and run the promotion again, so it starts from the updated
 base. *No checks reported after the grace period* depends on the repo's `ci.none` setting:
@@ -345,7 +348,7 @@ approval; a new approval after the rejection wins.
 
 **Degraded.** `<app> health is Degraded (sync=… revision=…)` — Argo synced the merge and the
 rollout is failing. Look at the Application in Argo (or `hoist watch --app <name>`); when it is
-Healthy again, `R`. `Argo Application <name> not found; check kube.argo_namespace and the repo's
+Healthy again, `r`. `Argo Application <name> not found; check kube.argo_namespace and the repo's
 Application wrappers` is configuration: the Application lives in a namespace other than
 `kube.argo_namespace` (default `argocd`), or was renamed.
 
@@ -358,17 +361,17 @@ know the base branch:
   remote branch was deleted; `git fetch --prune origin` and check `--base`.
 - `origin/main is already at X, but this promotion's commit is Y — something else moved this branch; refusing to force-push. Delete or fast-forward it manually if that was intentional.`
   — someone pushed to the promotion's branch by hand. hoist never force-pushes. Delete or
-  fast-forward the branch yourself if that was intended, then `R`.
+  fast-forward the branch yourself if that was intended, then `r`.
 - `commit X changes paths beyond this promotion's plan` — the branch's commit touches files the
   plan did not. hoist refuses to treat it as its own. Fix the branch — reset `hoist/<env>/<id>` on
-  origin to the base branch, or delete it there — then `R`, and hoist commits again.
+  origin to the base branch, or delete it there — then `r`, and hoist commits again.
 - `found PR #N … but it targets base "x", not "main"` / `… was closed without merging` — a PR on
   the promotion's branch that hoist did not open, or one that was closed. Retarget or reopen it
-  and `R`; hoist adopts it. If the closed PR should stay closed, open a new one from the same
+  and `r`; hoist adopts it. If the closed PR should stay closed, open a new one from the same
   branch, carrying the closed PR's title and body so the reviewer still sees hoist's diff
   summary and warnings (`gh pr create --head hoist/<env>/<id> --base main --title "$(gh pr
   view <n> --json title -q .title)" --body "$(gh pr view <n> --json body -q .body)"`), then
-  `R` — hoist prefers an open PR over a closed one on the same branch.
+  `r` — hoist prefers an open PR over a closed one on the same branch.
 
 One thing that does *not* help in any of these: deleting the state file. A promotion's id is a
 hash of its inputs, so the same digests into the same env is the same id, the same branch and the

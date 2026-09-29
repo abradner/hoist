@@ -13,12 +13,12 @@
 │· argo sync                                                                   │
 │· rollout                                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│next check in 12s · R now                                                     │
+│next check in 12s · r now                                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │history                                                                       │
-│2026-09-01T12:00:00Z  branched      acted                                     │
+│4 days ago  branch        acted                                               │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-                         o open PR · X abandon · R re-observe · l log · esc back
+esc back · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help

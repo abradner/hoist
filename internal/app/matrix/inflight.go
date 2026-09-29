@@ -211,23 +211,12 @@ func (m Model) countdownText(s flight.Summary) string {
 	return fmt.Sprintf("next check in %s", remaining.Round(time.Second))
 }
 
-// approvalCopy is s.Action() with one wording fix (T3-05, UX-H10): a promotion blocked on the
-// approval step reads "waiting for an approver to comment `hoist approve <id>` on PR #N"
-// instead of flight's own "blocked on you — comment … to release it:", which AGENTS.md §9's
-// own regression note (entry 11's neighbour, the copy sweep) flags as reading like an accusal
-// rather than a status. Scoped to the matrix's own pane rather than changed in package flight
-// itself, which is a later train's file (T3-06) — this keeps the fix local to the files T3-05
-// actually touches while still landing the mockup's exact wording here.
-func approvalCopy(s flight.Summary) (text, command string) {
-	text, command = s.Action()
-	if command == "" || !strings.HasPrefix(command, "hoist approve") {
-		return text, command
-	}
-	if s.PR != nil && s.PR.Number > 0 {
-		return fmt.Sprintf("waiting for an approver to comment `%s` on PR #%d", command, s.PR.Number), ""
-	}
-	return fmt.Sprintf("waiting for an approver to comment `%s` on the PR", command), ""
-}
+// approvalCopy was this pane's own local copy of the wording fix (T3-05, UX-H10) for a
+// promotion blocked on approval; T3-06 moved it into flight.ApprovalCopy (exported) once that
+// package had its own PR to land the identical fix in, so the pane and flight.Model's own
+// actionSection render the same sentence from one place rather than two copies kept in step by
+// hand. Kept as a thin local alias rather than rewriting every call site in this file.
+func approvalCopy(s flight.Summary) (text, command string) { return flight.ApprovalCopy(s) }
 
 // styleStrip renders the step strip with the shared ui.Step glyph set (T3-05: "one glyph set",
 // retiring this pane's own ●/◍/✗/○ in favour of the same ✓/◐/·/✗/⏸ set flight.Model itself

@@ -128,6 +128,24 @@ func (s Summary) Verdict() string {
 	return "starting"
 }
 
+// ApprovalCopy is Action() with one wording fix (v2·04a, UX-H10): a promotion blocked on the
+// approval step reads "waiting for an approver to comment `hoist approve <id>` on PR #N" instead
+// of Action()'s own "blocked on you — comment ... to release it:", which reads like an accusal
+// rather than a status (AGENTS.md §9's own regression note on this fix). Exported (T3-06) so
+// this package's own flight.Model and the matrix's in-flight pane render the identical sentence
+// from one place, rather than each keeping its own copy of the fix in step by hand — the matrix
+// carried it alone from T3-05 until this package had its own PR to land it in too.
+func ApprovalCopy(s Summary) (text, command string) {
+	text, command = s.Action()
+	if command == "" || !strings.HasPrefix(command, "hoist approve") {
+		return text, command
+	}
+	if s.PR != nil && s.PR.Number > 0 {
+		return fmt.Sprintf("waiting for an approver to comment `%s` on PR #%d", command, s.PR.Number), ""
+	}
+	return fmt.Sprintf("waiting for an approver to comment `%s` on the PR", command), ""
+}
+
 // Action is what the operator can do about it, when it is theirs to do: the approval
 // command for a promotion parked on approval (the id was previously only in the PR body,
 // which is how a healthy promotion sat indistinguishable from a hang), the conflict text for

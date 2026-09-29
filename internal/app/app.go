@@ -727,8 +727,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.note(activity.Err, fmt.Sprintf("could not open %s: %v", msg.url, msg.err), "", msg.url)
 		}
 		return m, nil
+	case flight.WatchMsg:
+		// w on the flight screen (T3-06): the same openWatch the matrix's own w/OpenWatchMsg
+		// already uses — flight has already resolved which family (families(), its own doc
+		// comment, raising its own chooser when there was more than one), so this is exactly
+		// the plain (family, target) pair openWatch takes, pushed on top of the flight screen
+		// rather than replacing it (esc off the watch screen returns here, still mirroring the
+		// same running drive).
+		return m.openWatch(msg.Family, msg.Target)
 	case flight.AbandonMsg:
-		// The flight screen's own X gesture already confirmed the operator wants this
+		// The flight screen's own shift+x gesture already confirmed the operator wants this
 		// (flight.AbandonMsg's own doc comment) — pop back to the matrix immediately and let
 		// session.Controller.Abandon do the real work: cancel, wait for a busy Step to actually
 		// stop, then the real Backend.Abandon call.

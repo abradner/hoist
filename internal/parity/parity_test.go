@@ -56,7 +56,7 @@ var registry = []op{
 	{
 		Name: "promote: drive the pipeline to rollout",
 		CLI:  "promote --from --to --repo --apps-root --promotable",
-		TUI:  "plan.StartMsg enter on the plan screen; the flight screen is the CLI's progress output, flight.ReobserveMsg R re-observes",
+		TUI:  "plan.StartMsg enter on the plan screen; the flight screen is the CLI's progress output, flight.ReobserveMsg r re-observes (T3-06: was capital R)",
 	},
 	{
 		Name: "direct mode: commit to the base branch, no PR (non-production only)",
@@ -102,12 +102,12 @@ var registry = []op{
 	{
 		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",
 		CLI:  "abandon --confirm-abandon",
-		TUI:  "flight.AbandonMsg X on the flight screen, behind a huh.Confirm; shift+x on the matrix's own in-flight pane (T3-04) reuses the same message rather than a second matrix-owned one",
+		TUI:  "flight.AbandonMsg shift+x on the flight screen, behind a huh.Confirm (T3-06: was capital X); shift+x on the matrix's own in-flight pane (T3-04) reuses the same message rather than a second matrix-owned one",
 	},
 	{
 		Name: "watch one Application converge, outside any promotion",
 		CLI:  "watch --app --once --repo --apps-root",
-		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r refreshes (T3-03: the footer no longer says \"poll now\" or \"never refreshes\"), esc pops (#101)",
+		TUI:  "matrix.OpenWatchMsg w on the cursor cell; the first paint is --once, r refreshes (T3-03: the footer no longer says \"poll now\" or \"never refreshes\"), esc pops (#101); flight.WatchMsg w on the flight screen (T3-06) watches the running promotion's own family and target — a chooser (huh.Select) first when it touches more than one family",
 	},
 	{
 		Name: "override one repo's digest before planning",
@@ -117,7 +117,7 @@ var registry = []op{
 	{
 		Name: "treat a PR with no checks as green under ci.none: prompt",
 		CLI:  "resume --override-ci-none promote --override-ci-none deploy --override-ci-none",
-		TUI:  "flight.OverrideCINoneMsg c on the flight screen, behind a huh.Confirm",
+		TUI:  "flight.OverrideCINoneMsg shift+c on the flight screen, behind a huh.Confirm (T3-06: was lowercase c), offered only when engine.IsCINonePromptBlock names the reason",
 	},
 	{
 		Name: "show the effective config and where it came from",

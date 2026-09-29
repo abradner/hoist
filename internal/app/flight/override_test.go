@@ -57,14 +57,14 @@ func blockedOnCINone(t *testing.T) Model {
 	return m
 }
 
-// TestFlightGoldenBlockedOnCINone pins the offer: the blocked section names `c`, the footer
-// hints it, at both harness sizes.
+// TestFlightGoldenBlockedOnCINone pins the offer: the blocked section names `shift+c`, the
+// footer hints it, at both harness sizes.
 func TestFlightGoldenBlockedOnCINone(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC) }
 	m := blockedOnCINone(t).WithNow(now)
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
 		v := m.SetSize(size[0], size[1]).View()
-		for _, want := range []string{"press c to treat no checks as green", "c treat as green"} {
+		for _, want := range []string{"press shift+c to treat no checks as green", "shift+c treat as green"} {
 			if !strings.Contains(v, want) {
 				t.Errorf("%dx%d: view missing %q:\n%s", size[0], size[1], want, v)
 			}
@@ -72,21 +72,21 @@ func TestFlightGoldenBlockedOnCINone(t *testing.T) {
 		uitest.Golden(t, "flight-ci-none", v, size[0], size[1])
 	}
 	// The dialog itself, drawn over the dimmed screen.
-	d := uitest.Keys(m, Model.Update, "c")
+	d := uitest.Keys(m, Model.Update, "shift+c")
 	uitest.Golden(t, "flight-ci-none-confirm", d.View(), 80, 24)
 }
 
-// TestOverrideGestureCompletesThroughRealInput: c, y, enter emits OverrideCINoneMsg for this
-// promotion; c, n, enter emits nothing; c, esc leaves the dialog. Driven through keypresses
-// only — nothing here touches confirmValue (AGENTS.md §9 entry 6).
+// TestOverrideGestureCompletesThroughRealInput: shift+c, y, enter emits OverrideCINoneMsg for
+// this promotion; shift+c, n, enter emits nothing; shift+c, esc leaves the dialog. Driven
+// through keypresses only — nothing here touches confirmValue (AGENTS.md §9 entry 6).
 func TestOverrideGestureCompletesThroughRealInput(t *testing.T) {
 	m := blockedOnCINone(t)
 	if m.CapturesText() {
-		t.Fatal("positive control: nothing captures text before c")
+		t.Fatal("positive control: nothing captures text before shift+c")
 	}
-	m, _ = m.Update(uitest.Key("c"))
+	m, _ = m.Update(uitest.Key("shift+c"))
 	if !m.confirming {
-		t.Fatal("c did not open the confirmation")
+		t.Fatal("shift+c did not open the confirmation")
 	}
 	if !m.CapturesText() {
 		t.Fatal("the open dialog must capture text, or the root's q quits mid-decision")
@@ -108,7 +108,7 @@ func TestOverrideGestureCompletesThroughRealInput(t *testing.T) {
 	}
 
 	n := blockedOnCINone(t)
-	n, _ = n.Update(uitest.Key("c"))
+	n, _ = n.Update(uitest.Key("shift+c"))
 	n, _ = n.Update(uitest.Key("n"))
 	n2, cmd := n.Update(uitest.Key("enter"))
 	if cmd != nil {
@@ -119,10 +119,25 @@ func TestOverrideGestureCompletesThroughRealInput(t *testing.T) {
 	}
 
 	e := blockedOnCINone(t)
-	e, _ = e.Update(uitest.Key("c"))
+	e, _ = e.Update(uitest.Key("shift+c"))
 	e, cmd = e.Update(uitest.Key("esc"))
 	if cmd != nil || e.confirming {
 		t.Errorf("esc should close the dialog silently: cmd=%v confirming=%v", cmd, e.confirming)
+	}
+}
+
+// TestShiftCOnlyWhenOffered proves shift+c does nothing at all — no dialog, no command — unless
+// offersCINoneOverride() says the offer is live, mirroring the design's own "only when offered"
+// (T3-06); TestOverrideKeyDoesNothingForOtherBlocks below covers the same rule per other block
+// reasons.
+func TestShiftCOnlyWhenOffered(t *testing.T) {
+	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	if m.offersCINoneOverride() {
+		t.Fatal("fixture precondition: an ordinary in-progress promotion offers nothing")
+	}
+	m, cmd := m.Update(uitest.Key("shift+c"))
+	if cmd != nil || m.confirming {
+		t.Errorf("shift+c opened a dialog (%v) or emitted (%v) when not offered", m.confirming, cmd)
 	}
 }
 
@@ -165,9 +180,9 @@ func TestOverrideKeyDoesNothingForOtherBlocks(t *testing.T) {
 			if v := m.View(); strings.Contains(v, "treat as green") {
 				t.Errorf("view offers the override:\n%s", v)
 			}
-			m, cmd := m.Update(uitest.Key("c"))
+			m, cmd := m.Update(uitest.Key("shift+c"))
 			if m.confirming || cmd != nil {
-				t.Errorf("c opened a dialog (%v) or emitted (%v)", m.confirming, cmd)
+				t.Errorf("shift+c opened a dialog (%v) or emitted (%v)", m.confirming, cmd)
 			}
 		})
 	}

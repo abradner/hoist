@@ -4,14 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/uitest"
 )
 
-// TestAbandonKeyNoticeWhenNotAttached mirrors TestAbortKeyNoticeWhenNotAttached: X is a
+// TestAbandonKeyNoticeWhenNotAttached mirrors TestAbortKeyNoticeWhenNotAttached: shift+x is a
 // no-op-with-notice, never opening the confirm dialog, while still Building (no real id yet).
 func TestAbandonKeyNoticeWhenNotAttached(t *testing.T) {
 	m := NewAttached(building("app-staging", "app-production", false), PollDurations{})
@@ -22,12 +21,12 @@ func TestAbandonKeyNoticeWhenNotAttached(t *testing.T) {
 	// the overflow entirely, matching internal/app/flight/model_test.go's own precedent for
 	// this exact interaction (TestDriveErrorOnNonRetryableStepStopsPolling's history).
 	m = m.SetSize(80, 11).SetStyles(ui.NewStyles(true))
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	m, cmd := m.Update(uitest.Key("shift+x"))
 	if cmd != nil {
-		t.Fatal("X produced a command when there is nothing to abandon")
+		t.Fatal("shift+x produced a command when there is nothing to abandon")
 	}
 	if m.confirmingAbandon {
-		t.Fatal("X opened the confirm dialog when there is nothing to abandon")
+		t.Fatal("shift+x opened the confirm dialog when there is nothing to abandon")
 	}
 	if !strings.Contains(m.View(), "nothing to abandon") {
 		t.Errorf("view missing the not-driving notice:\n%s", m.View())
@@ -35,7 +34,7 @@ func TestAbandonKeyNoticeWhenNotAttached(t *testing.T) {
 }
 
 // TestAbandonKeyRefusedOnADoneScreen: a finished promotion cannot be abandoned — abandoning is
-// not a rollback — so X refuses before ever opening the dialog.
+// not a rollback — so shift+x refuses before ever opening the dialog.
 func TestAbandonKeyRefusedOnADoneScreen(t *testing.T) {
 	snap := stepping(fixtureState(), true, []engine.StepStatus{
 		st(engine.StepBranched, engine.Observation{Satisfied: true}),
@@ -46,20 +45,20 @@ func TestAbandonKeyRefusedOnADoneScreen(t *testing.T) {
 	if !m.done {
 		t.Fatal("fixture precondition: the screen should be done")
 	}
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	m, cmd := m.Update(uitest.Key("shift+x"))
 	if cmd != nil {
-		t.Fatal("X produced a command on a done screen")
+		t.Fatal("shift+x produced a command on a done screen")
 	}
 	if m.confirmingAbandon {
-		t.Fatal("X opened the confirm dialog on a done screen")
+		t.Fatal("shift+x opened the confirm dialog on a done screen")
 	}
 	if !strings.Contains(m.View(), "already landed") {
 		t.Errorf("view missing the already-landed notice:\n%s", m.View())
 	}
 }
 
-// TestAbandonKeyRefusedWhileAlreadyAbandoning: the operator has already confirmed X once — a
-// second X while the entry is still winding down (waiting for a busy Step to notice its
+// TestAbandonKeyRefusedWhileAlreadyAbandoning: the operator has already confirmed shift+x once —
+// a second shift+x while the entry is still winding down (waiting for a busy Step to notice its
 // cancelled ctx, or with Backend.Abandon already dispatched) must not reopen the confirm dialog
 // and emit a second AbandonMsg, which internal/app/session.Controller.Abandon would otherwise
 // turn into a second Backend.Abandon call (closing the PR / deleting the branch and state twice).
@@ -73,18 +72,18 @@ func TestAbandonKeyRefusedWhileAlreadyAbandoning(t *testing.T) {
 	if !m.abandoning {
 		t.Fatal("fixture precondition: the screen should mirror Abandoning")
 	}
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	m, cmd := m.Update(uitest.Key("shift+x"))
 	if cmd != nil {
-		t.Fatal("X produced a command while already abandoning")
+		t.Fatal("shift+x produced a command while already abandoning")
 	}
 	if m.confirmingAbandon {
-		t.Fatal("X opened the confirm dialog while already abandoning")
+		t.Fatal("shift+x opened the confirm dialog while already abandoning")
 	}
 	if !strings.Contains(m.View(), "already in progress") {
 		t.Errorf("view missing the already-abandoning notice:\n%s", m.View())
 	}
-	if strings.Contains(m.hint(), "X abandon") {
-		t.Errorf("hint still advertises X while already abandoning: %q", m.hint())
+	if strings.Contains(m.footer(), "shift+x abandon") {
+		t.Errorf("footer still advertises shift+x while already abandoning: %q", m.footer())
 	}
 }
 
@@ -94,12 +93,12 @@ func TestAbandonKeyRefusedWhileAlreadyAbandoning(t *testing.T) {
 // through real keypresses, never by setting m.confirmAbandonValue directly.
 func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
 	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	m, _ = m.Update(uitest.Key("shift+x"))
 	if !m.confirmingAbandon {
-		t.Fatal("X did not open the confirmation")
+		t.Fatal("shift+x did not open the confirmation")
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	m2, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = m.Update(uitest.Key("y"))
+	m2, cmd := m.Update(uitest.Key("enter"))
 	if cmd == nil {
 		t.Fatal("y then enter produced no command: the confirmation never saw the keypress")
 	}
@@ -113,9 +112,9 @@ func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
 
 	// The asymmetry that makes the above mean something: answering no must emit nothing.
 	n := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
-	n, _ = n.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
-	n, _ = n.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if _, cmd := n.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+	n, _ = n.Update(uitest.Key("shift+x"))
+	n, _ = n.Update(uitest.Key("n"))
+	if _, cmd := n.Update(uitest.Key("enter")); cmd != nil {
 		t.Errorf("answering no must not abandon anything, got %v", cmd())
 	}
 }
@@ -125,15 +124,35 @@ func TestAbandonGestureCompletesThroughRealInput(t *testing.T) {
 // widget update (which swallows Esc).
 func TestAbandonEscClosesDialogWithoutEmitting(t *testing.T) {
 	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'X', Text: "X"})
+	m, _ = m.Update(uitest.Key("shift+x"))
 	if !m.confirmingAbandon {
-		t.Fatal("fixture precondition: X should open the confirm dialog")
+		t.Fatal("fixture precondition: shift+x should open the confirm dialog")
 	}
-	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m, cmd := m.Update(uitest.Key("esc"))
 	if cmd != nil {
 		t.Errorf("esc should emit nothing, got %v", cmd())
 	}
 	if m.confirmingAbandon {
 		t.Error("confirmingAbandon should be cleared once Esc is handled")
+	}
+}
+
+// TestCapslockXDoesNothing proves the write-binding matcher (keys.Abandon, a Write-class
+// Binding) rejects a caps-lock letter with no shift held on a protocol-capable terminal — the
+// combination Binding.Matches' own point 3 exists for (train3-design.md's "Matches for a write
+// binding"). Without this rule a caps-lock typo would fire the identical destructive gesture a
+// deliberate shift+x does.
+func TestCapslockXDoesNothing(t *testing.T) {
+	m := NewAttached(stepping(fixtureState(), false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	before := m.View()
+	got, cmd := m.Update(uitest.Key("capslock+x"))
+	if cmd != nil {
+		t.Errorf("capslock+x produced a command: %#v", cmd())
+	}
+	if got.confirmingAbandon {
+		t.Error("capslock+x must not open the abandon confirmation")
+	}
+	if got.View() != before {
+		t.Errorf("capslock+x changed the view:\nbefore:\n%s\nafter:\n%s", before, got.View())
 	}
 }

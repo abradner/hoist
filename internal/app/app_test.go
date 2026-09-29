@@ -1769,7 +1769,7 @@ func TestEnterOnBuildingPaneEntryReattaches(t *testing.T) {
 	}
 }
 
-// TestReobserveKeyThroughRoot: a real "R" keypress on an attached flight screen, driven through
+// TestReobserveKeyThroughRoot: a real "r" keypress on an attached flight screen, driven through
 // the root's own Update exactly as a running program would — the top screen's own key handling
 // emits flight.ReobserveMsg, and the root's case (unchanged by PR 3) answers it by calling
 // session.Controller.Poke, which drives one more real Step call against the fake driver.
@@ -1794,13 +1794,13 @@ func TestReobserveKeyThroughRoot(t *testing.T) {
 	}
 
 	var top tea.Model = mm
-	top, reobserveCmd := press(t, top, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	top, reobserveCmd := press(t, top, tea.KeyPressMsg{Code: 'r', Text: "r"})
 	if reobserveCmd == nil {
-		t.Fatal("R on the attached flight screen produced no command")
+		t.Fatal("r on the attached flight screen produced no command")
 	}
 	top, pokeCmd := top.Update(reobserveCmd()) // flight.ReobserveMsg reaches the root
 	if pokeCmd == nil {
-		t.Fatal("R's ReobserveMsg produced no re-drive command")
+		t.Fatal("r's ReobserveMsg produced no re-drive command")
 	}
 	top.Update(firstStepOfPokeBatch(t, pokeCmd)()) // the actual Step call
 	if stepCalls != 2 {

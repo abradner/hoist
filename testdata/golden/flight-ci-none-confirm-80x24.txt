@@ -1,4 +1,4 @@
-╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+╭─ hoist · promotion · blocked ────────────────────────────────────────────────╮
 │abcd1234   app-staging → app-production                     started 4 days ago│
 ├──────────────────────────────────────────────────────────────────────────────┤
 │✓ branch                                                                      │
@@ -7,18 +7,18 @@
 │✓ PR                                                                          │
 │✗ CI                                                                          │
 │  ╭─ treat no checks as green ─────────────────────────────────────────────╮  │
-│ex│┃ Treat this PR's missing checks as green and let app-production merge  │  │
+│  │┃ Treat this PR's missing checks as green and let app-production merge  │  │
 │· │┃ on approval alone? ci.none is prompt; this applies to promotion       │  │
 │· │┃ abcd1234 only.                                                        │  │
 │· │┃                                                                       │  │
 │· │┃                             Yes     No                                │  │
 │· ╰────────────────────────────────────────────────────────────────────────╯  │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│blocked — no checks reported after the grace period; ci.none=prompt requires  │
-│an explicit override — re-run `hoist resume abcd1234 --override-ci-none`      │
-│press c to treat no checks as green for this promotion                        │
-│R to re-observe once resolved                                                 │
+│blocked                                                                       │
+│press shift+c to treat no checks as green for this promotion                  │
+│r to re-observe once resolved                                                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
+│history                                                                       │
 │…                                                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-bloc… o open PR · c treat as green · X abandon · R re-observe · l log · esc back
+        esc back · o open PR · w watch · l log · shift+c treat as green · ? more
