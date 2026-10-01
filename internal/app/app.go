@@ -386,8 +386,7 @@ func (m Model) noteStarted(build session.BuildID, id string) Model {
 	return m.note(activity.Info, text, "", url)
 }
 
-// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (commit 1 of the screen's own
-// train, matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
+// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (the matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
 // purely so a message stamped with m.matrixTick reaches this root's Update once a second while
 // matrixWantsCountdown() holds, making the pane's "next check in Ns" text advance instead of
 // looking the same whether the next poll is one second away or wedged. scope.Result[T]'s own
@@ -578,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (not a failed fetch, not the same pointer this root already held) — if the plan or
 		// deploy confirm screen asked for it (r), rebuild it against m.repo now rather than the
 		// snapshot it was pushed with; every other screen (including a matrix-only stack) is
-		// left alone, since nothing else in this train reads a repo it does not re-derive on its
+		// left alone, since nothing else reads a repo it does not re-derive on its
 		// own next open.
 		if top := len(m.stack) - 1; top >= 1 {
 			switch s := m.stack[top].(type) {
@@ -609,7 +608,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case session.Event:
-		// D2 of the design: every controller-issued command reaches the root through exactly
+		// Every controller-issued command reaches the root through exactly
 		// this one case, and everything it means for the screens on the stack is decided in
 		// apply(). session.Event is deliberately not named *Msg (internal/app/session's own
 		// doc comment) so internal/parity's own parser — which only ever collects `case
@@ -732,8 +731,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the flight screen itself. A flight screen is pushed directly on top of whatever screen
 		// asked for it (the plan or deploy confirm screen, m.start's own doc comment), so a single
 		// pop used to land back on that confirm screen with the exact same plan still ticked and
-		// ready — Enter there would start the very drive esc just left watching (audit UX-H6/FB-H2,
-		// the operator's own decision, follow-up to PR 3). truncateToMatrix's own doc comment has
+		// ready — Enter there would start the very drive esc just left watching (audit UX-H6/FB-H2).
+		// truncateToMatrix's own doc comment has
 		// the mechanics.
 		return m.truncateToMatrix()
 	case flight.OpenPRMsg:
@@ -753,7 +752,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.openURL == nil {
 			// Mirrors startPromotion's own nil convention above: a caller that hasn't
 			// wired a browser opener in gets a clear notice instead of a nil-pointer
-			// panic (documented follow-up work, per PR #39's own report).
+			// panic.
 			m = m.note(activity.Err, fmt.Sprintf("open PR not wired yet: %s", msg.URL), "", msg.URL)
 			return m, nil
 		}
@@ -941,7 +940,7 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 			needsRelist = true
 		case session.ChangeRefused:
 			// A whole-listing failure (the forge/state directory unreachable) — left for a
-			// later train PR to surface; the pane simply keeps its last good listing.
+			// not surfaced; the pane simply keeps its last good listing.
 		case session.ChangeAbandoned:
 			m = m.note(activity.OK, "abandoned "+ch.ID, "", "")
 			m = m.mirrorAttached(ch.Build, ch.Snap)
@@ -1238,7 +1237,7 @@ func (m Model) View() tea.View {
 	// 4) is also requested. Without it, a terminal reporting shift+/ sends only the base
 	// codepoint '/' plus the Shift modifier, and the decoder upper-cases '/' — which is still
 	// '/' — instead of substituting the shifted key '?'. That broke '?' (open help), ':' (the
-	// digest-override input) and '@' on every kitty-protocol terminal, found in review.
+	// digest-override input) and '@' on every kitty-protocol terminal.
 	// ReportAssociatedText (flag 16) is requested alongside it so a
 	// terminal that prefers to report the literal produced text (rather than a codepoint the
 	// client must reinterpret) has a route to do that too; the decoder prefers Text when the
@@ -1357,7 +1356,7 @@ func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 // deploy plan never resolves a digest (the reference is caller-supplied), so Plan's own Deploy
 // branch is exactly as pure as gitops.BuildDeployPlan was. Plan also attaches
 // WarnDeployIntoProduction itself now, so the confirm screen and the PR body it later renders
-// agree with the CLI's dry run by construction (service:Plan, PR B) rather than by both callers
+// agree with the CLI's dry run by construction (service.Plan) rather than by both callers
 // remembering to attach it.
 func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
@@ -1372,7 +1371,7 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.Histor
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
-	// the picker stays on the stack underneath, unlike before this train — deploy.BackMsg
+	// the picker stays on the stack underneath, unlike the plan flow — deploy.BackMsg
 	// (esc) pops back onto that same tags.Model instance, cursor/filter/loaded rows intact,
 	// rather than all the way to the matrix. Direct mode is the deploy screen's own shift+d
 	// gesture now (Model.onKey/toggleDirect), never set here.

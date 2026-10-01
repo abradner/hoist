@@ -65,7 +65,7 @@ type DriverHooks struct {
 // Step) and OverrideCINone, so a screen's manual retry can never race an automatic tick's Step
 // call over the same *engine.PromotionState — the same one-in-flight-per-instance guarantee
 // flight.Model's own busy flag gives at the UI layer, held here too so a caller with no busy
-// flag of its own (a future controller holding a Drive across screens) still gets it for
+// flag of its own (session.Controller, which holds a Drive across screens) still gets it for
 // free.
 type Driver struct {
 	mu    sync.Mutex

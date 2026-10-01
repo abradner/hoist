@@ -10,7 +10,7 @@
 // never runs. internal/service/imports_test.go enforces this mechanically rather than by
 // convention alone (AGENTS.md §10 meta-rule 5).
 //
-// This train (PR A) starts the package with the pieces every later PR needs first: Settings
+// The package is built from a few pieces: Settings
 // (what a run resolved from flags and config, once), Deps (constructor seams a caller injects,
 // so a real invocation and a test share the same shape), Service (the lazy, memoized clients
 // built from Deps), and the repo view (a single current read of the GitOps repo, from the

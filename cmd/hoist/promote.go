@@ -177,7 +177,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 // reportDriveResult renders Driver.Run's outcome the same way for hoist promote and
 // hoist resume: the branch/commit/PR/merge summary on success, the specific messages
 // AGENTS.md's "waiting for signing approval" / ErrWaiting / ctx deadline / Blocked cases call
-// for, and the redact.Strings final boundary for anything else (Finding B: a step's Act error
+// for, and the redact.Strings final boundary for anything else (a step's Act error
 // can embed a registered credential verbatim via a failed git command's wrapped stderr).
 func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv string, s *engine.PromotionState, err error) int {
 	switch {

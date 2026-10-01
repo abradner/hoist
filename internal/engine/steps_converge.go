@@ -32,7 +32,7 @@ package engine
 // (a second request while one is already in flight is a no-op to the controller), so this costs
 // an extra API call, never a second real action.
 //
-// A residual gap, raised and confirmed in review but deliberately not fixed here: the
+// A residual gap, deliberately not fixed here: the
 // "guaranteed to be no earlier than the real merge event" claim above holds by causality (the
 // merge must have already happened, on GitHub's own servers, before this process's Observe can
 // see pr.Merged==true over the network) but the anchor's *value* is this process's own
@@ -92,7 +92,7 @@ func (s *PromotionState) argoApplications() []argo.Application {
 
 // editsForApp returns just the edits (and matching ExpectedBlobs entries) s.EditApps attributes
 // to appName — the scoping a per-Application landed-verdict question needs (revisionCarries,
-// review, PR #182: see observeLanded's own doc comment for why asking the whole
+// #182: see observeLanded's own doc comment for why asking the whole
 // promotion's verdict on behalf of one Application was wrong). Every driver of ArgoSyncedStep
 // (internal/service.Driver, shared by the CLI and the flight screen) runs against a state that
 // has already been through EnsureArgoApps — a fresh promotion has EditApps set at construction,

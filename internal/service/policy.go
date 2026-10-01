@@ -55,7 +55,7 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 // For a non-direct request this only checks the forge identity every promotion eventually needs
 // (repos[].github) — the same check the CLI's old runPromote/runDeploy made before ever calling
 // their own buildPromotionForConfirm, and the TUI's old buildStartPromotion (cmd/hoist/wiring.go,
-// both since removed by this train) made separately for itself; unified here, in
+// both since removed) made separately for itself; unified here, in
 // StartPromotion's one call to Preflight, so neither face can drift from the other's wording
 // again.
 func (s *Service) Preflight(target string, m Mode) error {

@@ -28,8 +28,8 @@ import (
 // allowed to know both sides) translates for it. The root maps these same values into
 // session.Config for the controller that actually drives; this screen keeps
 // its own copy only for anything it still renders directly (today: nothing computed from it, but
-// NewAttached's signature keeps the type so a later PR — the visible-wait countdown — has
-// somewhere to put a poll-driven display timer without a signature change).
+// NewAttached's signature keeps the type so a poll-driven display timer has somewhere to
+// live without a signature change).
 type PollDurations struct {
 	CI, Approval, Argo, Rollout, Deadline time.Duration
 }
@@ -310,9 +310,8 @@ type countdownTick struct{}
 // Init starts whichever tick chain this screen needs to animate on its own: the spinner's while
 // Building or a Step is outstanding (unchanged), or the 1s countdown redraw while m.waiting() —
 // a mirrored screen with nothing in flight and nothing counting down has nothing to animate, so
-// this returns nil rather than a permanent, invisible tick loop (PR #39 review finding #5, still
-// true here: the loop this guards is Update's own reschedule, not a poll this screen no longer
-// drives).
+// this returns nil rather than a permanent, invisible tick loop (the loop this guards is
+// Update's own reschedule, not a poll this screen drives).
 func (m Model) Init() tea.Cmd {
 	if m.building || m.busy {
 		return m.spinner.Tick
@@ -339,7 +338,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if !m.building && !m.busy {
 			// The step that was outstanding when this tick was scheduled has since resolved.
 			// Hand off to the countdown chain if there is now something to count down to,
-			// rather than just stopping (PR #39 review finding #5 still holds: never
+			// rather than just stopping (never
 			// reschedule unconditionally).
 			if m.waiting() {
 				return m, scope.After(m.tickID, time.Second, countdownTick{})

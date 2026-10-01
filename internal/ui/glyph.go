@@ -3,8 +3,8 @@ package ui
 import "fmt"
 
 // StepState is one step's state in a pipeline strip (a promotion's branch/commit/push/…/rollout
-// steps, a restart target's own progress) — the shape both flight and, once the matrix migrates
-// to it, the matrix's in-flight rows share.
+// steps, a restart target's own progress) — the shape the flight screen and the matrix's
+// in-flight rows share.
 type StepState uint8
 
 const (
@@ -23,10 +23,8 @@ const (
 
 // StepGlyph returns the one glyph set every step strip in this app should use (the audit
 // doc): ✓ done, ◐ active, · pending, ✗ failed, ⏸ waiting. It retires the older,
-// inconsistent ●/◍/○/⟳ glyphs different screens picked independently — AGENTS.md §9's own
-// "one glyph set" note — though no screen switches to it in this PR (the screen's own acceptance
-// check: `git grep -n '"[●◍○⟳]"' internal/ui` must stay empty, since that's the new set's own
-// package, but a screen's existing glyphs are untouched until its own migration PR).
+// inconsistent ●/◍/○/⟳ glyphs different screens picked independently. The check that nothing
+// drifts back is `git grep -n '"[●◍○⟳]"' internal/ui`, which must stay empty.
 func StepGlyph(s StepState) string {
 	switch s {
 	case StepDone:

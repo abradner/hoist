@@ -369,9 +369,7 @@ func (m Model) regTagsCmd() tea.Cmd {
 	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		if regTagsFn == nil {
-			// Findings 4/5 (round N): this used to say "no registry configured for this
-			// repo" — a hardcoded placeholder naming neither the actual image repo nor how
-			// to fix it. Name imageRepo and point at the config knob that supplies
+			// Name imageRepo (not a generic "no registry" message) and point at the config knob that supplies
 			// regTagsFn (cmd/hoist wires this from the matching registries[] entry —
 			// BuildFunc's own doc comment).
 			return regTagsLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
@@ -562,8 +560,8 @@ func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
 	// Same reasoning as m.selectedTag's own assignment in onRegTagsLoaded: the initial
 	// selection is a default cursor position, not an operator choice, so once the real
 	// (git-date) order is known it should track the new top row — but only while the
-	// operator hasn't moved the cursor themselves yet (cursorMoved's own doc comment). And,
-	// found by an adversarial review of this commit: a selection change means nothing renders
+	// operator hasn't moved the cursor themselves yet (cursorMoved's own doc comment). And
+	// a selection change means nothing renders
 	// for it without the same two commands onRegTagsLoaded/moveCursor already fire on every
 	// OTHER selection change — without these, the reordered top row's commit delta was never
 	// requested (the stale one from the old top row stuck around instead) and, in the common
@@ -1020,9 +1018,9 @@ func (m Model) visibleWindow(rows []Row) (start, end int) {
 }
 
 // fetchVisible fires MetaFunc for every row within the current visibleWindow that isn't already
-// loaded, loading, or settled with an error (finding 4: a prior MetaErr means this row's
-// Config call already failed once — never rescheduled without an explicit re-arm this round
-// chose not to add — see this function's own loop comment) — AGENTS.md invariant 4's "fetch on
+// loaded, loading, or settled with an error (a prior MetaErr means this row's
+// Config call already failed once — never rescheduled without an explicit re-arm, which does
+// not exist — see this function's own loop comment) — AGENTS.md invariant 4's "fetch on
 // demand as rows become visible/selected", never every tag up front. Called after the list
 // loads, on cursor movement, on a filter change, and after a metadata load reorders the list
 // (which can shift what's near the cursor for the unmapped/Created-sorted case).
@@ -1040,7 +1038,7 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range rows[start:end] {
 		i := byTag[r.Tag]
-		// A row with MetaErr already set is settled, exactly like MetaLoaded — finding 4: a
+		// A row with MetaErr already set is settled, exactly like MetaLoaded: a
 		// row whose Config call failed (a missing manifest, an unsupported platform, a
 		// temporarily unavailable registry) must not be rescheduled every time fetchVisible
 		// runs again (the cursor moving, a filter change, another row's own metadata landing
@@ -1176,7 +1174,7 @@ func tagOrDigest(r image.Ref) string {
 }
 
 // stagingNote renders the paired staging env's committed manifest tag(s) for this image repo:
-// the single agreed tag in the common case, or an explicit disagreement (finding 3, round N)
+// the single agreed tag in the common case, or an explicit disagreement
 // when StagingMismatch found more than one distinct tag across the staging env's own
 // families/occurrences — gitops.BuildPlan's WarnSourceDisagrees is the same "warn, don't
 // block" shape for the analogous disagreement among one env's SOURCE occurrences; this
@@ -1295,7 +1293,7 @@ func (m Model) tableSection() string {
 	}
 	// Windowed to the same [start,end) fetchVisible uses (visibleWindow), so the cursor's row
 	// is always among what's drawn — moving the cursor past one screen's worth of rows must
-	// scroll the window with it, never leave the selected row off-screen (finding 5).
+	// scroll the window with it, never leave the selected row off-screen.
 	start, end := m.visibleWindow(rows)
 	// Groups (#91): a divider above the first drawn row of the digest and moving groups —
 	// also when the window opens mid-group, so a scrolled page still says what it is

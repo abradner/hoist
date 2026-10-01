@@ -38,8 +38,7 @@ type Settings struct {
 	Config *config.Config
 
 	// Resolve is the digest-resolution chain for THIS run: order, registry auth, cluster
-	// secret, op ref (NewResolveOptions, resolve.go). Added in PR B, alongside the rest of
-	// the resolution machinery it was deferred with in PR A's own doc comment.
+	// secret, op ref (NewResolveOptions, resolve.go).
 	Resolve ResolveOptions
 
 	Poll     engine.PollIntervals

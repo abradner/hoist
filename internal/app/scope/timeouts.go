@@ -55,7 +55,7 @@ const (
 	// which is instant. Mirrored here the same way List is; the controller's own
 	// Config.AbandonCallTimeout is the value actually consulted. Deliberately generous and
 	// independent of Abandon above: conflating the two (a single 1s timeout used for both the
-	// busy-Step wait and the call) meant a real abandon regularly failed with "context deadline
-	// exceeded" (found in review of ceaccb2).
+	// busy-Step wait and the call) made a real abandon regularly fail with "context deadline
+	// exceeded".
 	AbandonCall = 60 * time.Second
 )

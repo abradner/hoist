@@ -241,7 +241,7 @@ func ArchiveDir() (string, error) {
 // promotion can still be genuinely in flight (blocked for weeks, say). `hoist promotions` is
 // the one caller, and follows exactly that order.
 //
-// Two known, accepted edge cases (a fresh-eyes cross-stack review; recorded rather than fixed,
+// Two known, accepted edge cases (recorded rather than fixed,
 // since both are narrow and the single-operator CLI mostly serializes itself):
 //
 //   - `LastActivity`'s own "when did anything last happen" reading resets every time

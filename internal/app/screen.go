@@ -19,7 +19,7 @@ import (
 // keyed is implemented by a screen adapter whose underlying screen has a stated row in
 // internal/ui/keys' registry — the root's own "?" and "l" key handling (app.go's
 // Update) only fires for a top screen that implements this, so the help overlay never lists
-// keys a screen doesn't honour yet (the audit doc's scope) and "l" never opens the
+// keys a screen doesn't honour and "l" never opens the
 // activity log from a screen that hasn't opted in. Every adapter embeds its package's Model by
 // value, so this is promoted automatically wherever the underlying Model itself exposes
 // KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own package;

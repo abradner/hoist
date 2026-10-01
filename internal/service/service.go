@@ -18,8 +18,7 @@ import (
 // never wedge every later attempt for the rest of the session) and why Git/Cluster are never
 // memoized at all: Git carries no per-target state to cache (git.Exec{} is stateless, and a
 // test swaps newGit mid-run — abandon_test), and Cluster is opened fresh per call today (the
-// drift column already does this; caching it would be a behavior change this train does not
-// make).
+// drift column already does this; caching it would be a behavior change).
 type Service struct {
 	settings Settings
 	deps     Deps
@@ -150,7 +149,7 @@ func (s *Service) Cluster(kubeContext string) (k8s.Cluster, string, error) {
 // repo's default.
 //
 // A free function over Deps, not a Service method, because cmd/hoist's own callers
-// (runPromotions/runResume, moving into this package in a later PR) build one of these per
+// (cmd/hoist's runPromotions/runResume) build one of these per
 // promotion in a loop over possibly-different repos[] entries — exactly what buildArgoRolloutIn
 // (cmd/hoist/resume.go) did before this move, unmemoized, since each call may target a
 // different cluster context. A Service that already holds the right Settings can still get the

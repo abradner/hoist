@@ -15,7 +15,7 @@ import (
 )
 
 // EnsureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
-// decoding an older file leaves the field empty (review finding), and
+// decoding an older file leaves the field empty, and
 // ArgoRefreshedStep/ArgoSyncedStep both take their `len(apps) == 0` "no Argo Application in this
 // promotion's plan" success path on an empty ArgoApps — so an upgraded, already-in-flight
 // promotion could be reported complete having never actually checked the Application it edited.
@@ -202,7 +202,7 @@ type Listed struct {
 	Unconfigured bool
 	// Archived is true when this same List call just archived this promotion (it was Done and
 	// older than ArchiveDoneOlderThan) — the CLI's own --archived listing needs this to avoid
-	// printing an archived-this-run promotion a second time (review finding, #181).
+	// printing an archived-this-run promotion a second time (#181).
 	Archived bool
 	// ArchiveErr is set when archiving was attempted (Done, past the retention window) but
 	// failed — the promotion is still reported Done, with the archive failure alongside it,
@@ -223,8 +223,7 @@ type ListOpts struct {
 // List re-observes every live promotion state file — `hoist promotions`' own listing and the
 // matrix's in-flight pane both drive from this one call now (previously two separate re-
 // observation loops, cmd/hoist/resume.go's runPromotions and cmd/hoist/wiring.go's
-// observeForList, which could in principle disagree about the very same state file — aggregate
-// review of stack #137 already flagged this once for the Argo/rollout client alone). Never
+// observeForList, which could in principle disagree about the very same state file). Never
 // reads a state file's own recorded Phase (AGENTS.md §4.1) and never returns early on one
 // candidate's own error — a promotion that cannot be confirmed is reported as such (Listed.Err),
 // never dropped.
@@ -310,11 +309,9 @@ func (s *Service) ListArchived(repoFullName string) ([]*engine.PromotionState, e
 // the same flag); Hooks carries the progress/onWaiting callbacks the returned Drive is built
 // with — wiring Hooks.Progress into the Driver here (DriverHooks{Progress: o.Hooks.Progress})
 // gives any CALLER that passes a Hooks value the same per-step progress a freshly started
-// promotion already gets through StartPromotion. This is stated, not enforced, for the TUI's own
-// resume path (matrix.ResumeMsg in internal/app/app.go): as of this PR it still calls
-// svc.Resume(ctx, id, service.ResumeOpts{}) with no Hooks, so a resumed promotion's flight screen
-// shows no live progress line yet — closing that is a later train's work, not this one's; only
-// the CLI's runResume passes Hooks today.
+// promotion already gets through StartPromotion. Both faces pass Hooks: the CLI's runResume,
+// and the TUI through session.Controller's resume (startHooks), so a resumed promotion's flight
+// screen shows the same live progress line a freshly started one does.
 type ResumeOpts struct {
 	OverrideCINone bool
 	Hooks          Hooks

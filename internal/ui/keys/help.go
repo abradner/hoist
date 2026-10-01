@@ -20,7 +20,7 @@ var pairs = [][2]struct {
 }
 
 // helpColWidth is each column's fixed width in the pair layout — wide enough for the longest
-// entry this train's screens actually use ("shift+r  restart the cell's family → restart
+// entry the screens actually use ("shift+r  restart the cell's family → restart
 // screen" truncates past this, which is an accepted trade-off of a fixed two-column grid over
 // one column that could grow to fit anything).
 const helpColWidth = 30

@@ -509,8 +509,8 @@ func (m Model) Init() tea.Cmd {
 
 // loadCmd runs Plan (internal/service) off the Update call stack (AGENTS.md §4.3: resolution
 // opens a cluster/registry connection) — the screen no longer builds the gitops.Plan itself
-// (service:Plan, PR B): planFn is svc.Plan, so this screen's plan and the CLI's dry run can
-// never silently diverge again.
+// (service.Plan): planFn is svc.Plan, so this screen's plan and the CLI's dry run can
+// never silently diverge.
 func (m Model) loadCmd() tea.Cmd {
 	repo, source, target, planFn := m.repo, m.source, m.target, m.planFn
 	overrides := make(map[string]image.Ref, len(m.overrides))
