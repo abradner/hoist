@@ -46,7 +46,7 @@ type Summary struct {
 	// for again), and zero for a Live entry that isn't in the plain "waiting on the next
 	// scheduled check" state either (building, busy, done, stopped — session.Controller only
 	// ever sets it for a Waiting entry). The matrix's own in-flight pane is this field's one
-	// consumer today (commit 1 of the T3-06 train): each Waiting entry's "next check in Ns" text
+	// consumer today (commit 1 of that redesign): each Waiting entry's "next check in Ns" text
 	// is worded straight off it, never recomputed from a duration this package would have to
 	// keep in step with session.Controller's own poll interval by hand.
 	NextPoll time.Time
@@ -88,7 +88,7 @@ func RowState(r Row) ui.StepState {
 }
 
 // StepStrip is the whole pipeline on one line: "✓ branch ✓ commit ✓ push ✓ PR #103 ◐ CI ⏸
-// approval · merge · argo refresh · argo sync · rollout" — ui.StepGlyph's own set (T3-06),
+// approval · merge · argo refresh · argo sync · rollout" — ui.StepGlyph's own set,
 // retiring this package's former ●/◍/✗/○ strip glyphs, which duplicated rows.go's own Glyph
 // characters under a third, inconsistent set (P2-13, T3 review). The PR step names its number
 // once one exists.
@@ -136,10 +136,10 @@ func (s Summary) Verdict() string {
 // ApprovalCopy is Action() with one wording fix (v2·04a, UX-H10): a promotion blocked on the
 // approval step reads "waiting for an approver to comment `hoist approve <id>` on PR #N" instead
 // of Action()'s own "blocked on you — comment ... to release it:", which reads like an accusal
-// rather than a status (AGENTS.md §9's own regression note on this fix). Exported (T3-06) so
+// rather than a status (AGENTS.md §9's own regression note on this fix). Exported so
 // this package's own flight.Model and the matrix's in-flight pane render the identical sentence
 // from one place, rather than each keeping its own copy of the fix in step by hand — the matrix
-// carried it alone from T3-05 until this package had its own PR to land it in too.
+// carried it alone until this package had its own PR to land it in too.
 func ApprovalCopy(s Summary) (text, command string) {
 	text, command = s.Action()
 	if command == "" || !strings.HasPrefix(command, "hoist approve") {

@@ -126,7 +126,7 @@ type Config struct {
 	// DeleteRemoteBranch had a chance to (found in review of ceaccb2).
 	AbandonCallTimeout time.Duration
 	// ListTimeout bounds one Backend.List call. Kept equal to internal/app/scope.List (60s, P3
-	// #14 t2-review.md) — that constant's own doc comment is what actually documents the value;
+	// #14) — that constant's own doc comment is what actually documents the value;
 	// this default exists so a caller that builds a Config directly (every test) still gets it.
 	ListTimeout time.Duration
 	// Now is the clock. Defaults to time.Now; every test injects a fixed one.
@@ -354,7 +354,7 @@ func (c Controller) withoutEntry(build BuildID) Controller {
 	// own build, removing the second, refused entry unconditionally deleted that live mapping out
 	// from under the entry that actually won). Deleting unconditionally would make the surviving
 	// entry unreachable by Snapshot/Resume/Poke/Abandon while BuildSnapshot still shows it alive —
-	// exactly the state TestProbeByIDClobber (t2-review.md) pins.
+	// exactly the state TestProbeByIDClobber pins.
 	if ok && e.id != "" && c.byID[e.id] == build {
 		c.byID = maps.Clone(c.byID)
 		delete(c.byID, e.id)

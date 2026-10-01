@@ -11,7 +11,7 @@ import (
 	"github.com/abradner/hoist/internal/ui/keys"
 )
 
-// menu.go is the action menu enter opens for the cell under the cursor (T3-04, v2·02 mockup):
+// menu.go is the action menu enter opens for the cell under the cursor (v2·02 mockup):
 // what MenuFor lists is pure — a family, an env, the repo's pairs config and what is in
 // flight, no terminal dependency — the same split cells.go and grid.go already keep between
 // "what to say" and "how to draw it".
@@ -33,7 +33,7 @@ type MenuItem struct {
 // watch, restart, plus one row per in-flight promotion already targeting env — matched on
 // Target alone, since flight.Summary carries no family (a promotion targets an env, not one
 // row of it), which is this function's own known imprecision when two families are promoting
-// into the same env at once (ticketed in the T3-04/05 report rather than chased here).
+// into the same env at once (ticketed rather than chased here).
 func MenuFor(t Table, fam, env string, envs config.EnvsConfig, inflight []flight.Summary) []MenuItem {
 	present := cellPresent(t, fam, env)
 	items := []MenuItem{promoteItem(env, envs), tagItem(fam, env, present), watchItem(fam, env, present), restartItem(fam, env, present)}
@@ -44,7 +44,7 @@ func MenuFor(t Table, fam, env string, envs config.EnvsConfig, inflight []flight
 		items = append(items, MenuItem{
 			Label:   fmt.Sprintf("resume in flight %s (%s)", paneID(s), s.Verdict()),
 			Msg:     resumeMsgFor(s),
-			Enabled: true, // P2-9 (T3 review): a bare MenuItem{} left this false, so runMenuItem always returned nil
+			Enabled: true, // a bare MenuItem{} left this false, so runMenuItem always returned nil
 		})
 	}
 	return items
@@ -122,7 +122,7 @@ func (m Model) menuView() string {
 		lines = append(lines, line)
 	}
 	if m.IsProduction(m.menuEnv) {
-		// P2-13 (T3 review): the longer wording truncated at 80 columns ("`hoist appro…"),
+		// the longer wording truncated at 80 columns ("`hoist appro…"),
 		// hiding the command name a reviewer would actually type.
 		lines = append(lines, "", m.styles.Production.Render("⚠ production: every write opens a PR, gated on `hoist approve`"))
 	}

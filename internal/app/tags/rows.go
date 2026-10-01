@@ -133,7 +133,7 @@ func BackfillGitDates(rows []Row, gitTags []forge.GitTag) []Row {
 // position, appended after every loaded row, so a row already visible under the cursor never
 // jumps out from under it mid-fetch.
 //
-// This sort is only ever complete among rows that have actually loaded (finding 4, round 5):
+// This sort is only ever complete among rows that have actually loaded:
 // fetchVisible (model.go) only fetches metadata for whatever window is currently visible, so a
 // genuinely newer tag sitting outside every window the cursor has visited yet is never fetched
 // at all, and can never be sorted ahead of what's already loaded — Reorder has no way to rank a
@@ -203,8 +203,8 @@ func ShortDigest(digest string) string {
 // imageRepo — read from repo, the gitops repository's own parsed occurrences, never any live
 // cluster or Argo state (this package has no k8s/Argo read wired in at all — AGENTS.md §4.8
 // keeps that connection, like every other, at cmd/hoist's layer, and none of it reaches
-// here). Finding 5, round 2: an earlier revision of this doc comment, and the text the caller
-// (model.go's viewReady) rendered from this result, both called this "currently running" — a
+// here). Correcting an earlier claim: an earlier revision of this doc comment, and the text the
+// caller (model.go's viewReady) rendered from this result, both called this "currently running" — a
 // false claim about live state whenever Argo hasn't synced yet, a rollout is incomplete, or
 // the live workload otherwise differs from what's committed; both are corrected to say
 // "committed manifest tag" instead, matching what's actually being compared here. AGENTS.md
@@ -215,7 +215,7 @@ func ShortDigest(digest string) string {
 // no occurrence of imageRepo, or none of its occurrences carry a tag to compare (every one a
 // bare digest pin, nothing to differ from).
 //
-// Round-N findings (Copilot, two; Codex, one — all three against the same nondeterminism):
+// Three independent findings against the same nondeterminism:
 // envs.Pairs and Env.Families are both maps, and this function used to range over each one
 // directly and return on the first match, so (1) a config naming more than one source env
 // paired to the same production target (never rejected by config.Validate) picked a

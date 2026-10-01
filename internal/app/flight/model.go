@@ -79,12 +79,12 @@ type OverrideCINoneMsg struct{ ID string }
 // next scheduled poll. Train 2 design, D3: the flight screen no longer drives anything itself —
 // it only asks, and the root answers by calling session.Controller.Poke, whose own busy/not-found
 // refusal is authoritative regardless of what this screen's own guard already believed. Plain
-// "r" (keys.Refresh, Verb class) rather than a Write binding (T3-06/v2 keymap): asking to
+// "r" (keys.Refresh, Verb class) rather than a Write binding (the v2 keymap): asking to
 // re-observe now writes nothing itself, unlike shift+x/shift+c below.
 type ReobserveMsg struct{ ID string }
 
 // WatchMsg asks whatever composes screens to open the read-only watch screen for Family in
-// Target — w's own request (T3-06), the same navigation-by-message-of-its-own-type convention
+// Target — w's own request, the same navigation-by-message-of-its-own-type convention
 // every other screen transition uses (AGENTS.md §4.8: matrix.OpenPlanMsg, plan.BackMsg).
 // Family is resolved by this screen from its own PromotionState.Edits (families, below) before
 // this is ever emitted — never left for the root to guess, and never the root's job to derive
@@ -155,7 +155,7 @@ type Model struct {
 	width, height int
 	// now is the clock the header's elapsed/deadline are worded against; a test pins it.
 	now func() time.Time
-	// log is the History scrollback, always shown (v2/T3-06: the M10 train's "visible by
+	// log is the History scrollback, always shown (v2/: the M10 train's "visible by
 	// default" already made it the common case; l no longer toggles it — the root's generic
 	// keyed handling (KeyScreen, below) now sends l to the shared activity screen instead, so
 	// this screen has nothing left for a toggle to hide, and every mockup (v2·04a/b) draws the
@@ -376,7 +376,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.notice = ""
 	if m.confirming {
-		// Esc leaves the dialog without answering it (the tag picker's round-3 finding:
+		// Esc leaves the dialog without answering it (the tag picker's finding:
 		// huh's own Update swallows Esc, trapping the operator); everything else is the
 		// widget's, until enter reads its answer.
 		if keys.Esc.Matches(msg) {
@@ -459,11 +459,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case keys.Esc.Matches(msg):
 		return m, func() tea.Msg { return BackMsg{} }
 	}
-	// The log is always shown now (v2/T3-06: l no longer toggles it — see the log field's own
+	// The log is always shown now (v2/: l no longer toggles it — see the log field's own
 	// doc comment), so any key this switch didn't recognize is the viewport's: ↑/↓,
 	// PageUp/PageDown scroll it. Laid out on this copy first — View lays out its own copy, so
-	// the retained viewport would otherwise be the zero-sized one NewAttached built (Copilot,
-	// #124).
+	// the retained viewport would otherwise be the zero-sized one NewAttached built (the same
+	// gotcha as config.Model's and activity.Model's own).
 	m = m.layout()
 	var cmd tea.Cmd
 	m.log, cmd = m.log.Update(msg)
@@ -553,7 +553,7 @@ func (m Model) openConfirm() (Model, tea.Cmd) {
 	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.id)
 	m.confirmOverride = huh.NewConfirm().Title(title).Value(&m.confirmValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
-	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly (T3-06):
+	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly :
 	// the one shared keymap every standalone huh field in this app now uses.
 	m.confirmOverride.WithKeyMap(keys.HuhKeyMap())
 	m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
@@ -597,7 +597,7 @@ func (m Model) openConfirmAbandon() (Model, tea.Cmd) {
 	title := fmt.Sprintf("Abandon promotion %s? This retires its state and, if it opened a PR, closes it and deletes the branch. This is not a rollback.", m.id)
 	m.confirmAbandon = huh.NewConfirm().Title(title).Value(&m.confirmAbandonValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
-	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly (T3-06).
+	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly.
 	m.confirmAbandon.WithKeyMap(keys.HuhKeyMap())
 	m.confirmAbandon.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.confirmAbandon.WithWidth(m.dialogWidth())
@@ -662,7 +662,7 @@ func (m Model) layout() Model {
 		fixed += lipgloss.Height(n)
 		sections++
 	}
-	// The log is always shown now (v2/T3-06 — see the log field's own doc comment), so its own
+	// The log is always shown now (v2/ — see the log field's own doc comment), so its own
 	// section and the "history" label above it are unconditional too.
 	sections++
 	fixed++ // the "history" label above the log
@@ -725,7 +725,7 @@ func (m Model) View() string {
 	return redact.Strings(out)
 }
 
-// title follows the app-wide `hoist · <noun> · <state>` pattern (T3-06), naming the state word
+// title follows the app-wide `hoist · <noun> · <state>` pattern, naming the state word
 // stateWord derives from the same fields the header/action sections already read — never a
 // separate "in flight" catch-all, so the title and the body never disagree about what is
 // happening.
@@ -889,16 +889,16 @@ func (m Model) actionSection() string {
 	// ApprovalCopy, not sum.Action() directly: the one wording fix v2·04a settled on (UX-H10) —
 	// "waiting for an approver to comment `hoist approve <id>` on PR #N" as ONE sentence, not
 	// Action()'s own "blocked on you — comment ... to release it:" plus a separate command line.
-	// Exported from this package now (T3-06) rather than kept as the matrix pane's own local
+	// Exported from this package now rather than kept as the matrix pane's own local
 	// wrapper, so the screen and the pane render the identical sentence from one place.
 	// command is always "" after ApprovalCopy: Action()'s only non-empty command was the
 	// approval-wait one, and ApprovalCopy folds it into text as one sentence (its own doc
-	// comment) — nothing left needs the separate accent-styled command line the pre-T3-06
+	// comment) — nothing left needs the separate accent-styled command line the pre-
 	// rendering had here.
 	text, _ := ApprovalCopy(sum)
 	// approvalWaiting is true exactly when text is the ApprovalCopy sentence rather than some
 	// other active row's plain detail — the one case that takes priority over the generic
-	// countdown below, matching the pre-T3-06 precedence (Action()'s own non-empty command
+	// countdown below, matching the pre- precedence (Action's own non-empty command
 	// implied the identical priority, before ApprovalCopy folded it into text and left command
 	// always "").
 	approvalStep, hasActive := ActiveStep(m.rows)
@@ -994,7 +994,7 @@ func (m Model) statusLeft() string {
 	return ""
 }
 
-// footer renders through keys.Footer (T3-06), matching this screen's own row in
+// footer renders through keys.Footer, matching this screen's own row in
 // internal/ui/keys' registry — v2·04a/b's own order (esc, o, w, l), with the write bindings and
 // r after the always-shown set so a narrow terminal drops them first (Hint.Pri's own doc
 // comment: a lower Pri survives longest). esc's own wording is the one explicit ask from the
@@ -1027,6 +1027,6 @@ func (m Model) footer() string {
 }
 
 // KeyScreen implements the root's keyed interface (internal/app/screen.go): the root's generic
-// ?/l handling now covers this screen (T3-06), rather than flight owning its own help text or
+// ?/l handling now covers this screen, rather than flight owning its own help text or
 // its own l-toggles-the-log gesture.
 func (m Model) KeyScreen() keys.Screen { return keys.ScrFlight }

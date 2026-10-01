@@ -12,12 +12,12 @@ package engine
 // That gap — this package detecting the disagreement itself, before ever reaching Apply — is
 // closed one layer up: cmd/hoist's own runPromote calls checkCloneCurrentForBase right after
 // BuildPlan, unconditionally. It fetches origin/<base> fresh itself, first — never "as last
-// fetched into this clone", which used to be this check's own gap (round 5: nothing ever
+// fetched into this clone", which used to be this check's own gap (nothing ever
 // fetched before it ran, so staleness was unbounded, not merely a documented limitation) — then
 // compares the clone's on-disk content, and what applying the plan's own edits to it would
 // produce, against the SAME revision Worktree's own resolveBase would actually build a new
 // promotion from: origin/<base> whenever that ref exists at all, unconditionally, never a
-// special case for "local happens to be ahead" (round 5's other finding: Worktree does not treat
+// special case for "local happens to be ahead" (Worktree does not treat
 // that specially either, so this check must not). A mismatch refuses clearly, naming the file
 // and both revisions, before any worktree exists or any commit is attempted; a match — "the
 // clone agrees with what the worktree will actually be built from" or "that content already

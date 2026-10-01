@@ -146,7 +146,7 @@ func Lines(st State, cursor, declared, target, imageRepo string, mapped bool, ro
 		lines = append(lines, Line{Text: fmt.Sprintf("%s  %s", ShortSHA(c.SHA), c.Subject), Role: role, Index: i})
 	}
 	if end < n {
-		// T3-07 (v2·06a): "↓ N more commits", right-aligned by the caller (tags.Model's own
+		// (v2·06a): "↓ N more commits", right-aligned by the caller (tags.Model's own
 		// paneSection) — this is the same trailer plan.Model's own history section renders too
 		// (room=200 there, so it rarely fires), kept as one wording rather than two.
 		lines = append(lines, Line{Text: fmt.Sprintf("↓ %d more commits", n-end), Role: "more", Index: -1})

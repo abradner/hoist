@@ -44,7 +44,7 @@ type Row struct {
 	// NoOp is true when every edit for this repo already matches the target (Edit.NoOp()):
 	// promoting this repo would write nothing. Never true alongside Disabled — an unresolved
 	// row has no confirmed New reference to compare against, so resolution failure is checked
-	// first (T3-09, UX-M17: "no-op rows shown greyed").
+	// first (UX-M17: "no-op rows shown greyed").
 	NoOp bool
 }
 
@@ -271,7 +271,7 @@ func WarningRepo(w gitops.Warning) string {
 // Selectable is the rows huh.MultiSelect offers a checkbox for — neither unresolved (Disabled)
 // nor already current (NoOp): ticking a no-op row would promote nothing, so it is shown but
 // never offered as a tickable option, the same convention Disabled already uses for a different
-// reason (T3-09, UX-M17).
+// reason (UX-M17).
 func Selectable(rows []Row) []Row {
 	out := make([]Row, 0, len(rows))
 	for _, r := range rows {
@@ -294,7 +294,7 @@ func Disabled(rows []Row) []Row {
 }
 
 // NoOps is the rows already current in the target env — shown greyed with the reason, never
-// tickable (T3-09, UX-M17: "no-op rows shown greyed", the plan-confirm mockup's own
+// tickable (UX-M17: "no-op rows shown greyed", the plan-confirm mockup's own
 // "· worker · already current").
 func NoOps(rows []Row) []Row {
 	out := make([]Row, 0, len(rows))
@@ -308,7 +308,7 @@ func NoOps(rows []Row) []Row {
 
 // ImageRefStats counts the image references this plan would actually write for the ticked
 // repo set, and the distinct files they touch — the totals line's own "N image references, M
-// files" (T3-09, mirroring deploy.scale's identical count, T3-08). A no-op edit writes nothing
+// files" (mirroring deploy.scale's identical count). A no-op edit writes nothing
 // (Edit.NoOp()) and is excluded, exactly as RenderDiff already skips it into no diff hunk.
 func ImageRefStats(pl gitops.Plan, ticked map[string]bool) (refs, files int) {
 	fileSet := map[string]bool{}
@@ -415,7 +415,7 @@ func TargetsFor(r *gitops.Repo, source string) []string {
 }
 
 // SourcesFor lists the candidate source envs for target: every other discovered env,
-// sorted. It backs the huh.Select shown when p (matrix.OpenPlanMsg, T3-04) named a target
+// sorted. It backs the huh.Select shown when p (matrix.OpenPlanMsg) named a target
 // with no unambiguous reverse pair — the mirror of TargetsFor, above, which is still used
 // where a source is known but has no configured target of its own.
 func SourcesFor(r *gitops.Repo, target string) []string {

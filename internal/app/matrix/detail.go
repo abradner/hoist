@@ -6,7 +6,7 @@ import (
 	"github.com/abradner/hoist/internal/app/flight"
 )
 
-// detail.go is the wide-terminal detail pane (T3-05, v2·01b): what the matrix already knows
+// detail.go is the wide-terminal detail pane (v2·01b): what the matrix already knows
 // about the cell under the cursor, spelled out in full rather than abbreviated to fit a table
 // cell. Detail is pure — Table, Running and the in-flight list, no terminal dependency — the
 // same split cells.go/grid.go/menu.go already keep.
@@ -18,7 +18,7 @@ import (
 // per family row, and reshaping it to support that is a bigger change than this file's own
 // scope. Detail instead renders as its own block, shown as an extra Frame Section below the
 // table at width >= detailMinWidth — real information, differently laid out; the 4-column
-// mockup shape is left as a follow-up (named in the T3-04/05 handoff report).
+// mockup shape is left as a follow-up (named in a handoff report).
 //
 // Further deviation, forced by the data actually available here: the mockup's own lines
 // "declared 3 days ago · a1b2c3d", "running 2/2 pods on this digest", "ahead of <env> ·

@@ -84,7 +84,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	// Laid out on this copy first — View lays out its own, so the retained viewport would
-	// otherwise still be the zero-sized one New built (flight's log, Copilot #124).
+	// otherwise still be the zero-sized one New built (the same gotcha as flight's log).
 	m = m.layout()
 	var cmd tea.Cmd
 	m.body, cmd = m.body.Update(kp)

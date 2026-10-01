@@ -446,7 +446,7 @@ func (f *Fake) SetHeadSHA(prNumber int, sha string) {
 
 // SetBase is the test-only hook standing in for another actor retargeting a PR's base after
 // this promotion last observed it — the same rare, real race MergedStep's own success-path base
-// check (round-6 hardening) exists to catch (mirrors SetHeadSHA's own stale-head test hook).
+// check (hardening) exists to catch (mirrors SetHeadSHA's own stale-head test hook).
 func (f *Fake) SetBase(prNumber int, base string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -459,7 +459,7 @@ func (f *Fake) SetBase(prNumber int, base string) {
 }
 
 // SetClosed is the test-only hook standing in for an operator closing a PR on GitHub without
-// merging it (round-9 finding: PROpenedStep must refuse to adopt one of these as satisfied).
+// merging it (finding: PROpenedStep must refuse to adopt one of these as satisfied).
 func (f *Fake) SetClosed(prNumber int, closed bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -54,7 +54,7 @@ const (
 // s.Edits and s.ExpectedBlobs unfiltered (DirectPushedStep); a caller asking about one
 // Application's own share of a multi-Application promotion passes just that Application's
 // edits and the matching subset of expectedBlobs (ArgoSyncedStep.revisionCarries, scoped via
-// PromotionState.EditApps — round-2 review finding, PR #182: passing the whole promotion here
+// PromotionState.EditApps — review finding, PR #182: passing the whole promotion here
 // for a per-Application question meant one Application superseded by a later change made every
 // OTHER Application in the same loop report superseded too, silently skipping their own health
 // check).
@@ -103,7 +103,7 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, edits []gito
 		// worker, the ordinary shape — satisfies a whole-file predicate on the strength of
 		// either one, so an occurrence repointed elsewhere reads as unchanged, and a false
 		// landedIntact here silently retires findInFlight's one-in-flight-per-env invariant
-		// (Codex, PR #167).
+		// (#167).
 		//
 		// A file that no longer parses, or whose recorded occurrence is gone from it, is
 		// landedGone: a promotion cannot claim to have landed at a revision where it cannot

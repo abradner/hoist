@@ -18,7 +18,7 @@ type Styles struct {
 	// Status styles the status-bar summary, Notice a transient message shown in its place,
 	// Hint the key hints on the right of the bar.
 	Status, Notice, Hint lipgloss.Style
-	// Help styles the expanded help line toggled by ? — its own shade since T3-02, distinct
+	// Help styles the expanded help line toggled by ? — its own shade, distinct
 	// from Dim's grey (previously identical), so the two read as different things when a
 	// screen shows both at once (the help overlay's own body over a dimmed frame).
 	Help lipgloss.Style
@@ -30,10 +30,10 @@ type Styles struct {
 	// spelled out; colour is the second channel). Good: pinned, green CI, "in staging".
 	// Warn: drifted, split, a migration, a blocked step. Bad: a failed step, an error line.
 	// Dim: external, an unreached step, "…10 more". Accent: the cursor, an id, a command
-	// the operator should type. Production: its own hue (T3-02), distinct from Warn — a
+	// the operator should type. Production: its own hue, distinct from Warn — a
 	// production target is a fact about the env, not a warning about the current change.
 	Good, Warn, Bad, Dim, Accent, Production lipgloss.Style
-	// Info (T3-02) is its own colour, split out of what used to be Notice/Warn/Production
+	// Info is its own colour, split out of what used to be Notice/Warn/Production
 	// sharing one amber: a plain "this happened" report (a promotion started, a URL shown),
 	// never itself a warning or a failure. Notice keeps its own field and colour — the
 	// transient-message role frame.go's NoticeLines still defaults to — so existing callers
@@ -41,7 +41,7 @@ type Styles struct {
 	// root's activity row, AGENTS.md §4.8/§9 — ui.NoticeLinesStyled takes the style a caller
 	// chose instead of always reaching for Notice).
 	Info lipgloss.Style
-	// Cursor (T3-02) is the cell-cursor style the matrix's grid renderer needs from T3-04
+	// Cursor is the cell-cursor style the matrix's grid renderer needs from
 	// on: a background fill (not just a foreground colour, the way Selected reinforces a
 	// row) plus bold, so a single highlighted cell reads clearly against a table of many.
 	Cursor lipgloss.Style
@@ -59,7 +59,7 @@ func NewStyles(dark bool) Styles {
 	good := ld(lipgloss.Color("28"), lipgloss.Color("78"))
 	warn := ld(lipgloss.Color("166"), lipgloss.Color("214"))
 	bad := ld(lipgloss.Color("160"), lipgloss.Color("203"))
-	// T3-02: Info, Production and Help/Muted each get their own hue instead of sharing Warn's
+	// Info, Production and Help/Muted each get their own hue instead of sharing Warn's
 	// amber or Dim's grey (the audit doc's own list of what today collapses to one colour).
 	// info is a calm blue — a plain report, never itself an exception. production is the
 	// mockups' own violet (docs/tui/mockups.html's `.c-prod`, #d9a0f0), picked specifically to

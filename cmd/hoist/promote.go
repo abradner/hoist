@@ -289,8 +289,8 @@ func checkDirectPreflight(cmdName string, eff effective, direct bool, confirmDir
 		fmt.Fprintf(stderr, "%s: --confirm-direct=%q does not match the target env %q; repeat the exact target env to confirm\n", cmdName, confirmDirect, targetEnv)
 		return exitUsage
 	}
-	// Round-N finding (Codex, P2): DirectCommitGateStep — internal/engine/direct.go's own
-	// "sole enforcement point" for AGENTS.md invariant 5/6 — used to be constructed only
+	// DirectCommitGateStep — internal/engine/direct.go's own "sole enforcement point" for
+	// AGENTS.md §4.5 — used to be constructed only
 	// after BuildPlan and the all-no-op fast path further down this function, so a
 	// --direct run against a production env whose plan happened to already be current
 	// exited 0 claiming success ("already current") without the gate ever running, and a

@@ -40,7 +40,7 @@ type PromotionState struct {
 	// pushes to Base, so Branch is set but was never pushed, which is indistinguishable from a
 	// PR promotion that died before PushedStep ran. Without this field, resuming a direct
 	// promotion re-observes it through AllSteps, finds Branch missing on origin, and pushes it
-	// and opens a PR — the exact thing the operator asked not to happen (Codex review, PR #43).
+	// and opens a PR — the exact thing the operator asked not to happen.
 	Direct      bool
 	Phase       StepName // an index/hint only — Observe never trusts it, see AGENTS.md §4.1
 	History     []HistoryEntry
@@ -125,7 +125,7 @@ type PromotionState struct {
 	// carried, not re-derived, plan-time fact.
 	//
 	// A state file written before M5 added this field decodes it as empty, which is not the same
-	// thing as a promotion computed to touch no Application (round-1 review finding): a non-empty
+	// thing as a promotion computed to touch no Application (review finding): a non-empty
 	// Edits with an empty ArgoApps is only possible for a state that predates ArgoAppNames ever
 	// running against it, since a real call against a non-empty edit set always yields at least
 	// one name or an error (see ArgoAppNames' own doc comment). cmd/hoist/resume.go's
@@ -138,7 +138,7 @@ type PromotionState struct {
 	// can scope a question ("is Application X's own share of this promotion still landed") to
 	// just that Application's files instead of asking it of the whole promotion. Computed once
 	// by EditApps when the promotion is first built, carried like ArgoApps, and repaired by
-	// ensureArgoApps for a state file saved before this field existed (round-2 review finding,
+	// ensureArgoApps for a state file saved before this field existed (review finding,
 	// PR #182: ArgoSyncedStep.revisionCarries used to call observeLanded over the whole
 	// promotion and apply that one verdict to every Application in the loop, so one Application
 	// superseded by a later deploy silently skipped the health check on every OTHER Application

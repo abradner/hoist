@@ -157,8 +157,8 @@ type Model struct {
 // rolling (#PR8/FB-M7's own list): before this, none of those three states carried any visible
 // sign that they were doing anything rather than having quietly wedged (the same "is this still
 // alive" question flight.Model's own spinner already answers for a promotion in flight). A
-// bubbles/v2 spinner.Model was tried here first and never actually animated (P3 #9,
-// t2-review.md): Init/start/the Rolling transition below are relied on elsewhere (attach-style
+// bubbles/v2 spinner.Model was tried here first and never actually animated: Init/start/the
+// Rolling transition below are relied on elsewhere (attach-style
 // app-level tests, sessionBuildCmd's own single-cmd shape) to return their real work as ONE
 // unbatched command, and nothing in this package ever issued the spinner's own tea.Tick to
 // advance it past its first frame — so the "spinner" was a permanently frozen glyph, which reads
@@ -349,7 +349,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// reread is P2-8 (T3 review): the design's own "r" re-read row for this screen, missing until
+// reread is the design's own "r" re-read row for this screen, missing until
 // now. Re-runs Funcs.Read to refresh replica counts, strategy and last-restart times against
 // whatever the cluster says right now — restart's own equivalent of plan/tags' own "reload"
 // gesture. Only offered from stateConfirm (already loaded once) or a stateFailed set by a real
@@ -529,7 +529,7 @@ func (m Model) View() string {
 	return redact.Strings(view)
 }
 
-// footer renders through keys.Footer (T3-03), matching the screen's own row in
+// footer renders through keys.Footer, matching the screen's own row in
 // internal/ui/keys' registry rather than a hand-built hint string.
 func (m Model) footer() string {
 	hints := []keys.Hint{{B: keys.Log, Long: "l activity", Pri: 2}}

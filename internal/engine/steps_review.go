@@ -373,7 +373,7 @@ func (MergedStep) Name() StepName { return StepMerged }
 // base reset outside hoist after a real merge is caught rather than silently reported as success
 // on a re-run of the same promotion (same deterministic id/branch/marker, same already-merged
 // PR) — see mergeWasReverted's own doc comment for why ancestry, not blob content, is the
-// correct test (round 3, finding #2: a blob comparison would misclassify an ordinary later
+// correct test (a blob comparison would misclassify an ordinary later
 // re-promotion to the same env, which legitimately changes the same paths, as a revert).
 func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	pr, ok, err := findOwnPR(ctx, m.Forge, s)
@@ -398,8 +398,8 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 	// without merging (#130). If that swap happens between ApprovedStep's observation and
 	// this one — the operator closes and replaces the PR mid-pass — the approval that
 	// satisfied ApprovedStep was posted on the dead PR, and merging the replacement here
-	// would land a production change on an approval its reviewer never saw (§4.5; Codex on
-	// #138). Block this pass instead: the next one re-observes from the top, PROpenedStep
+	// would land a production change on an approval its reviewer never saw (§4.5; #138).
+	// Block this pass instead: the next one re-observes from the top, PROpenedStep
 	// adopts the replacement and ApprovedStep reads *its* comments.
 	if s.PR != nil && s.PR.Number > 0 && s.PR.Number != pr.Number {
 		return Observation{Blocked: fmt.Sprintf(
@@ -450,7 +450,7 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 // promotion's own merge commit, as reported by the forge's own pr.MergeSHA — is still an
 // ancestor of that tip (git.Git.IsAncestor, `git merge-base --is-ancestor`).
 //
-// This replaced an earlier (round 2) implementation that compared s.Base's tip content, path by
+// This replaced an earlier implementation that compared s.Base's tip content, path by
 // path, against s.ExpectedBlobs (the same blob-hash technique CommittedStep's own Observe uses
 // to confirm its commit). That was the wrong test: content equality cannot distinguish "the base
 // moved backward past my merge" from "the base moved forward past my merge via a later,
@@ -467,7 +467,7 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 // promotion's merge is genuinely part of history — Satisfied, regardless of what later, forward
 // commits changed (the superseded case, correctly not reverted). If mergeSHA is NOT an ancestor
 // of the current tip, that is a real revert — a force-push or reset backward past it, or the
-// base branch rebuilt from an earlier point — and this correctly Blocks, exactly as round 2
+// base branch rebuilt from an earlier point — and this correctly Blocks, exactly as
 // intended for that case.
 func (m MergedStep) mergeWasReverted(ctx context.Context, s *PromotionState, mergeSHA string) (bool, string, error) {
 	if mergeSHA == "" {

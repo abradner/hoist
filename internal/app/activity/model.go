@@ -14,7 +14,7 @@ import (
 )
 
 // BackMsg is emitted on esc; the root pops the screen (internal/app/app.go — l, handled
-// generically for any keyed screen since T3-03/T3-04, is what pushes it: the same New-on-open,
+// generically for any keyed screen, is what pushes it: the same New-on-open,
 // adapter-in-app.go shape every other read-only screen in this package uses, config.Model in
 // particular).
 type BackMsg struct{}
@@ -87,8 +87,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, func() tea.Msg { return BackMsg{} }
 	}
 	// Laid out on this copy first — View lays out its own, so the retained viewport would
-	// otherwise still be the zero-sized one New built (config.Model's own comment on the same
-	// gotcha, Copilot #124).
+	// otherwise still be the zero-sized one New built (config.Model's own comment notes the
+	// same gotcha).
 	m = m.layout()
 	if key.Matches(kp, m.keys.Home) {
 		m.body.GotoTop()

@@ -48,7 +48,7 @@ type PlannedChange struct {
 	// was built from, never whatever s.Repo() happens to hold when the operator later confirms —
 	// fixing the fail-open gap where an F5 refresh landing between building the plan and pressing
 	// Enter let a stale plan's edits pass a freshness check run against the NEW view instead of
-	// the one that produced them (t1-review.md P2 #6).
+	// the one that produced them.
 	//
 	// When s is in origin mode (cur.FromOrigin — LoadRepo(RepoFromOrigin) has run: TUI boot or a
 	// later F5), this field is ALWAYS a real FromOrigin view with a captured SHA: Plan itself
@@ -115,7 +115,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 		// deploy confirm's own PlanRequest) and this call actually running. Building
 		// RepoView{Repo: r} here — as the branch above does for req.Repo == cur.Repo — would
 		// silently downgrade StartPromotion's later freshness check from CheckRepoViewCurrent
-		// (the tight origin-tip comparison, t1-review.md P2 #6) to checkCloneCurrentForBase (the
+		// (the tight origin-tip comparison) to checkCloneCurrentForBase (the
 		// looser local-disk check), since FromOrigin would read false. Fail closed instead: the
 		// CLI path below never reaches this branch, because it never calls LoadRepo at all, so
 		// cur.FromOrigin is always false there regardless of what Repo it passes.

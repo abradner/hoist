@@ -58,9 +58,9 @@ type Promotion struct {
 	// session.Config, but only cmd/hoist decides what a real run's clock is) so a test can drive
 	// a real Start -> Step(landed) -> refresh sequence deterministically — a fixed Now and an
 	// After that fires on request rather than actually sleeping — the same seam session.Config
-	// already exposes to its own package's tests, now reachable from app.New (P3 #10,
-	// t2-review.md). Both nil (every real caller, and every test that never needs to drive a
-	// tick chain) keeps session.Config's own defaults: time.Now and tea.Tick.
+	// already exposes to its own package's tests, now reachable from app.New. Both nil (every
+	// real caller, and every test that never needs to drive a tick chain) keeps session.Config's
+	// own defaults: time.Now and tea.Tick.
 	Now   func() time.Time
 	After func(d time.Duration, f func(time.Time) tea.Msg) tea.Cmd
 }
@@ -166,16 +166,16 @@ type Model struct {
 	quitConfirmValue bool
 
 	// kbd is what the terminal answered when View below asked for
-	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes (T3-01) — flag 8, the one Kitty-protocol
+	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes  — flag 8, the one Kitty-protocol
 	// feature that can report a caps-lock letter as ModCapsLock distinct from ModShift
 	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
-	// records whether the terminal granted it). Its one use is a single line in T3-03's help
+	// records whether the terminal granted it). Its one use is a single line in its help
 	// overlay ("caps lock ignored" vs "a capital counts as shift"), never passed down into any
 	// value-typed screen (the audit doc's own "needs your decision", resolved as: match
 	// without tracking state per-screen, record once here for that one line instead).
 	kbd tea.KeyboardEnhancementsMsg
 
-	// helpOpen/helpScreen are the root's own "?" overlay (T3-03): opened only for a top screen
+	// helpOpen/helpScreen are the root's own "?" overlay opened only for a top screen
 	// that implements keyed (KeyScreen), drawn with ui.Dialog over whatever is underneath.
 	// helpScreen is fixed at the moment the overlay opens, not re-read from the stack on every
 	// keypress, so the overlay's own content cannot change out from under the operator while it
@@ -185,7 +185,7 @@ type Model struct {
 	helpScreen keys.Screen
 
 	// hint is the transient "q quits from the matrix · esc goes back" row (the audit doc's
-	// own T3-03 decision): unlike the activity row (Model.activity), it is not an entry in the
+	// own decision): unlike the activity row (Model.activity), it is not an entry in the
 	// log — it is cleared unconditionally at the top of every keypress, so it survives exactly
 	// one more key after the one that set it, then disappears whether or not that next key did
 	// anything else. It shares the activity row's own screen-space mechanism (View, below): both
@@ -387,7 +387,7 @@ func (m Model) noteStarted(build session.BuildID, id string) Model {
 	return m.note(activity.Info, text, "", url)
 }
 
-// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (commit 1 of T3-06's own
+// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (commit 1 of the screen's own
 // train, matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
 // purely so a message stamped with m.matrixTick reaches this root's Update once a second while
 // matrixWantsCountdown() holds, making the pane's "next check in Ns" text advance instead of
@@ -451,7 +451,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyboardEnhancementsMsg:
 		// Skipped by internal/parity's parser (tea.* messages, not a pkg.XMsg case), so this
 		// needs no registry row (the audit doc's own acceptance check). m.kbd's only
-		// consumer is T3-03's help overlay.
+		// consumer is its help overlay.
 		m.kbd = msg
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -499,7 +499,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// invariant — so "top is the matrix" and "the stack holds only the matrix" are the
 			// same condition). Anywhere else q is unbound: it shows the transient hint rather
 			// than doing anything, unless the top screen is mid-text-entry, in which case the
-			// letter falls through to it untouched (round 5, finding 3's own guard, unchanged).
+			// letter falls through to it untouched (screen.go's CapturesText guard).
 			if !m.capturesText() {
 				if _, onMatrix := m.top().(matrixScreen); onMatrix {
 					if m.sess.AnyRunning() {
@@ -511,7 +511,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "?":
-			// The help overlay (T3-03): only for a top screen with a stated row in
+			// The help overlay only for a top screen with a stated row in
 			// internal/ui/keys' registry (keyed), and never while it's mid-text-entry — a filter
 			// query typing "?" is not asking for help.
 			if !m.capturesText() {
@@ -524,8 +524,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			// The activity log, from any screen that has opted into the registry (keyed) —
 			// generic root-level handling, not a per-screen message (the audit doc's own
-			// "the root intercepts ?, l and q as keys, not as *Msgs"). Since T3-04, matrixScreen
-			// implements keyed too, so this now covers the matrix itself as well — its own
+			// "the root intercepts ?, l and q as keys, not as *Msgs"). matrixScreen now implements
+			// keyed too, so this covers the matrix itself as well — its own
 			// former l handling (matrix.OpenActivityMsg) is retired.
 			if !m.capturesText() {
 				if _, ok := m.top().(keyed); ok {
@@ -540,12 +540,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case matrix.DriftMsg:
 		// The matrix's own async answer, routed to it wherever it sits: the default below
 		// forwards to the top screen only, and an env whose answer landed while the plan or
-		// picker was open stayed "resolving…" for good (Copilot, #110).
+		// picker was open stayed "resolving…" for good.
 		return m.withMatrix(func(ms matrix.Model) matrix.Model { ms, _ = ms.Update(msg); return ms }), nil
 	case matrix.RepoRefreshedMsg:
-		// Same #110-shaped routing as DriftMsg just above — F5's fetch can land after the
-		// operator has already navigated onto the plan screen or the tag picker. Round-2
-		// review (PR #182) found a second gap this case also closes: m.repo (this struct's own
+		// Same routing gap as DriftMsg just above — F5's fetch can land after the
+		// operator has already navigated onto the plan screen or the tag picker. A second gap
+		// this case also closes: m.repo (this struct's own
 		// field, below — what plan.New/tags/restart/deploy all read) was never updated by an
 		// F5 refresh at all, only the matrix screen's OWN internal copy was, so a plan opened
 		// after F5 silently kept building from the boot-time snapshot even while the table
@@ -554,7 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// guards live there, once, not duplicated here) and adopts it as the root's own.
 		//
 		// A failed refresh used to become the matrix's own clear-on-next-key notice — exactly
-		// the #164 shape the activity log exists to end (P2 #7, t2-review.md): F5 is async, so
+		// the #164 shape the activity log exists to end (P2 #7): F5 is async, so
 		// the operator can easily have pressed another key by the time this lands, and the
 		// refusal disappeared before it was ever read. TakeRefreshError hands back that error
 		// (and clears it on the matrix) so it goes to the activity log instead, which survives.
@@ -575,7 +575,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.repo == nil || m.repo == before {
 			return m, nil
 		}
-		// T3-09: plan.RefreshMsg/deploy.RefreshMsg's own rebuild. A fresh repo genuinely landed
+		// plan.RefreshMsg/deploy.RefreshMsg's own rebuild. A fresh repo genuinely landed
 		// (not a failed fetch, not the same pointer this root already held) — if the plan or
 		// deploy confirm screen asked for it (r), rebuild it against m.repo now rather than the
 		// snapshot it was pushed with; every other screen (including a matrix-only stack) is
@@ -653,7 +653,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.push(fs)
 		return m, tea.Batch(fs.Init(), cmd)
 	case matrix.OpenPlanMsg:
-		// T3-04: p always names the Target (the cursor's column); Source is the one reverse
+		// p always names the Target (the cursor's column); Source is the one reverse
 		// pair when exactly one exists, else "" — the plan screen itself then asks "promote
 		// into <target> from…" (plan.New's own stateSelectEnv branch below).
 		ps := planScreen{plan.New(m.repo, m.promotable, m.envs, msg.Source, msg.Target, m.planFn, m.history)}
@@ -662,8 +662,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deploy.BackMsg:
 		// The deploy screen's Esc, handled exactly like the plan screen's below: without a case
 		// here the message was forwarded to the top screen — the deploy screen itself — which
-		// fed it to its own viewport, so Esc did nothing and the screen could not be left
-		// (Copilot, PR #72). T3-08: openDeploy no longer pops the tags picker before pushing the
+		// fed it to its own viewport, so Esc did nothing and the screen could not be left.
+		// openDeploy no longer pops the tags picker before pushing the
 		// deploy screen, so this pop lands back on that same tags.Model instance — cursor,
 		// filter and loaded rows all intact — rather than on the matrix. popAndRelist still is
 		// the right call: it only re-lists when the pop actually lands on the matrix
@@ -674,7 +674,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case plan.BackMsg:
 		return m.popAndRelist()
 	case plan.RefreshMsg, deploy.RefreshMsg:
-		// T3-09: r on the plan or deploy confirm screen asks for exactly the fetch F5 already
+		// r on the plan or deploy confirm screen asks for exactly the fetch F5 already
 		// runs on the matrix (requestMatrixRefresh) — neither screen can fetch origin itself
 		// (AGENTS.md §4.3), and service.Plan never does either (it only reads whatever repo the
 		// service currently holds). The actual rebuild happens once matrix.RepoRefreshedMsg
@@ -777,7 +777,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case flight.WatchMsg:
-		// w on the flight screen (T3-06): the same openWatch the matrix's own w/OpenWatchMsg
+		// w on the flight screen the same openWatch the matrix's own w/OpenWatchMsg
 		// already uses — flight has already resolved which family (families(), its own doc
 		// comment, raising its own chooser when there was more than one), so this is exactly
 		// the plain (family, target) pair openWatch takes, pushed on top of the flight screen
@@ -846,7 +846,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		// T3-07/T3-08: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
+		// /: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
 		// is gone); the deploy confirm screen offers shift+d itself now, once the diff is
 		// already on screen, so there is only ever one path in here.
 		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
@@ -1149,7 +1149,7 @@ func (m Model) bottomLine() string {
 	return text + suffix
 }
 
-// activityStyle colours the root's activity row by the latest entry's own Kind (T3-02): Info
+// activityStyle colours the root's activity row by the latest entry's own Kind: Info
 // for a plain report, Good for a landed or completed outcome, Bad for a refusal or failure —
 // replacing the uniform amber every entry used to render in regardless of what happened, the
 // same colour a bare warning or a genuine failure got. Info is also the default for the empty
@@ -1172,7 +1172,7 @@ func (m Model) activityStyle() lipgloss.Style {
 // bottomText and bottomStyle pick which one row the terminal's last line shows (see Model.hint's
 // own doc comment): the transient q hint takes priority over the activity row while it is set,
 // since only one such row exists on screen at a time — never both at once, and never the hint
-// added as its own activity.Entry (T3-03's own decision: it is not a record of anything that
+// added as its own activity.Entry (the screen's own decision: it is not a record of anything that
 // happened, only a momentary correction).
 func (m Model) bottomText() string {
 	if m.hint != "" {
@@ -1227,7 +1227,7 @@ func (m Model) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
-	// T3-01: ask every run for the Kitty-protocol features that can tell a caps-lock letter
+	// ask every run for the Kitty-protocol features that can tell a caps-lock letter
 	// apart from a real shift (internal/ui/keys.Binding.Matches, point 3) — a terminal that
 	// doesn't support it, or hasn't opted in, just never sends a KeyboardEnhancementsMsg back,
 	// and the legacy path (point 4 of Matches) is what every terminal runs today regardless.
@@ -1271,7 +1271,7 @@ func (m Model) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch kmsg.String() {
 		case "esc":
 			// Leave the dialog without answering it — huh's own Update swallows Esc, the same
-			// trap the tag picker's round-3 finding caught one layer down.
+			// trap the tag picker's finding caught one layer down.
 			m.quitConfirming = false
 			return m, nil
 		case "enter":
@@ -1366,14 +1366,14 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.Histor
 	defer cancel()
 	pc, err := m.planFn(ctx, service.PlanRequest{Repo: m.repo, Target: target, Deploy: &ref})
 	if err != nil {
-		// T3-08: the picker stays on the stack (below) — a build failure is a notice on IT,
+		// the picker stays on the stack (below) — a build failure is a notice on IT,
 		// not a pop back past it to the matrix, since the operator's next move is most likely
 		// picking a different tag from the very list they were just looking at.
 		return m.noteErr(fmt.Sprintf("cannot deploy %s to %s: %v", ref, target, err)), nil
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
-	// T3-08: the picker stays on the stack underneath, unlike before this train — deploy.BackMsg
+	// the picker stays on the stack underneath, unlike before this train — deploy.BackMsg
 	// (esc) pops back onto that same tags.Model instance, cursor/filter/loaded rows intact,
 	// rather than all the way to the matrix. Direct mode is the deploy screen's own shift+d
 	// gesture now (Model.onKey/toggleDirect), never set here.
@@ -1529,7 +1529,7 @@ func (m Model) top() Screen {
 }
 
 // updateHelp handles every key while the help overlay is open: esc, ? and enter all close it
-// (the audit doc's T3-03 scope); ctrl+c still quits immediately, exactly as it does
+// (the audit doc's scope); ctrl+c still quits immediately, exactly as it does
 // everywhere else; every other key is swallowed rather than reaching the screen underneath,
 // so the overlay behaves like a real modal rather than a transparent one that happens to also
 // draw a box.
@@ -1576,8 +1576,8 @@ func (m Model) capturesText() bool {
 // Without this, plan.StartMsg's Plan field carries every edit BuildPlan produced regardless of
 // what the operator unticked (plan.Model never mutates m.plan itself — only the rendered diff
 // and m.ticked track the selection), so a real promotion would commit every repo in the plan,
-// including ones the confirm screen's own diff never showed as changing (Codex review, PR
-// #50). Edits for a repo not in ticked are dropped entirely — never downgraded to a NoOp or
+// including ones the confirm screen's own diff never showed as changing. Edits for a repo not
+// in ticked are dropped entirely — never downgraded to a NoOp or
 // moved into Untouched — mirroring RenderDiff's own treatment of the identical set, so the
 // commit message/PR body engine.RenderCommitMessage/RenderPRBody render from p.Edits (both key
 // off Edit.New.Repo, cmd/hoist's internal/engine/template.go) describe exactly what the
@@ -1586,8 +1586,8 @@ func (m Model) capturesText() bool {
 // Warnings gets the same treatment, for the same reason: engine.RenderPRBody also renders
 // p.Warnings verbatim, and without this a PR body could carry a warning about a repo the
 // operator explicitly unticked — one that never appears in p.Edits and so never appears
-// anywhere else in the PR — describing a repo not part of the promotion at all (Copilot, PR
-// #50 round 4). plan.WarningRepo names the repo each warning is about (every Warning built by
+// anywhere else in the PR — describing a repo not part of the promotion at all.
+// plan.WarningRepo names the repo each warning is about (every Warning built by
 // pkg/gitops or pkg/resolve carries Occurrences for exactly one repo); a warning naming no
 // repo at all (WarningRepo returns "", which none of today's constructors produce, but nothing
 // forbids a future one that isn't per-repo) is kept unconditionally rather than dropped, since

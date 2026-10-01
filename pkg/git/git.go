@@ -87,7 +87,7 @@ type Git interface {
 	// dir's object graph — `git merge-base --is-ancestor`, which git itself defines as true for
 	// a commit and itself, not just for a strict ancestor. Both revs must already be resolvable
 	// locally (a caller verifying a remote branch's tip should FetchBranch it first, the same
-	// way LsTreeBlob callers do). Added in M4 for MergedStep's Observe (finding #2, round 3):
+	// way LsTreeBlob callers do). Added for MergedStep's Observe:
 	// whether a promotion's own merge commit is still reachable from the base's current tip is
 	// the correct test for "did something revert past this merge", not a content/blob
 	// comparison — a later, legitimate commit that changes the very same paths (an ordinary

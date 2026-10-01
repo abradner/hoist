@@ -15,7 +15,7 @@ const (
 	// loadCmd): a cluster read plus a registry HEAD per repo, chained through pkg/resolve's
 	// priority order (AGENTS.md §4.10). Also reused by internal/app's own openDeploy, whose
 	// call is synchronous and pure (no cluster/registry involved) but budgeted the same way for
-	// consistency rather than left unbounded. Raised from 20s to 120s (P3 #14, t2-review.md):
+	// consistency rather than left unbounded. Raised from 20s to 120s (P3 #14):
 	// the registry credential chain's `op` link can be an interactive 1Password approval
 	// (§4.6/§4.10 — the same reason git's own commit step gets a "waiting for signing approval"
 	// notice rather than a short deadline), and 20s was tight enough to fail resolution outright
@@ -41,7 +41,7 @@ const (
 	// file re-observed against the forge and cluster. Mirrored here for documentation; the
 	// controller's own Config.ListTimeout already defaults to this exact value (§4.1 — nothing
 	// consults this constant directly, so the two cannot silently drift without a reviewer
-	// noticing the two literals disagree). Raised from 30s to 60s (P3 #14, t2-review.md): every
+	// noticing the two literals disagree). Raised from 30s to 60s (P3 #14): every
 	// in-flight promotion's own forge/cluster re-observation happens in this one call, and 30s
 	// was tight for an operator with several promotions in flight against a forge under load.
 	List = 60 * time.Second
