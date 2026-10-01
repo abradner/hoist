@@ -12,11 +12,17 @@ hoist is a Go terminal UI that promotes container images between environments in
 GitOps repository, and drives the whole path from edit to rollout: commit, PR, CI, human approval,
 merge, Argo refresh, Deployment watch — with resume after interruption. It is a single-operator
 tool for the author's own GitOps repo first, written so other repos with the same shape can use it.
-Status: pre-alpha, first tag `v0.1.0`; milestones M0–M10 have landed on `main`, and so has the
-TUI/CLI parity work that closed the registry's last one-sided rows (#101–#104, #132), so every
-operation is reachable from both faces. The remaining work — the design questions the tracker
-flags (#24, #41, #53, #90), the migration delta and doctrine warnings of M7 (#7) and M13's
-first-run wizard (#106) — is tracked in issues.
+
+Status: pre-alpha, first tag `v0.1.0` (main has since moved well past it — a merge is not a
+release, §7). Milestones M0–M10 and the TUI/CLI parity work (#101–#104, #132) are on `main`, so
+every operation is reachable from both the CLI and the TUI. The UX overhaul this file also
+describes — the architecture audit's findings, `internal/service` as the one use-case layer both
+faces call, the `internal/app/session` drive controller, the `internal/ui/keys` registry, and the
+redesigned screens (§4.8) — is a separate train still **in review, not yet on `main`**; this file
+states it as built because that is what the branch under review does, not a claim about what
+`main` runs today. Remaining work — the design questions the tracker flags (#24, #41, #53, #90),
+the migration delta and doctrine warnings of M7 (#7), and M13's first-run wizard (#106) — is
+tracked in issues.
 
 Domain nouns, as this repo uses them:
 
@@ -89,17 +95,17 @@ A conflict with a principle is a stop-and-check, never something to quietly work
 
 | Layer | Technology | Notes |
 |---|---|---|
-| Language | Go 1.26 | Managed via `mise` (`mise.toml`); use `mise exec -- go …` in a fresh shell |
-| TUI | Bubble Tea v2 (`charm.land/bubbletea/v2`), Bubbles v2, Lip Gloss v2, huh v2 | Hand-rolled panes; no layout library |
-| Manifests | `gopkg.in/yaml.v3` node API | Scan, byte-minimal edit, structural verify. No kustomize/helm libraries |
-| Registry | `github.com/google/go-containerregistry` | Tag list, manifest HEAD, config blobs; `authn` keychain chain |
-| Forge | `github.com/cli/go-gh/v2` | Reuses the user's `gh` login — go-gh's own token resolution, which execs `gh auth token` for a keyring-stored one; hoist never execs `gh` itself. `Forge` interface; GitHub only today |
+| Language | Go 1.26 | Via `mise` (`mise.toml`); use `mise exec -- go …` in a fresh shell |
+| TUI | Bubble Tea v2, Bubbles v2, Lip Gloss v2, huh v2 (`charm.land/...`) | Hand-rolled panes; no layout library |
+| Manifests | `gopkg.in/yaml.v3` node API | Scan, byte-minimal edit, structural verify. No kustomize/helm |
+| Registry | `github.com/google/go-containerregistry` | Tags, manifest HEAD, config blobs; `authn` keychain chain |
+| Forge | `github.com/cli/go-gh/v2` | Reuses the user's own `gh` login: hoist defines no token flag or env var of its own and never sees the token value; go-gh's own resolution reads `GH_TOKEN`/`GITHUB_TOKEN` (a different pair for an enterprise host) first, then `gh`'s config file, then `gh auth token` for a keyring-stored one — the one place the `gh` binary is execed, hoist itself never execs `gh`. `Forge` interface, GitHub only today |
 | Git | `exec git` | Worktree per promotion; inherits the user's signing config. Not go-git (§4.6) |
-| Kubernetes | `k8s.io/client-go` (+ `api`, `apimachinery`) | Pods, secrets, dynamic client for Argo `Application` CRs, Deployment watches |
+| Kubernetes | `k8s.io/client-go` (+ `api`, `apimachinery`) | Pods, secrets, Argo `Application` CRs, Deployment watches |
 | State | JSON files under `$XDG_STATE_HOME/hoist/` | No database, no workflow engine (§4.1) |
-| Testing | `go test` with golden files, `client-go` fakes, ggcr's in-memory registry, real `git` in temp dirs | See §6 |
+| Testing | `go test`, golden files, `client-go` fakes, ggcr's in-memory registry, real `git` in temp dirs | §6 |
 | Lint | golangci-lint v2 | Pinned in `mise.toml` and CI |
-| Deployment | `go install …/cmd/hoist@latest` at the newest tag; goreleaser binaries per tag | See §7 |
+| Deployment | `go install …/cmd/hoist@latest` at the newest tag; goreleaser binaries per tag | §7 |
 
 ## 4. Critical Architectural Rules
 
@@ -164,36 +170,34 @@ one-line-per-occurrence diff is the whole review surface for a production change
 
 Discovery is all-or-nothing: an `Application` wrapper whose `spec.source.path` does not exist
 fails `gitops.Discover` (naming the wrapper, the Application and the path) rather than becoming a
-warning. Principle 5 was weighed and does not apply — Argo could not sync that wrapper either, and
-a plan built over a repo hoist could only half-read would be trusted for exactly the part it did
-not see. An *unmanaged* directory is the mirror case and stays informational: nothing there is
-promoted, so nothing is misreported (decided in issue #12).
+warning — Argo could not sync that wrapper either, and a plan built over a repo hoist could only
+half-read would be trusted for exactly the part it did not see (principle 5 weighed, doesn't
+apply). An *unmanaged* directory is the mirror case and stays informational: nothing there is
+promoted, so nothing is misreported (#12).
 
 ### 4.3 `pkg/` is activity-shaped
 
 `pkg/*` packages never import `internal/`, never import a workflow engine, and their calls take
 JSON-serialisable inputs and return JSON-serialisable outputs that contain **no secrets** —
 credentials are resolved inside the adaptor from env, keychain, cluster or `op`. Correcting an
-earlier claim here: this used to say every `pkg/*` package "expose[s] functions of the shape
-`func(ctx, In) (Out, error)`" — true of `pkg/gitops`, `pkg/resolve`, `pkg/redact` and `pkg/image`,
-but not of `pkg/git`, `pkg/forge`, `pkg/argo`, `pkg/rollout` or `pkg/registry`, each of which
-exposes a stateful client *interface* (`git.Git`, `forge.Forge`, `argo.Argo`, `rollout.Rollout`,
-`registry.Registry`) built once and called several times — a git worktree, a forge session, a
-kube client all carry connection state a bare function per call would have to rebuild every time.
-The activity-shaped constraint that actually matters — no secrets crossing the boundary, JSON-
-serialisable in/out, no `internal/` import — holds for both shapes; only the bare-function-per-call
-description was too narrow. *Why:* the same calls must be wrappable as Temporal activities by
+earlier claim here: not every package is a bare `func(ctx, In) (Out, error)`: `pkg/gitops`,
+`pkg/resolve`, `pkg/redact` and `pkg/image`
+are, but `pkg/git`, `pkg/forge`, `pkg/argo`, `pkg/rollout` and `pkg/registry` each expose a stateful
+client *interface* (`git.Git`, `forge.Forge`, `argo.Argo`, `rollout.Rollout`, `registry.Registry`)
+built once and called several times — a git worktree, a forge session, a kube client all carry
+connection state a bare function per call would have to rebuild. What actually matters — no
+secrets crossing the boundary, JSON-serialisable in/out, no `internal/` import — holds for both
+shapes. *Why:* the same calls must be wrappable as Temporal activities by
 `github.com/abradner/workflow` without change, and that library's boundary rule is that nothing
 secret or unbounded crosses a workflow/activity edge.
 
-`internal/service` sits above `pkg/` and `internal/engine`, as the one use-case layer both the CLI
+`internal/service` sits above `pkg/` and `internal/engine` as the one use-case layer both the CLI
 (`cmd/hoist`) and the TUI (`internal/app`) call for planning, starting, listing, resuming and
-abandoning a promotion (§4.8's service-layer bullet) — it is where activity-shaped `pkg/` clients
-and `internal/engine`'s step machinery get composed into one call per use case. `pkg/` still never
-imports `internal/`, `internal/service` included: `internal/service/imports_test.go` enforces both
-directions (`pkg/...` never depends on `hoist/internal`, and `internal/service` never depends on
-`internal/app` or a bubbletea package), so the layering stays a build-checked fact, not a
-convention someone has to remember.
+abandoning a promotion (§4.8) — it composes activity-shaped `pkg/` clients and `internal/engine`'s
+step machinery into one call per use case. `pkg/` still never imports `internal/`,
+`internal/service` included: `internal/service/imports_test.go` enforces both directions
+mechanically (`pkg/...` never depends on `hoist/internal`, and `internal/service` never depends on
+`internal/app` or a bubbletea package).
 
 ### 4.4 Public surfaces carry no cluster identity
 
@@ -245,144 +249,115 @@ root calls on resize and theme change; the root adapts each one through its `Scr
 shows, before any styling — lives in a file with no terminal dependency (`matrix/cells.go`) so it
 is unit-testable as plain values; the model file only lays that data out. `internal/ui` holds the
 shared palette, the frame chrome and the small shared widgets (the status bar), nothing
-screen-specific. No layout library (§4.7) — which means no flexbox-for-terminals dependency, not
-no borders: from M10 on, a screen's `View` is `ui.Frame{Title, Sections, Footer}.Render(styles,
-w, h)` (a titled rounded box with rules between sections, the footer always the terminal's last
-line), two panes are `ui.Columns`, a sub-pane is `ui.Box`, and every `huh.Confirm` is drawn
-through `ui.Dialog` (lipgloss's `Canvas`/`Layer` compositor, centred over the dimmed parent — the
-one place the compositor is used; everything else composes with `JoinVertical`). Those helpers take
-their glyphs from lipgloss's own `Border` (every edge, junction and the title rule), join panes
-with `JoinHorizontal`, and pad rows by cell width (`ansi.StringWidth`, `ansi.Truncate`) — the one
-thing they do by hand, because a frame's body is a list of already-rendered lines and `Place`
-would re-measure what `Frame` has just measured; a screen that
-hand-assembles `─` and `│` is reimplementing `borders.go` and will get the width arithmetic wrong
-the way the pre-M10 screens did (padded strings, a hints line wherever content ended, versions
-wrapping mid-token — #85). Relative times go through `ui.Ago`/`ui.Until`/`ui.Span` with a `now
-func() time.Time` the screen takes, so goldens are stable. Every screen's tests render through
-`internal/ui/uitest`: `Golden` at 80×24 *and* 120×40 (exact line count, no line over width), one
-shared `-update` flag, and `Keys`/`Drain` driving real keypresses — a confirmation is never tested
-by setting the bool a key would have set (`huh.NewConfirm()` ships a zero keymap and ignores every
-key unless `.WithKeyMap(huh.NewDefaultKeyMap())` is called; read the answer with `GetValue()`, never
-through `Value(&m.field)`, which captures a field on the copy that built the widget — two shipped
-gestures were broken this way and their tests passed). *Why:* the first UI PR (#10) had no stated
-convention and adopted this shape as a proposal in `internal/app/doc.go` (§8, "building structure
-where no convention is stated is a decision"); stating it here once means the next screen follows
-it instead of re-litigating shape per PR. The M10 amendment replaces the earlier "screens compose
-strings with `strings.Join`" wording, which had been read as forbidding borders.
+screen-specific. No layout library (§4.7) — no flexbox-for-terminals dependency, not no borders: a
+screen's `View` is `ui.Frame{Title, Sections, Footer}.Render(styles, w, h)` (a titled rounded box
+with rules between sections, footer always the terminal's last line), two panes are `ui.Columns`, a
+sub-pane is `ui.Box`, and every `huh.Confirm` is drawn through `ui.Dialog` (lipgloss's
+`Canvas`/`Layer` compositor, centred over the dimmed parent — the one place the compositor is
+used; everything else composes with `JoinVertical`). Those helpers take their glyphs from
+lipgloss's own `Border`, join panes with `JoinHorizontal`, and pad rows by cell width
+(`ansi.StringWidth`, `ansi.Truncate`) — the one thing they do by hand, since a frame's body is a
+list of already-rendered lines and `Place` would re-measure what `Frame` has just measured; a screen that hand-assembles `─` and `│` is
+reimplementing `borders.go` and will get the width arithmetic wrong the way the pre-M10 screens
+did (#85) — this M10 wording replaces an earlier "screens compose strings with `strings.Join`"
+rule that had been read as forbidding borders outright, which was never the intent. Relative
+times go through `ui.Ago`/`ui.Until`/`ui.Span` with a `now func() time.Time` the screen takes, so
+goldens are stable. Every screen's tests render through `internal/ui/uitest`: `Golden` at 80×24
+*and* 120×40 (exact line count, no line over width), one shared `-update` flag, and `Keys`/`Drain`
+driving real keypresses — a confirmation is never tested by setting the bool a key would have set
+(`huh.NewConfirm()` ships a zero keymap and ignores every key unless
+`.WithKeyMap(huh.NewDefaultKeyMap())` is called; read the answer with `GetValue()`, never through
+`Value(&m.field)`, which captures a field on the copy that built the widget — §9 entry 6).
 
-Three more conventions, codified from PR #27 (the plan screen), which needed all three and found
-no rule stated for any of them:
+Conventions every screen follows, each codified after a PR needed one and found none stated:
 
 - **A screen requests navigation by emitting a message of its own concrete type**
   (`matrix.OpenPlanMsg`, `plan.BackMsg`) that the root's `Update` switches on to push or pop a
-  screen. This is what keeps "a screen never imports `app`" true in the other direction too: the
-  screen names the transition, the root decides what it means.
-- **The matrix keeps a column cursor** (`matrix.Model.col`, moved by Left/Right) so "current env"
-  is real state (`CurrentEnv()`), not a value only derivable from the table's row cursor — a
-  promotion is planned from an env, not a family, and the two cursors are independent. Amended
-  T3-04: columns come in pipeline order (`config.EnvsConfig.PipelineOrder`, derived from
-  `envs.pairs`) rather than alphabetically, the cursor starts on the first non-production
-  column, and it now names the **target** of a promotion, not the source — `p` promotes INTO
-  the cursor's env, taking the source from the one reverse pair (`SourcesOf`) when exactly one
-  exists and leaving it for the plan screen to ask ("promote into `<target>` from…") otherwise.
-  This replaces the earlier `p`/`P` pair (promote the paired target / force a prompt for any
-  target), which read the cursor as a source.
-- **`internal/service` is the one use-case layer both faces call; the root depends on the
-  narrow `app.Service` interface, not on `*service.Service` itself.** Superseded (2026-09, the
-  service-design train's PR F): this bullet used to read "`cmd/hoist` owns the adapter from CLI
-  options to the TUI's resolve function (`buildResolveFunc` in `cmd/hoist/main.go`): the plan
-  screen's `ResolveFunc` type lives in `internal/app/plan` and knows nothing of
-  `resolutionOptions` or `runResolution`; only `cmd/hoist` is allowed to know both sides, so a
-  screen's own package still never imports `config` or `registry` policy, only the plain function
-  type it calls." That was true when `cmd/hoist` was the only place a promotion's use-case logic
-  (planning, starting, listing, resuming, abandoning) lived — every non-trivial operation needed
-  its own hand-adapted function type per screen. `internal/service` (`Plan`, `StartPromotion`,
-  `List`, `Resume`, `Abandon`, `RefreshRepo`, `Repo`) now holds that logic once, for both the CLI
-  and the TUI, and `internal/app.Service` (`internal/app/service.go`) is the narrow, consumer-side
-  interface the root (`app.Model`) depends on — `*service.Service` satisfies it directly, and a
-  test fakes it with a plain struct. `cmd/hoist` still owns constructing the real `*service.Service`
-  (`serviceDeps`, `settingsFor`) and still adapts what has no service-layer home yet — history,
-  tags, watch, restart, drift remain plain function types built in `cmd/hoist/wiring.go`, per this
-  same rule, until they migrate too. A screen may import `internal/service` for its plain value
-  types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) — this keeps
-  `session.Driver` (`internal/app/session`, the controller every drive now goes through — Train 2
-  design) and `plan.Func` small, local, and fakeable without pulling in the whole client-cache type — but
-  never `internal/app` itself, keeping "a screen never imports `app`" intact. Correcting an
-  adjacent claim this bullet's old wording relied on: "a screen never imports `config`" was
-  already false before this change and stays false — `internal/app/plan`, `internal/app/matrix`,
-  `internal/app/tags` and `internal/app/deploy` all import `internal/config` for
-  `config.EnvsConfig` (production/pairs), which they need to render directly rather than through
-  a translated plain value; only `registry`/`resolve` *policy* stays out of a screen's package.
-- **A screen that shows launcher-owned text takes plain values, not a function.** Codified
-  from the config screen (#104, Arc 2): when what a screen displays is a string the launcher
-  already holds (the redacted config text and its path), the root takes it through
-  `WithConfigView(path, found, text)` and the screen's `New(...)` takes the same plain values —
-  no func value, no `Init` fetch. `WithHistory`/`WithDrift`/`WithWatch` pass funcs because
-  those screens *observe* something that changes; a func for static text would be a claim of
-  liveness the screen cannot keep (principle 1).
-- **A drive is owned by the session controller, never by the screen that watches it.** Codified
-  from the feedback-wiring train's PR 2 (`internal/app/session.Controller`, a value type held on
-  the root): starting, resuming, stepping, abandoning and listing a promotion or deploy all
-  happen in exactly one place, off the screen stack entirely. The flight screen is built already
-  attached (`flight.NewAttached`) to one controller entry and is a pure mirror of it from there —
-  `Mirror(snapshot)` replaces its displayed state, and it issues no `tea.Cmd` that talks to a
-  `Driver` or a channel itself (`internal/app/flight`'s own package doc). A screen that wants
-  something to happen to its own drive asks for it with a message of its own concrete type
-  (`ReobserveMsg`, `OverrideCINoneMsg`, `AbandonMsg` — the existing "a screen requests navigation
-  by emitting its own type" convention, extended to drive requests) and the root answers by
-  calling the controller and routing the resulting `session.Change` values back onto whichever
-  screen is attached to that build (`app.go`'s own `apply`/`mirrorAttached`). `session.Event` is
-  deliberately not named with a `Msg` suffix and stays out of `internal/parity`'s navigation
-  registry (its own doc comment): it is internal plumbing between the controller and the root,
-  never something the operator triggers directly the way a screen's own `*Msg` is.
-- **An async result is `scope.Do`/`scope.After`, and `Update` drops a `Foreign` one.** Codified
-  from the feedback-wiring train's PR 5 (`internal/app/scope`): a screen is a value, so esc then
-  reopening the same key builds a brand-new `Model` rather than mutating the old one — but that
-  does not cancel whatever `tea.Cmd` the old instance had outstanding (that needs an owned
-  `context.Context`, PR 6's job, not this one's), and the old instance's answer still arrives and
-  is still routed to whichever screen is now on top by concrete type. `plan.Model`'s `loadedMsg`
-  landing on a plan screen for a different env after a second `p`, and `watch.Model`'s
-  `snapshotMsg` landing on a `w` for a different family, are the same shape (audit FB-H3/FB-M4).
-  Every screen that issues its own async command builds it with `scope.Do`/`scope.After` instead
-  of a bare `func() tea.Msg`, stamping the result with `scope.New()`'s ID at construction (and
-  again on any in-place reload, `plan.Model`'s override rebuild being the one example today), and
-  its `Update` starts with `if scope.Foreign(m.id, msg) { return m, nil }` before switching on
-  anything else. Never stamp a spinner or cursor-blink tick — `internal/ui/uitest`'s own `Drain`
-  already drops those unconditionally. Not universal yet (P3 #8, t2-review.md): `internal/app/tags`
-  and `internal/app/matrix` predate `scope` and still guard the identical race with their own
-  process-unique `gen`/`generation` counters, checked by hand in each handler rather than through
-  `scope.Foreign` — correct, but a second shape for the same problem. Porting them to `scope` is
-  unticketed cleanup, not a defect; a new screen still uses `scope.Do`/`scope.Foreign` from the
-  start rather than adding a third counter-based instance of this pattern.
-- **Keys come from `internal/ui/keys`.** The whole approved screen × key table lives there as
-  data (`docs/audit/2026-09-ux-arch-audit.md`, "Proposed keymap"), transcribed once
-  (`registry.go`) rather than redeclared per screen; the stateless write-binding matcher that
-  tells a real shift from caps lock (§9 entry 13); `Footer` (the shared status-bar layout,
-  never a hand-joined string); and `HuhKeyMap()` (§9 entry 6). Every screen in `internal/app`
-  builds its key handling and footer through this package now (T3-01 through T3-10 finished the
-  migration screen by screen — the audit doc's "Ordering and golden churn" table) and
-  implements `KeyScreen() keys.Screen` so the root's help overlay and activity log reach it
-  generically. A raw `key.NewBinding` or `huh.NewDefaultKeyMap()` call anywhere under
-  `internal/app` outside this package is a regression, not a style choice — frozen by
-  `internal/copycheck`'s `TestNoKeyNewBindingOutsideKeys`/`TestNoHuhDefaultKeyMapOutsideKeys`
-  (T3-10) rather than left to review (§10 meta-rule 5). A new screen starts on `internal/ui/keys`
-  from its first commit.
-- **The root intercepts `?`, `l` and `q` as keys, not as `*Msg`s (T3-03).** `?` opens
+  screen — this is what keeps "a screen never imports `app`" true in the other direction too.
+- **The matrix keeps a column cursor** (`matrix.Model.col`, moved by ←/→) so "current env" is real
+  state (`CurrentEnv()`), independent of the row cursor. Columns come in pipeline order
+  (`config.EnvsConfig.PipelineOrder`, derived from `envs.pairs`), the cursor starts on the first
+  non-production column (`firstNonProductionColumn`), and it names the **target** of a promotion —
+  `p` promotes INTO the cursor's env, taking the source from the one reverse pair (`SourcesOf`)
+  when exactly one exists and leaving it for the plan screen to ask otherwise.
+- **`internal/service` is the one use-case layer both faces call; the root depends on the narrow
+  `app.Service` interface, not `*service.Service` itself.** Supersedes an earlier version of this
+  bullet, which said `cmd/hoist` alone owned the CLI→TUI adapter (`buildResolveFunc`) and that a
+  screen never imports `config` — already false then (several screens import `internal/config` for
+  `EnvsConfig` directly) and fully replaced now that the logic has a real home. `internal/service` (`Plan`,
+  `StartPromotion`, `List`, `Resume`, `Abandon`, `RefreshRepo`, `Repo`) holds planning/starting/
+  listing/resuming/abandoning logic once, for both the CLI and the TUI; `internal/app.Service`
+  (`internal/app/service.go`) is the narrow, consumer-side interface `app.Model` depends on —
+  `*service.Service` satisfies it directly, and a test fakes it with a plain struct. `cmd/hoist`
+  still owns constructing the real `*service.Service` (`serviceDeps`, `settingsFor`) and still
+  adapts what has no service-layer home yet — history, tags, watch, restart, drift remain plain
+  function types built in `cmd/hoist/wiring.go` until they migrate too. A screen may import
+  `internal/service` for its plain value types (`service.Tick`, `service.PlanRequest`,
+  `service.PlannedChange`) and `internal/config` for `config.EnvsConfig` (several screens render
+  production/pairs directly) — but never `internal/app`, and never `registry`/`resolve` *policy*.
+- **A screen that shows launcher-owned text takes plain values, not a function.** When what a
+  screen displays is a string the launcher already holds (the config screen's redacted text and
+  path), the root takes it through `WithConfigView(path, found, text)` and the screen's `New(...)`
+  takes the same plain values — no func value, no `Init` fetch. `WithHistory`/`WithDrift`/
+  `WithWatch` pass funcs because those screens *observe* something that changes; a func for
+  static text would be a claim of liveness the screen cannot keep (principle 1).
+- **A drive is owned by the session controller, never by the screen that watches it.**
+  `internal/app/session.Controller` (a value type held on the root) is where starting, resuming,
+  stepping, abandoning and listing a promotion or deploy all happen, off the screen stack
+  entirely. The flight screen is built already attached (`flight.NewAttached`) to one controller
+  entry and is a pure mirror of it — `Mirror(snapshot)` replaces its displayed state, and it
+  issues no `tea.Cmd` that talks to a `Driver` or a channel itself. A screen that wants something
+  done to its own drive asks with a message of its own concrete type (`ReobserveMsg`,
+  `OverrideCINoneMsg`, `AbandonMsg`) and the root answers by calling the controller and routing the
+  resulting `session.Change` values back onto whichever screen is attached to that build
+  (`app.go`'s `apply`/`mirrorAttached`). `session.Event` deliberately carries no `Msg` suffix and
+  stays out of `internal/parity`'s navigation registry — it is internal plumbing between the
+  controller and the root, never something the operator triggers directly. *Why this shape:*
+  before the controller existed, the flight screen owned its own driver and tick chain, so leaving
+  it (esc) had to cancel that context or leak the goroutine — coupling "stop watching" to
+  "cancel the promotion" by accident of where the state lived, wrong for a drive that waits on a
+  human for hours (§9 entry 12). `x` (a screen's own "stop watching" key) is retired now that
+  `esc` means exactly that and nothing more.
+- **An async result is `scope.Do`/`scope.After`, and `Update` drops a `Foreign` one.**
+  `internal/app/scope` stamps an async command's result with the screen instance that issued it: a
+  screen is a value, so esc-then-reopen builds a brand-new `Model`, but the old instance's
+  outstanding `tea.Cmd` isn't cancelled by that alone, and its answer can still land on a newer
+  instance of the same screen kind (`plan.Model`'s `loadedMsg` racing a second `p`, `watch.Model`'s
+  `snapshotMsg` racing a `w` on a different family). Every screen that issues its own async command
+  builds it with `scope.Do`/`scope.After`, stamping the result with `scope.New()`'s ID (and again
+  on any in-place reload), and its `Update` starts with
+  `if scope.Foreign(m.id, msg) { return m, nil }`. Never stamp a spinner or cursor-blink tick —
+  `internal/ui/uitest`'s `Drain` already drops those. `scope.Scope` (`Open`/`Ctx`/`DoCtx`) goes
+  further, giving a screen a real per-instance cancellable `context.Context` rather than just a
+  stale-result guard — `internal/app/plan` and `internal/app/restart` already build their calls
+  through it. Not universal yet: `internal/app/tags` and `internal/app/matrix` predate `scope` and
+  still guard the identical race with their own process-unique `gen` counters — correct, but a
+  second shape for the same problem; a new screen uses `scope` from the start.
+- **Keys come from `internal/ui/keys`.** The whole approved screen × key table lives there as data
+  (`registry.go`), plus the stateless write-binding matcher that tells a real shift from caps lock
+  (§9 entry 13), `Footer` (the shared status-bar layout), and `HuhKeyMap()`. Every screen in
+  `internal/app` builds its key handling and footer through this package and implements
+  `KeyScreen() keys.Screen` so the root's help overlay and activity log reach it generically. A raw
+  `key.NewBinding` or `huh.NewDefaultKeyMap()` call anywhere under `internal/app` outside this
+  package is a regression, frozen by `internal/copycheck`'s
+  `TestNoKeyNewBindingOutsideKeys`/`TestNoHuhDefaultKeyMapOutsideKeys` rather than left to review.
+- **The root intercepts `?`, `l` and `q` as keys, not as `*Msg`s.** `?` opens
   `ui.Dialog(..., keys.HelpTitle(s), keys.HelpView(s, kbd), ...)` for whatever screen is on top,
-  but only when that screen implements `keyed` (`KeyScreen() keys.Screen` — promoted from the
-  underlying package's own `Model`, never redeclared on the `app` adapter struct) and is not
-  `CapturesText()`; `esc`, `?` and `enter` close it, every other key is swallowed except
-  `ctrl+c`. `l` pushes the activity screen for the same `keyed` top screen, generically, rather
-  than each screen emitting its own `OpenActivityMsg` (the matrix implements `keyed` too, since
-  T3-04, and its own former `l` handling — `matrix.OpenActivityMsg` — is retired, so this covers
-  the matrix the same generic way as every other screen). `q` quits only when
-  the matrix is the only screen on the stack (`top().(matrixScreen)` — true exactly when the
-  stack has one screen, since the matrix always sits at index 0); anywhere else, and not mid-text
-  entry, it sets `Model.hint` (a one-line, one-key-lifetime row rendered the same way the
-  activity row is — out of the top screen's own rows, never appended past them, §9 entry 10) to
-  "q quits from the matrix · esc goes back" and does nothing further. None of this is a
-  `pkg.XMsg` `internal/parity`'s parser would need a row for; the operation itself (quit, watch,
-  the activity log) already has one.
+  when that screen implements `keyed` (`KeyScreen() keys.Screen` — promoted from the underlying
+  screen's own `Model`, never redeclared on the `app` adapter) and is not `CapturesText()`; esc,
+  `?` and enter close it, everything else is swallowed except ctrl+c. `l` pushes the activity
+  screen for the same `keyed` top screen generically, rather than each screen emitting its own
+  message. `q` quits only when the matrix is the only screen on the stack; anywhere else, and not
+  mid-text-entry, it sets a one-line hint ("q quits from the matrix · esc goes back") and does
+  nothing further. None of this needs an `internal/parity` row — the operation itself (quit,
+  activity log) already has one.
+- **The activity log is the root's record of what happened this session**
+  (`internal/app/activity`, `l` on any `keyed` screen): an append-only, capped `Log` (50 entries,
+  oldest dropped first) of every promotion started, landed, blocked or failed, every abandon, every
+  browser-launch outcome — replacing the old single transient "notice" string that a later,
+  unrelated keypress silently discarded (§9 entry 10 is the sibling bug this design avoids: the
+  root's bottom row shows only the latest entry, never truncated, and is never appended past the
+  screen's own frame).
 
 ### 4.9 Configuration
 
@@ -414,16 +389,17 @@ how a digest is chosen and how a registry credential is scoped:
   resolve.
 - Every adaptor registers each credential value it loads with `pkg/redact` the moment it is read,
   and everything printed — the CLI's plan output and the TUI's plan screen alike (F10) — passes
-  through it before reaching the terminal. A registry's own error response is never trusted
-  beyond a fixed allowlist of status codes (F5): its free-form message and detail fields are
-  never rendered at all.
+  through it before reaching the terminal. A registry's own error response is never trusted beyond
+  a fixed allowlist of status codes (F5): its free-form message and detail fields are never
+  rendered at all.
 
 ## 5. Repository Map
 
 `docs/repo-map.md` is the living boundary map: surfaces, trust boundaries, cross-cutting flows,
-and the risk register. It exists because that knowledge lives *between* files and can't be
-reconstructed by grep — and because cold-started subagents and future sessions get no
-conversation context, only what's written down.
+and the risk register — including `internal/service`, `internal/app/session`, `internal/app/scope`
+and `internal/ui/keys` now that they carry real boundaries of their own. It exists because that
+knowledge lives *between* files and can't be reconstructed by grep — and because cold-started
+subagents and future sessions get no conversation context, only what's written down.
 
 - **Read it before touching anything boundary-sensitive**: auth, tenancy, deletion/visibility,
   serialization, background delivery, routing, any external surface.
@@ -448,195 +424,100 @@ mise exec -- golangci-lint run
 mise exec -- go run ./cmd/hoist --help
 ```
 
-Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml` (`~/.config/hoist/config.yaml` when unset,
-on every platform — never `~/Library`), or wherever `--config <path>` points; state under
+Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml` (`~/.config/hoist/config.yaml` when unset, on
+every platform — never `~/Library`), or wherever `--config <path>` points; state under
 `$XDG_STATE_HOME/hoist/`; caches under `$XDG_CACHE_HOME/hoist/`. `docs/config.example.yaml` is the
-annotated schema (`internal/config` loads it: typed struct, unknown keys are errors, defaults in one
-`Normalize` step, errors carry the YAML path). A missing file means flags only; a broken file stops
-every command. `hoist config show` prints the effective config with defaults filled and `op` refs
-redacted; `hoist config path` prints where it looked. `mise exec -- go run ./cmd/hoist plan --repo
-<path> --from <env> --to <env> --dry-run` is the read-only way to run against a real repo: it
-prints the unified diff, the untouched images and the warnings, and touches no git state
-(`--repo`, `--apps-root` and `--promotable` fall back to the selected `repos[]` entry — the only
-one, or the one `--repo` names — then to `cluster/apps` and the `ghcr.io/` placeholder). Without
-`--dry-run` it prints the same and exits 3 — `plan` itself never writes; `hoist promote` (below)
-is the write path. Before planning,
-`plan` resolves every promotable source-env image to a digest (`pkg/resolve` over `pkg/k8s` and
-`pkg/registry`): the source namespace's running pods first, then the manifest's own pin, then a
-registry HEAD of the tag, in the order of `--digest-sources` (default `pods,manifest,registry`;
-`none` plans from the manifests alone, exactly as M1 did). `--kube-context` names the kubeconfig
-context (default the repo's `kube.context`, else the current context; the name in use is
-printed, its address never). The registry credential chain is `--registry-auth` (default
-`env,keychain,cluster,op`), with `--cluster-secret ns/name` and `--op-ref op://…` opting the last
-two links in; the dry run's "Resolution" section names each repo's digest and source, every
-alternative and disagreement, and which credential source authenticated, or — when the registry
-was asked and every source in the chain failed, the anonymous fallback included — that it was
-consulted and which sources were tried; either way, by name only, never a value. A
-`--digest` override still wins over every source.
+annotated schema. A missing config file means flags only; a broken one stops every command.
+`hoist config show`/`hoist config path` print the effective config (defaults filled, `op` refs
+redacted) and where it was read from.
 
-`mise exec -- go run ./cmd/hoist promote --repo <path> --from <env> --to <env>` (M3, extended in
-M4) takes the same flags as `plan` minus `--dry-run` — its whole point is to act — plus `--base`
-(the GitOps repo's default branch, `main` unless given), `--override-ci-none` (§9's `ci.none:
-prompt` override) and requires `repos[].github: owner/name` for the selected repo. It builds the
-same plan `hoist plan` would, then drives `internal/engine`'s full seven-step pipeline to
-completion: create or reuse a `git worktree` under `$XDG_CACHE_HOME/hoist/worktrees/<id>` from
-the user's own clone (never a fresh clone, never the user's own checkout — §4.6), apply and
-commit the edits (SSH-signed via the user's own git config, `hoist promote` says "waiting for
-signing approval" if a commit sits for 5s), push the branch, open a PR via the user's own `gh`
-login (`pkg/forge/github`, via `go-gh`: hoist defines no token flag and no environment variable
-of its own, sets no host, and never sees the value, but go-gh's own resolution reads an
-environment token first — `GH_TOKEN`/`GITHUB_TOKEN` for github.com, a different pair for an
-enterprise host, exactly as go-gh's `auth.tokenForHost` splits them, which is the authority
-rather than this sentence — then `gh`'s config file, then `gh auth token` for a keyring-stored
-token, which is the one place the `gh` binary is execed at runtime), wait for CI to go green
-(`ci.none` policy for a PR reporting no checks at all), wait for the human approval comment
-(`hoist approve <id>`, or immediately for an env whose approval mode is `auto`), then squash-merge
-and delete the branch — refusing the merge if the PR's head has moved since this promotion last
-pushed it — then (M5) asks Argo CD to refresh (the `argocd.argoproj.io/refresh` annotation, §4.7),
-waits for `status.sync.revision`/`status.sync.status`/`status.health.status` to agree with the
-merge, and watches every Deployment this promotion edited roll out (`pkg/argo`, `pkg/rollout`,
-driven through the Kubernetes API alone — no Argo API server, no Argo token, no `k8s.io/kubectl`
-import). Every step re-observes the worktree/remote/forge/cluster before acting (§4.1), so killing
-the process and re-running the identical command is safe and resumes rather than duplicating; a
-state file under `$XDG_STATE_HOME/hoist/promotions/<id>.json` is kept purely as a human-readable
-index (History), never consulted to decide what already happened. A plan whose edits are all
-no-ops prints "already current" and exits 0 without touching git or the forge. `promote` refuses to
-start a second promotion for a target env that already has a non-terminal one in flight
-(re-observed, not read from the state file's own recorded phase). Before that state file exists, a
-short-lived claim file (`engine.ClaimInFlight`) closes the race between two concurrent `promote`
-invocations that both start before either has written state; a claim conflict is never
-auto-resolved (an earlier, more automatic design kept reintroducing the same reclaim race — see
-`claim.go`'s package doc) — the error names the claimant's age and the claim file's path, and
-recovery from a genuinely abandoned one (the owning process was killed) is deleting that file by
-hand. `hoist promotions` lists every promotion state file with its phase re-observed the same way,
-and `hoist resume <id>` (or `hoist resume --env <target-env>`) re-drives one from wherever
-`Observe` actually finds it — the CLI's own poll loop (`internal/config`'s `poll` section,
-`poll.argo`/`poll.rollout` from M5 on) is what does the actual waiting on CI/approval/Argo/rollout,
-never a `Step`'s own `Act`. `promote` also takes `--direct` (M6): commit straight to `--base` instead of
-opening a PR, driving `internal/engine.AllDirectSteps` (branch, commit, then push straight to
-`--base` — no separate branch left on origin, no PR) rather than the full pipeline above, and
-then converging through Argo and rollout exactly as the PR path does (M8; until then it stopped
-at the push — issue #66). Every step past the push gates on `PromotionState.LandedSHA()` rather
-than `MergeSHA` directly, which a direct push never produces; `LandedSHA` is derived from the
-state's `Direct` flag rather than persisted, so old state files keep resuming. `--direct` requires both a
-configured repo (`repos[].envs.production` must be known — a flags-only run has no such list,
-and `promote` refuses `--direct` outright rather than treat "unconfigured" as "every env is
-non-production") and `--confirm-direct=<env>`, a second, distinct flag repeating `--to`'s exact
-value as the confirming argument (refused if it doesn't match) — the CLI's equivalent of the
-TUI tag picker's keypress + `huh.Confirm` gesture. Neither flag is itself the gate:
-`internal/engine.DirectCommitGateStep` independently refuses any env listed in
-`envs.production` regardless of what the CLI or the TUI believed (§4.5), checked before any
-planning fast path (including the all-no-op short circuit) can report success. `hoist deploy --repo <path> --env <env> --image <repo:tag@sha256:…>` (M8) is `promote`'s sibling
-for the other half of the problem statement: instead of copying one env's digests into another it
-writes one caller-named ref into every occurrence of that image repo in `--env`, then drives the
-identical engine pipeline (`gitops.BuildDeployPlan`, which unlike `BuildPlan` treats the repo
-being absent from the target env as an error — there is nothing to write). It takes `promote`'s
-flags minus `--from`, plus the same `--direct`/`--confirm-direct` pair, and its rendered artifacts
-say *deploy*, never *promote*. `hoist restart --env <env> [--family a,b]` (M9) rolls an env's Deployments without changing the image
-references they declare, and is the one command that deliberately writes to the cluster instead of to git: it
-stamps `kubectl.kubernetes.io/restartedAt` on the live pod template exactly as `kubectl rollout
-restart` does. Argo does not treat that as drift even with `selfHeal: true` — its diff is a
-three-way merge, so a field Argo never set and that is absent from the manifest is left alone,
-the same reason `kubectl apply` does not delete fields it never wrote. There is therefore no
-plan, no branch, no PR, no state file and nothing to resume; re-running restarts again, which is
-the operation. Production is gated not by §4.5's PR-and-approval pair (nothing is committed, so
-there is nothing to review) but by `--confirm-production=<env>` repeating the env exactly, the
-same shape `--confirm-direct` uses. Before anything rolls it names every target with its replica
-count, strategy and last restart, and warns — never blocks — where a restart will not be graceful,
-including where a container's reference is unpinned: a mutable tag can pull a different build when
-the replacement pod lands, so "the same images" is a claim only a digest can support.
-The same operation is on the matrix as `shift+r`, which restarts the family under the cursor
-through the same `internal/restart` core — shift, because it asks for a write (`internal/ui/keys`'
-Write class, §9 entry 13) — and shows the target list with its warnings before taking the
-confirmation; production there takes a `huh.Confirm`
-rather than the CLI's `--confirm-production`. `hoist watch --app <name>` (M5) is a read-only companion, independent
-of any promotion: it prints one Application's current sync/health/revision and the rollout
-progress of every Deployment/Job/CronJob its family declares, resolved from `--repo`/`--apps-root`
-the same way `plan`/`promote` are, and polls (`--once` for a single snapshot) at whichever of
-`poll.argo`/`poll.rollout` is tighter; it never calls `Refresh` — only `Get`/`Deployment`/`JobLike`
-— since watching is not promoting. The same view is on the matrix as `w` (#101): the watch
-screen (`internal/app/watch`) for the cursor cell's family and env, first paint the `--once`
-snapshot, then polling at the same cadence through a `watch.Func` that `cmd/hoist`'s
-`buildWatchFunc` builds over the same reads (`readWatchSnapshot`, shared with the CLI); the
-screen package imports neither `pkg/argo` nor `pkg/rollout`, so it cannot name `Refresh`, and a
-test pins its import list. `mise exec -- go
-run ./cmd/hoist --repo <path>` with no command opens the env × family matrix screen (root
-`--base` and `--kube-context` apply to it as to the subcommands, whose own flags of those names
-default to the root's — #105; root `--digest-sources`, `--registry-auth`, `--cluster-secret` and
-`--op-ref` likewise (#132): the plan screen resolves with them and the credential-chain
-overrides reach the tag picker's and the history's registry clients, the drift column stays
-pods-only, and an empty `--registry-auth`/`--digest-sources` is refused at the root with
-`plan`'s own message; `q` quits (asks first if a drive is running),
-`?` help; `c` opens a read-only view of the effective config — the same redacted,
-defaults-filled text as `hoist config show`, titled with the path `config path` prints (#104);
-`r`/`F5`/`ctrl+r` re-ask the cluster what each env runs — every running build per image
-repo straight from the pods (`k8s.Cluster.RunningImages`, never the planning resolver's one pick),
-so a partial rollout reads "2 builds running" and the drift sentence names whether it compared by
-digest or by tag (#122); every cell carries its state as a
-word — pinned, unpinned, split, external, drifted — split judged per image repo on builds, so one
-tag pinned to two digests is split and a bare tag beside the same tag pinned is not (#118) — and a production column is marked `⚠` in the
-header and named in the footer (#86, M10); what is promoting right now is listed under the table —
-re-observed against the forge and cluster at boot and every `poll.approval`, finished ones left
-out, expanded to the step strip and the `hoist approve <id>` command when the terminal has the
-rows, one line when it does not — and `tab` focuses the in-flight pane, where `enter` resumes/
-re-attaches the selected promotion on the flight screen (the menu's own "resume in flight" item
-does the same), `o` opens its PR, each asking which when several are in flight: the TUI's
-`hoist promotions` and `hoist resume` (M10). `t` opens the tag picker — `internal/app/tags`, M6;
-a chooser first when the cell holds several first-party images — for the current cell's first-party
-image, listing the registry's own tags with created/digest columns, preferring the mapped app
-repo's git tag dates for ordering when `repos[].apps` names one — grouped (#91) by
-`tags.Classify`, a stated convention since no registry marks a tag's kind: releases lead the list
-with no divider above them (an optional `v` or `release-`/`release/`, then dot-separated digits,
-then an optional `-`/`+` suffix — so `v1.2.3`, `1.2.3`, `v202609060428`, `release-2026.09`), then
-digest-named tags (`sha-` or `sha256-` and at least seven hex) and moving tags (`latest`, branch
-names) each sit under their own divider; nothing is hidden and `/` filters across all three,
-since
-the operator is scanning for releases outnumbered several to one — `enter` on a tag opens the
-deploy confirm screen — `internal/app/deploy`, M8 — rather than reporting that nothing was
-written: it shows the diff the pick would make and takes Enter, so no write in hoist skips a diff
-and a confirmation (direct mode there is `shift+d`, same as the plan confirm below — the matrix
-carries no separate direct-deploy shortcut of its own); the picker (M10) leads with what the env declares today and how long it has, shows each tag's build
-age relative to now and whether the paired staging env's manifest carries it, and under the cursor
-the commits between the declared build and the one under the cursor with the migrations among them
-(`pkg/migrate` — `tab` into the list, `→` opens a commit in a scrolling reader (`pgdn`/`pgup`
-page the body, `home`/`end` jump to its ends; ↑/↓ still switch commits — #120), `enter` there
-reviews the change (`space` is unbound on this screen); a split target env names
-every declared reference in the header and says which one the count runs from — #119;
-a gap is always a sentence naming why: no `apps` mapping, an unresolvable revision, a forge error);
-the confirm screens lead with the work, not the mechanism (M10): the deploy confirm says
-"rolling out N commits · M migrations · replacing v1, live 34 days" over the commit list, the plan
-confirm keeps the ticked set on the left and the hovered repo's commits and migrations on the
-right with the common image-repo prefix lifted into the header so a version never wraps, and on
-both `d` toggles the yaml diff into view and `enter` means the same from either; on the plan
-confirm `e` is the TUI's `--digest` (#102): a `huh.Input` dialog pre-filled with the hovered
-repo's `<repo>=`, validated on `enter` by `image.ParseOverride` — the one predicate
-`digestFlag.Set` applies too, so both faces refuse the same inputs with the same words — that
-rebuilds the plan through `ResolveFunc` with the override in place, so the row's provenance,
-the resolution section and the plan's warnings read `override` exactly as the CLI's do; an
-invalid entry keeps the dialog open with the refusal, `esc` changes nothing; the flight screen
-itself (opened by starting a promotion, or by `tab`/`enter` from the matrix's in-flight pane)
-offers `r` to re-observe now, `o` to open the PR, `w` to watch the family/target, `shift+x` to
-abandon (`hoist abandon <id>`'s own TUI gesture) and `esc` to go back while the drive keeps
-running; the flight and restart screens are framed the same way, with the blocked reason and its command
-(`hoist approve <id>`) as their own section, which a short terminal keeps by collapsing the step
-list to a one-line strip rather than dropping the verdict; when that reason is `ci.none: prompt`'s
-"no checks reported" block — recognised by `engine.IsCINonePromptBlock`, the one Blocked reason with
-an override — the section offers `shift+c`, which behind a `huh.Confirm` emits
-`flight.OverrideCINoneMsg` and the root sets `CINoneOverride` on that promotion's state and
-re-drives it: the TUI's `hoist resume <id> --override-ci-none` (#103), per promotion, never a
-launch flag or config default (§4.5). Browsing the matrix, the picker and the
-plan/confirm screen they open into is read-only, but confirming a
-plan there (Enter on either confirm screen) drives a real promotion or deploy exactly like
-`promote`/`deploy` above — commit, push, PR, CI, approval, merge, Argo refresh, rollout — through the same
-`internal/engine` pipeline. The two faces are held in step by `internal/parity`: a registry test
-that parses the subcommand dispatch, every flag set and every navigation message the TUI root
-switches on, and fails when any of them has no row, or when a row with one side empty cites no
-issue — so a new subcommand, flag or screen lands with its parity stated or not at all. Every row
-is two-sided as of the parity arc (#101–#104, #132); a `Gap:` reappearing is a deliberate act
-that has to name the issue that closes it. Golden files under `testdata/golden/` regenerate with
-`mise exec -- go test ./pkg/gitops ./internal/app/... ./internal/ui/... -update` (one shared flag
-for the screens, in `internal/ui/uitest`; files are `<name>-<w>x<h>.txt`); the fixture repo is `testdata/repo`
+Root flags shared by every subcommand and the no-command TUI launch (#105, #132): `--repo`,
+`--apps-root`, `--promotable`, `--base`, `--kube-context`, `--digest-sources`, `--registry-auth`,
+`--cluster-secret`, `--op-ref` — a subcommand's own flag of the same name defaults to the root's,
+so `hoist --base dev promote` and `hoist promote --base dev` mean the same thing. Digest resolution
+and registry auth follow §4.10's ordering; an empty `--registry-auth`/`--digest-sources` is refused
+with `plan`'s own message on every face.
+
+### CLI commands
+
+| Command | Purpose | Notes |
+|---|---|---|
+| `plan --repo <path> --from <env> --to <env> [--dry-run]` | Build a promotion plan; read-only | Resolves every source-env image to a digest first (§4.10). Prints the diff, untouched images, warnings and the Resolution section (digest/source/credential per repo, by name only). Without `--dry-run` it prints the same and exits 3 — `plan` never writes. `--digest` overrides one repo's resolved reference. |
+| `promote --repo --from --to [--base] [--override-ci-none] [--direct --confirm-direct=<env>]` | Drive a promotion to completion (resumable) | Requires `repos[].github`. Builds the same plan `plan` would, then runs `internal/engine`'s pipeline: worktree → commit (signed) → push → PR → CI green → human approval (`hoist approve <id>`, or immediate under `approval: auto`) → squash-merge (refused if the PR's head has moved since this promotion last pushed it) → Argo refresh → rollout watch. A state file under `promotions/<id>.json` is a human-readable index only (never consulted for truth). A short-lived claim file (`engine.ClaimInFlight`) closes the race between two concurrent starts; a claim conflict is never auto-resolved — recovery from a genuinely abandoned claim is deleting its file by hand. `promote` refuses a second promotion into a target env with one already in flight (re-observed). All-no-op plans print "already current" and exit 0, touching nothing. `--direct` commits straight to `--base` (`internal/engine.AllDirectSteps`) instead of opening a PR; requires `--confirm-direct=<env>` repeating `--to`'s exact value (refused otherwise); gated independently by `internal/engine.DirectCommitGateStep` against `envs.production` regardless of what the CLI or TUI believed (§4.5), and refused outright unless the repo's `envs.production` is configured. Every step past the push gates on `LandedSHA()` (derived from the state's `Direct` flag, never persisted). |
+| `deploy --repo --env --image <repo:tag@sha256:…>` | `promote`'s sibling: write one caller-named ref into every occurrence of that image repo in one env | Same flags as `promote` minus `--from`, plus `--direct`/`--confirm-direct`. `gitops.BuildDeployPlan` errors if the image repo is absent from the target env. Rendered artifacts say *deploy*, never *promote*. |
+| `restart --env <env> [--family a,b] [--confirm-production=<env>]` | Roll an env's Deployments without changing declared image refs | Stamps `kubectl.kubernetes.io/restartedAt` on the live pod template (like `kubectl rollout restart`); Argo's three-way merge diff ignores it, so no drift. No plan, branch, PR or state file — re-running restarts again. Warns (never blocks) where a restart won't be graceful, including an unpinned tag. |
+| `promotions [--repo] [--archived]` | List promotion state files, phase re-observed against the forge/cluster | A terminal promotion older than `state.retain` (config, default 30 days, measured from its last activity) is archived into `promotions/archive/` — invisible to `findInFlight` by construction, never touched while still in flight however old. `--archived` also lists the archive. |
+| `resume <id>` / `resume --env <target-env>` | Re-drive a promotion from wherever `Observe` actually finds it | Never from the state file's recorded phase. |
+| `abandon <id> --confirm-abandon=<id>` | Retire a promotion that never landed | Closes its PR and deletes its branch if it opened one; refused once the promotion has landed. |
+| `watch --app <name> [--once]` | Read-only: one Application's sync/health/revision and its Deployments'/Jobs'/CronJobs' rollout progress | Never calls `Refresh` — only `Get`/`Deployment`/`JobLike`, since watching is not promoting. The TUI's `watch` screen package likewise imports neither `pkg/argo` nor `pkg/rollout`; a test pins its import list. |
+| `config show` / `config path` | Print effective config / where it was read from | Pure decode-and-check; always safe. |
+| *(no command)* `hoist --repo <path>` | Opens the env × family matrix TUI | See below. |
+
+### TUI
+
+`hoist --repo <path>` with no subcommand opens the env × family matrix; every promoting/deploying
+action there drives the identical `internal/engine` pipeline `promote`/`deploy` do — commit, push,
+PR, CI, approval, merge, Argo refresh, rollout — through `internal/service`/`internal/app/session`.
+Browsing the matrix, the tag picker and the plan/deploy confirm screens is read-only until Enter
+confirms a plan. Every cell carries its state as a word (pinned, unpinned, split, external,
+drifted) — split is judged per image repo on builds, so one tag pinned to two digests is split and
+a bare tag beside the same tag pinned is not (#118); a production column is marked `⚠` (#86). `r`/
+`F5`/`ctrl+r` re-ask the cluster what each env runs straight from the pods, never the planning
+resolver's one pick, so a partial rollout reads "2 builds running", and the drift sentence names
+whether it compared by digest or by tag (#122).
+
+Keys, from `internal/ui/keys/registry.go` (the one source `internal/copycheck` and the help
+overlay both enforce — a write action always shows as `shift+<letter>`, never a bare capital,
+since a legacy terminal can't tell shift from caps lock, §9 entry 13):
+
+| Key | Meaning | Where |
+|---|---|---|
+| `enter` | primary action (open menu/flight, run item, start promotion/deploy, review tag) | every screen except flight, watch, config, activity |
+| `esc` | back — never cancels a running drive | every screen |
+| `?` | help overlay for the current screen | every screen |
+| `l` | activity log | every screen |
+| `q` | quit; asks first if a drive is running; only quits outright from the bare matrix | matrix, elsewhere sets a hint |
+| `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
+| `o` | open PR | matrix, flight |
+| `p` | promote into the cursor's column | matrix, menu |
+| `t` | deploy a tag | matrix, menu |
+| `w` | watch family/target | matrix, menu, flight |
+| `c` | read-only config view | matrix |
+| `d` | toggle yaml diff | plan, deploy |
+| `e` | override digest (`--digest` equivalent; both validated by the one predicate `image.ParseOverride`, #102) | plan |
+| `/` | filter | plan, tags |
+| `space` | tick/untick a repo | plan |
+| `tab` | switch pane (table/flight, repos/impact, list/commits) | matrix, plan, tags |
+| `shift+r` | restart family (write; the restart screen's own confirmation is `enter`, and a production restart there takes a `huh.Confirm`) | matrix, menu |
+| `shift+x` | abandon (write) | matrix, flight |
+| `shift+d` | direct mode (write) | plan, deploy |
+| `shift+c` | override `ci.none: prompt`'s block (write; per promotion, never a launch flag or config default, §4.5; recognised by `engine.IsCINonePromptBlock`, #103) | flight |
+| ↑↓←→, `pgup`/`pgdn`, `home`/`end` | move/scroll/page | every list/viewport screen |
+
+The tag picker groups tags by `tags.Classify` (releases, then digest-named, then moving tags like
+`latest`/branches, each under its own divider, #91) since no registry marks a tag's kind, and shows
+the commits and migrations (`pkg/migrate`) between the declared build and the one under the cursor
+— `tab` into the list, `→` opens a commit in a scrolling reader (`pgdn`/`pgup` page the body,
+`home`/`end` jump to its ends, #120); `enter` there reviews the change (`space` is unbound on this
+screen). A split target env names every
+declared reference in its header and says which one the commit count runs from (#119). Choosing a
+tag opens the deploy confirm screen rather than writing anything directly: it shows the diff the
+pick would make and takes Enter, so no write in hoist skips a diff and a confirmation. The plan and
+deploy confirm screens lead with the work, not the mechanism ("rolling out N commits · M migrations
+· replacing v1, live 34 days").
+
+### Cross-cutting
+
+The two faces are held in step by `internal/parity`: a registry test that parses the subcommand
+dispatch, every flag set and every navigation message the TUI root switches on, and fails when any
+of them has no row, or a row with one side empty cites no issue. Every row is two-sided as of the
+parity arc (#101–#104, #132); a `Gap:` reappearing has to name the issue that closes it.
+
+Golden files under `testdata/golden/` regenerate with
+`mise exec -- go test ./pkg/gitops ./internal/app/... ./internal/ui/... -update` (one shared flag,
+`internal/ui/uitest`; files are `<name>-<w>x<h>.txt`); the fixture repo is `testdata/repo`
 (synthetic, placeholder-only — §4.4).
+
 The dev-machine form matters: the `mise` shim for `go` errors with `No version is set for shim: go`
 outside a directory that pins one, so use `mise exec --` or run from inside this repo.
 
@@ -1125,9 +1006,10 @@ test lives** (if one exists).
    open, a claim held — and only incidentally something a screen happens to be watching right now;
    giving the screen the only reference to it means popping the screen is the only way anything
    else ever finds out the drive existed. Rule: a background effect that must outlive navigation is
-   owned by something above every screen that can navigate — here, `internal/app/session.Controller`
-   (a value on the ROOT model, D1 of the Train 2 design) — and a screen only ever mirrors a
-   `Snapshot` of it (D3); popping a screen changes what is drawn, never what is running. `x` (the
+   owned by something above every screen that can navigate — here,
+   `internal/app/session.Controller` (a value on the ROOT model, D1 of the Train 2 design) — and a
+   screen only ever mirrors a `Snapshot` of it (D3); popping a screen changes what is drawn, never
+   what is running. `x` (the
    screen's own "stop watching" key) is retired entirely once `esc` already means exactly that and
    nothing more. Regression tests: `TestEscFromFlightLeavesDriveRunning`,
    `TestEnterReattachesWithoutSecondResume`, `TestEscDuringBuildKeepsBuilding`,
