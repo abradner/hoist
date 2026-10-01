@@ -319,7 +319,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, source,
 // never by this package itself any more: Enter hands off to the building screen without
 // removing this one (m.start's own design), and cancelling here on Enter
 // used to strand every not-yet-loaded delta if that build then failed and the building screen
-// popped back to a plan screen whose history could never load again.
+// popped back to a plan screen whose history could never load again (FB-M3).
 func (m Model) Close() { m.scope.Close() }
 
 // WithNow fixes the clock relative dates are worded against (tests).
@@ -582,7 +582,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		if keys.Esc.Matches(msg) && !m.confirming && !m.overriding && !m.filtering() {
-			// No cancel here any more: the root's own pop, triggered by this BackMsg,
+			// No cancel here any more (FB-M3): the root's own pop, triggered by this BackMsg,
 			// calls Close on this screen the moment it is actually removed from the stack —
 			// see Close's own doc comment. While a huh field's own filter is open, esc
 			// belongs to the widget (it closes the filter, not the screen) — see filtering's

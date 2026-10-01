@@ -10,14 +10,14 @@ pair](#promote-a-pair) · [deploy a build](#deploy-a-build) · [restart a family
 · [when it stops](#when-it-stops) · [resuming](#resuming) · [registry
 credentials](#registry-credentials) · [direct mode](#direct-mode)
 
-Three keys work the same everywhere `?` and `q` do; `l` is close but not universal (see the table
-below): `?` opens a full help overlay naming every key the current screen honours (`esc`, `?` or
-`enter` closes it); `l` opens the activity log — every result and error this session has recorded,
-oldest first, nothing truncated — from most screens; `q` quits hoist, but only from the matrix
-(with a confirm if a drive is still running) —
-pressed anywhere else it does nothing but remind you to go back first. `ctrl+c` quits immediately
-from any screen, no confirm, and on the way out names every promotion still in flight with its own
-`hoist resume <id>`.
+Three keys matter everywhere. `?` (help) works on every screen: it opens an overlay naming every
+key the current screen honours (`esc`, `?` or `enter` closes it). `q` quits hoist from the matrix
+only (with a confirm if a drive is still running); pressed anywhere else it does nothing but
+remind you to go back first. `l` opens the activity log — every result and error this session has
+recorded, oldest first, nothing truncated — on the screens that list it (see the table below).
+`ctrl+c` quits immediately from any screen, no confirm — except while the `q` quit-confirm dialog
+is open, where it is swallowed like every other key — and on the way out names every promotion
+still in flight with its own `hoist resume <id>`.
 
 ## Keys at a glance
 
@@ -33,7 +33,7 @@ since a legacy terminal cannot tell a real shift from caps lock pressed by mista
 | `?` | help overlay | every screen |
 | `l` | activity log | matrix, plan, deploy, tags, flight, watch, restart, config |
 | `q` | quit; only from the bare matrix (confirms if a drive is running) | matrix |
-| `ctrl+c` | quit immediately, no confirm | every screen |
+| `ctrl+c` | quit immediately, no confirm (swallowed while the `q` confirm is open) | every screen |
 | `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
 | `o` | open the PR (chooser if several are in flight) | matrix, flight |
 | `p` | promote into the cursor's column | matrix, menu |

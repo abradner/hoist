@@ -46,7 +46,8 @@
 // values by BuildID. A screen requests a step (flight.ReobserveMsg, OverrideCINoneMsg,
 // AbandonMsg) rather than taking one, so nothing about driving a promotion is owned by
 // whichever screen instance happens to be showing it. Esc leaves the drive running and only
-// stops mirroring it onto a screen; x (AbandonMsg) is the one gesture that actually cancels it.
+// stops mirroring it onto a screen; shift+x (AbandonMsg; bare x is retired) cancels one drive,
+// and q's confirmed quit cancels every drive at once (session.Controller.StopAll).
 // A drive outlives its screen and re-attaches on demand, since the Controller, not the screen,
 // owns the ctx and the goroutine.
 package app

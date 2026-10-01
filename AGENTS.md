@@ -17,8 +17,8 @@ Status: pre-alpha, first tag `v0.1.0` (main has since moved well past it — a m
 release, §7). Milestones M0–M10 and the TUI/CLI parity work (#101–#104, #132) are on `main`, so
 every operation is reachable from both the CLI and the TUI. The UX overhaul this file also
 describes was built as a named stack of PRs — the architecture audit (#185, #186, #188, #203),
-`internal/service` as the one use-case layer both faces call plus the `internal/app/session`
-drive controller (#190–#199, #202), the confirmation/feedback wiring (#205–#213, #215), the
+`internal/service` as the one use-case layer both faces call (#190–#199, #202), the
+`internal/app/session` drive controller and the confirmation/feedback wiring (#205–#213, #215), the
 `internal/ui/keys` registry and redesigned screens (§4.8; #217–#227, #229), and this doc pass
 (#230–#234, plus the followup that corrected it) — and this file describes it as built because
 that is what those PRs contain; check the tracker and `main`'s own log for whether the stack has
@@ -126,9 +126,10 @@ and it names the branch (`hoist/<env>/<id>`), the PR body marker (`<!-- hoist:id
 trailer (`hoist-id:`) and the approval token. *Why:* a promotion waits on a human for hours; the
 process will be killed, the laptop will sleep. A durable event log (Temporal was considered and
 declined — see §11) would only cache facts GitHub and Argo already hold, and a random id would open
-a second PR on restart. The CLI's own poll loop (`internal/config`'s `poll` section,
-`poll.argo`/`poll.rollout` from M5 on) is what does the actual waiting on CI, approval, Argo and
-rollout — never a `Step`'s own `Act`, which only ever acts once and returns.
+a second PR on restart. The waiting on CI, approval, Argo and rollout (cadences from
+`internal/config`'s `poll` section, `poll.argo`/`poll.rollout` from M5 on) is done by
+`service.Driver.Run` for the CLI and by `session.Controller`'s polls for the TUI — never by a
+`Step`'s own `Act`, which only ever acts once and returns.
 
 **Re-observing "did this land" is a three-way question, never two.** A step asking whether its own
 change is still in effect at a revision must sort that revision into *intact*, *superseded* or
@@ -493,7 +494,7 @@ since a legacy terminal can't tell shift from caps lock, §9 entry 13):
 | `?` | help overlay for the current screen | every screen |
 | `l` | activity log | matrix, plan, deploy, tags, flight, watch, restart, config |
 | `q` | quit; asks first if a drive is running; only quits outright from the bare matrix | matrix, elsewhere sets a hint |
-| `ctrl+c` | quit immediately (matrix also prints what's still in flight) | every screen |
+| `ctrl+c` | quit immediately, no confirm; after exit every in-flight promotion id is printed with its `hoist resume`, from any screen. Swallowed while the `q` quit-confirm dialog is open | every screen |
 | `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
 | `o` | open PR | matrix, flight |
 | `p` | promote into the cursor's column | matrix, menu |
