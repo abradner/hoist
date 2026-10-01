@@ -388,7 +388,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 // reaches that same final step again in its own turn, but reuses the probe's Observation
 // there rather than calling Observe a second time — every poll that isn't yet fully done
 // would otherwise cost one extra, wasted remote call on the final step, every tick of the
-// flight screen's own poll loop (PR #39 review finding #3).
+// TUI's own poll loop.
 // Both of Status's own Observe errors are returned as *StepError (Op: "observe"), not a bare
 // fmt.Errorf, even though nothing here ever calls Act: Retryable (this package, called by
 // internal/service.Driver.Run for both the CLI and the flight screen, which now share the one

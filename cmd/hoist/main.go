@@ -642,7 +642,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	tagsFn := buildTagsFunc(eff.cfg, svc)
 	// buildRestartFuncs/buildWatchFunc/buildHistoryFuncs below read the Argo/rollout clients and
 	// the current repo through svc itself, per call, rather than a client or a repo captured
-	// once here at boot (Train 2 design PR 7): svc.Argo/svc.Rollout memoize only a success, so a
+	// once here at boot: svc.Argo/svc.Rollout memoize only a success, so a
 	// cluster unreachable this instant is retried on the next w/R/F5 rather than wedged for the
 	// rest of the session, and svc.Repo() always answers with whatever LoadRepo/RefreshRepo most
 	// recently stored, so a family an F5 refresh just added is visible immediately.

@@ -65,7 +65,7 @@ type DriverHooks struct {
 // Step) and OverrideCINone, so a screen's manual retry can never race an automatic tick's Step
 // call over the same *engine.PromotionState — the same one-in-flight-per-instance guarantee
 // flight.Model's own busy flag gives at the UI layer, held here too so a caller with no busy
-// flag of its own (a future Train 2 controller holding a Drive across screens) still gets it for
+// flag of its own (session.Controller, which holds a Drive across screens) still gets it for
 // free.
 type Driver struct {
 	mu    sync.Mutex
@@ -83,10 +83,9 @@ type Driver struct {
 // always mutated its own s argument in place.
 //
 // Exported and taking steps/state/save/poll positionally rather than a settled Deps/Settings
-// shape because this is the Train 1 PR C shape: internal/service.StartPromotion (PR D) and
-// Resume (PR E) are what build a Driver in production once they land, and are expected to
-// unexport this constructor behind their own request/response types once they do — see
-// AGENTS.md's design doc for this train (docs/audit/service-design.md §1, driver.go).
+// shape because internal/service.StartPromotion and Resume are what build a Driver in
+// production, and are expected to unexport this constructor behind their own request/response
+// types once every caller goes through them.
 func NewDriver(steps []engine.Step, state *engine.PromotionState, save func(*engine.PromotionState) error, poll engine.PollIntervals, hooks DriverHooks) *Driver {
 	wrapped := save
 	if hooks.Progress != nil {

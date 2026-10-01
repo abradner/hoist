@@ -26,10 +26,10 @@ import (
 // needs, in place of importing internal/config itself. AGENTS.md §4.8: a screen never imports
 // config/registry policy, only the plain values or function types cmd/hoist (the one place
 // allowed to know both sides) translates for it. The root maps these same values into
-// session.Config (Train 2 design, D3) for the controller that actually drives; this screen keeps
+// session.Config for the controller that actually drives; this screen keeps
 // its own copy only for anything it still renders directly (today: nothing computed from it, but
-// NewAttached's signature keeps the type so a later PR — the visible-wait countdown, #106's
-// design doc PR 8 — has somewhere to put a poll-driven display timer without a signature change).
+// NewAttached's signature keeps the type so a poll-driven display timer has somewhere to
+// live without a signature change).
 type PollDurations struct {
 	CI, Approval, Argo, Rollout, Deadline time.Duration
 }
@@ -57,8 +57,8 @@ type AbandonMsg struct{ ID string }
 // even when a plan or deploy confirm screen sits underneath this one (the screen that started the
 // drive: m.start's own doc comment, app.go). It never pops back to that confirm screen instead:
 // doing so used to leave it still ticked and ready, so Enter there started the very drive esc just
-// left watching (audit UX-H6/FB-H2, the operator's own decision, a follow-up to Train 2 design PR
-// 3's original "leaving flight never cancels anything"). The drive keeps running exactly as it
+// left watching (audit UX-H6/FB-H2, the operator's own decision, a follow-up to the original
+// "leaving flight never cancels anything"). The drive keeps running exactly as it
 // was; the root only stops mirroring it onto a screen. enter/r on the matrix's in-flight pane
 // re-attaches a fresh flight screen to the same running entry later (session.Controller.Running's
 // own dedup, already in Start/Resume, means that never starts a second one).
@@ -76,7 +76,7 @@ type BackMsg struct{}
 type OverrideCINoneMsg struct{ ID string }
 
 // ReobserveMsg is r's own request: re-observe promotion ID now, rather than waiting for the
-// next scheduled poll. Train 2 design, D3: the flight screen no longer drives anything itself —
+// next scheduled poll. The flight screen no longer drives anything itself —
 // it only asks, and the root answers by calling session.Controller.Poke, whose own busy/not-found
 // refusal is authoritative regardless of what this screen's own guard already believed. Plain
 // "r" (keys.Refresh, Verb class) rather than a Write binding (the v2 keymap): asking to
@@ -94,7 +94,7 @@ type ReobserveMsg struct{ ID string }
 type WatchMsg struct{ Family, Target string }
 
 // Model is the flight screen: a mirror of one session.Controller entry, never a driver of its
-// own (Train 2 design, D3). It keeps no ctx, no Driver, no tick chain — session.Controller owns
+// own. It keeps no ctx, no Driver, no tick chain — session.Controller owns
 // every background command; this package's own doc comment on Update covers why. Update handles
 // only this screen's own keys, its spinner, and the two confirm dialogs (c/X); the state it
 // renders is set exclusively by NewAttached and Mirror.
@@ -130,12 +130,12 @@ type Model struct {
 	// nextPoll mirrors the entry's own Snapshot.NextPoll — when session.Controller will next
 	// re-observe this promotion on its own, absent an r. Zero while building, busy, done or
 	// stopped (session.Controller only ever sets it for a Waiting entry); actionSection's own
-	// countdown (Train 2 design PR 8) is what makes that wait visible rather than a screen that
+	// countdown is what makes that wait visible rather than a screen that
 	// looks the same whether it is about to check again in one second or is quietly wedged.
 	nextPoll time.Time
 	// tickID stamps this instance's own 1s countdown-redraw ticks (scope.After), distinct from
 	// any other flight instance's — never a Scope/ctx, since this screen drives nothing and owns
-	// no cancellable call of its own (D3): the tick carries no work, it only wakes Update once a
+	// no cancellable call of its own: the tick carries no work, it only wakes Update once a
 	// second so the countdown's rendered text advances while this screen is the one on top (a
 	// tick delivered while some other screen is on top reaches THAT screen's Update instead,
 	// which does not recognize it and drops it — which is exactly what stops the chain once this
@@ -148,14 +148,14 @@ type Model struct {
 	errNotice string
 	// buildLog is the Snapshot's own progress log — one entry per line Hooks.Progress reported,
 	// oldest first (session.LogLine, owned by the controller; this screen never accumulates its
-	// own copy — Train 2 design, D3's own note on session.LogLine).
+	// own copy).
 	buildLog []session.LogLine
 
 	styles        ui.Styles
 	width, height int
 	// now is the clock the header's elapsed/deadline are worded against; a test pins it.
 	now func() time.Time
-	// log is the History scrollback, always shown (v2/: the M10 train's "visible by
+	// log is the History scrollback, always shown: M10's "visible by
 	// default" already made it the common case; l no longer toggles it — the root's generic
 	// keyed handling (KeyScreen, below) now sends l to the shared activity screen instead, so
 	// this screen has nothing left for a toggle to hide, and every mockup (v2·04a/b) draws the
@@ -193,8 +193,8 @@ func (m Model) WithNow(now func() time.Time) Model {
 	return m
 }
 
-// newViewport is the log pane's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
-// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds bare "d"
+// newViewport is the log pane's own scrolling body, bound to keys.ViewportKeyMap
+// rather than left on viewport.New()'s bubbles-library default, which binds bare "d"
 // to half-page down — this screen has no diff key, but the registry lists "d" as unbound here,
 // and the bubbles default paged the log out from under an operator who pressed it expecting
 // nothing to happen.
@@ -205,7 +205,7 @@ func newViewport() viewport.Model {
 }
 
 // NewAttached builds the flight screen already attached to one session.Controller entry — the
-// TUI's only way to construct this screen (Train 2 design, D3): the root calls it once, right
+// TUI's only way to construct this screen: the root calls it once, right
 // after session.Controller.Start/Resume hands back a BuildID, and every later change reaches this
 // same instance through Mirror rather than a fresh construction. It replaces New/NewBuilding/
 // AdoptBuilt: whichever phase s names (Building included — s.State is zero then, and s.Source/
@@ -235,7 +235,7 @@ func (m Model) ID() string { return m.id }
 func (m Model) Attached() (id string, build session.BuildID) { return m.id, m.build }
 
 // Mirror replaces this screen's displayed state with s — the root calls it after every
-// session.Controller change whose Build matches Attached()'s own (D3). A snapshot for a
+// session.Controller change whose Build matches Attached()'s own. A snapshot for a
 // different build is a caller bug (mirrorAttached in app.go only ever mirrors a matching one) and
 // is applied as-is rather than defended against here a second time (AGENTS.md §8, the deletion
 // test: the one real guard belongs where the routing decision is made).
@@ -310,9 +310,8 @@ type countdownTick struct{}
 // Init starts whichever tick chain this screen needs to animate on its own: the spinner's while
 // Building or a Step is outstanding (unchanged), or the 1s countdown redraw while m.waiting() —
 // a mirrored screen with nothing in flight and nothing counting down has nothing to animate, so
-// this returns nil rather than a permanent, invisible tick loop (PR #39 review finding #5, still
-// true here: the loop this guards is Update's own reschedule, not a poll this screen no longer
-// drives).
+// this returns nil rather than a permanent, invisible tick loop (the loop this guards is
+// Update's own reschedule, not a poll this screen drives).
 func (m Model) Init() tea.Cmd {
 	if m.building || m.busy {
 		return m.spinner.Tick
@@ -326,7 +325,7 @@ func (m Model) Init() tea.Cmd {
 // Update handles the screen's own keys and its two tick chains. Every async result this screen
 // used to process directly (a drive's own Tick, a progress line) now arrives only as a fresher
 // Mirror call from the root — this package issues no tea.Cmd that talks to a Driver or a channel
-// at all (Train 2 design, D3; TestFlightNeverCallsDriver pins it). The spinner and the countdown
+// at all (TestFlightNeverCallsDriver pins it). The spinner and the countdown
 // chains hand off to each other at whichever end delivers next (their own doc comments): a
 // mirrorAttached call from the root updates this screen's state directly, with no Init and no
 // message through here, so each chain's own delivery is what notices the OTHER condition has
@@ -339,7 +338,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if !m.building && !m.busy {
 			// The step that was outstanding when this tick was scheduled has since resolved.
 			// Hand off to the countdown chain if there is now something to count down to,
-			// rather than just stopping (PR #39 review finding #5 still holds: never
+			// rather than just stopping (never
 			// reschedule unconditionally).
 			if m.waiting() {
 				return m, scope.After(m.tickID, time.Second, countdownTick{})
@@ -393,7 +392,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.updateConfirmAbandon(msg)
 	}
 	if m.choosingFamily {
-		// P3 (T3 review): esc while the chooser's own "/" filter is open must close only the
+		// esc while the chooser's own "/" filter is open must close only the
 		// filter — huh's own Update handles that — not the whole chooser; checked before the
 		// unconditional close below, the mirror of updateFamilyChooser's own enter-while-
 		// filtering guard just below it.
@@ -459,7 +458,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case keys.Esc.Matches(msg):
 		return m, func() tea.Msg { return BackMsg{} }
 	}
-	// The log is always shown now (v2/: l no longer toggles it — see the log field's own
+	// The log is always shown now (l no longer toggles it — see the log field's own
 	// doc comment), so any key this switch didn't recognize is the viewport's: ↑/↓,
 	// PageUp/PageDown scroll it. Laid out on this copy first — View lays out its own copy, so
 	// the retained viewport would otherwise be the zero-sized one NewAttached built (the same
@@ -553,7 +552,7 @@ func (m Model) openConfirm() (Model, tea.Cmd) {
 	title := fmt.Sprintf("Treat this PR's missing checks as green and let %s merge on approval alone? ci.none is prompt; this applies to promotion %s only.", m.state.TargetEnv, m.id)
 	m.confirmOverride = huh.NewConfirm().Title(title).Value(&m.confirmValue)
 	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
-	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly :
+	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly:
 	// the one shared keymap every standalone huh field in this app now uses.
 	m.confirmOverride.WithKeyMap(keys.HuhKeyMap())
 	m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
@@ -662,7 +661,7 @@ func (m Model) layout() Model {
 		fixed += lipgloss.Height(n)
 		sections++
 	}
-	// The log is always shown now (v2/ — see the log field's own doc comment), so its own
+	// The log is always shown now (see the log field's own doc comment), so its own
 	// section and the "history" label above it are unconditional too.
 	sections++
 	fixed++ // the "history" label above the log
@@ -893,12 +892,12 @@ func (m Model) actionSection() string {
 	// wrapper, so the screen and the pane render the identical sentence from one place.
 	// command is always "" after ApprovalCopy: Action()'s only non-empty command was the
 	// approval-wait one, and ApprovalCopy folds it into text as one sentence (its own doc
-	// comment) — nothing left needs the separate accent-styled command line the pre-
+	// comment) — nothing left needs the separate accent-styled command line the earlier
 	// rendering had here.
 	text, _ := ApprovalCopy(sum)
 	// approvalWaiting is true exactly when text is the ApprovalCopy sentence rather than some
 	// other active row's plain detail — the one case that takes priority over the generic
-	// countdown below, matching the pre- precedence (Action's own non-empty command
+	// countdown below, matching the earlier precedence (Action's own non-empty command
 	// implied the identical priority, before ApprovalCopy folded it into text and left command
 	// always "").
 	approvalStep, hasActive := ActiveStep(m.rows)

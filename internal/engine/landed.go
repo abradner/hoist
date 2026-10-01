@@ -54,10 +54,10 @@ const (
 // s.Edits and s.ExpectedBlobs unfiltered (DirectPushedStep); a caller asking about one
 // Application's own share of a multi-Application promotion passes just that Application's
 // edits and the matching subset of expectedBlobs (ArgoSyncedStep.revisionCarries, scoped via
-// PromotionState.EditApps — review finding, PR #182: passing the whole promotion here
-// for a per-Application question meant one Application superseded by a later change made every
+// PromotionState.EditApps): passing the whole promotion here
+// for a per-Application question would let one Application superseded by a later change make every
 // OTHER Application in the same loop report superseded too, silently skipping their own health
-// check).
+// check.
 //
 // The returned detail is a human sentence for the Observation, naming what is actually
 // declared at rev when that differs from the plan; it is never the only signal — the verdict

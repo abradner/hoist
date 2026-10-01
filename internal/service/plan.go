@@ -15,8 +15,7 @@ import (
 // PlanRequest is everything Plan needs to build one gitops.Plan, for a promotion or a deploy —
 // the one shape `hoist plan`, `hoist promote`, `hoist deploy` and both TUI paths (the plan
 // screen's loadCmd, the matrix's deploy confirm) now build and hand to Plan, so a plan built for
-// a confirm screen and a plan built for the CLI's own dry run can never silently diverge again
-// (AGENTS.md §4's own "Divergences" section, item 10).
+// a confirm screen and a plan built for the CLI's own dry run can never silently diverge again.
 type PlanRequest struct {
 	// Repo is the discovered GitOps repo to plan against; nil uses s.Repo().Repo (the
 	// service's own current view — LoadRepo/RefreshRepo).
@@ -70,7 +69,7 @@ type PlannedChange struct {
 	// built for a Mode that was never handed this exact, unfiltered Plan (see Request's own doc
 	// comment) — a caller with a filtered, ticked-down plan has no single resolution behind it
 	// any more, and StartRequest.Fresh being nil is exactly what tells StartPromotion to recover
-	// digests from the plan's own edits instead (Divergence 8, unchanged).
+	// digests from the plan's own edits instead, unchanged from the TUI's own rule.
 	fresh *freshInputs
 }
 
@@ -168,7 +167,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 	if res != nil {
 		// runPlan/runPromote (cmd/hoist) and the TUI plan screen all used to prepend this
 		// themselves; Plan is now the one place that does it, so it is fixed by construction
-		// rather than by every caller remembering to (AGENTS.md §4's Divergences, item 10).
+		// rather than by every caller remembering to.
 		pl.Warnings = append(resolve.Warnings(res.Res), pl.Warnings...)
 	}
 	return PlannedChange{Plan: pl, Repo: r, View: view, Resolution: res, fresh: &freshInputs{digests: planDigests, reasons: reasons}}, nil

@@ -123,8 +123,8 @@ type Model struct {
 	width, height int
 }
 
-// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap (P2-6 in the
-// T3 review) rather than left on viewport.New()'s bubbles-library default, which binds
+// newViewport is this screen's own scrolling body, bound to keys.ViewportKeyMap
+// rather than left on viewport.New()'s bubbles-library default, which binds
 // space/f/b to page and bare "d"/"u" to half-page — none of it shown on this screen's footer
 // or help overlay.
 func newViewport() viewport.Model {

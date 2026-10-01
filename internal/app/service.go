@@ -8,7 +8,7 @@ import (
 
 // Service is the root's one seam onto internal/service — narrow, consumer-side, and named for
 // what the TUI actually calls, not for internal/service.Service's own full surface (AGENTS.md
-// §4.8, the service-design train's PR F: the root depends on this interface, and cmd/hoist's
+// §4.8): the root depends on this interface, and cmd/hoist's
 // *service.Service satisfies it directly). A test fakes it with a plain struct rather than a
 // real Service backed by git/forge/Argo — the same reason flight.Driver and plan.Func are kept
 // small and local instead of importing internal/service's whole client-cache type.

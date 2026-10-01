@@ -48,8 +48,7 @@ type Entry struct {
 const Cap = 50
 
 // Log is an append-only, capped history of Entry values (doc.go's own "Design" section) — a
-// value type, copy-on-append like session.Controller (AGENTS.md §4.8, D1's convention one layer
-// over): Add never mutates the receiver's backing array, so an older Log a screen still holds
+// value type, copy-on-append like session.Controller (AGENTS.md §4.8): Add never mutates the receiver's backing array, so an older Log a screen still holds
 // (Model.New takes one by value, doc comment) never observes a later Add.
 type Log struct {
 	entries []Entry

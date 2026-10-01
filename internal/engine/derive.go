@@ -42,7 +42,7 @@ func ArgoAppNames(r *gitops.Repo, targetEnv string, edits []gitops.Edit) ([]stri
 // EditApps maps each edit's file to the Argo Application name that owns it — the same
 // Family->Application walk ArgoAppNames dedupes and sorts, kept per-file here so a caller that
 // needs to scope a question to one Application's own share of a promotion (ArgoSyncedStep's
-// revisionCarries, PR #182 review) doesn't have to re-derive the mapping. The CLI calls
+// revisionCarries, #182) doesn't have to re-derive the mapping. The CLI calls
 // this once, from the same gitops.Repo Discover already produced, when building a
 // PromotionState, and carries the result on PromotionState.EditApps (see its own doc comment)
 // rather than recomputing it on every resume — the same "structural fact about the plan,

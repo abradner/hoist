@@ -4,15 +4,13 @@
 // keeping the matrix's in-flight pane listed — all of it re-observed, never trusted from a
 // screen's own memory (AGENTS.md §4.1).
 //
-// This package is standalone and, as of this PR, not wired into internal/app: app.go still owns
-// its own buildGen/buildCancel/promotionBuiltMsg dance and internal/app/flight still drives its
-// own promotion directly. Both exist for the same reason this package exists — see their own doc
-// comments — and a later PR replaces them with Controller, so a background drive a screen owns
-// stops dying with that screen (AGENTS.md §9's own eventual entry on this).
+// internal/app's root model holds one Controller and routes every command and Event through it
+// (app.go's Update, apply), and the flight screen mirrors one entry rather than driving a
+// promotion itself — so a background drive no longer dies with the screen that started it.
 //
 // # Design
 //
-// Controller is a value type (D1 of the Train 2 design this PR implements): every state change
+// Controller is a value type: every state change
 // happens inside Update or one of Controller's own methods, each returning a new Controller
 // rather than mutating one in place, exactly as internal/app/matrix.Model and
 // internal/app/plan.Model already do (AGENTS.md §4.8). Bubble Tea keeps only whatever a model's

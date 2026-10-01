@@ -13,9 +13,7 @@ import (
 )
 
 // Driver is what Controller drives one entry's promotion through — internal/service.Drive's own
-// consumer-side interface, narrowed to exactly what a poll needs (mirrors
-// internal/app/flight.Driver's identical narrowing, one layer up, before the wiring PR that
-// follows this one replaces that screen's own copy with this one — see design doc D3).
+// consumer-side interface, narrowed to exactly what a poll needs.
 // *service.Driver, returned by Backend.StartPromotion/Resume as a service.Drive, satisfies it
 // directly (a superset interface always does); a test fakes it without building a real
 // service.Driver.
@@ -86,7 +84,7 @@ func (p Phase) String() string {
 }
 
 // LogLine is one progress line Controller has seen for a build, oldest first — the Snapshot's
-// own equivalent of flight.Model's buildLog, now owned here so a mirroring screen (a later PR)
+// own equivalent of flight.Model's buildLog, now owned here so a mirroring screen (the flight screen)
 // never has to keep its own copy in sync with a channel it does not own.
 type LogLine struct {
 	At   time.Time
@@ -98,7 +96,7 @@ type LogLine struct {
 // and After so nothing here ever sleeps or races real wall-clock time.
 type Config struct {
 	// Deadline bounds one build+drive's whole ctx, shared between the StartPromotion/Resume call
-	// and every Step call that follows it (one ctx per drive, D1's own rule — the time the build
+	// and every Step call that follows it (one ctx per drive — the time the build
 	// itself took counts against the same budget the drive polls against, never a fresh window
 	// per Step call, mirroring flight.Model's own deadlineAt one layer up).
 	Deadline time.Duration
@@ -121,9 +119,9 @@ type Config struct {
 	// git ls-remote plus forge PR/check lookups) followed by ClosePR and a DeleteRemoteBranch
 	// push, none of which is instant. This is deliberately generous and independent of
 	// AbandonTimeout/AbandonWait, which only bound the short busy-Step wait that precedes the
-	// call: conflating the two meant a real abandon inherited a 1s deadline and routinely failed
-	// with "context deadline exceeded", sometimes after ClosePR had already run but before
-	// DeleteRemoteBranch had a chance to (found in review of ceaccb2).
+	// call: conflating the two would give a real abandon a 1s deadline and routinely fail
+	// it with "context deadline exceeded", sometimes after ClosePR had already run but before
+	// DeleteRemoteBranch had a chance to.
 	AbandonCallTimeout time.Duration
 	// ListTimeout bounds one Backend.List call. Kept equal to internal/app/scope.List (60s, P3
 	// #14) — that constant's own doc comment is what actually documents the value;
@@ -202,8 +200,8 @@ type Change struct {
 	// Snap is the entry's own last snapshot, populated only for a Change whose entry Update
 	// removes from Controller in the very same call (ChangeDone, ChangeAbandoned) — every other
 	// kind leaves the entry live, so a caller can always get a fresher one straight from
-	// Controller.Snapshot/BuildSnapshot instead. Without this, a mirroring screen (the wiring PR
-	// that follows this one, D3) would have nothing left to mirror the instant a promotion
+	// Controller.Snapshot/BuildSnapshot instead. Without this, a mirroring screen (the flight
+	// screen) would have nothing left to mirror the instant a promotion
 	// finishes: BuildSnapshot(build) already returns false by the time the Change reaches it,
 	// since withoutEntry has already run, and the screen would be frozen one step short of the
 	// true final state forever.
@@ -230,7 +228,7 @@ var (
 	// to step — a Resume whose Backend.Resume call itself failed (Building never reached
 	// onBuilt's success path) and was then abandoned, or any other entry that reached Stopped
 	// without ever getting a driver. Poke/OverrideCINone would otherwise call Step on a nil
-	// interface value and panic (found in review: onAbandoned's error path used to leave exactly
+	// interface value and panic (onAbandoned's error path could otherwise leave exactly
 	// such an entry behind, driver-less and Poke-able). Enforced twice, deliberately (AGENTS.md
 	// §8's layered-checks rule): onAbandoned also refuses to leave a driver-less entry behind at
 	// all (see its own doc comment) — deleting either check would make a new state possible
@@ -288,7 +286,7 @@ type entry struct {
 }
 
 // Controller is the value type that owns every drive this session package tracks — see doc.go's
-// own "Design" section (D1): every state change happens inside Update or one of Controller's own
+// own "Design" section: every state change happens inside Update or one of Controller's own
 // methods, each of which returns a new Controller. Its two maps (entries, byID) are always
 // replaced with a maps.Clone'd copy before either is written to, so an older Controller value —
 // a stale screen copy, a test's "before" snapshot — never observes a write a newer one made
@@ -334,11 +332,9 @@ func (c Controller) withEntry(e entry) Controller {
 // withoutEntry returns a Controller with build removed from both maps. It also cancels build's
 // own ctx — the one place a finished/failed/abandoned entry's listener goroutine (listenCmd) and
 // its context.WithDeadline timer are actually stopped, rather than left running (and blocked on
-// a channel nobody will ever read again) until the entry's own 4h deadline. Every caller used to
-// have to remember to cancel before removing an entry; two call sites (onStep's Done case,
-// onBuilt's build-failed case) didn't, which is exactly the goroutine leak listenCmd's own doc
-// comment claims is fixed (found in review of ceaccb2) — cancelling here instead makes it true
-// unconditionally. Safe to call on an entry whose ctx was already cancelled (CancelBuild/Stop do
+// a channel nobody will ever read again) until the entry's own 4h deadline. Cancelling here, rather than at each caller
+// (onStep's Done case, onBuilt's build-failed case), means no call site can forget and leak the
+// goroutine listenCmd's own doc comment says is stopped. Safe to call on an entry whose ctx was already cancelled (CancelBuild/Stop do
 // so themselves first): context.CancelFunc is idempotent.
 func (c Controller) withoutEntry(build BuildID) Controller {
 	e, ok := c.entries[build]
@@ -349,10 +345,10 @@ func (c Controller) withoutEntry(build BuildID) Controller {
 	delete(c.entries, build)
 	// byID[e.id] is only ever deleted when it still points at THIS build — a Resume racing a
 	// Start for the same promotion id can leave byID[id] pointing at the SURVIVING entry by the
-	// time the loser is removed here (found in review: onBuilt's own same-target dedup refuses
+	// time the loser is removed here (onBuilt's own same-target dedup refuses
 	// the second builtMsg to land, but if the FIRST one to land already mapped byID[id] to its
-	// own build, removing the second, refused entry unconditionally deleted that live mapping out
-	// from under the entry that actually won). Deleting unconditionally would make the surviving
+	// own build, removing the second, refused entry unconditionally would delete that live mapping
+	// out from under the entry that actually won). Deleting unconditionally would make the surviving
 	// entry unreachable by Snapshot/Resume/Poke/Abandon while BuildSnapshot still shows it alive —
 	// exactly the state TestProbeByIDClobber pins.
 	if ok && e.id != "" && c.byID[e.id] == build {
@@ -502,7 +498,7 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 	c = c.withEntry(e)
 	backend := c.backend
 	resumeCmd := func() tea.Msg {
-		// Hooks{Progress, OnWaiting} — the design's own FB-M2 fix: a resumed drive now reports
+		// Hooks{Progress, OnWaiting} fixes FB-M2: a resumed drive now reports
 		// live log lines exactly as a freshly started one already did (service.Resume's own doc
 		// comment on ResumeOpts.Hooks).
 		d, err := backend.Resume(ctx, id, service.ResumeOpts{Hooks: startHooks(ch)})
@@ -518,7 +514,7 @@ func toBuiltMsg(build BuildID, gen uint64, d service.Drive, err error) builtMsg 
 		// one or the other), but a test double or a future Backend implementation that does must
 		// not reach d.State() below: that's a nil interface method call, which panics rather than
 		// degrading to a notice like every other unwired/misbehaving-adaptor path in this package
-		// (PR 2's own gap, closed here rather than left for onBuilt to guard a second time).
+		// (guarded here once rather than in onBuilt a second time).
 		err = errors.New("session: backend returned neither a drive nor an error")
 	}
 	var state engine.PromotionState
@@ -582,8 +578,7 @@ func (c Controller) Poke(id string) (Controller, tea.Cmd, error) {
 	// rearm cancelled the old ctx, which stops the old listenCmd (it returns nil the instant it
 	// sees <-ctx.Done(), per its own doc comment) — but nothing else restarts one on the fresh
 	// ctx/gen it just built, so any progress line the re-armed Step reports would sit unread in
-	// progressCh until the whole drive finished: the flight log froze for the rest of it (found
-	// in review of ceaccb2). Batch a fresh listener alongside the Step so progress keeps flowing.
+	// progressCh until the whole drive finished, freezing the flight log. Batch a fresh listener alongside the Step so progress keeps flowing.
 	return c, tea.Batch(stepCmd(e.ctx, e.build, e.gen, e.driver, false), listenCmd(e.ctx, e.build, e.gen, e.progressCh)), nil
 }
 
@@ -775,15 +770,15 @@ func (c Controller) Live() []Snapshot {
 
 // AnyRunning reports whether at least one tracked entry is actually in progress — Building,
 // Stepping, or Waiting, or an Abandoning entry whose Backend.Abandon call has actually been
-// dispatched (abandonIssued) — the root's own q-with-drives-running gate (Train 2 design PR 3). A
+// dispatched (abandonIssued) — the root's own q-with-drives-running gate. A
 // Stopped entry (a Blocked step or a terminal, non-retryable error — R/Poke re-arms it) or one
 // still Abandoning but not yet abandonIssued (waiting on a busy Step to notice its ctx was
 // cancelled — nothing has actually been dispatched to the forge/cluster yet) does not, by itself,
 // need a confirm before the program quits: StopAll's own ctx cancel is all there would be to
 // interrupt. An abandonIssued entry is different — a real Backend.Abandon call (re-observe, close
 // the PR, delete the branch) is in flight, and quitting out from under it is exactly the "kills a
-// running service.Abandon mid-way" case a confirm exists for (found in review: this used to
-// exclude every Abandoning entry regardless of abandonIssued).
+// running service.Abandon mid-way" case a confirm exists for (so only an Abandoning entry whose
+// abandonIssued is false is excluded).
 func (c Controller) AnyRunning() bool {
 	for _, e := range c.entries {
 		switch e.phase {
@@ -852,7 +847,7 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 		// before the call even starts, so e.id is always known here. The build's own outcome no
 		// longer matters: proceeding to a fresh Step (on success) would silently re-arm past the
 		// cancel, and reporting a build failure (on the ctx this same Abandon call cancelled)
-		// would drop Backend.Abandon entirely — found in review of ceaccb2. Either way the
+		// would drop Backend.Abandon entirely. Either way the
 		// operator asked to abandon, so that is what happens now.
 		e.busy = false
 		if msg.err == nil {
@@ -861,8 +856,8 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 			// Same fill as the ordinary (non-abandoning) success path below: a Resume never has
 			// source/target/direct to seed the entry with up front, so without this an abandon
 			// fired during a resumed entry's Build window would show a blank header for the brief
-			// window before the abandon actually completes (found in review — the ordinary path's
-			// own fill was never reached here, since this branch returns before it).
+			// window before the abandon actually completes (the ordinary path's own fill is not
+			// reached here, since this branch returns before it).
 			if e.source == "" && e.target == "" {
 				e.source = msg.state.SourceEnv
 				e.target = msg.state.TargetEnv
@@ -874,9 +869,8 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 			// branch) already dispatched Backend.Abandon for this entry before this builtMsg
 			// arrived, capturing its own (build, gen) at that dispatch time — deliberately NOT
 			// bumped here, since that call's own abandonedMsg still has to match e.gen when it
-			// comes back (found in review: bumping gen unconditionally, as an earlier version of
-			// this fix did, orphaned that in-flight call's result instead of preventing a second
-			// one — the entry never got removed). Record the build's own outcome and stop: the
+			// comes back (bumping gen unconditionally would orphan that in-flight call's
+			// result instead of preventing a second one — the entry would never get removed). Record the build's own outcome and stop: the
 			// already-dispatched abandonCmd will resolve this entry on its own.
 			c = c.withEntry(e)
 			return c, nil, nil
@@ -884,9 +878,8 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 		// Nothing has dispatched Backend.Abandon for this entry yet — this onBuilt call is the
 		// first thing to decide "call it now". Bump gen so a same-gen abandonWaitMsg still
 		// in-flight from Abandon's own busy path (below) is dropped by onAbandonWait's own gen
-		// check instead of racing this dispatch (found in review of ceaccb2 — the comment used to
-		// claim this bump alone was sufficient; abandonIssued above is what actually prevents the
-		// double call when the wait chain gets there first instead).
+		// check instead of racing this dispatch (this bump alone does not prevent a double call;
+		// abandonIssued above is what does, when the wait chain gets there first instead).
 		e.gen++
 		e.abandonIssued = true
 		c = c.withEntry(e)
@@ -899,10 +892,9 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 	e.state = msg.state
 	e.id = msg.state.ID
 	// Resume (unlike Start) never has source/target/direct to seed the entry with up front — the
-	// caller only ever names an id — so a resumed entry's Snapshot read blank for all three until
-	// now: the flight header and pane line went blank during Build, and runningForTarget couldn't
-	// see it at all (AGENTS.md invariant 5's own claim didn't hold for a resumed drive — found in
-	// review of ceaccb2). Fill them from msg.state, which service.StartPromotion/Resume both
+	// caller only ever names an id — so until they are filled a resumed entry's Snapshot reads blank
+	// for all three: the flight header and pane line go blank during Build, and runningForTarget
+	// cannot see it at all. Fill them from msg.state, which service.StartPromotion/Resume both
 	// populate from the very first preflight save (internal/service/start.go's own
 	// SourceEnv/TargetEnv, set before a Driver is ever handed back) — but only when Start hasn't
 	// already set them from its own, equally authoritative req/target/source parameters: a
@@ -912,7 +904,7 @@ func (c Controller) onBuilt(msg builtMsg) (Controller, tea.Cmd, []Change) {
 		e.target = msg.state.TargetEnv
 		e.direct = msg.state.Direct
 	}
-	// Duplicate-driver window (found in review of ceaccb2): between StartPromotion's own first
+	// Duplicate-driver window: between StartPromotion's own first
 	// preflight save and this process's builtMsg arriving, a fresh listing can already show the
 	// real id beside the still id-less Building entry Start created — Resume(id) then gets past
 	// the byID dedup entirely (Resume sets e.id at entry creation, from the id it was GIVEN, but
@@ -989,8 +981,7 @@ func (c Controller) onStep(msg stepMsg) (Controller, tea.Cmd, []Change) {
 		// reports (blocked, a retryable/non-retryable error, or an ordinary tick) must not
 		// overwrite Abandoning with Stopped: that would let Poke re-arm (bumping gen), which
 		// drops the abandonWaitMsg already scheduled and the abandon silently disappears
-		// (found in review of ceaccb2 — the fix predates the Abandoning phase even existing to
-		// protect). The entry just goes idle (busy already false above); the pending
+		// (the guard exists so an Abandoning entry is never overwritten). The entry just goes idle (busy already false above); the pending
 		// abandonWaitMsg, next time it fires, proceeds to Backend.Abandon regardless of what
 		// this tick said.
 		changes = append(changes, Change{Kind: ChangeStepped, Build: e.build, ID: e.id})
@@ -1046,7 +1037,7 @@ func (c Controller) onAbandonWait(msg abandonWaitMsg) (Controller, tea.Cmd, []Ch
 	// The wait gave up (or the entry was already idle) — this is the wait chain's own dispatch of
 	// Backend.Abandon. Mark it issued before onBuilt's own abandoning branch (below) can find out:
 	// a slow Resume/Start build landing at the same gen after this point must not dispatch a
-	// second Backend.Abandon call of its own (found in review — see abandonIssued's own doc
+	// second Backend.Abandon call of its own (see abandonIssued's own doc
 	// comment on why gen alone cannot arbitrate this).
 	e.abandonIssued = true
 	c = c.withEntry(e)
@@ -1083,7 +1074,7 @@ func (c Controller) onAbandoned(msg abandonedMsg) (Controller, tea.Cmd, []Change
 		// in-flight Step's own stepMsg would land in onStep and — since e.phase is no longer
 		// Abandoning by the time it arrives — fall through to the ordinary "schedule the next
 		// poll" path instead of being recognised as the abandon's own busy step, silently
-		// reviving an entry the operator was told had failed to abandon (found in review). Bumping
+		// reviving an entry the operator was told had failed to abandon. Bumping
 		// gen here drops both: any pollMsg/stepMsg still addressed to the old generation is stale.
 		e.gen++
 		e.busy = false

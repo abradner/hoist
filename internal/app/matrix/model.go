@@ -140,7 +140,7 @@ type Model struct {
 	now         func() time.Time
 }
 
-// KeyScreen implements the root's keyed interface the matrix now has a stated row in
+// KeyScreen implements the root's keyed interface: the matrix now has a stated row in
 // internal/ui/keys' registry, so the root's own "?" help overlay and "l" activity-log handling
 // apply to it exactly as they already do to watch/restart/config/activity.
 func (m Model) KeyScreen() keys.Screen { return keys.ScrMatrix }
@@ -281,7 +281,7 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 	}
 }
 
-// RequestRefresh is Train 2 design PR 4's completion-triggered refresh: exactly what F5 already
+// RequestRefresh is the completion-triggered refresh: exactly what F5 already
 // does, exported so the root can call it when a drive lands or finishes.
 func (m Model) RequestRefresh() (Model, tea.Cmd) {
 	nm, driftCmd := m.refresh()
@@ -1006,7 +1006,7 @@ func (m Model) stateWord(c Cell, env string) string {
 // inter-section rule has to be counted alongside the subheader's and the notes' whenever one is
 // present. It says nothing about whether the pane ultimately finds room to render non-empty at
 // the current height — paneBudget/inflightPane decide that — so a height too tight for even the
-// compact form is, at worst, one row off here; the same approximation the pre- code lived
+// compact form is, at worst, one row off here; the same approximation the earlier code lived
 // with when the pane cost 0 rather than 1 extra rule row.
 func (m Model) hasPane() bool {
 	return len(m.inflight) > 0 || m.inflightErr != ""
@@ -1095,8 +1095,8 @@ func boolInt(b bool) int {
 
 // notes is the section under the grid: the transient notice or hint first, else what the
 // cluster said about the cursor's column, then the in-flight fold when the pane itself has no
-// room (paneBudget's own decision). The bubbles help.Model line this used to carry is retired
-// in  — the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
+// room (paneBudget's own decision). The bubbles help.Model line this used to carry is retired —
+// the root's own overlay (internal/ui/keys.HelpView) replaces it entirely.
 func (m Model) notes() string {
 	lines := m.baseNotes()
 	if m.paneRows(m.paneBudget()) == 0 {
@@ -1285,7 +1285,7 @@ const productionMarker = " ⚠"
 // statusBar is the matrix's own footer, through keys.Footer: the env under the
 // cursor on the left, the writes and verbs an operator is actually looking for the key of on
 // the right, in priority order so a narrow terminal drops the least useful first. The cursor's
-// own production marker (T3 followup, group 3) is productionMarker — the same "⚠" the header
+// own production marker is productionMarker — the same "⚠" the header
 // and the notes sentence already use — rather than the spelled-out " (production)" this used to
 // read: at 120 columns the write-verb hints leave the status too little room, and
 // ui.StatusBar's own truncation-with-ellipsis rule was cutting "env b (production)" down to
@@ -1312,7 +1312,7 @@ func (m Model) statusBar() string {
 	}
 	// "tab in flight" is only true when there is an in-flight pane to focus (toggleFocus is a
 	// no-op otherwise) — advertising it with nothing in flight is a hint for a key that
-	// does nothing (P2-13, T3 review).
+	// does nothing.
 	if len(m.inflight) > 0 {
 		hints = append(hints, keys.Hint{B: keys.Tab, Long: "tab in flight", Short: "tab in flight", Pri: 7})
 	}

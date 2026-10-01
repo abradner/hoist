@@ -37,10 +37,11 @@ var (
 //
 // Preflight (checkDirectPreflight), planning (svc.Plan) and taking the plan the rest of the way
 // (svc.StartPromotion) are now the same three calls `hoist deploy` and the TUI's own confirm
-// screens make — see internal/service's own design doc for why unifying them was worth a whole
-// PR: the CLI and the TUI used to assemble the freshness/claim/save/preflight sequence by hand,
-// in two different orders, which is exactly what let the TUI reach the production direct-commit
-// gate only after its own claim and initial state save (AGENTS.md §4.5 trust boundary).
+// screens make: the CLI and the TUI used to assemble the freshness/claim/save/preflight
+// sequence by hand, in two different orders, which is exactly what let the TUI reach the
+// production direct-commit gate only after its own claim and initial state save (AGENTS.md
+// §4.5 trust boundary). Unifying on internal/service.StartPromotion closes that gap for both
+// callers at once.
 func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist promote", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -117,7 +118,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// Plan prepends resolve.Warnings itself now (service.Plan's own doc comment) — runPlan and
 	// the TUI plan screen go through the identical call, so a pods/manifest digest disagreement
-	// can never reach one and not the other again (AGENTS.md §4's Divergences, item 10). It runs
+	// can never reach one and not the other again. It runs
 	// under the same signal/deadline ctx as everything after it, so ^C or the poll deadline can
 	// interrupt resolution too, not just the drive that follows it.
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
@@ -176,7 +177,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 // reportDriveResult renders Driver.Run's outcome the same way for hoist promote and
 // hoist resume: the branch/commit/PR/merge summary on success, the specific messages
 // AGENTS.md's "waiting for signing approval" / ErrWaiting / ctx deadline / Blocked cases call
-// for, and the redact.Strings final boundary for anything else (Finding B: a step's Act error
+// for, and the redact.Strings final boundary for anything else (a step's Act error
 // can embed a registered credential verbatim via a failed git command's wrapped stderr).
 func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv string, s *engine.PromotionState, err error) int {
 	switch {

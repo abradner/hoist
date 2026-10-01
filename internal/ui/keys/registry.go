@@ -10,8 +10,8 @@ type row struct {
 }
 
 // table is the whole approved screen × key matrix, transcribed from the audit's own table.
-// Every screen in internal/app reads it through On/Has below (through finished the
-// migration); the tests in this file and each screen package's own TestRegistryKeysAreHonoured
+// Every screen in internal/app reads it through On/Has below; the tests in this file and each
+// screen package's own TestRegistryKeysAreHonoured
 // (internal/app/matrix, plan, deploy, tags, flight, watch, restart, config, activity) hold it to
 // the audit's rules mechanically rather than by review (AGENTS.md §10 meta-rule 5).
 var table = []row{
@@ -93,8 +93,7 @@ var table = []row{
 	// all (unlike flight's OpenPRMsg, which the root already threads through) — so it is
 	// delisted here rather than left as a dead row; wiring a real "open commit on forge" gesture
 	// is a real feature (a URL builder, a message, a root handler) and belongs in its own
-	// change, not this fixup pass. Home/End are implemented (moveCursor's own list) and
-	// now listed alongside them.
+	// change. Home/End are implemented (moveCursor's own list) and now listed alongside them.
 	{ScrTags, Enter, "review tag → confirm"},
 	{ScrTags, Esc, "back"},
 	{ScrTags, Help, "help overlay"},
@@ -109,7 +108,7 @@ var table = []row{
 	{ScrTags, End, "bottom"},
 	{ScrTags, CtrlC, "quit now"},
 
-	// tag picker's commit reader pane. P2-7/8: Open delisted for the same reason as ScrTags'
+	// tag picker's commit reader pane. Open delisted for the same reason as ScrTags'
 	// own row above; Tab was listed ("commits ⇄ list") but updateReading's own switch has no
 	// case for it — reading a commit has no second pane to tab to — so it is delisted too.
 	// Esc, Enter, Home and End ARE handled (updateReading: Back/Left, Review, Home, End) but

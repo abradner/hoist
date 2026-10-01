@@ -20,7 +20,7 @@ var pairs = [][2]struct {
 }
 
 // helpColWidth is each column's fixed width in the pair layout — wide enough for the longest
-// entry this train's screens actually use ("shift+r  restart the cell's family → restart
+// entry the screens actually use ("shift+r  restart the cell's family → restart
 // screen" truncates past this, which is an accepted trade-off of a fixed two-column grid over
 // one column that could grow to fit anything).
 const helpColWidth = 30
@@ -30,7 +30,7 @@ const helpColWidth = 30
 // hand-formats it a second way.
 func HelpTitle(s Screen) string { return fmt.Sprintf("help · %s", s) }
 
-// HelpView renders the full-key overlay's BODY for one screen every binding On(s)
+// HelpView renders the full-key overlay's BODY for one screen: every binding On(s)
 // lists, grouped under the mockup's own four headings, the "shift+ keys always ask before they
 // write" line whenever the screen has at least one Write binding, and one line naming whether
 // this run can tell a caps-lock letter from a real shift — recorded once at the root from

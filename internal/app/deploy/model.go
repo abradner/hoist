@@ -42,7 +42,7 @@ import (
 // BackMsg asks whatever composes screens to pop this one.
 type BackMsg struct{}
 
-// RefreshMsg is r/F5/ctrl+r rebuild the diff at fresh origin. The screen has no way to
+// RefreshMsg is r/F5/ctrl+r: rebuild the diff at fresh origin. The screen has no way to
 // fetch origin itself (AGENTS.md §4.3 — a screen never opens a git/cluster/registry connection),
 // so this asks the root to run the matrix's own completion-triggered refresh
 // (requestMatrixRefresh, the same fetch F5 already runs there) and rebuild this screen once
@@ -150,10 +150,10 @@ func (m Model) ResetStarting() Model {
 }
 
 // newViewport is this screen's own scrolling body — the diff pane and the commit list alike —
-// bound to keys.ViewportKeyMap (P2-6 in the T3 review) rather than left on viewport.New()'s
+// bound to keys.ViewportKeyMap rather than left on viewport.New()'s
 // bubbles-library default, which binds space to page: the redesign retired space as a
-// scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on
-// (T3 followup, group 2): the yaml diff's whole point is the digest, and a hard-truncated line
+// scroll gesture on this screen, and the default keymap left it live anyway. SoftWrap is on:
+// the yaml diff's whole point is the digest, and a hard-truncated line
 // hides it past the pane's right edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
 	v := viewport.New()
@@ -226,7 +226,7 @@ func (m Model) Target() string { return m.target }
 // handler reads this back the same way as Target, above.
 func (m Model) ImageRef() string { return m.image }
 
-// Reload is RefreshMsg's own rebuild the root calls this synchronously once it has
+// Reload is RefreshMsg's own rebuild: the root calls this synchronously once it has
 // rebuilt pl against a fresh *gitops.Repo (mirroring openDeploy's own direct planFn call —
 // AGENTS.md §4.3's reasoning is about resolving a digest, and a deploy plan never resolves one,
 // the reference is caller-supplied), replacing the plan and the diff/commit views it feeds
@@ -276,7 +276,7 @@ func (m Model) scroll(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.notice = ""
-	// shift+d toggles direct mode — checked ahead of the msg.String switch below since
+	// shift+d toggles direct mode — checked ahead of the msg.String() switch below since
 	// keys.Direct.Matches is the stateless write-binding test (rule 5's shift-vs-caps-lock
 	// distinction), not a string a switch case could match directly.
 	if keys.Direct.Matches(msg) {
@@ -600,7 +600,7 @@ func tagOrDigest(r image.Ref) string {
 }
 
 // commitLines is the commit viewport's content: one line per commit, migration-carrying ones
-// marked, newest first as the delta lists them. (v2·05a): windowed to what the viewport's
+// marked, newest first as the delta lists them (v2·05a) — windowed to what the viewport's
 // own box actually shows — commits.Height(), set by layout() before this is (re-)called — with
 // a right-aligned "↓ N more commits" trailer for the rest, mirroring tags.Model's own pane
 // convention rather than leaving the operator to scroll blind to find out how much is
@@ -737,7 +737,7 @@ func (m Model) hints() string {
 func (m Model) KeyScreen() keys.Screen { return keys.ScrDeploy }
 
 // scale is the one-line summary of what will be written — the sentence an operator would say
-// out loud before pressing enter. "image reference(s)", never "occurrence(s)" the
+// out loud before pressing enter. "image reference(s)", never "occurrence(s)": the
 // latter is this codebase's own internal term for one image: scalar in one manifest
 // (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an operator is about
 // to press enter on.

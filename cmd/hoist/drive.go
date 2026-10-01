@@ -18,7 +18,7 @@ import (
 // so this conversion happens once, here, at the one place allowed to know both sides.
 // settingsFor (main.go) and buildPollDurations (wiring.go, which layers Deadline on top for
 // flight.PollDurations' own shape) both call this rather than each hand-copying the same four
-// fields a third and fourth time (P3).
+// fields a third and fourth time.
 func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 	return engine.PollIntervals{
 		CI:       time.Duration(poll.CI),
@@ -30,9 +30,8 @@ func pollIntervals(poll config.PollConfig) engine.PollIntervals {
 
 // runHooksForCLI builds the service.RunHooks a CLI drive command runs a *service.Driver's Run
 // through — the same waitingReporter/heartbeatEvery reporting cmd/hoist's own Driver.Run
-// gave every promotion before this PR, now wired as hooks Run itself calls rather than logic
-// duplicated in a loop this package no longer owns (AGENTS.md invariant 4: the actual waiting
-// still lives in Run's own loop, not here — this is only what gets printed while it waits).
+// gives every promotion, wired as hooks Run itself calls (AGENTS.md §4.1: the actual waiting
+// lives in Run's own loop, not here — this is only what gets printed while it waits).
 func runHooksForCLI(stderr io.Writer) service.RunHooks {
 	w := &waitingReporter{w: stderr, now: time.Now}
 	return service.RunHooks{

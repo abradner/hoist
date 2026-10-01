@@ -16,11 +16,14 @@ tool for the author's own GitOps repo first, written so other repos with the sam
 Status: pre-alpha, first tag `v0.1.0` (main has since moved well past it — a merge is not a
 release, §7). Milestones M0–M10 and the TUI/CLI parity work (#101–#104, #132) are on `main`, so
 every operation is reachable from both the CLI and the TUI. The UX overhaul this file also
-describes — the architecture audit's findings, `internal/service` as the one use-case layer both
-faces call, the `internal/app/session` drive controller, the `internal/ui/keys` registry, and the
-redesigned screens (§4.8) — is a separate train still **in review, not yet on `main`**; this file
-states it as built because that is what the branch under review does, not a claim about what
-`main` runs today. Remaining work — the design questions the tracker flags (#24, #41, #53, #90),
+describes was built as a named stack of PRs — the architecture audit (#185, #186, #188, #203),
+`internal/service` as the one use-case layer both faces call (#190–#199, #202), the
+`internal/app/session` drive controller and the confirmation/feedback wiring (#205–#213, #215), the
+`internal/ui/keys` registry and redesigned screens (§4.8; #217–#227, #229), and this doc pass
+(#230–#234, plus the followup that corrected it) — and this file describes it as built because
+that is what those PRs contain; check the tracker and `main`'s own log for whether the stack has
+been merged, rather than trust this sentence's tense (principle 1). Remaining work — the design
+questions the tracker flags (#24, #41, #53, #90),
 the migration delta and doctrine warnings of M7 (#7), and M13's first-run wizard (#106) — is
 tracked in issues.
 
@@ -123,7 +126,10 @@ and it names the branch (`hoist/<env>/<id>`), the PR body marker (`<!-- hoist:id
 trailer (`hoist-id:`) and the approval token. *Why:* a promotion waits on a human for hours; the
 process will be killed, the laptop will sleep. A durable event log (Temporal was considered and
 declined — see §11) would only cache facts GitHub and Argo already hold, and a random id would open
-a second PR on restart.
+a second PR on restart. The waiting on CI, approval, Argo and rollout (cadences from
+`internal/config`'s `poll` section, `poll.argo`/`poll.rollout` from M5 on) is done by
+`service.Driver.Run` for the CLI and by `session.Controller`'s polls for the TUI — never by a
+`Step`'s own `Act`, which only ever acts once and returns.
 
 **Re-observing "did this land" is a three-way question, never two.** A step asking whether its own
 change is still in effect at a revision must sort that revision into *intact*, *superseded* or
@@ -219,6 +225,10 @@ surface shows is a warning the reviewer of a PR never sees.
 Config *defaults* may never weaken this; only an explicit per-env setting can. *Why:* on the target
 repo every `Application` auto-syncs with prune and self-heal, so a merge to `main` is the
 deployment, and the app entrypoint runs `db:prepare` — a merge can migrate a production database.
+`engine.DirectCommitGateStep` is checked through `Service.Preflight`, which `StartPromotion` calls
+before any planning fast path — including the all-no-op short circuit — can report success
+(`internal/service/start.go`'s `Preflight → freshness → … → no-op` order), so a direct promotion
+into production is refused before either face gets to claim there was nothing to do.
 
 ### 4.6 `exec git`, not go-git
 
@@ -239,6 +249,11 @@ driven through the Kubernetes API alone: refresh = the `argocd.argoproj.io/refre
 the `Application`, status = its `status` subresource. No Argo API server, no Argo token.
 
 ### 4.8 TUI structure
+
+Codified from PR #10, the first UI-heavy PR, which had no stated convention for any of this and
+adopted this shape as a proposal in `internal/app/doc.go` (§8, "building structure where no
+convention is stated is a decision") — stating it here once means the next screen follows it
+instead of re-litigating shape per PR.
 
 `internal/app` holds the one root `tea.Model`: the screen stack, the window size, the theme
 (built once from `tea.BackgroundColorMsg`) and the global keys. Every screen is a value-typed
@@ -274,6 +289,7 @@ Conventions every screen follows, each codified after a PR needed one and found 
 - **A screen requests navigation by emitting a message of its own concrete type**
   (`matrix.OpenPlanMsg`, `plan.BackMsg`) that the root's `Update` switches on to push or pop a
   screen — this is what keeps "a screen never imports `app`" true in the other direction too.
+  Codified from PR #27 (the plan screen), which needed this convention and found none stated.
 - **The matrix keeps a column cursor** (`matrix.Model.col`, moved by ←/→) so "current env" is real
   state (`CurrentEnv()`), independent of the row cursor. Columns come in pipeline order
   (`config.EnvsConfig.PipelineOrder`, derived from `envs.pairs`), the cursor starts on the first
@@ -334,8 +350,9 @@ Conventions every screen follows, each codified after a PR needed one and found 
   still guard the identical race with their own process-unique `gen` counters — correct, but a
   second shape for the same problem; a new screen uses `scope` from the start.
 - **Keys come from `internal/ui/keys`.** The whole approved screen × key table lives there as data
-  (`registry.go`), plus the stateless write-binding matcher that tells a real shift from caps lock
-  (§9 entry 13), `Footer` (the shared status-bar layout), and `HuhKeyMap()`. Every screen in
+  (`registry.go`), plus the stateless write-binding matcher — it rejects caps lock without shift only where
+  the terminal reports them separately; a legacy terminal's bare capital counts as shift
+  (§9 entry 13) — `Footer` (the shared status-bar layout), and `HuhKeyMap()`. Every screen in
   `internal/app` builds its key handling and footer through this package and implements
   `KeyScreen() keys.Screen` so the root's help overlay and activity log reach it generically. A raw
   `key.NewBinding` or `huh.NewDefaultKeyMap()` call anywhere under `internal/app` outside this
@@ -356,8 +373,9 @@ Conventions every screen follows, each codified after a PR needed one and found 
   oldest dropped first) of every promotion started, landed, blocked or failed, every abandon, every
   browser-launch outcome — replacing the old single transient "notice" string that a later,
   unrelated keypress silently discarded (§9 entry 10 is the sibling bug this design avoids: the
-  root's bottom row shows only the latest entry, never truncated, and is never appended past the
-  screen's own frame).
+  root's bottom row shows only the latest entry, truncated to the terminal's width with "…" when it
+  doesn't fit, and is never appended past the screen's own frame — the full text is in the activity
+  log (`l`)).
 
 ### 4.9 Configuration
 
@@ -443,9 +461,9 @@ with `plan`'s own message on every face.
 | Command | Purpose | Notes |
 |---|---|---|
 | `plan --repo <path> --from <env> --to <env> [--dry-run]` | Build a promotion plan; read-only | Resolves every source-env image to a digest first (§4.10). Prints the diff, untouched images, warnings and the Resolution section (digest/source/credential per repo, by name only). Without `--dry-run` it prints the same and exits 3 — `plan` never writes. `--digest` overrides one repo's resolved reference. |
-| `promote --repo --from --to [--base] [--override-ci-none] [--direct --confirm-direct=<env>]` | Drive a promotion to completion (resumable) | Requires `repos[].github`. Builds the same plan `plan` would, then runs `internal/engine`'s pipeline: worktree → commit (signed) → push → PR → CI green → human approval (`hoist approve <id>`, or immediate under `approval: auto`) → squash-merge (refused if the PR's head has moved since this promotion last pushed it) → Argo refresh → rollout watch. A state file under `promotions/<id>.json` is a human-readable index only (never consulted for truth). A short-lived claim file (`engine.ClaimInFlight`) closes the race between two concurrent starts; a claim conflict is never auto-resolved — recovery from a genuinely abandoned claim is deleting its file by hand. `promote` refuses a second promotion into a target env with one already in flight (re-observed). All-no-op plans print "already current" and exit 0, touching nothing. `--direct` commits straight to `--base` (`internal/engine.AllDirectSteps`) instead of opening a PR; requires `--confirm-direct=<env>` repeating `--to`'s exact value (refused otherwise); gated independently by `internal/engine.DirectCommitGateStep` against `envs.production` regardless of what the CLI or TUI believed (§4.5), and refused outright unless the repo's `envs.production` is configured. Every step past the push gates on `LandedSHA()` (derived from the state's `Direct` flag, never persisted). |
+| `promote --repo --from --to [--base] [--override-ci-none] [--direct --confirm-direct=<env>]` | Drive a promotion to completion (resumable) | Requires `repos[].github`. Builds the same plan `plan` would, then runs `internal/engine`'s pipeline: worktree → commit (signed) → push → PR → CI green → human approval (`hoist approve <id>`, or immediate under `approval: auto`) → squash-merge (refused if the PR's head has moved since this promotion last pushed it) → Argo refresh → rollout watch. A state file under `promotions/<id>.json` is a human-readable index only (never consulted for truth). A short-lived claim file (`engine.ClaimInFlight`) closes the race between two concurrent starts; a claim conflict is never auto-resolved — an earlier, more automatic design kept reintroducing the same reclaim race one layer up each time it tried to make a stuck claim self-heal (`claim.go`'s own package doc), so recovery from a genuinely abandoned claim is deleting its file by hand. `promote` refuses a second promotion into a target env with one already in flight (re-observed). All-no-op plans print "already current" and exit 0, touching nothing. `--direct` commits straight to `--base` (`internal/engine.AllDirectSteps`) instead of opening a PR; requires `--confirm-direct=<env>` repeating `--to`'s exact value (refused otherwise); gated independently by `internal/engine.DirectCommitGateStep` against `envs.production` regardless of what the CLI or TUI believed (§4.5), and refused outright unless the repo's `envs.production` is configured. Every step past the push gates on `LandedSHA()` (derived from the state's `Direct` flag, never persisted). |
 | `deploy --repo --env --image <repo:tag@sha256:…>` | `promote`'s sibling: write one caller-named ref into every occurrence of that image repo in one env | Same flags as `promote` minus `--from`, plus `--direct`/`--confirm-direct`. `gitops.BuildDeployPlan` errors if the image repo is absent from the target env. Rendered artifacts say *deploy*, never *promote*. |
-| `restart --env <env> [--family a,b] [--confirm-production=<env>]` | Roll an env's Deployments without changing declared image refs | Stamps `kubectl.kubernetes.io/restartedAt` on the live pod template (like `kubectl rollout restart`); Argo's three-way merge diff ignores it, so no drift. No plan, branch, PR or state file — re-running restarts again. Warns (never blocks) where a restart won't be graceful, including an unpinned tag. |
+| `restart --env <env> [--family a,b] [--confirm-production=<env>]` | Roll an env's Deployments without changing declared image refs | Restart is the one command that deliberately writes to the cluster instead of to git. Stamps `kubectl.kubernetes.io/restartedAt` on the live pod template (like `kubectl rollout restart`); Argo's three-way merge diff ignores it, so no drift. No plan, branch, PR or state file — re-running restarts again. Warns (never blocks) where a restart won't be graceful, including an unpinned tag. Production is gated not by §4.5's PR-and-approval pair (nothing is committed, so there is nothing to review) but by `--confirm-production=<env>` repeating the env exactly. |
 | `promotions [--repo] [--archived]` | List promotion state files, phase re-observed against the forge/cluster | A terminal promotion older than `state.retain` (config, default 30 days, measured from its last activity) is archived into `promotions/archive/` — invisible to `findInFlight` by construction, never touched while still in flight however old. `--archived` also lists the archive. |
 | `resume <id>` / `resume --env <target-env>` | Re-drive a promotion from wherever `Observe` actually finds it | Never from the state file's recorded phase. |
 | `abandon <id> --confirm-abandon=<id>` | Retire a promotion that never landed | Closes its PR and deletes its branch if it opened one; refused once the promotion has landed. |
@@ -475,8 +493,9 @@ since a legacy terminal can't tell shift from caps lock, §9 entry 13):
 | `enter` | primary action (open menu/flight, run item, start promotion/deploy, review tag) | every screen except flight, watch, config, activity |
 | `esc` | back — never cancels a running drive | every screen |
 | `?` | help overlay for the current screen | every screen |
-| `l` | activity log | every screen |
+| `l` | activity log | matrix, plan, deploy, tags, flight, watch, restart, config |
 | `q` | quit; asks first if a drive is running; only quits outright from the bare matrix | matrix, elsewhere sets a hint |
+| `ctrl+c` | quit immediately, no confirm; after exit every in-flight promotion id is printed with its `hoist resume`, from any screen. Swallowed while the `q` quit-confirm dialog is open | every screen |
 | `r` / `F5` / `ctrl+r` | re-observe / refresh / reload / rebuild from origin | matrix, plan, deploy, flight, watch, restart, tags |
 | `o` | open PR | matrix, flight |
 | `p` | promote into the cursor's column | matrix, menu |
@@ -995,7 +1014,7 @@ test lives** (if one exists).
    `TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy` in `internal/service/inflight_test.go`
    (#165, #166).
 12. **A background effect owned by a screen dies with the screen.** What happened: before the
-   session controller existed (Train 2 design, FB-H2), the flight screen owned its own driver, ctx
+   session controller existed (FB-H2), the flight screen owned its own driver, ctx
    and tick chain — so leaving it (Esc) had to cancel that ctx or leak the goroutine, and "leaving"
    and "stopping the promotion" were the same code path by construction. That coupling was never a
    deliberate choice about what Esc should MEAN; it was a consequence of where the state happened
@@ -1007,8 +1026,8 @@ test lives** (if one exists).
    giving the screen the only reference to it means popping the screen is the only way anything
    else ever finds out the drive existed. Rule: a background effect that must outlive navigation is
    owned by something above every screen that can navigate — here,
-   `internal/app/session.Controller` (a value on the ROOT model, D1 of the Train 2 design) — and a
-   screen only ever mirrors a `Snapshot` of it (D3); popping a screen changes what is drawn, never
+   `internal/app/session.Controller` (a value on the ROOT model) — and a
+   screen only ever mirrors a `Snapshot` of it; popping a screen changes what is drawn, never
    what is running. `x` (the
    screen's own "stop watching" key) is retired entirely once `esc` already means exactly that and
    nothing more. Regression tests: `TestEscFromFlightLeavesDriveRunning`,
@@ -1018,7 +1037,7 @@ test lives** (if one exists).
    wait for a busy Step, and R's refusal while it waits, be answered correctly by the controller
    alone, with no screen involved at all) — all in `internal/app` and `internal/app/flight`.
 13. **A legacy terminal cannot tell shift from caps lock, and `key.Matches` cannot tell either
-   even when a terminal can.** What happened: the T3 keymap audit set out to display every write
+   even when a terminal can.** What happened: the keymap audit set out to display every write
    binding as `shift+r` rather than a bare `R`, on the theory that hoist could simply match
    `key.WithKeys("shift+r")`. It cannot: `bubbletea/v2` requests no keyboard enhancement by
    default, so a printable letter arrives as one byte and ultraviolet's decoder sets `ModShift`
@@ -1043,7 +1062,7 @@ test lives** (if one exists).
    `TestWriteMatches` in `internal/ui/keys/keys_test.go` covers all seven cases (legacy shift,
    legacy bare capital, kitty shift, kitty caps lock alone — rejected, kitty shift+caps lock,
    lower case — rejected, ctrl+shift — rejected); `TestNoBareCapital` asserts no `Show`, `Desc`
-   or rendered footer in the registry shows a bare capital letter. Addendum (T3 review P1-1):
+   or rendered footer in the registry shows a bare capital letter. Addendum, found in a later review:
    requesting `ReportAllKeysAsEscapeCodes` alone (flag 8) without also requesting
    `ReportAlternateKeys` (flag 4) and `ReportAssociatedText` sends a Kitty-protocol terminal no
    shifted-key or text component for punctuation — a decoder then upper-cases the base rune, a
@@ -1054,7 +1073,7 @@ test lives** (if one exists).
    `ReportAllKeysAsEscapeCodes | ReportAlternateKeys | ReportAssociatedText` — every render
    (`app.go`'s `View`); a terminal that doesn't support the request, or doesn't grant it, simply
    never sends a `KeyboardEnhancementsMsg` back, so a legacy terminal is unaffected either way.
-   Regression tests (T3 followup, group 5 — the test named here previously,
+   Regression tests (the test named here previously,
    `TestKittyShiftedPunctuationNeedsAlternateKeys`, decodes the raw pre-fix byte sequence directly
    against ultraviolet's decoder with no flag requested at all, so it documents the bug's shape
    but cannot fail from a regression in what `View` requests; it is not the gate): the actual gate

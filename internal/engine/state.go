@@ -125,7 +125,7 @@ type PromotionState struct {
 	// carried, not re-derived, plan-time fact.
 	//
 	// A state file written before M5 added this field decodes it as empty, which is not the same
-	// thing as a promotion computed to touch no Application (review finding): a non-empty
+	// thing as a promotion computed to touch no Application: a non-empty
 	// Edits with an empty ArgoApps is only possible for a state that predates ArgoAppNames ever
 	// running against it, since a real call against a non-empty edit set always yields at least
 	// one name or an error (see ArgoAppNames' own doc comment). cmd/hoist/resume.go's
@@ -138,8 +138,8 @@ type PromotionState struct {
 	// can scope a question ("is Application X's own share of this promotion still landed") to
 	// just that Application's files instead of asking it of the whole promotion. Computed once
 	// by EditApps when the promotion is first built, carried like ArgoApps, and repaired by
-	// ensureArgoApps for a state file saved before this field existed (review finding,
-	// PR #182: ArgoSyncedStep.revisionCarries used to call observeLanded over the whole
+	// ensureArgoApps for a state file saved before this field existed (PR #182:
+	// ArgoSyncedStep.revisionCarries used to call observeLanded over the whole
 	// promotion and apply that one verdict to every Application in the loop, so one Application
 	// superseded by a later deploy silently skipped the health check on every OTHER Application
 	// in the same block — the same class of bug AGENTS.md §4.1's #168 interim-state note
@@ -241,7 +241,7 @@ func ArchiveDir() (string, error) {
 // promotion can still be genuinely in flight (blocked for weeks, say). `hoist promotions` is
 // the one caller, and follows exactly that order.
 //
-// Two known, accepted edge cases (a fresh-eyes cross-stack review; recorded rather than fixed,
+// Two known, accepted edge cases (recorded rather than fixed,
 // since both are narrow and the single-operator CLI mostly serializes itself):
 //
 //   - `LastActivity`'s own "when did anything last happen" reading resets every time

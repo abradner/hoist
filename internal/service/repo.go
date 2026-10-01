@@ -87,7 +87,7 @@ func (s *Service) LoadRepo(ctx context.Context, mode RepoMode) (RepoView, error)
 		// so publishing outside that lock let whichever of the two happened to reach s.mu.Lock
 		// second win regardless of which one actually finished its own fetch-discover sequence
 		// second — an older refresh's stale view could overwrite a newer one that had already
-		// landed (P3 #8). Publishing before Unlock keeps "last to hold refreshMu"
+		// landed. Publishing before Unlock keeps "last to hold refreshMu"
 		// and "last to publish" the same event.
 		s.mu.Lock()
 		s.view = view

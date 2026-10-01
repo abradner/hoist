@@ -15,7 +15,7 @@ import (
 )
 
 // EnsureArgoApps repairs a state file written before M5 added PromotionState.ArgoApps: JSON
-// decoding an older file leaves the field empty (review finding), and
+// decoding an older file leaves the field empty, and
 // ArgoRefreshedStep/ArgoSyncedStep both take their `len(apps) == 0` "no Argo Application in this
 // promotion's plan" success path on an empty ArgoApps — so an upgraded, already-in-flight
 // promotion could be reported complete having never actually checked the Application it edited.
@@ -43,7 +43,7 @@ import (
 // since Applications remain the primary concern, but it closes both gaps a legacy state can
 // have.
 //
-// s.EditApps gets the same treatment as a third, independent gap (review, PR #182): a
+// s.EditApps gets the same treatment as a third, independent gap (PR #182): a
 // state file saved any time between M5 and EditApps' own introduction has a populated ArgoApps
 // but a nil EditApps, since the two fields were computed together at construction from that
 // point on but ArgoApps alone before it — so "ArgoApps non-empty" cannot stand in for "EditApps
@@ -51,8 +51,8 @@ import (
 // terms, discovering the repo only once for whichever of the two repairs this state actually
 // needs.
 //
-// Moved unchanged from cmd/hoist/resume.go's ensureArgoApps, and exported (it moved unexported
-// in the design's own first draft) because both List and Resume in this file call it, and a
+// Moved unchanged from cmd/hoist/resume.go's ensureArgoApps, and exported because both List and
+// Resume in this file call it, and a
 // resume_test.go's own legacy-state regression coverage needs it directly too.
 func EnsureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 	needsApps := len(s.ArgoApps) == 0 && len(s.Edits) > 0
@@ -93,8 +93,8 @@ func EnsureArgoApps(s *engine.PromotionState, rc config.RepoConfig) error {
 // from cmd/hoist's own runResume/runAbandon) is a NEW path-traversal surface: an id containing
 // a path separator or ".." reaches outside the promotions directory (`../../etc/passwd`), or
 // sideways into the archive subdirectory (`archive/<real-id>`), letting `hoist resume`/`hoist
-// abandon` act on an archived or aged-out promotion `hoist promotions` never lists as live
-// (P3). Find refuses any id containing a path separator or ".." outright, and —
+// abandon` act on an archived or aged-out promotion `hoist promotions` never lists as live.
+// Find refuses any id containing a path separator or ".." outright, and —
 // once a state file does load — refuses one whose own ID does not match id, so a file that
 // happens to sit at the expected path but was never saved as this id (or was moved/archived
 // since) is treated as not found rather than silently acted on.
@@ -190,7 +190,7 @@ func (s *Service) FindInFlightForEnv(ctx context.Context, env string) (*engine.P
 // be built, EnsureArgoApps failed, or the re-observation itself errored (already redacted —
 // AGENTS.md §4.10); otherwise Statuses is engine.Status's own full per-step walk and Last is its
 // final entry (the CLI only ever prints Last; the matrix's pane needs every entry to draw
-// per-step glyphs — see risk 8 in the design doc this PR implements: engine.Status is used here,
+// per-step glyphs. engine.Status is used here,
 // not engine.ObserveAll, specifically so one walk serves both, and Last is derived from its own
 // final entry rather than a second, separate ObserveAll call).
 type Listed struct {
@@ -202,7 +202,7 @@ type Listed struct {
 	Unconfigured bool
 	// Archived is true when this same List call just archived this promotion (it was Done and
 	// older than ArchiveDoneOlderThan) — the CLI's own --archived listing needs this to avoid
-	// printing an archived-this-run promotion a second time (review finding, #181).
+	// printing an archived-this-run promotion a second time (#181).
 	Archived bool
 	// ArchiveErr is set when archiving was attempted (Done, past the retention window) but
 	// failed — the promotion is still reported Done, with the archive failure alongside it,
@@ -223,8 +223,7 @@ type ListOpts struct {
 // List re-observes every live promotion state file — `hoist promotions`' own listing and the
 // matrix's in-flight pane both drive from this one call now (previously two separate re-
 // observation loops, cmd/hoist/resume.go's runPromotions and cmd/hoist/wiring.go's
-// observeForList, which could in principle disagree about the very same state file — aggregate
-// review of stack #137 already flagged this once for the Argo/rollout client alone). Never
+// observeForList, which could in principle disagree about the very same state file). Never
 // reads a state file's own recorded Phase (AGENTS.md §4.1) and never returns early on one
 // candidate's own error — a promotion that cannot be confirmed is reported as such (Listed.Err),
 // never dropped.
@@ -310,11 +309,9 @@ func (s *Service) ListArchived(repoFullName string) ([]*engine.PromotionState, e
 // the same flag); Hooks carries the progress/onWaiting callbacks the returned Drive is built
 // with — wiring Hooks.Progress into the Driver here (DriverHooks{Progress: o.Hooks.Progress})
 // gives any CALLER that passes a Hooks value the same per-step progress a freshly started
-// promotion already gets through StartPromotion. This is stated, not enforced, for the TUI's own
-// resume path (matrix.ResumeMsg in internal/app/app.go): as of this PR it still calls
-// svc.Resume(ctx, id, service.ResumeOpts{}) with no Hooks, so a resumed promotion's flight screen
-// shows no live progress line yet — closing that is a later train's work, not this one's; only
-// the CLI's runResume passes Hooks today.
+// promotion already gets through StartPromotion. Both faces pass Hooks: the CLI's runResume,
+// and the TUI through session.Controller's resume (startHooks), so a resumed promotion's flight
+// screen shows the same live progress line a freshly started one does.
 type ResumeOpts struct {
 	OverrideCINone bool
 	Hooks          Hooks
@@ -345,8 +342,8 @@ type ResumeOpts struct {
 //     independently of Confirmed (AGENTS.md §4.5), so resuming can never reach an env the
 //     original run would have been refused.
 func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, error) {
-	// Honours ctx eagerly, unlike the TUI's own pre-move Resume adapter (design doc Divergence
-	// 6: it built a state and Driver even against an already-cancelled context) — a caller that
+	// Honours ctx eagerly, unlike the TUI's own pre-move Resume adapter (it built a state and
+	// Driver even against an already-cancelled context) — a caller that
 	// cancelled before calling Resume should never see it start building a state at all.
 	if err := ctx.Err(); err != nil {
 		return nil, err

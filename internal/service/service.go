@@ -18,8 +18,7 @@ import (
 // never wedge every later attempt for the rest of the session) and why Git/Cluster are never
 // memoized at all: Git carries no per-target state to cache (git.Exec{} is stateless, and a
 // test swaps newGit mid-run — abandon_test), and Cluster is opened fresh per call today (the
-// drift column already does this; caching it would be a behavior change this train does not
-// make).
+// drift column already does this; caching it would be a behavior change).
 type Service struct {
 	settings Settings
 	deps     Deps
@@ -36,7 +35,7 @@ type Service struct {
 	// (index.lock contention, a worktree registration torn between the two). The TUI's own
 	// matrix already avoids issuing two concurrent asks (askRepoRefresh's
 	// refreshingRepo/refreshAgain coalescing), but that is UI-level politeness, not the actual
-	// guarantee: a completion-triggered refresh (Train 2 design PR 4) and an F5 the operator
+	// guarantee: a completion-triggered refresh and an F5 the operator
 	// presses in the same instant both reach LoadRepo directly, and this mutex is what makes
 	// two such loads inside one running `hoist` unable to run at once — see AGENTS.md §8's
 	// deletion test: the matrix's own guard could be deleted without this directory becoming
@@ -150,7 +149,7 @@ func (s *Service) Cluster(kubeContext string) (k8s.Cluster, string, error) {
 // repo's default.
 //
 // A free function over Deps, not a Service method, because cmd/hoist's own callers
-// (runPromotions/runResume, moving into this package in a later PR) build one of these per
+// (cmd/hoist's runPromotions/runResume) build one of these per
 // promotion in a loop over possibly-different repos[] entries — exactly what buildArgoRolloutIn
 // (cmd/hoist/resume.go) did before this move, unmemoized, since each call may target a
 // different cluster context. A Service that already holds the right Settings can still get the

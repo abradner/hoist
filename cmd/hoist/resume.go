@@ -31,10 +31,8 @@ func promotionsSettings(cfg *config.Config, kubeOverride string) service.Setting
 }
 
 // boundedCommandContext gives runPromotions/runResume/runAbandon the same interruptible,
-// deadline-bounded context every one of them built by hand before this PR: talking to a real
-// forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate
-// (finding, applied to runPromotions and missed on runResume's --env path until this
-// unification).
+// deadline-bounded context: talking to a real
+// forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate.
 func boundedCommandContext(deadline time.Duration) (context.Context, context.CancelFunc) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	if deadline <= 0 {
@@ -85,7 +83,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			// Named explicitly rather than folded into the bare message below: a --repo typo
 			// (repos[].github is owner/name, not the config entry's own name: or path:) would
 			// otherwise print identically to "you have no promotions at all", with nothing to
-			// suggest the filter itself might be the reason (review finding).
+			// suggest the filter itself might be the reason.
 			fmt.Fprintf(stdout, "hoist promotions: no promotions found for --repo %s\n", *repoFilter)
 			return 0
 		}
@@ -94,7 +92,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	}
 	// archivedThisRun tracks ids this same invocation just moved to the archive (Listed.Archived),
 	// so --archived's own listing below (which reads ArchiveDir fresh, after the loop) does not
-	// print one of them a second time — review finding.
+	// print one of them a second time.
 	archivedThisRun := map[string]bool{}
 	for _, l := range listed {
 		s := l.State

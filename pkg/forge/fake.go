@@ -459,7 +459,7 @@ func (f *Fake) SetBase(prNumber int, base string) {
 }
 
 // SetClosed is the test-only hook standing in for an operator closing a PR on GitHub without
-// merging it (finding: PROpenedStep must refuse to adopt one of these as satisfied).
+// merging it: PROpenedStep must refuse to adopt one of these as satisfied.
 func (f *Fake) SetClosed(prNumber int, closed bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

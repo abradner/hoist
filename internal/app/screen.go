@@ -17,13 +17,13 @@ import (
 )
 
 // keyed is implemented by a screen adapter whose underlying screen has a stated row in
-// internal/ui/keys' registry  — the root's own "?" and "l" key handling (app.go's
+// internal/ui/keys' registry — the root's own "?" and "l" key handling (app.go's
 // Update) only fires for a top screen that implements this, so the help overlay never lists
-// keys a screen doesn't honour yet (the audit doc's scope) and "l" never opens the
+// keys a screen doesn't honour and "l" never opens the
 // activity log from a screen that hasn't opted in. Every adapter embeds its package's Model by
 // value, so this is promoted automatically wherever the underlying Model itself exposes
-// KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own later PRs
-// (onward); watchScreen, restartScreen, configScreen and activityScreen get it here.
+// KeyScreen() — matrixScreen and the confirm/picker screens pick this up in their own package;
+// watchScreen, restartScreen, configScreen and activityScreen get it here.
 type keyed interface{ KeyScreen() keys.Screen }
 
 // Screen is what the root drives. Screens are values: every method returns the updated
@@ -100,7 +100,7 @@ func (s planScreen) ResetStarting() Screen { return planScreen{s.Model.ResetStar
 // flightScreen adapts flight.Model the same way. It is pushed on top of the plan screen
 // when the operator confirms a plan (plan.StartMsg, handled in app.go's own start()), and on
 // top of the matrix when resuming one already on disk (matrix.ResumeMsg). It is a pure mirror
-// of one internal/app/session.Controller entry (Train 2 design, D3): app.go's start()
+// of one internal/app/session.Controller entry: app.go's start()
 // constructs it once, already attached, via flight.NewAttached, and every later change reaches
 // this same instance through Mirror as the root's apply() routes session.Change values to it —
 // the screen itself drives nothing and calls no Driver.

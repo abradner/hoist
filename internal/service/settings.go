@@ -11,7 +11,7 @@ import (
 // boundary — cmd/hoist's own settingsFor builds it from the effective flag/config precedence
 // selectRepo already computes; the TUI shares the exact same struct rather than rebuilding an
 // equivalent one, which is what let the two faces' kube-context fallback drift into five
-// separate copies (AGENTS.md's Divergences).
+// separate copies.
 type Settings struct {
 	RepoDir, AppsRoot string
 	Base              string
@@ -38,8 +38,7 @@ type Settings struct {
 	Config *config.Config
 
 	// Resolve is the digest-resolution chain for THIS run: order, registry auth, cluster
-	// secret, op ref (NewResolveOptions, resolve.go). Added in PR B, alongside the rest of
-	// the resolution machinery it was deferred with in PR A's own doc comment.
+	// secret, op ref (NewResolveOptions, resolve.go).
 	Resolve ResolveOptions
 
 	Poll     engine.PollIntervals

@@ -124,9 +124,9 @@ func toPR(r prResponse) forge.PR {
 		Base:       r.Base.Ref,
 		Merged:     merged,
 		// Closed-without-merging: GitHub's "state" is "closed" but this PR never merged — a
-		// dead PR (finding: FindPR's own state=all query can return one of these, and a
+		// dead PR: FindPR's own state=all query can return one of these, and a
 		// caller that adopts it as "found, therefore satisfied" would try to merge a PR whose
-		// merge call always 405s).
+		// merge call always 405s.
 		Closed:    r.State == "closed" && !merged,
 		MergeSHA:  r.MergeCommitSHA,
 		CreatedAt: r.CreatedAt,
@@ -260,11 +260,10 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 	var runs []checkRun
 	// lastPageFull tracks whether the loop's final iteration returned a full 100-row page:
 	// true only when the loop ran out of pages (maxCheckRunPages) without ever seeing a
-	// short page, which is exactly "there may be more beyond the bound" (Known bug classes,
-	// the P1-adjacent hardening this pagination fix's own bound can reintroduce: silently
+	// short page, which is exactly "there may be more beyond the bound": silently
 	// truncating at maxCheckRunPages is the identical failure mode as never paginating at
 	// all, just moved further out — a later pending/failed run past the bound would make CI
-	// appear green when it isn't).
+	// appear green when it isn't.
 	lastPageFull := false
 	for page := 1; page <= maxCheckRunPages; page++ {
 		var resp checkRunsResponse
@@ -399,13 +398,12 @@ func commentsQuery(since time.Time, page int) url.Values {
 // account, not a bot), and the set of values isn't closed, so filtering on Type != "User" would
 // silently drop a real, non-bot commenter along with actual bots.
 //
-// Paged through every page GitHub reports (Known bug classes: "only page 1 of a PR's comments
+// Paged through every page GitHub reports: "only page 1 of a PR's comments
 // is fetched" — a PR with more than 100 comments could otherwise hide an approval or a later
-// reject past the first page, so ApprovedStep's newest-match scan would never see it).
+// reject past the first page, so ApprovedStep's newest-match scan would never see it.
 func (c *Client) Comments(ctx context.Context, prNumber int, since time.Time) ([]forge.Comment, error) {
 	var resp []commentResponse
-	// lastPageFull mirrors Checks' own bound-vs-truncation tracking (Known bug classes, the
-	// P1-adjacent hardening this pagination fix's own bound can reintroduce): true only when
+	// lastPageFull mirrors Checks' own bound-vs-truncation tracking: true only when
 	// every page up to maxCommentPages came back full, meaning there may be more comments
 	// beyond the bound this loop never saw — silently truncating here could hide a later
 	// approve or reject exactly as the original unpaginated bug did, just moved further out.

@@ -32,7 +32,7 @@ package engine
 // (a second request while one is already in flight is a no-op to the controller), so this costs
 // an extra API call, never a second real action.
 //
-// A residual gap, raised and confirmed in review but deliberately not fixed here: the
+// A residual gap, deliberately not fixed here: the
 // "guaranteed to be no earlier than the real merge event" claim above holds by causality (the
 // merge must have already happened, on GitHub's own servers, before this process's Observe can
 // see pr.Merged==true over the network) but the anchor's *value* is this process's own
@@ -92,7 +92,7 @@ func (s *PromotionState) argoApplications() []argo.Application {
 
 // editsForApp returns just the edits (and matching ExpectedBlobs entries) s.EditApps attributes
 // to appName — the scoping a per-Application landed-verdict question needs (revisionCarries,
-// review, PR #182: see observeLanded's own doc comment for why asking the whole
+// #182: see observeLanded's own doc comment for why asking the whole
 // promotion's verdict on behalf of one Application was wrong). Every driver of ArgoSyncedStep
 // (internal/service.Driver, shared by the CLI and the flight screen) runs against a state that
 // has already been through EnsureArgoApps — a fresh promotion has EditApps set at construction,
@@ -280,8 +280,8 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			// This app's synced revision landed and was replaced by a later, legitimate
 			// change (AGENTS.md §4.1: superseded is satisfied, not reverted) — the live
 			// containers now legitimately run someone else's later change, not this
-			// promotion's own Edit.New. Round-2 review finding: calling rolloutCause here
-			// compared the wrong thing against imageMismatches (reporting "image not yet
+			// promotion's own Edit.New. Calling rolloutCause here used to compare the wrong
+			// thing against imageMismatches (reporting "image not yet
 			// live" for an image this promotion never expects to see live again) and, worse,
 			// could Block an already-finished promotion on an unrelated later deploy's own
 			// failed rollout. This app needs nothing further from this step.
@@ -314,7 +314,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 // landedSuperseded (the original "carried" meaning, unchanged), but the caller needs to tell
 // them apart: a superseded app's live containers legitimately run a LATER, unrelated change,
 // so comparing them against this promotion's own stale Edit.New (rolloutCause, below) would be
-// meaningless at best and a wrong Block at worst — review finding against an earlier
+// meaningless at best and a wrong Block at worst — a bug found against an earlier
 // version of this split.
 //
 // Three cases, in order:
@@ -399,9 +399,9 @@ func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState) (de
 			}
 			// A transient error (not "genuinely absent") means this read cannot be trusted
 			// for ANY Deployment this round — reporting a confident cause built from an
-			// incomplete picture (review finding: an earlier version silently
-			// swallowed this on one Deployment while confidently naming or Blocking on
-			// another) would be worse than the plain sync/health tuple the caller falls
+			// incomplete picture (an earlier version silently swallowed this on one
+			// Deployment while confidently naming or Blocking on another) would be worse
+			// than the plain sync/health tuple the caller falls
 			// back to. RolledOutStep's own poll loop is what actually retries a transient
 			// failure; this courtesy read simply says nothing this round.
 			return "", false
@@ -473,8 +473,8 @@ func groupEditsByWorkload(edits []gitops.Edit) (deployments map[string][]deploym
 }
 
 // containerKey identifies one container slot within a Deployment's live spec — a typed
-// alternative to a [2]any map key (review finding: unsafe and easy to misuse for no
-// benefit over a two-field struct).
+// alternative to a [2]any map key: unsafe and easy to misuse for no
+// benefit over a two-field struct.
 type containerKey struct {
 	name string
 	init bool
@@ -511,14 +511,14 @@ func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []stri
 // naming the Deployment — mirroring ArgoRefreshedStep/ArgoSyncedStep's own errorsIsNotFound
 // handling of a missing Application, for the same reason: retrying cannot make a deleted object
 // reappear, and a generic plumbing error would read as "something is broken" rather than "this
-// object is gone" (review finding). Any other error reading a Deployment (a transient
+// object is gone". Any other error reading a Deployment (a transient
 // API hiccup) still propagates as a plain error, for the CLI's poll loop to retry.
 //
 // Jobs and CronJobs this promotion touched are listed, never gated on: any error reading one
 // (not found — a short ttlSecondsAfterFinished or an Argo hook's deletion policy can GC a Job
 // before this Observe gets to it — or transient) becomes a report line and the loop continues,
 // rather than a hard error that would gate the whole promotion on a status this step's own
-// contract says it never gates on (review finding).
+// contract says it never gates on.
 type RolledOutStep struct{ Rollout rollout.Rollout }
 
 // Name implements Step.
@@ -571,7 +571,7 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 			// Report-only (this step's own doc comment, invariant 4): a Job/CronJob hoist
 			// cannot even read (GC'd, or a transient API error) is surfaced as a report line,
 			// never as a Blocked/hard-error that would gate the whole promotion on a status
-			// this step never gates on (review finding).
+			// this step never gates on.
 			jobReports = append(jobReports, fmt.Sprintf("%s %s: could not check (%s)", jl.Kind, jl.Name, err))
 			continue
 		}

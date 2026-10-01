@@ -4,8 +4,8 @@ import "charm.land/bubbles/v2/viewport"
 
 // ViewportKeyMap is the one viewport.KeyMap every read-only scrolling body in this app should
 // use — config, activity and the tag picker's commit reader already built this same literal by
-// hand (three copies drifting independently); P2-6 in the T3 review found that plan, deploy,
-// flight, restart and watch's own viewports were left on viewport.New()'s bubbles-library
+// hand (three copies drifting independently); plan, deploy, flight, restart and watch's own
+// viewports were left on viewport.New()'s bubbles-library
 // default instead, which binds space/f/b to PageDown/PageUp, "d"/"u" (bare, no ctrl) to
 // half-page, and left/right/h/l to horizontal scroll — none of it ever shown on a footer or
 // help overlay, all of it live. That is why space still scrolled the deploy confirm screen
@@ -20,7 +20,7 @@ import "charm.land/bubbles/v2/viewport"
 // own diff viewport used to hard-wrap (bubbles' default when SoftWrap is off is actually a
 // horizontal crop, not a wrap), which cut a long image reference off before its digest ever
 // scrolled into view — and with Left/Right unbound there, there was no way to see the rest
-// either. T3 followup, group 2: both screens now set SoftWrap on their own viewport instead of
+// either. Both screens now set SoftWrap on their own viewport instead of
 // wiring up horizontal scroll here, so the full line — digest included — is always on screen,
 // just taller. A future viewport that genuinely needs horizontal scroll over unwrapped content
 // should bind Left/Right explicitly at that call site rather than here, since this keymap is

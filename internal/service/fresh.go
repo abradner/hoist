@@ -20,7 +20,7 @@ import (
 // Set by Service.Plan for every promotion it builds (plan.go); nil for a deploy (checkFreshBase
 // branches on Plan.IsDeploy before ever consulting it). A caller with no PlannedChange behind
 // its plan at all (the TUI's own ticked-and-filtered confirm) passes nil, and freshDigestsFor
-// falls back to recovering digests from the plan's own edits instead — Divergence 8's TUI rule,
+// falls back to recovering digests from the plan's own edits instead — the TUI's rule,
 // preserved unchanged.
 type freshInputs struct {
 	digests map[string]image.Ref
@@ -252,7 +252,7 @@ func deployRefOf(p gitops.Plan) image.Ref {
 
 // freshDigestsFor picks the digests/reasons checkFreshBase rebuilds the fresh plan with: fresh's
 // own values when the caller had a resolution behind this plan (the CLI's own already-completed
-// resolution, carried on PlannedChange), else recovered from pl's own edits — Divergence 8's TUI
+// resolution, carried on PlannedChange), else recovered from pl's own edits — the TUI's
 // rule, unchanged: the point of this check is whether origin's tree has an occurrence THIS plan
 // cannot see, so the two plans must differ only in the tree they were built from; re-running
 // resolution here could also move the refs and turn a resolution change into a phantom missing
@@ -271,7 +271,7 @@ func freshDigestsFor(pl gitops.Plan, fresh *freshInputs) (map[string]image.Ref, 
 }
 
 // checkFreshBase is direct mode's own additional gap-closer alongside checkCloneCurrentForBase
-// (round-N finding, "base-advanced-with-new-occurrence"): it independently discovers and plans
+// ("base-advanced-with-new-occurrence"): it independently discovers and plans
 // from a throwaway, freshly-fetched snapshot of origin/base's current tree, then refuses if that
 // discovers any occurrence — identified by file/line/column, never by its current value, since a
 // differing value at an ALREADY-known position is exactly what checkCloneCurrentForBase already

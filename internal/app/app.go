@@ -48,7 +48,7 @@ import (
 // gets today's original launch-only behavior rather than a silently different one.
 //
 // Starting and driving a promotion itself goes through session.Controller (New's own m.sess,
-// built from svc and Poll — Train 2 design), not through this struct.
+// built from svc and Poll), not through this struct.
 type Promotion struct {
 	Poll       flight.PollDurations
 	OpenURL    func(url string) error
@@ -90,13 +90,13 @@ type Model struct {
 	tagsFn     tags.BuildFunc
 	// restartFn is everything the restart screen needs from the cluster, supplied by the root's
 	// own caller (cmd/hoist) so this package opens no connection of its own (AGENTS.md §4.8).
-	// cmd/hoist's buildRestartFuncs (Train 2 design PR 7) asks the cluster fresh on every call,
+	// cmd/hoist's buildRestartFuncs asks the cluster fresh on every call,
 	// so a boot-time failure is retried the next time R is pressed rather than wedged for the
 	// session; zero here means the caller chose not to wire a cluster at all, and R says so.
 	restartFn apprestart.Funcs
 	// watchFn builds the watch screen's read function for one family in one env (WithWatch;
 	// cmd/hoist's buildWatchFunc). Never nil once wired: buildWatchFunc itself retries the
-	// cluster per call (PR 7) and reports the real error from whatever failed, rather than this
+	// cluster per call and reports the real error from whatever failed, rather than this
 	// package ever collapsing it to a generic "none configured". nil means the caller chose not
 	// to wire a cluster at all, and w says so.
 	watchFn watch.BuildFunc
@@ -107,16 +107,16 @@ type Model struct {
 	history history.Funcs
 
 	// sess is the one place a build, resume, step, abandon or listing actually happens
-	// (internal/app/session, Train 2 design). It is a value: every state change happens inside
+	// (internal/app/session). It is a value: every state change happens inside
 	// Update or one of its own methods, each returning a new Controller (AGENTS.md §4.8's
-	// value-model convention, D1 of the design). Every background command it issues reaches the
-	// root as a session.Event, handled by exactly one case in Update below (D2); a flightScreen
-	// only ever mirrors a Snapshot from it and drives nothing itself (D3, internal/app/flight's
+	// value-model convention). Every background command it issues reaches the
+	// root as a session.Event, handled by exactly one case in Update below; a flightScreen
+	// only ever mirrors a Snapshot from it and drives nothing itself (internal/app/flight's
 	// own package doc).
 	sess session.Controller
 
 	// lastList is the most recent full listing session.ChangeListed carried (state files on
-	// disk, each re-observed) — kept so a ChangeStepped change (Train 2 design PR 4) can
+	// disk, each re-observed) — kept so a ChangeStepped change can
 	// re-merge the controller's own freshest live snapshots into the matrix's in-flight pane
 	// (mergeInFlight's own shape) without waiting for the next listing tick and without a forge
 	// call of its own: the listed-but-not-live entries in the last full listing are still good,
@@ -130,8 +130,8 @@ type Model struct {
 	openURL    func(url string) error
 	openPRMode string
 
-	// activity is the root's own record of what has happened this session (internal/app/activity,
-	// Train 2 design PR9) — a real in-flight conflict, missing config, a promotion started,
+	// activity is the root's own record of what has happened this session (internal/app/activity)
+	// — a real in-flight conflict, missing config, a promotion started,
 	// landed, blocked or failed, an abandon, a browser-launch outcome. It replaces the old
 	// transient "notice" string, which showed exactly one message and cleared unconditionally on
 	// the operator's next keypress (#164's own shape, one layer further: a real refusal that
@@ -153,20 +153,19 @@ type Model struct {
 	configText  string
 
 	// quitConfirming/quitConfirm/quitConfirmValue are q's own dialog, raised only when
-	// session.Controller.AnyRunning is true (Train 2 design PR 3: leaving flight never cancels a
+	// session.Controller.AnyRunning is true (leaving flight never cancels a
 	// drive, so quitting the whole program is the one gesture that still needs a confirm before
 	// every running drive is actually stopped watching at once) — the same keypress-then-
 	// huh.Confirm shape every other destructive gesture in this package uses, read back with
 	// GetValue, never confirmValue itself (AGENTS.md §9 entry 6). ctrl+c is deliberately NOT
 	// gated by this: promotion state is durable (§4.1) and `hoist resume` recovers whatever
-	// either quit path interrupts (the design doc's own open question #2, confirmed by the
-	// operator).
+	// either quit path interrupts, confirmed with the operator.
 	quitConfirming   bool
 	quitConfirm      *huh.Confirm
 	quitConfirmValue bool
 
 	// kbd is what the terminal answered when View below asked for
-	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes  — flag 8, the one Kitty-protocol
+	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes — flag 8, the one Kitty-protocol
 	// feature that can report a caps-lock letter as ModCapsLock distinct from ModShift
 	// (internal/ui/keys.Binding.Matches is what actually uses that bit; this field only
 	// records whether the terminal granted it). Its one use is a single line in its help
@@ -307,9 +306,9 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(tea.RequestBackgroundColor, screenCmd, m.sess.Init())
 }
 
-// start is plan.StartMsg and deploy.StartMsg's one shared dispatch (Train 2 design PR 2: the
+// start is plan.StartMsg and deploy.StartMsg's one shared dispatch — the
 // two near-identical StartMsg blocks the pre-session-controller app.go carried collapse into
-// this): ask session.Controller to Start req for (source, target), push a flightScreen already
+// this: ask session.Controller to Start req for (source, target), push a flightScreen already
 // mirroring whatever Snapshot exists the instant it agrees to track it (Building, with nothing
 // real yet — NewAttached's own doc comment), and let the resulting session.Event stream carry
 // it the rest of the way. A refusal (no backend wired, or another promotion already targets this
@@ -387,8 +386,7 @@ func (m Model) noteStarted(build session.BuildID, id string) Model {
 	return m.note(activity.Info, text, "", url)
 }
 
-// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (commit 1 of the screen's own
-// train, matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
+// matrixCountdownTick is the in-flight pane's own 1s redraw wake-up (the matrix's counterpart to flight.Model's countdownTick): it carries no data, and exists
 // purely so a message stamped with m.matrixTick reaches this root's Update once a second while
 // matrixWantsCountdown() holds, making the pane's "next check in Ns" text advance instead of
 // looking the same whether the next poll is one second away or wedged. scope.Result[T]'s own
@@ -488,8 +486,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			// Immediate, no confirm, regardless of what is running: promotion state is durable
-			// (AGENTS.md §4.1) and `hoist resume` recovers whatever this interrupts (Train 2
-			// design's own operator decision). cmd/hoist's own main.go prints every id still in
+			// (AGENTS.md §4.1) and `hoist resume` recovers whatever this interrupts, the
+			// operator's own choice. cmd/hoist's own main.go prints every id still in
 			// flight and its `hoist resume <id>` line once the program actually exits (keymap
 			// rule 4) — nothing more happens here than asking to quit.
 			return m, tea.Quit
@@ -554,7 +552,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// guards live there, once, not duplicated here) and adopts it as the root's own.
 		//
 		// A failed refresh used to become the matrix's own clear-on-next-key notice — exactly
-		// the #164 shape the activity log exists to end (P2 #7): F5 is async, so
+		// the #164 shape the activity log exists to end: F5 is async, so
 		// the operator can easily have pressed another key by the time this lands, and the
 		// refusal disappeared before it was ever read. TakeRefreshError hands back that error
 		// (and clears it on the matrix) so it goes to the activity log instead, which survives.
@@ -579,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (not a failed fetch, not the same pointer this root already held) — if the plan or
 		// deploy confirm screen asked for it (r), rebuild it against m.repo now rather than the
 		// snapshot it was pushed with; every other screen (including a matrix-only stack) is
-		// left alone, since nothing else in this train reads a repo it does not re-derive on its
+		// left alone, since nothing else reads a repo it does not re-derive on its
 		// own next open.
 		if top := len(m.stack) - 1; top >= 1 {
 			switch s := m.stack[top].(type) {
@@ -610,7 +608,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case session.Event:
-		// D2 of the design: every controller-issued command reaches the root through exactly
+		// Every controller-issued command reaches the root through exactly
 		// this one case, and everything it means for the screens on the stack is decided in
 		// apply(). session.Event is deliberately not named *Msg (internal/app/session's own
 		// doc comment) so internal/parity's own parser — which only ever collects `case
@@ -623,7 +621,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(sessCmd, applyCmd)
 	case matrix.ResumeMsg:
 		if msg.ID == "" {
-			// A still-Building pane entry (P1 #2): it has no promotion id for Resume(id) to look
+			// A still-Building pane entry has no promotion id for Resume(id) to look
 			// up yet — Resume("") used to reach Backend.Resume(ctx, "") and fail every time,
 			// popping the freshly-pushed flight screen right back off with "could not start
 			// promotion". The build is already tracked (session.Controller.Start put it there);
@@ -722,19 +720,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case flight.BackMsg:
 		// esc: stop watching this promotion from the TUI only — the drive itself keeps running,
-		// Building included (Train 2 design PR 3, the operator's own decision: leaving flight
-		// never cancels anything). Nothing here touches session.Controller at all any more;
+		// Building included, the operator's own decision: leaving flight
+		// never cancels anything. Nothing here touches session.Controller at all any more;
 		// enter/r on the matrix's in-flight pane (matrix.ResumeMsg below) re-attaches a fresh
 		// flightScreen to the exact same BuildID/id later, and session.Controller.Start/Resume's
-		// own dedup (already in place before this PR) is what keeps that from ever starting a
+		// own dedup is what keeps that from ever starting a
 		// second driver for it.
 		//
 		// This always returns all the way to the matrix, closing every screen above it — not just
 		// the flight screen itself. A flight screen is pushed directly on top of whatever screen
 		// asked for it (the plan or deploy confirm screen, m.start's own doc comment), so a single
 		// pop used to land back on that confirm screen with the exact same plan still ticked and
-		// ready — Enter there would start the very drive esc just left watching (audit UX-H6/FB-H2,
-		// the operator's own decision, follow-up to PR 3). truncateToMatrix's own doc comment has
+		// ready — Enter there would start the very drive esc just left watching (audit UX-H6/FB-H2).
+		// truncateToMatrix's own doc comment has
 		// the mechanics.
 		return m.truncateToMatrix()
 	case flight.OpenPRMsg:
@@ -754,7 +752,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.openURL == nil {
 			// Mirrors startPromotion's own nil convention above: a caller that hasn't
 			// wired a browser opener in gets a clear notice instead of a nil-pointer
-			// panic (documented follow-up work, per PR #39's own report).
+			// panic.
 			m = m.note(activity.Err, fmt.Sprintf("open PR not wired yet: %s", msg.URL), "", msg.URL)
 			return m, nil
 		}
@@ -763,8 +761,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		open, url := m.openURL, msg.URL
 		return m, func() tea.Msg { return openURLResultMsg{url: url, err: open(url)} }
 	case openURLResultMsg:
-		// Every branch that shows anything carries msg.url as the entry's own URL — "openURLResultMsg
-		// entries carry the URL" (Train 2 design PR9) — so the activity screen and the bottom row
+		// Every branch that shows anything carries msg.url as the entry's own URL, so the
+		// activity screen and the bottom row
 		// alike can show it; the quiet-success "launch" case adds no entry at all, unchanged from
 		// the old notice convention's own silence there.
 		switch {
@@ -777,7 +775,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case flight.WatchMsg:
-		// w on the flight screen the same openWatch the matrix's own w/OpenWatchMsg
+		// w on the flight screen: the same openWatch the matrix's own w/OpenWatchMsg
 		// already uses — flight has already resolved which family (families(), its own doc
 		// comment, raising its own chooser when there was more than one), so this is exactly
 		// the plain (family, target) pair openWatch takes, pushed on top of the flight screen
@@ -846,7 +844,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tags.BackMsg:
 		return m.pop(), nil
 	case tags.SelectedMsg:
-		// /: the picker's own direct-commit gesture retired (tags.DirectRequestedMsg
+		// The picker's own direct-commit gesture is retired (tags.DirectRequestedMsg
 		// is gone); the deploy confirm screen offers shift+d itself now, once the diff is
 		// already on screen, so there is only ever one path in here.
 		return m.openDeploy(msg.ImageRepo, msg.Tag, msg.Digest, msg.Target, deployHistory(msg.Delta, msg.Declared, msg.DeclaredSince, msg.HistoryNote))
@@ -871,8 +869,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// apply reacts to every session.Change one Update(session.Event) call produced (D2/D3 of the
-// Train 2 design): most changes mean "mirror the fresher Snapshot onto whichever flightScreen is
+// apply reacts to every session.Change one Update(session.Event) call produced: most changes
+// mean "mirror the fresher Snapshot onto whichever flightScreen is
 // attached to this Build" — the default case, handled once by mirrorAttached below — with three
 // exceptions this root itself has to act on: a failed build has no Snapshot left to mirror onto
 // (the entry was never fully created) and instead pops the preflight screen with a notice; a
@@ -899,7 +897,7 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 			m.lastList = ch.List
 			m = m.remergeInFlight()
 		case session.ChangeStepped:
-			// Train 2 design PR 4, FB-M8 for a drive running here: the pane reflects this
+			// For a drive running here, the pane reflects this
 			// session's own freshest live snapshot the instant a Step lands, rather than
 			// waiting for the next listing tick (session.Config.ListEvery) — no forge call, just
 			// a re-merge of what this session already knows against the last full listing.
@@ -942,7 +940,7 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 			needsRelist = true
 		case session.ChangeRefused:
 			// A whole-listing failure (the forge/state directory unreachable) — left for a
-			// later train PR to surface; the pane simply keeps its last good listing.
+			// not surfaced; the pane simply keeps its last good listing.
 		case session.ChangeAbandoned:
 			m = m.note(activity.OK, "abandoned "+ch.ID, "", "")
 			m = m.mirrorAttached(ch.Build, ch.Snap)
@@ -1001,8 +999,8 @@ func (m Model) mirrorAttached(build session.BuildID, fallback session.Snapshot) 
 
 // remergeInFlight re-merges this session's own live snapshots (session.Controller.Live) into the
 // matrix's in-flight pane against the last full listing this session saw (m.lastList) — the exact
-// merge session.ChangeListed already does, replayed with fresher live data and no forge call
-// (Train 2 design PR 4). Used both for a fresh listing itself and, ChangeStepped's own case
+// merge session.ChangeListed already does, replayed with fresher live data and no forge call.
+// Used both for a fresh listing itself and, ChangeStepped's own case
 // above, for the pane to reflect a live entry's progress in between listing ticks.
 func (m Model) remergeInFlight() Model {
 	live := m.sess.Live()
@@ -1014,7 +1012,7 @@ func (m Model) remergeInFlight() Model {
 
 // requestMatrixRefresh triggers the matrix's own completion-triggered refresh (matrix.Model.
 // RequestRefresh: refresh() for drift, askRepoRefresh() for the repo, through the existing
-// repoGen guard and its refreshAgain coalescing — Train 2 design PR 4). The matrix always sits
+// repoGen guard and its refreshAgain coalescing). The matrix always sits
 // at stack index 0 (push never inserts below it, pop and truncateToMatrix both refuse to remove
 // it), so this indexes directly rather than searching the whole stack the way withMatrix does
 // for a message that can land while some other screen is on top.
@@ -1107,13 +1105,13 @@ func summaryForSnapshot(s session.Snapshot) flight.Summary {
 	}
 	sum := flight.Summarize(state, s.Done, s.Statuses, s.Err)
 	// This entry is being driven by THIS session, right now — never merely re-observed from a
-	// listing (summaryFor's own path never sets this) — so the pane can say so (Train 2 design
-	// PR 3, matrix.compactLine/expandedSections).
+	// listing (summaryFor's own path never sets this) — so the pane can say so
+	// (matrix.compactLine/expandedSections).
 	sum.Live = true
 	// Carried through even once ID is known, so a caller never has to branch on phase to decide
 	// which handle to use — matrix.ResumeMsg always has this session's own BuildID available for
-	// a still-Building entry, which has no promotion id yet for Resume(id) to look up (P1 #2:
-	// enter on a Building pane entry used to call Backend.Resume("") and fail).
+	// a still-Building entry, which has no promotion id yet for Resume(id) to look up:
+	// enter on a Building pane entry used to call Backend.Resume("") and fail.
 	sum.Build = s.Build
 	// s.NextPoll is only ever set for a Waiting live entry (Mirror's own doc comment in
 	// internal/app/flight/model.go) — carried straight through so the matrix's in-flight pane
@@ -1239,8 +1237,8 @@ func (m Model) View() tea.View {
 	// 4) is also requested. Without it, a terminal reporting shift+/ sends only the base
 	// codepoint '/' plus the Shift modifier, and the decoder upper-cases '/' — which is still
 	// '/' — instead of substituting the shifted key '?'. That broke '?' (open help), ':' (the
-	// digest-override input) and '@' on every kitty-protocol terminal, found in review before
-	// the T3 chain shipped. ReportAssociatedText (flag 16) is requested alongside it so a
+	// digest-override input) and '@' on every kitty-protocol terminal.
+	// ReportAssociatedText (flag 16) is requested alongside it so a
 	// terminal that prefers to report the literal produced text (rather than a codepoint the
 	// client must reinterpret) has a route to do that too; the decoder prefers Text when the
 	// terminal sends it. See internal/app/kitty_decode_test.go for the byte-level regression.
@@ -1358,7 +1356,7 @@ func (m Model) openWatch(family, target string) (tea.Model, tea.Cmd) {
 // deploy plan never resolves a digest (the reference is caller-supplied), so Plan's own Deploy
 // branch is exactly as pure as gitops.BuildDeployPlan was. Plan also attaches
 // WarnDeployIntoProduction itself now, so the confirm screen and the PR body it later renders
-// agree with the CLI's dry run by construction (service:Plan, PR B) rather than by both callers
+// agree with the CLI's dry run by construction (service.Plan) rather than by both callers
 // remembering to attach it.
 func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.History) (tea.Model, tea.Cmd) {
 	ref := image.Ref{Repo: imageRepo, Tag: tag, Digest: digest}
@@ -1373,7 +1371,7 @@ func (m Model) openDeploy(imageRepo, tag, digest, target string, h deploy.Histor
 	}
 	pl := pc.Plan
 	ds := deployScreen{deploy.New(pl, m.repo.Root, ref.String(), m.envs, m.styles).WithHistory(h).WithView(pc.View)}
-	// the picker stays on the stack underneath, unlike before this train — deploy.BackMsg
+	// the picker stays on the stack underneath, unlike the plan flow — deploy.BackMsg
 	// (esc) pops back onto that same tags.Model instance, cursor/filter/loaded rows intact,
 	// rather than all the way to the matrix. Direct mode is the deploy screen's own shift+d
 	// gesture now (Model.onKey/toggleDirect), never set here.

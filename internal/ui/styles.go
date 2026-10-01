@@ -41,8 +41,8 @@ type Styles struct {
 	// root's activity row, AGENTS.md §4.8/§9 — ui.NoticeLinesStyled takes the style a caller
 	// chose instead of always reaching for Notice).
 	Info lipgloss.Style
-	// Cursor is the cell-cursor style the matrix's grid renderer needs from
-	// on: a background fill (not just a foreground colour, the way Selected reinforces a
+	// Cursor is the cell-cursor style the matrix's grid renderer needs: a background fill
+	// (not just a foreground colour, the way Selected reinforces a
 	// row) plus bold, so a single highlighted cell reads clearly against a table of many.
 	Cursor lipgloss.Style
 	// Add and Del colour the + and - lines of a diff.
