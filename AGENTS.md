@@ -350,8 +350,9 @@ Conventions every screen follows, each codified after a PR needed one and found 
   still guard the identical race with their own process-unique `gen` counters — correct, but a
   second shape for the same problem; a new screen uses `scope` from the start.
 - **Keys come from `internal/ui/keys`.** The whole approved screen × key table lives there as data
-  (`registry.go`), plus the stateless write-binding matcher that tells a real shift from caps lock
-  (§9 entry 13), `Footer` (the shared status-bar layout), and `HuhKeyMap()`. Every screen in
+  (`registry.go`), plus the stateless write-binding matcher — it rejects caps lock without shift only where
+  the terminal reports them separately; a legacy terminal's bare capital counts as shift
+  (§9 entry 13) — `Footer` (the shared status-bar layout), and `HuhKeyMap()`. Every screen in
   `internal/app` builds its key handling and footer through this package and implements
   `KeyScreen() keys.Screen` so the root's help overlay and activity log reach it generically. A raw
   `key.NewBinding` or `huh.NewDefaultKeyMap()` call anywhere under `internal/app` outside this
