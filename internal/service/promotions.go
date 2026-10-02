@@ -208,6 +208,12 @@ type Listed struct {
 	// failed — the promotion is still reported Done, with the archive failure alongside it,
 	// exactly as runPromotions always has.
 	ArchiveErr error
+	// Cleaned is one line per thing this same List call removed for a promotion it observed
+	// landed (its worktree, its local branch — CleanupLanded); CleanupErr is why that removal
+	// was refused or failed. Neither changes Done: a promotion is no less finished for still
+	// having a worktree.
+	Cleaned    []string
+	CleanupErr error
 }
 
 // ListOpts scopes and configures one List call: RepoFullName filters to one repo ("" lists
@@ -271,6 +277,12 @@ func (s *Service) listOne(ctx context.Context, st *engine.PromotionState, o List
 	l := Listed{State: *st, Done: done, Statuses: statuses}
 	if n := len(statuses); n > 0 {
 		l.Last = statuses[n-1]
+	}
+	if engine.Landed(statuses) {
+		// Landed, by this call's own observation: nothing after the landing step reads the
+		// worktree or the local branch, so both go now rather than waiting for the rollout
+		// (which a superseded promotion never completes — #168).
+		l.Cleaned, l.CleanupErr = s.CleanupLanded(ctx, st)
 	}
 	if done && o.ArchiveDoneOlderThan > 0 && time.Since(st.LastActivity()) > o.ArchiveDoneOlderThan {
 		if aerr := s.deps.Store.Archive(st.ID); aerr != nil {
@@ -374,11 +386,12 @@ func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, e
 	}
 
 	steps := engine.StepsFor(st, s.Git(), f, a, ro, rc.Envs.Production, true, o.Hooks.OnWaiting)
-	return NewDriver(steps, st, s.deps.Store.Save, s.settings.Poll, DriverHooks{Progress: o.Hooks.Progress}), nil
+	return &cleaningDrive{Drive: NewDriver(steps, st, s.deps.Store.Save, s.settings.Poll, DriverHooks{Progress: o.Hooks.Progress}), svc: s}, nil
 }
 
-// Abandon retires promotion id for good: releases the state file and, if it opened a PR, closes
-// it and deletes its remote branch. The returned actions are one human-readable description per
+// Abandon retires promotion id for good: releases the state file, removes its worktree and its
+// local branch from the operator's clone and, if it opened a PR, closes it and deletes its
+// remote branch. The returned actions are one human-readable description per
 // real action actually taken, in order (empty when nothing beyond the state file itself needed
 // touching — a direct-mode promotion never opens a PR or pushes a branch to origin at all).
 //
@@ -446,6 +459,21 @@ func (s *Service) Abandon(ctx context.Context, id string) ([]string, error) {
 			return lines, fmt.Errorf("deleting branch %s: %w", st.Branch, err)
 		}
 		lines = append(lines, "deleted branch "+st.Branch)
+	}
+
+	// The worktree and the local branch go too, and before the state file: the state file is
+	// what makes a failed abandon retryable, so it is the last thing removed. Nothing landed
+	// (re-observed above) and the operator confirmed, so the worktree holds nothing hoist would
+	// not rebuild from the same plan. A refusal — the paths could not be shown to be hoist's own
+	// — is reported and does not stop the abandon; a real failure does.
+	cleaned, cerr := s.removePromotionFiles(ctx, st, false)
+	lines = append(lines, cleaned...)
+	var refused *engine.CleanupRefusedError
+	switch {
+	case errors.As(cerr, &refused):
+		lines = append(lines, "left the worktree and local branch in place: "+refused.Reason)
+	case cerr != nil:
+		return lines, cerr
 	}
 
 	if err := s.deps.Store.Delete(id); err != nil {

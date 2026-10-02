@@ -975,6 +975,141 @@ func TestDeleteRemoteBranchIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestDeleteLocalBranch covers the three answers a caller can get: deleted, nothing to delete,
+// and refused. The branch is created with a commit its base does not contain, which is the shape
+// every squash-merged promotion branch has and the reason this is `-D` rather than `-d`.
+func TestDeleteLocalBranch(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	const branch = "hoist/app-production/del"
+	var g Exec
+	if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Commit(ctx(), wt, "unmerged work", []string{"x.txt"}, time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Checked out in a worktree: git refuses, and so does this.
+	if deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, branch); err == nil || deleted {
+		t.Fatalf("a branch checked out in a worktree must not be deleted: deleted=%v err=%v", deleted, err)
+	}
+	if ok, err := g.LocalBranchExists(ctx(), cloneDir, branch); err != nil || !ok {
+		t.Fatalf("the refused branch must still exist: ok=%v err=%v", ok, err)
+	}
+
+	if err := g.RemoveWorktree(ctx(), cloneDir, wt); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, branch)
+	if err != nil || !deleted {
+		t.Fatalf("DeleteLocalBranch: deleted=%v err=%v", deleted, err)
+	}
+	if ok, err := g.LocalBranchExists(ctx(), cloneDir, branch); err != nil || ok {
+		t.Fatalf("branch should be gone: ok=%v err=%v", ok, err)
+	}
+	if deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, branch); err != nil || deleted {
+		t.Fatalf("deleting an absent branch is a no-op, not an error: deleted=%v err=%v", deleted, err)
+	}
+}
+
+// TestDeleteLocalBranchRefusesTheClonesOwnCheckout names the one deletion that must never
+// happen: the branch the operator's own clone has checked out (AGENTS.md §4.6). Git refuses it
+// and DeleteLocalBranch passes that refusal through rather than working around it.
+func TestDeleteLocalBranchRefusesTheClonesOwnCheckout(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	before, _, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, "main"); err == nil || deleted {
+		t.Fatalf("the clone's checked-out branch must not be deleted: deleted=%v err=%v", deleted, err)
+	}
+	after, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/main")
+	if err != nil || !ok || after != before {
+		t.Fatalf("main must be untouched: %q -> %q ok=%v err=%v", before, after, ok, err)
+	}
+	for _, bad := range []string{"", "-D", "--all"} {
+		if deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, bad); err == nil || deleted {
+			t.Errorf("DeleteLocalBranch(%q) must be refused: deleted=%v err=%v", bad, deleted, err)
+		}
+	}
+}
+
+func TestWorktreeDirty(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	var g Exec
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/dirty", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := g.WorktreeDirty(ctx(), wt); err != nil || dirty {
+		t.Fatalf("a fresh worktree is clean: dirty=%v err=%v", dirty, err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "untracked.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := g.WorktreeDirty(ctx(), wt); err != nil || !dirty {
+		t.Fatalf("an untracked file makes it dirty: dirty=%v err=%v", dirty, err)
+	}
+	if _, err := g.Commit(ctx(), wt, "commit it", []string{"untracked.txt"}, time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := g.WorktreeDirty(ctx(), wt); err != nil || dirty {
+		t.Fatalf("committed work is not dirt: dirty=%v err=%v", dirty, err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := g.WorktreeDirty(ctx(), wt); err != nil || !dirty {
+		t.Fatalf("a modified tracked file makes it dirty: dirty=%v err=%v", dirty, err)
+	}
+}
+
+// TestRemoveWorktreeDeregistersADirectoryDeletedByHandUnderASymlink: the operator clears the
+// cache directory with rm, and the cache path runs through a symlink (macOS's /var, a symlinked
+// ~/.cache). Git still has the worktree registered under its resolved path; the caller only
+// knows the unresolved one, which no longer exists to be resolved. If that pair is not matched
+// up, the registration is never removed and git refuses to delete the branch for good.
+func TestRemoveWorktreeDeregistersADirectoryDeletedByHandUnderASymlink(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	realCache := filepath.Join(t.TempDir(), "real-cache")
+	if err := os.Mkdir(realCache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "cache-link")
+	if err := os.Symlink(realCache, link); err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(link, "wt")
+	const branch = "hoist/app-production/gone"
+	var g Exec
+	if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+
+	on, registered, err := g.WorktreeBranch(ctx(), cloneDir, wt)
+	if err != nil || !registered || on != branch {
+		t.Fatalf("a hand-deleted worktree is still registered and must be found: on=%q registered=%v err=%v", on, registered, err)
+	}
+	if err := g.RemoveWorktree(ctx(), cloneDir, wt); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if _, registered, err := g.WorktreeBranch(ctx(), cloneDir, wt); err != nil || registered {
+		t.Fatalf("the worktree should be deregistered: registered=%v err=%v", registered, err)
+	}
+	if deleted, err := g.DeleteLocalBranch(ctx(), cloneDir, branch); err != nil || !deleted {
+		t.Fatalf("with the registration gone the branch can be deleted: deleted=%v err=%v", deleted, err)
+	}
+}
+
 func TestRemoveWorktreeIdempotent(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")

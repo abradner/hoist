@@ -48,6 +48,22 @@ type Git interface {
 	// platform-specific ways) — remove only after every child using it has exited. Removing
 	// an already-absent worktree is not an error.
 	RemoveWorktree(ctx context.Context, cloneDir, worktreeDir string) error
+	// LocalBranchExists reports whether cloneDir has a local branch of that name
+	// (refs/heads/<branch>). It asks nothing of any remote.
+	LocalBranchExists(ctx context.Context, cloneDir, branch string) (bool, error)
+	// DeleteLocalBranch deletes cloneDir's local branch outright (`git branch -D`), reporting
+	// whether there was one to delete; an absent branch is not an error. It is a force delete
+	// because the only branches hoist deletes are a promotion's own, and a squash-merged
+	// promotion branch is never an ancestor of its base, so `-d` would refuse every one. What
+	// makes that safe is not this method but its caller, which may pass only a branch name it
+	// derived itself (internal/engine.CleanupTarget). Git's own refusal to delete a branch that
+	// is checked out in any worktree — the clone's included — is left to stand and returned as
+	// the error: this never detaches or switches anything to get its way.
+	DeleteLocalBranch(ctx context.Context, cloneDir, branch string) (deleted bool, err error)
+	// WorktreeDirty reports whether worktreeDir has anything `git status` would show: a
+	// modified, staged or untracked file. It says nothing about commits that exist only on
+	// the worktree's branch.
+	WorktreeDirty(ctx context.Context, worktreeDir string) (bool, error)
 	// LsRemoteBranch reports origin's current tip of branch, ok=false when the ref does not
 	// exist there. This is the one source of truth Observe uses for "has this been pushed"
 	// — never a locally cached belief.
@@ -340,6 +356,38 @@ func (e Exec) RemoveWorktree(ctx context.Context, cloneDir, worktreeDir string) 
 	return nil
 }
 
+// LocalBranchExists implements Git.
+func (e Exec) LocalBranchExists(ctx context.Context, cloneDir, branch string) (bool, error) {
+	if branch == "" {
+		return false, errors.New("local branch name is empty")
+	}
+	return e.localBranchExists(ctx, cloneDir, branch)
+}
+
+// DeleteLocalBranch implements Git.
+func (e Exec) DeleteLocalBranch(ctx context.Context, cloneDir, branch string) (bool, error) {
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return false, fmt.Errorf("refusing to delete local branch %q: not a branch name", branch)
+	}
+	exists, err := e.localBranchExists(ctx, cloneDir, branch)
+	if err != nil || !exists {
+		return false, err
+	}
+	if _, err := e.run(ctx, cloneDir, "branch", "-D", "--", branch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// WorktreeDirty implements Git.
+func (e Exec) WorktreeDirty(ctx context.Context, worktreeDir string) (bool, error) {
+	out, err := e.run(ctx, worktreeDir, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 type worktreeEntry struct {
 	path, branch string
 }
@@ -419,11 +467,23 @@ func guardDisposablePath(cloneDir, worktreeDir string) error {
 	return nil
 }
 
+// resolvePath is p with symlinks resolved, for comparing against the paths git itself records
+// (always resolved). When p no longer exists its symlinks cannot be resolved directly, so the
+// parent is resolved and the last element kept: a worktree whose directory was deleted by hand
+// under a symlinked cache directory (macOS's /var, a symlinked ~/.cache) is still registered
+// under its resolved path, and must still be found there — otherwise it can never be
+// deregistered, and git refuses to delete the branch it "has checked out" forever.
 func resolvePath(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
-	return filepath.Clean(p)
+	clean := filepath.Clean(p)
+	if dir, base := filepath.Split(clean); base != "" && dir != "" {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, base)
+		}
+	}
+	return clean
 }
 
 func (e Exec) localBranchExists(ctx context.Context, cloneDir, branch string) (bool, error) {
