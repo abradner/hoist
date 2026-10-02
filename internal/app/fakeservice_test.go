@@ -144,6 +144,9 @@ type fakeService struct {
 	// view THIS plan/deploy was actually built against, and startFn alone cannot see whether it
 	// did.
 	onStart func(service.StartRequest)
+	// onHooks, when set, receives the Hooks StartPromotion was given, so a test can fire
+	// OnHistory the way the real Driver does mid-walk.
+	onHooks func(service.Hooks)
 }
 
 func (f *fakeService) Plan(ctx context.Context, req service.PlanRequest) (service.PlannedChange, error) {
@@ -159,6 +162,9 @@ func (f *fakeService) StartPromotion(ctx context.Context, req service.StartReque
 	}
 	if f.startFn == nil {
 		panic("fakeService: StartPromotion called but startFn not set")
+	}
+	if f.onHooks != nil {
+		f.onHooks(h)
 	}
 	opts := startOpts{Direct: req.Mode.Direct, Confirmed: req.Mode.Confirmed}
 	state, driver, err := f.startFn(ctx, req.Plan, opts, h.Progress)

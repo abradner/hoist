@@ -19,7 +19,7 @@ package engine
 // new dependency (git or forge) on this step, and it is guaranteed to be no earlier than the
 // real merge event (Drive can only log "Merged" once the remote actually reports it merged),
 // which is the safe direction for this comparison — a later anchor only ever delays
-// satisfaction, never falsely advances it. mergedAt takes the *earliest* such entry across
+// satisfaction, never falsely advances it. landedAt takes the *earliest* such entry across
 // every resume, which is the closest available proxy to the real merge instant.
 //
 // The known failure mode the brief calls out — re-annotating on every Observe because
@@ -116,7 +116,7 @@ func (s *PromotionState) editsForApp(appName string) (edits []gitops.Edit, expec
 	return edits, expectedBlobs
 }
 
-// mergedAt is the earliest s.History entry recorded for StepMerged — see this file's own
+// landedAt is the earliest s.History entry recorded for StepMerged — see this file's own
 // package doc comment for why it is a safe (if slightly conservative) proxy for the real merge
 // wall-clock time, with no new dependency and no change to MergedStep itself. ok is false only
 // if Drive has genuinely never reached Merged yet, which ArgoRefreshedStep's own MergeSHA guard
@@ -157,7 +157,7 @@ func (a ArgoRefreshedStep) Observe(ctx context.Context, s *PromotionState) (Obse
 	}
 	anchor, ok := landedAt(s)
 	if !ok {
-		// s.MergeSHA is set (checked above), so mergedAt's own doc comment's invariant says
+		// s.MergeSHA is set (checked above), so landedAt's own doc comment's invariant says
 		// this "should" never happen — but trusting that blindly is exactly the zero-means-
 		// cannot-determine trap: a zero-value anchor makes st.ReconciledAt.After(anchor) true
 		// for essentially any real timestamp, so a state that reaches here anyway (a legacy or

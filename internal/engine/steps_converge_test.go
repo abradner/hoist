@@ -68,7 +68,7 @@ func TestArgoAppNamesEditOutsideAnyFamily(t *testing.T) {
 // --- ArgoRefreshedStep --------------------------------------------------------------------
 
 // argoState is a minimal PromotionState for testing ArgoRefreshedStep/ArgoSyncedStep in
-// isolation, without any real git/forge machinery — mergedAt only reads s.History, so a
+// isolation, without any real git/forge machinery — landedAt only reads s.History, so a
 // single synthetic Merged entry is all either step needs.
 func argoState() *PromotionState {
 	const mergedAgo = time.Minute
@@ -98,9 +98,9 @@ func TestArgoRefreshedNotSatisfiedBeforeAnyMergeIsRecorded(t *testing.T) {
 }
 
 // TestArgoRefreshedBlocksWhenMergeHasNoHistoryAnchor is Copilot's PR #51 review finding:
-// Observe used to discard mergedAt's own ok return, trusting the zero time as an anchor
+// Observe used to discard landedAt's own ok return, trusting the zero time as an anchor
 // whenever s.MergeSHA is set but s.History carries no matching StepMerged entry (a legacy or
-// otherwise inconsistent state file — mergedAt's own doc comment assumes this "should never
+// otherwise inconsistent state file — landedAt's own doc comment assumes this "should never
 // happen" given MergeSHA's guard just above, but blindly trusting that is exactly the
 // zero-means-cannot-determine trap: almost any real ReconciledAt is "after" the zero time, so
 // every Application would report already-reconciled with zero actual evidence a refresh ever

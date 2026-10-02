@@ -3709,3 +3709,62 @@ func TestWatchFooterNoContradiction(t *testing.T) {
 		t.Errorf("the watch footer should offer r refresh:\n%s", v)
 	}
 }
+
+// TestLiveHistoryReportReachesTheAttachedFlightScreenBeforeTheTick: a step's outcome reported
+// through Hooks.OnHistory shows on the attached flight screen as soon as it is saved, not when
+// the step's tick lands. The Step command is never run here, so no tick can have put the line
+// on screen. apply's default case (session.ChangeProgress -> mirrorAttached) is what carries
+// it; making that case a no-op fails this test.
+func TestLiveHistoryReportReachesTheAttachedFlightScreenBeforeTheTick(t *testing.T) {
+	const marker = "LIVEMARK committed on a branch"
+	state := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	drv := &funcDriver{StateFunc: func() engine.PromotionState { return state }}
+	drv.StepFunc = func(context.Context) (service.Tick, error) { return service.Tick{State: state}, nil }
+	var hooks service.Hooks
+	svc := &fakeService{
+		startFn: func(context.Context, gitops.Plan, startOpts, func(string)) (engine.PromotionState, session.Driver, error) {
+			return state, drv, nil
+		},
+		onHooks: func(h service.Hooks) { hooks = h },
+	}
+	tm, startCmd := sizedWithService(t, svc, Promotion{}).Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	if startCmd == nil {
+		t.Fatal("StartMsg produced no command")
+	}
+
+	// The same descent sessionBuildCmd does, keeping the listener it leaves uncalled.
+	outer, ok := startCmd().(tea.BatchMsg)
+	if !ok || len(outer) < 2 || outer[1] == nil {
+		t.Fatalf("start command yields %#v, want tea.BatchMsg(fs.Init(), sessCmd)", startCmd)
+	}
+	inner, ok := outer[1]().(tea.BatchMsg)
+	if !ok || len(inner) < 2 || inner[0] == nil || inner[1] == nil {
+		t.Fatalf("session command yields %#v, want tea.BatchMsg(buildCmd, listenCmd)", outer[1])
+	}
+	next, _ := tm.Update(inner[0]())
+	m := next.(Model)
+	if hooks.OnHistory == nil {
+		t.Fatal("the controller built Hooks without OnHistory")
+	}
+	if strings.Contains(plain(m), marker) {
+		t.Fatalf("control: the marker is on screen before any report:\n%s", plain(m))
+	}
+
+	entry := engine.HistoryEntry{Step: engine.StepCommitted, At: time.Now(), Detail: marker}
+	saved := state
+	saved.History = []engine.HistoryEntry{entry}
+	hooks.OnHistory(entry, saved)
+
+	got := make(chan tea.Msg, 1)
+	go func() { got <- inner[1]() }()
+	select {
+	case msg := <-got:
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the OnHistory report never reached the listener")
+	}
+	if v := plain(m); !strings.Contains(v, marker) {
+		t.Fatalf("the live history report is not on the flight screen before the tick lands:\n%s", v)
+	}
+}

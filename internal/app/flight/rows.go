@@ -11,7 +11,6 @@ package flight
 import (
 	"time"
 
-	"github.com/abradner/hoist/internal/app/session"
 	"github.com/abradner/hoist/internal/engine"
 )
 
@@ -234,18 +233,17 @@ func StartedAt(s engine.PromotionState) time.Time {
 	return s.History[0].At
 }
 
-// StartedAtWithLog is StartedAt for a promotion this session is driving: the earlier of the
-// first History entry and the first progress line, because preflight (checking the checkout,
-// claiming the env) runs and is logged before any History exists. It is the ONE origin for
-// "started" — the flight header and the matrix's in-flight pane both read it (the pane via
-// app.summaryForSnapshot), so the two never disagree about how old a promotion is. A promotion
-// known only from a listing has no progress log, and StartedAt is all there is.
-func StartedAtWithLog(s engine.PromotionState, log []session.LogLine) time.Time {
+// StartedAtBefore is StartedAt for a promotion this session is driving: the earlier of the
+// first History entry and logStart (the first progress line's time, zero when there is none),
+// because preflight (checking the checkout, claiming the env) runs and is logged before any
+// History exists. It is the ONE origin for "started" — the flight header and the matrix's
+// in-flight pane both read it, so the two never disagree about how old a promotion is. It takes
+// a plain time so this file stays free of the terminal (AGENTS.md §4.8); model.go extracts it
+// from the session's log. A promotion known only from a listing has no log: pass the zero time.
+func StartedAtBefore(s engine.PromotionState, logStart time.Time) time.Time {
 	start := StartedAt(s)
-	for _, l := range log {
-		if !l.At.IsZero() && (start.IsZero() || l.At.Before(start)) {
-			start = l.At
-		}
+	if !logStart.IsZero() && (start.IsZero() || logStart.Before(start)) {
+		start = logStart
 	}
 	return start
 }

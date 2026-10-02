@@ -64,7 +64,14 @@ func liveHistoryFlow(t *testing.T, start func(c Controller, backend *fakeBackend
 	listen := func() {
 		t.Helper()
 		e := h.c.entries[build]
-		m := listenCmd(e.ctx, e.build, e.gen, e.progressCh)()
+		got := make(chan tea.Msg, 1)
+		go func() { got <- listenCmd(e.ctx, e.build, e.gen, e.progressCh)() }()
+		var m tea.Msg
+		select {
+		case m = <-got:
+		case <-time.After(5 * time.Second):
+			t.Fatal("listen never received a report: OnHistory stopped sending")
+		}
 		h, _ = harnessUpdate(h, m)
 	}
 
