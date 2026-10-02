@@ -508,12 +508,14 @@ builds it — after flag parsing and setup, before planning — the narrator is 
 (`pkg/redact`, §4.10), so nothing written from then on reaches the terminal unredacted whatever
 its caller did; and it holds the one lock, since the "still" line is written from a second
 goroutine. Usage errors and the setup errors before that point go to stderr directly, as they
-always have; no credential is loaded that early. stdout is untouched: it is
-the summary, the listing, or the plan, and nothing else. `--quiet` on those five commands drops
+always have; no credential is loaded that early. The narration writes nothing to stdout, which
+stays the summary, the listing, or the plan. `--quiet` on those five commands drops
 the phase lines, the act lines (start and "done", so the PR's URL then first appears in the
 approval instructions) and the "still" lines, and nothing else. `resume` and `abandon` parse flags on either side of
 their id (`parseWithID`) and refuse a second positional — `resume <id> --override-ci-none`,
-the order the guide shows, used to leave the flag unparsed and silently ignored.
+the order the guide shows, used to leave the flag unparsed and silently ignored. That is a
+change in what those two invocations do, stdout included: the first now honours its flag, the
+second is a usage error where it used to run.
 
 ### TUI
 
