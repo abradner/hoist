@@ -45,7 +45,8 @@ func cacheDir() (string, error) {
 // states the reasoning this package leans on throughout cache.go: a digest is content-
 // addressed, so ImageMeta for one never changes once written — a digest-keyed cache entry
 // therefore never goes stale and needs no invalidation policy, no TTL, no ETag, nothing but
-// "does a readable, well-formed entry exist for this exact digest". Keying on the digest
+// "does a readable, well-formed entry exist for this exact digest". (PruneCache below bounds
+// the directory by last use; that is housekeeping, and a pruned entry is simply refetched.) Keying on the digest
 // alone (never the repo) is deliberate too: the same image content pushed under two repo
 // paths — a mirror, a rename — is still the same bytes, and there is no reason to fetch or
 // store its Created/Labels twice.
@@ -110,7 +111,70 @@ func loadCache(digest string) (ImageMeta, bool) {
 	if c.Digest != digest {
 		return ImageMeta{}, false
 	}
+	// A hit refreshes the entry's mtime, so PruneCache's age is "since last used", not "since
+	// first fetched". Best-effort: a cache that cannot be touched is still a cache.
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 	return ImageMeta(c), true
+}
+
+var (
+	cacheEntryRE = regexp.MustCompile(`^sha256-[0-9a-f]{64}\.json$`)
+	cacheTempRE  = regexp.MustCompile(`^\.meta-.*\.tmp$`)
+)
+
+// cacheTempMaxAge is how old a leftover saveCache temp file must be before PruneCache removes
+// it: far longer than any write takes, so a write in progress in another process is never the
+// one removed.
+const cacheTempMaxAge = time.Hour
+
+// PruneCache removes cache entries not used for longer than maxAge, and temp files a killed
+// saveCache left behind, returning the paths removed (or, with dryRun, the paths it would
+// remove) in name order. It is the cache's only bound. A digest-keyed entry never goes stale —
+// cacheFile's own doc comment — so this is about disk, not correctness: a pruned entry is
+// refetched the next time something asks for that digest.
+//
+// It touches only regular files in the cache directory whose names are exactly the two shapes
+// this package writes; a subdirectory, a symlink or any other file is left alone. A missing
+// cache directory is nothing to prune, not an error.
+func PruneCache(maxAge time.Duration, now time.Time, dryRun bool) ([]string, error) {
+	if maxAge <= 0 {
+		return nil, fmt.Errorf("registry: cache: prune age must be positive, got %s", maxAge)
+	}
+	dir, err := cacheDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, e := range entries {
+		limit := maxAge
+		switch {
+		case cacheEntryRE.MatchString(e.Name()):
+		case cacheTempRE.MatchString(e.Name()):
+			limit = cacheTempMaxAge
+		default:
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) <= limit {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if !dryRun {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return removed, err
+			}
+		}
+		removed = append(removed, path)
+	}
+	return removed, nil
 }
 
 // saveCache writes meta's entry atomically — a temp file in the same directory, then
