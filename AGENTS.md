@@ -463,7 +463,10 @@ mise exec -- go run ./cmd/hoist --help
 
 Config lives at `$XDG_CONFIG_HOME/hoist/config.yaml` (`~/.config/hoist/config.yaml` when unset, on
 every platform — never `~/Library`), or wherever `--config <path>` points; state under
-`$XDG_STATE_HOME/hoist/`; caches under `$XDG_CACHE_HOME/hoist/`. `docs/config.example.yaml` is the
+`$XDG_STATE_HOME/hoist/`; caches under `$XDG_CACHE_HOME/hoist/`. The cache holds three things, each
+with its own lifetime: `worktrees/<id>` (removed when the promotion lands or is abandoned),
+`repo-view/<hash>` (one per clone, rebuilt on refresh) and `registry/` (image config metadata by
+digest, pruned by `hoist gc` after 90 days unused). `docs/config.example.yaml` is the
 annotated schema. A missing config file means flags only; a broken one stops every command.
 `hoist config show`/`hoist config path` print the effective config (defaults filled, `op` refs
 redacted) and where it was read from.
@@ -486,6 +489,7 @@ with `plan`'s own message on every face.
 | `promotions [--repo] [--archived]` | List promotion state files, phase re-observed against the forge/cluster | A terminal promotion older than `state.retain` (config, default 30 days, measured from its last activity) is archived into `promotions/archive/` — invisible to `findInFlight` by construction, never touched while still in flight however old. `--archived` also lists the archive. A promotion observed *landed* has its worktree and local `hoist/<env>/<id>` branch removed in the same pass (`Service.CleanupLanded`, R-011) — at landing, not at rollout, and never for one that has not landed. |
 | `resume <id>` / `resume --env <target-env>` | Re-drive a promotion from wherever `Observe` actually finds it | Never from the state file's recorded phase. |
 | `abandon <id> --confirm-abandon=<id>` | Retire a promotion that never landed | Closes its PR and deletes its remote branch if it opened one, and removes its worktree and local branch (R-011); refused once the promotion has landed. |
+| `gc [--dry-run]` | Remove what finished promotions left on this machine | `Service.GC`: `CleanupLanded` for every live state file; orphaned worktrees under `$XDG_CACHE_HOME/hoist/worktrees` (no live state file) only when the name is a promotion id, the directory is a registered worktree of a configured clone on that id's own `hoist/<env>/<id>` branch, and `git status` is clean — otherwise kept and named; registry cache entries unused for 90 days (`registry.PruneCache`). `--dry-run` runs the identical checks and removes nothing. Never touches a state file, never automatic (R-011). No TUI counterpart (#246). |
 | `watch --app <name> [--once]` | Read-only: one Application's sync/health/revision and its Deployments'/Jobs'/CronJobs' rollout progress | Never calls `Refresh` — only `Get`/`Deployment`/`JobLike`, since watching is not promoting. The TUI's `watch` screen package likewise imports neither `pkg/argo` nor `pkg/rollout`; a test pins its import list. |
 | `config show` / `config path` | Print effective config / where it was read from | Pure decode-and-check; always safe. |
 | *(no command)* `hoist --repo <path>` | Opens the env × family matrix TUI | See below. |
