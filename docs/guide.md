@@ -411,6 +411,23 @@ hoist resume <id> --override-ci-none
 
 — and `block` has no override at all: fix why CI did not run.
 
+*A check that is not CI.* Some things report as checks without being CI — GitHub runs Copilot's
+review as a check-run named `copilot-pull-request-reviewer`, so a repo with three real checks
+showed `CI: 3/4 checks complete` and waited on the reviewer. List such names per repo:
+
+```yaml
+repos:
+  - path: ~/src/my-gitops
+    ci: { ignore: [copilot-pull-request-reviewer] }
+```
+
+Match is exact, against a check-run's name or a commit status's context. Ignored checks are
+excluded from the count and from failure and skipped blocking, and the step says so:
+`CI: 3/3 checks complete · ignoring copilot-pull-request-reviewer`. Nothing is ignored by
+default, and an entry that matches no reported check is not listed. If every reported check is
+ignored, that counts as *no checks reported* and `ci.none` decides. Like `ci.none`, the list is
+frozen into a promotion when it starts: a config edit does not reach one already in flight.
+
 **Approval.** `` waiting for `hoist approve <id>` from an approver `` — someone in the repo's
 `approvers` list (or, with `collaborators: true`, anyone with write access) comments exactly
 

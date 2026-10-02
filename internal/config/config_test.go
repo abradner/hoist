@@ -288,6 +288,8 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"approval enum", "repos:\n  - path: /x\n    envs: { approval: { app-production: maybe } }\n", "repos[0].envs.approval.app-production: want one of comment|auto, got \"maybe\""},
 		{"production twice", "repos:\n  - path: /x\n    envs: { production: [p, p] }\n", "repos[0].envs.production[1]: \"p\" listed twice"},
 		{"ci.none enum", "repos:\n  - path: /x\n    ci: { none: yellow }\n", "repos[0].ci.none: want one of green|prompt|block"},
+		{"ci.ignore empty", "repos:\n  - path: /x\n    ci: { ignore: [a, ''] }\n", "repos[0].ci.ignore[1]: empty check name"},
+		{"ci.ignore dup", "repos:\n  - path: /x\n    ci: { ignore: [a, b, a] }\n", "repos[0].ci.ignore[2]: duplicate check name \"a\""},
 		{"ci.grace negative", "repos:\n  - path: /x\n    ci: { grace: -1s }\n", "repos[0].ci.grace: must be a positive duration"},
 		{"digest_sources enum", "repos:\n  - path: /x\n    digest_sources: [pods, argo]\n", "repos[0].digest_sources[1]: want one of pods|manifest|registry"},
 		{"digest_sources empty", "repos:\n  - path: /x\n    digest_sources: []\n", "repos[0].digest_sources: must not be empty"},
@@ -617,5 +619,28 @@ func TestSourcesOfSortedAndScoped(t *testing.T) {
 	}
 	if got := envs.SourcesOf("nope"); got != nil {
 		t.Fatalf("SourcesOf(nope) = %v, want nil", got)
+	}
+}
+
+// TestCIIgnoreDefaultsToNothingAndShows pins §4.5's neighbour: no default ever ignores a check,
+// and an explicit list round-trips through `config show`'s marshal.
+func TestCIIgnoreDefaultsToNothingAndShows(t *testing.T) {
+	c, err := Load(write(t, "repos:\n  - path: /x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Repos[0].CI.Ignore) != 0 {
+		t.Fatalf("default ci.ignore = %v, want empty", c.Repos[0].CI.Ignore)
+	}
+	c, err = Load(write(t, "repos:\n  - path: /x\n    ci: { ignore: [copilot-pull-request-reviewer] }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := c.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "copilot-pull-request-reviewer") {
+		t.Fatalf("config show lacks the ignore entry:\n%s", out)
 	}
 }

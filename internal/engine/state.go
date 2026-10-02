@@ -80,6 +80,11 @@ type PromotionState struct {
 	// zero checks.
 	CINone  string
 	CIGrace time.Duration
+	// CIIgnore is RepoConfig.CI.Ignore as of when this promotion started: check names (a
+	// check-run's name or a commit status's context) CIGreenStep excludes from the rollup.
+	// Carried in state like CINone, so a resume gates on the same list the promotion began
+	// with. Nothing is ignored by default.
+	CIIgnore []string
 	// CINoneOverride, once set (via `hoist resume --override-ci-none`, or `c` on the TUI's
 	// flight screen behind a confirm — #103), lets CIGreenStep treat
 	// a still-empty check-run set as satisfied under ci.none: prompt after the grace period —

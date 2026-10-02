@@ -323,7 +323,7 @@ type ResumeOpts struct {
 // progress, no onWaiting, and the CLI's own ctx already wraps a deadline the TUI's call site
 // never threaded through either — this is the one path both now take):
 //
-//   - CINone/CIGrace/Approval/Approvers/Collaborators are NEVER re-read from the current config
+//   - CINone/CIGrace/CIIgnore/Approval/Approvers/Collaborators are NEVER re-read from the current config
 //     file — PromotionState's own doc comment states the invariant that these are policy "as of
 //     when this promotion started", so a promotion never straddles two different policies
 //     mid-flight even if the operator edits the config file while it is in flight. Only

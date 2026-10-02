@@ -159,7 +159,7 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 	if sha == "" {
 		sha = s.CommitSHA
 	}
-	sum, err := c.Forge.Checks(ctx, sha)
+	sum, err := c.Forge.Checks(ctx, sha, s.CIIgnore)
 	if err != nil {
 		// Known bug classes: a 404 or permissions hiccup must be retried, never read as "zero
 		// checks reported" — returning the error here (rather than a zero CheckSummary with a
@@ -190,10 +190,11 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		return Observation{Blocked: strings.Join(parts, "; ")}, nil
 	}
 	if sum.Total > 0 {
+		ignoring := ignoredNote(sum.Ignored)
 		if sum.Pending > 0 {
-			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete", sum.Total-sum.Pending, sum.Total)}, nil
+			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete%s", sum.Total-sum.Pending, sum.Total, ignoring)}, nil
 		}
-		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)", sum.Total)}, nil
+		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)%s", sum.Total, ignoring)}, nil
 	}
 	elapsed := c.now().Sub(s.PR.CreatedAt)
 	if elapsed < s.CIGrace {
@@ -214,6 +215,17 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		}
 		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`"}, nil
 	}
+}
+
+// ignoredNote is the suffix naming the checks repos[].ci.ignore excluded, so an ignored check is
+// never silently skipped: " · ignoring a, b", or "" when nothing matched.
+func ignoredNote(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	n := append([]string(nil), names...)
+	sort.Strings(n)
+	return " · ignoring " + strings.Join(n, ", ")
 }
 
 // ciNonePromptBlockedPrefix is the one reason text CIGreenStep produces for "ci.none=prompt

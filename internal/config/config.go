@@ -91,6 +91,10 @@ type EnvsConfig struct {
 type CIConfig struct {
 	None  string   `yaml:"none"`  // green|prompt|block; default green
 	Grace Duration `yaml:"grace"` // how long to wait for checks to appear; default 3m
+	// Ignore lists check names (a check-run's name or a commit status's context, exact match)
+	// CIGreenStep excludes from the rollup: things that report as checks but are not CI, like
+	// a code-review bot's run. Explicit and per repo; no default ever ignores a check.
+	Ignore []string `yaml:"ignore,omitempty"`
 }
 
 // KubeConfig names the kubeconfig context hoist reads pods from (M2), and, from M5, where
@@ -584,6 +588,18 @@ func validateRepo(p *problems, r RepoConfig) {
 	validateEnum(p, k+".ci.none", r.CI.None, "green", "prompt", "block")
 	if r.CI.Grace <= 0 {
 		p.add(k+".ci.grace", "must be a positive duration, got %s", r.CI.Grace)
+	}
+	seenIgnore := map[string]bool{}
+	for i, n := range r.CI.Ignore {
+		ip := fmt.Sprintf("%s.ci.ignore[%d]", k, i)
+		switch {
+		case strings.TrimSpace(n) == "":
+			p.add(ip, "empty check name")
+		case seenIgnore[n]:
+			p.add(ip, "duplicate check name %q", n)
+		default:
+			seenIgnore[n] = true
+		}
 	}
 	validateList(p, k+".digest_sources", r.DigestSources, "pods", "manifest", "registry")
 	for img, repo := range r.Apps {

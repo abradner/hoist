@@ -88,7 +88,7 @@ type StartRequest struct {
 // Observe a later Drive/Step call makes re-derives truth from the worktree and the remote
 // regardless of what's loaded here. Carrying History forward is purely so the caller's own
 // output can show it; a missing or unreadable prior state never blocks the run. The policy
-// fields (Base, CINone, CIGrace, Approval, Approvers, Collaborators) and the rendered artifacts
+// fields (Base, CINone, CIGrace, CIIgnore, Approval, Approvers, Collaborators) and the rendered artifacts
 // are restored from the PRIOR state whenever one exists, rather than left fresh from this call's
 // own settings/plan — PromotionState's own doc comment states these are policy "as of when this
 // promotion started", carried forward so a promotion never straddles two different policies
@@ -113,6 +113,7 @@ func (s *Service) newState(id, branch, worktreeDir string, p gitops.Plan, mode M
 		PRBody:         engine.RenderPRBody(id, p),
 		CINone:         rc.CI.None,
 		CIGrace:        time.Duration(rc.CI.Grace),
+		CIIgnore:       rc.CI.Ignore,
 		CINoneOverride: mode.OverrideCINone,
 		Approval:       rc.Approval(p.TargetEnv),
 		Approvers:      rc.Approvers,
@@ -126,6 +127,7 @@ func (s *Service) newState(id, branch, worktreeDir string, p gitops.Plan, mode M
 		st.Base = prev.Base
 		st.CINone = prev.CINone
 		st.CIGrace = prev.CIGrace
+		st.CIIgnore = prev.CIIgnore
 		st.Approval = prev.Approval
 		st.Approvers = prev.Approvers
 		st.Collaborators = prev.Collaborators

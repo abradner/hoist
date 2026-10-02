@@ -24,6 +24,13 @@ repos:
     approvers: [me]               # GitHub logins whose `hoist approve <id>` counts (M4)
     ci: { none: green, grace: 3m }              # a PR with no checks: green|prompt|block
                                                 # after grace (M4)
+    # ci.ignore: [copilot-pull-request-reviewer]  # check names (exact: a check-run's name or a
+    #                                           # commit status's context) that are NOT CI and
+    #                                           # must not gate or block a promotion — e.g. a
+    #                                           # review bot's run. Explicit, per repo; hoist
+    #                                           # ignores nothing by default. The CI step names
+    #                                           # what it ignored. If only ignored checks exist,
+    #                                           # ci.none applies as if none were reported.
     kube: { context: my-cluster, argo_namespace: argocd }  # kubeconfig context for pod
                                   # digests (M2); argo_namespace is where Argo CD's own
                                   # Application CRs live — NOT spec.destination.namespace,

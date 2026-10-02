@@ -1159,3 +1159,108 @@ func TestMergedDisconnectedAncestryInShallowCloneNamesTheClone(t *testing.T) {
 		t.Errorf("full clone control: reverted=%v err=%v why=%s", reverted, err, why)
 	}
 }
+
+// reviewerRollup is the incident's shape: three real CI runs, green, plus Copilot's review
+// reported as a check-run that is still pending.
+func reviewerRollup() []forge.Check {
+	return []forge.Check{
+		{Name: "kubeconform", State: forge.CheckSuccess},
+		{Name: "yq", State: forge.CheckSuccess},
+		{Name: "helm-render", State: forge.CheckSuccess},
+		{Name: "copilot-pull-request-reviewer", State: forge.CheckPending},
+	}
+}
+
+func TestCIGreenWithoutIgnoreWaitsOnTheReviewer(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: reviewerRollup()}
+
+	obs, err := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Waiting || obs.Detail != "CI: 3/4 checks complete" {
+		t.Fatalf("without an ignore list the step waits on 3/4, got %+v", obs)
+	}
+}
+
+func TestCIGreenIgnoresListedCheckAndSaysSo(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: reviewerRollup()}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer", "matches-nothing"}
+
+	obs, err := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied with the reviewer ignored, got %+v", obs)
+	}
+	if want := "CI green (3 checks) · ignoring copilot-pull-request-reviewer"; obs.Detail != want {
+		t.Fatalf("detail = %q, want %q (an entry matching nothing must not be listed)", obs.Detail, want)
+	}
+
+	// Still-waiting detail names it too.
+	f.NamedChecksBySHA[s.PushedSHA][0].State = forge.CheckPending
+	obs, _ = (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if want := "CI: 2/3 checks complete · ignoring copilot-pull-request-reviewer"; !obs.Waiting || obs.Detail != want {
+		t.Fatalf("waiting detail = %+v, want %q", obs, want)
+	}
+}
+
+func TestCIGreenIgnoredFailureDoesNotBlock(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	rollup := reviewerRollup()
+	rollup[3].State = forge.CheckFailure
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: rollup}
+
+	// Positive control: unignored, the same failure blocks.
+	obs, _ := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "copilot-pull-request-reviewer") {
+		t.Fatalf("control: unignored failure should block, got %+v", obs)
+	}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	obs, _ = (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !obs.Satisfied || obs.Blocked != "" {
+		t.Fatalf("ignored failing check must not block, got %+v", obs)
+	}
+}
+
+// TestCIGreenAllIgnoredFallsToCINonePolicy: ignoring every check is not green by itself; it is
+// "no checks reported", and ci.none decides.
+func TestCIGreenAllIgnoredFallsToCINonePolicy(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {{Name: "copilot-pull-request-reviewer", State: forge.CheckSuccess}}}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	s.CIGrace = time.Minute
+	step := CIGreenStep{Forge: f, Now: fixedNow(s.PR.CreatedAt.Add(2 * time.Minute))}
+
+	s.CINone = "prompt"
+	obs, _ := step.Observe(ctx(), s)
+	if !IsCINonePromptBlock(obs.Blocked) {
+		t.Fatalf("all-ignored under ci.none=prompt should block on the prompt, got %+v", obs)
+	}
+	s.CINone = "block"
+	obs, _ = step.Observe(ctx(), s)
+	if obs.Blocked == "" || obs.Satisfied {
+		t.Fatalf("all-ignored under ci.none=block should block, got %+v", obs)
+	}
+	s.CINone = "green"
+	obs, _ = step.Observe(ctx(), s)
+	if !obs.Satisfied || !strings.Contains(obs.Detail, "ci.none=green") {
+		t.Fatalf("all-ignored under ci.none=green satisfies via the policy, got %+v", obs)
+	}
+	// And within grace it waits, same as zero checks.
+	step.Now = fixedNow(s.PR.CreatedAt.Add(10 * time.Second))
+	if obs, _ = step.Observe(ctx(), s); !obs.Waiting {
+		t.Fatalf("all-ignored within grace should wait, got %+v", obs)
+	}
+}

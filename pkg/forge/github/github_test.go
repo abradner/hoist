@@ -225,7 +225,7 @@ func TestChecksSummarizesRollup(t *testing.T) {
 		]}`),
 		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestChecksTreatsSkippedAsItsOwnBucketNotSuccess(t *testing.T) {
 		]}`),
 		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestChecksPaginatesBeyondFirstPage(t *testing.T) {
 		},
 		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestChecksMoreThanBoundFailsClosed(t *testing.T) {
 		},
 		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
-	_, err := c.Checks(context.Background(), "deadbeef")
+	_, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err == nil {
 		t.Fatal("expected an error when every page up to the bound comes back full, got nil")
 	}
@@ -349,7 +349,7 @@ func TestChecksExactlyAtBoundIsNotAnError(t *testing.T) {
 		},
 		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": []}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatalf("a commit with exactly %d check-runs must not be treated as truncated: %v", total, err)
 	}
@@ -372,7 +372,7 @@ func TestChecksFoldsInCommitStatuses(t *testing.T) {
 			{"context": "ci/legacy-status", "state": "pending"}
 		]}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,12 +390,37 @@ func TestChecksCommitStatusFailureIsNamed(t *testing.T) {
 			{"context": "ci/legacy-status", "state": "failure"}
 		]}`),
 	})
-	sum, err := c.Checks(context.Background(), "deadbeef")
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "ci/legacy-status" {
 		t.Fatalf("CheckSummary = %+v, want the failing status context named in FailedNames", sum)
+	}
+}
+
+// TestChecksIgnoreMatchesCheckRunNameAndStatusContext: the ignore list is exact-match against
+// both reporting mechanisms, and a failing ignored one is excluded from every count.
+func TestChecksIgnoreMatchesCheckRunNameAndStatusContext(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": [
+			{"name": "yq", "status": "completed", "conclusion": "success"},
+			{"name": "copilot-pull-request-reviewer", "status": "in_progress", "conclusion": ""}
+		]}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": static(200, `{"statuses": [
+			{"context": "legacy-bot", "state": "failure"},
+			{"context": "ci/build", "state": "success"}
+		]}`),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef", []string{"copilot-pull-request-reviewer", "legacy-bot", "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 2 || sum.Success != 2 || sum.Pending != 0 || sum.Failure != 0 {
+		t.Fatalf("CheckSummary = %+v, want Total=2 Success=2", sum)
+	}
+	if len(sum.Ignored) != 2 {
+		t.Fatalf("Ignored = %v, want the two that matched", sum.Ignored)
 	}
 }
 
