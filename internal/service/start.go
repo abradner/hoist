@@ -51,7 +51,8 @@ type Mode struct {
 //
 // OnAct reports each step's Act as it is about to run (ActEvent) — the one signal that a
 // commit or a push is under way, since History, and so OnHistory below, only hears of an Act
-// once it has returned. Only the CLI sets it. AbandonWith and FindInFlightForEnv take a Hooks
+// once it has returned. Like OnHistory it runs on the walking goroutine under the Driver's
+// lock, so it must not block or call back into the Driver. Only the CLI sets it. AbandonWith and FindInFlightForEnv take a Hooks
 // too and use Progress alone.
 type Hooks struct {
 	Progress  func(string)

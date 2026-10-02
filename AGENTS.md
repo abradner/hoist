@@ -501,12 +501,17 @@ failed Act each already have a line),
 and a `hoist: still … (15s so far)` line when the phase last announced has gone `silenceEvery`
 without other output. Waits keep `waitingReporter`'s lines and its ten-minute heartbeat.
 `promotions` and `abandon` announce their re-observation the same way (`ListOpts.Progress`,
-`Service.AbandonWith`). The narrator is also the `io.Writer` every other stderr line of those
-commands goes through, for two reasons: its `Write` redacts (`pkg/redact`, §4.10), so nothing
-reaches the terminal unredacted whatever its caller did; and it holds the one lock, since the
-"still" line is written from a second goroutine. stdout is untouched: it is
+`Service.AbandonWith`). A step that acts again prints nothing it has already said, so
+`argo-refreshed`, which re-requests on every poll, appears once. From the point a command
+builds it — after flag parsing and setup, before planning — the narrator is also the
+`io.Writer` every other stderr line goes through, for two reasons: its `Write` redacts
+(`pkg/redact`, §4.10), so nothing written from then on reaches the terminal unredacted whatever
+its caller did; and it holds the one lock, since the "still" line is written from a second
+goroutine. Usage errors and the setup errors before that point go to stderr directly, as they
+always have; no credential is loaded that early. stdout is untouched: it is
 the summary, the listing, or the plan, and nothing else. `--quiet` on those five commands drops
-the phase, act and "still" lines only. `resume` and `abandon` parse flags on either side of
+the phase lines, the act lines (start and "done", so the PR's URL then first appears in the
+approval instructions) and the "still" lines, and nothing else. `resume` and `abandon` parse flags on either side of
 their id (`parseWithID`) and refuse a second positional — `resume <id> --override-ci-none`,
 the order the guide shows, used to leave the flag unparsed and silently ignored.
 

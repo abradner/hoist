@@ -34,7 +34,9 @@ const quietUsage = "print no progress lines on stderr; waits, the signing notice
 //
 // stdout is never touched: what a script parses stays exactly what it was.
 //
-// --quiet drops the progress, act and "still" lines and nothing else.
+// --quiet drops the phase lines, the act lines — an Act starting and its "done" — and the "still"
+// lines, and nothing else. That includes the "done" line carrying the PR's URL, which under
+// --quiet first appears in the approval instructions or the final summary.
 type narrator struct {
 	mu    sync.Mutex
 	w     io.Writer
@@ -43,10 +45,15 @@ type narrator struct {
 	doing string    // what was last announced as under way; "" while hoist is waiting or done
 	since time.Time // when doing was announced
 	last  time.Time // when anything was last written
+	// said is the last start line and the last outcome line printed for each step: a step that
+	// acts again and would print the same line again says nothing.
+	said map[engine.StepName]actLines
 }
 
+type actLines struct{ start, done string }
+
 func newNarrator(stderr io.Writer, quiet bool) *narrator {
-	return &narrator{w: stderr, quiet: quiet, now: time.Now}
+	return &narrator{w: stderr, quiet: quiet, now: time.Now, said: map[engine.StepName]actLines{}}
 }
 
 // Write implements io.Writer for the command's other stderr output. It counts as output for
@@ -84,10 +91,22 @@ func (n *narrator) announce(line string) {
 }
 
 // act prints a step's Act starting. Its outcome is history's to print.
+//
+// A step that acts again prints nothing it has already said: ArgoRefreshedStep re-requests the
+// refresh on every poll until Argo reconciles, and a start-and-done pair every five seconds
+// reads as a loop and buries the one line saying what hoist is waiting for. A retried push says
+// "pushing" once and "done" once, with the retry line between them.
 func (n *narrator) act(e service.ActEvent) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.announce(redact.Strings(string(e.Step) + ": " + actStarting(e)))
+	line := redact.Strings(string(e.Step) + ": " + actStarting(e))
+	said := n.said[e.Step]
+	if said.start == line {
+		return
+	}
+	said.start = line
+	n.said[e.Step] = said
+	n.announce(line)
 }
 
 // history hears every entry a walk records, as its save lands (service.Hooks.OnHistory), and
@@ -103,8 +122,15 @@ func (n *narrator) history(e engine.HistoryEntry, s engine.PromotionState) {
 	if n.quiet || e.Detail != "acted" {
 		return
 	}
+	line := redact.Strings(string(e.Step) + ": " + actDone(e.Step, s))
+	said := n.said[e.Step]
+	if said.done == line {
+		return
+	}
+	said.done = line
+	n.said[e.Step] = said
 	n.last = n.now()
-	fmt.Fprintf(n.w, "hoist: %s\n", redact.Strings(string(e.Step)+": "+actDone(e.Step, s)))
+	fmt.Fprintf(n.w, "hoist: %s\n", line)
 }
 
 // idle records that hoist is waiting on something else, which waitingReporter narrates at its

@@ -568,3 +568,38 @@ func TestNarratorPrintsOnlyAnActsOutcomeFromHistory(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestNarratorDoesNotRepeatAStepThatActsAgain: ArgoRefreshedStep acts on every poll until Argo
+// reconciles, and a push that failed is pushed again. Each says what it is doing once and that
+// it is done once; an outcome that differs (a new commit) is still printed.
+func TestNarratorDoesNotRepeatAStepThatActsAgain(t *testing.T) {
+	var buf bytes.Buffer
+	n := newNarrator(&buf, false)
+	n.now = time.Now
+	refresh := service.ActEvent{Step: engine.StepArgoRefreshed}
+	acted := engine.HistoryEntry{Step: engine.StepArgoRefreshed, Detail: "acted"}
+	for i := 0; i < 3; i++ {
+		n.act(refresh)
+		n.history(acted, engine.PromotionState{})
+	}
+	if got, want := buf.String(), "hoist: argo-refreshed: asking Argo CD to refresh\nhoist: argo-refreshed: done\n"; got != want {
+		t.Fatalf("three refreshes printed %q, want the pair once: %q", got, want)
+	}
+
+	buf.Reset()
+	push := service.ActEvent{Step: engine.StepPushed, State: engine.PromotionState{Branch: "hoist/env/abc"}}
+	n.act(push) // fails; the drive prints the retry line
+	n.act(push) // the retry
+	n.history(engine.HistoryEntry{Step: engine.StepPushed, Detail: "acted"}, engine.PromotionState{})
+	if got, want := buf.String(), "hoist: pushed: pushing hoist/env/abc\nhoist: pushed: done\n"; got != want {
+		t.Fatalf("a retried push printed %q, want %q", got, want)
+	}
+
+	buf.Reset()
+	commit := engine.HistoryEntry{Step: engine.StepCommitted, Detail: "acted"}
+	n.history(commit, engine.PromotionState{CommitSHA: "aaa"})
+	n.history(commit, engine.PromotionState{CommitSHA: "bbb"})
+	if got := strings.Count(buf.String(), "\n"); got != 2 {
+		t.Fatalf("two different commits are two outcomes, got %q", buf.String())
+	}
+}

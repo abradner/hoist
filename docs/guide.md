@@ -178,7 +178,8 @@ The PR's URL is on the line that opens it. A phase that runs 15 seconds with not
 repeats itself with a clock — `hoist: still pushed: pushing … (15s so far)` — so a slow push or
 a signing prompt you have not answered never looks like a hang; a wait on someone else (CI, an
 approval, Argo, a rollout) prints when its reason changes and then every ten minutes. `--quiet`
-drops the progress lines and keeps the waits, the signing notice, the approval instructions and
+drops the progress lines — the "done" lines with them, so the PR's URL then first shows in the
+approval instructions — and keeps the waits, the signing notice, the approval instructions and
 every error. `promotions` and `abandon` name what they are re-observing the same way, and take
 `--quiet` too.
 
