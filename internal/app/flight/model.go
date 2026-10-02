@@ -776,7 +776,7 @@ func (m Model) headerSection() string {
 		left += "   " + m.styles.Warn.Render("direct")
 	}
 	var right []string
-	if start := StartedAt(m.state); !start.IsZero() {
+	if start := m.startedAt(); !start.IsZero() {
 		right = append(right, "started "+ui.Ago(m.now(), start))
 	}
 	if !m.deadlineAt.IsZero() && !m.done {
@@ -940,26 +940,49 @@ func (m Model) actionSection() string {
 	return ""
 }
 
-// logView renders state.History first, then buildLog — chronological order, oldest to
-// newest: state.History is the settled record up to the last landed Tick (or, before the first
-// one has landed at all, empty); buildLog is the controller's own progress log for this build —
-// preflight lines before a PromotionState exists, or a step mid-Act during drive that hasn't
-// reached its own appendHistory yet.
+// logView renders ONE chronological list, each event once. Two sources feed it, disjoint by
+// construction: state.History (what the engine recorded — one entry per CHANGE of a step's
+// state, see engine.appendHistory) and buildLog (the controller's Hooks.Progress lines, which
+// are preflight and signing-wait lines only — internal/service never echoes a History entry
+// into Progress). They are merged by time, stably, so a progress line that ties a history entry
+// reads first, and every row uses the step's plain Label rather than the raw engine name.
 func (m Model) logView() string {
 	if len(m.buildLog) == 0 && len(m.state.History) == 0 {
 		return m.styles.Dim.Render("(no history yet)")
 	}
-	var b strings.Builder
-	// Relative times through ui.Ago, and the step's own plain label rather than the raw
-	// engine.StepName (UX-M4) — "12m ago  approval  no approval comment yet" instead of an
-	// RFC3339 timestamp and a bare StepName the operator would have to decode.
-	for _, h := range m.state.History {
-		fmt.Fprintf(&b, "%s  %-12s  %s\n", ui.Ago(m.now(), h.At), Label(h.Step), h.Detail)
+	type row struct {
+		at   time.Time
+		text string
 	}
+	rows := make([]row, 0, len(m.buildLog)+len(m.state.History))
 	for _, line := range m.buildLog {
-		fmt.Fprintf(&b, "%s  %s\n", ui.Ago(m.now(), line.At), line.Text)
+		rows = append(rows, row{line.At, line.Text})
+	}
+	for _, h := range m.state.History {
+		rows = append(rows, row{h.At, fmt.Sprintf("%-12s  %s", Label(h.Step), h.Detail)})
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].at.Before(rows[j].at) })
+	var b strings.Builder
+	// Relative times through ui.Ago — "12m ago  approval  no approval comment yet", never an
+	// RFC3339 timestamp (UX-M4).
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%s  %s\n", ui.Ago(m.now(), r.at), r.text)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// startedAt is when this promotion began from the operator's point of view: the earlier of the
+// first History entry and the first progress line, so the header's "started" never claims a
+// later moment than the oldest line in the log below it (preflight runs before any History
+// exists).
+func (m Model) startedAt() time.Time {
+	start := StartedAt(m.state)
+	for _, l := range m.buildLog {
+		if !l.At.IsZero() && (start.IsZero() || l.At.Before(start)) {
+			start = l.At
+		}
+	}
+	return start
 }
 
 // notes is the transient notice and the last plumbing error, word-wrapped.

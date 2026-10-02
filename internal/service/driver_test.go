@@ -45,7 +45,7 @@ func TestDriverRunRetriesTransientRolloutErrors(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
-	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Rollout: 5 * time.Millisecond}, DriverHooks{})
+	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Rollout: 5 * time.Millisecond})
 	err = d.Run(ctx, RunHooks{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded (a transient rollout error must be retried until the deadline, not aborted on the first hiccup)", err)
@@ -84,7 +84,7 @@ func TestDriverRunDoesNotRetryArgoRefreshNotFound(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Argo: 5 * time.Millisecond}, DriverHooks{})
+	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Argo: 5 * time.Millisecond})
 	start := time.Now()
 	err := d.Run(ctx, RunHooks{})
 	elapsed := time.Since(start)
@@ -178,7 +178,7 @@ func TestDriverStepRetryWaitsAtTheFailedStepsCadence(t *testing.T) {
 			// step is caught regardless of which case is running.
 			s := &engine.PromotionState{Phase: engine.StepCIGreen}
 			steps := []engine.Step{stubObserveErrStep{name: tc.failStep, err: tc.stepErr}}
-			d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, poll, DriverHooks{})
+			d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, poll)
 
 			tick, err := d.Step(context.Background())
 
@@ -195,39 +195,3 @@ func TestDriverStepRetryWaitsAtTheFailedStepsCadence(t *testing.T) {
 		})
 	}
 }
-
-// TestDriverProgressReportsOnlyNewHistory: the progress line mirrors a history entry, so a poll
-// that appends nothing (an unchanged wait) must emit nothing, and a changed detail emits once.
-func TestDriverProgressReportsOnlyNewHistory(t *testing.T) {
-	obs := &engine.Observation{Waiting: true, Detail: "CI: 3/4"}
-	steps := []engine.Step{progressStep{engine.StepCIGreen, obs}}
-	var lines []string
-	d := NewDriver(steps, &engine.PromotionState{}, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{},
-		DriverHooks{Progress: func(l string) { lines = append(lines, l) }})
-	for i := 0; i < 5; i++ {
-		if _, err := d.Step(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(lines) != 1 {
-		t.Fatalf("5 unchanged polls emitted %d lines, want 1: %q", len(lines), lines)
-	}
-	*obs = engine.Observation{Waiting: true, Detail: "CI: 4/4"}
-	if _, err := d.Step(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(lines) != 2 || !strings.Contains(lines[1], "CI: 4/4") {
-		t.Fatalf("a changed detail must emit once more: %q", lines)
-	}
-}
-
-type progressStep struct {
-	name engine.StepName
-	obs  *engine.Observation
-}
-
-func (p progressStep) Name() engine.StepName { return p.name }
-func (p progressStep) Observe(context.Context, *engine.PromotionState) (engine.Observation, error) {
-	return *p.obs, nil
-}
-func (p progressStep) Act(context.Context, *engine.PromotionState) error { return nil }

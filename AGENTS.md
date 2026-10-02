@@ -1083,6 +1083,30 @@ test lives** (if one exists).
    `internal/app/kitty_decode_test.go`, which decodes the extended CSI-u form a terminal sends
    once `ReportAlternateKeys` is actually granted and asserts the shifted punctuation comes out
    right.
+14. **A log that records every observation is a log nobody can read, and two feeds of one event
+   read as two events.** What happened: on a real promotion two minutes old the flight screen's
+   history showed ~60 lines. `engine.DriveStatus` appended a History entry for every step on every
+   walk ("already satisfied: …" for steps settled long ago, the same "waiting: …" each poll), so
+   History — which is persisted — grew by one entry per step per poll for as long as a human took
+   to approve; `service.Driver` additionally echoed each new entry as a `<step>: <detail>` progress
+   line, which the controller stored as `Snapshot.Log`, and `flight.logView` printed History and
+   then that log, so every event appeared twice, in two formats, in two concatenated
+   chronological runs (times visibly jumping back from "just now" to "2m ago"). Root cause: a log
+   of *observations* where the reader wanted a log of *changes*, and one fact published through two
+   channels with each consumer assuming the other did not exist. Rule: `appendHistory` records a
+   step's entry only when its detail differs from that step's newest entry, so History is the
+   change log (the first occurrence keeps its time; readers `landedAt`, `mergedAt`,
+   `waitingReporter`, `historyDetail` and `LastActivity` were checked and none needs per-poll
+   entries); `Hooks.Progress` carries preflight and signing-wait lines only — an outcome reaches a
+   screen through `PromotionState.History`, never also as a progress line; and `flight.logView`
+   merges the two disjoint sources into ONE list ordered by time, stably, with plain step labels,
+   while the header's "started" counts from the earliest line in it. Regression tests:
+   `TestHistoryRecordsChangesNotReobservations` in `internal/engine/engine_test.go`,
+   `TestResumeDoesNotMirrorHistoryIntoProgress` in `internal/service/promotions_test.go`,
+   `TestLogViewIsOneChronologicalListEachEventOnce`, `TestLogViewMergesByTimeNotBySource`,
+   `TestHeaderStartedUsesTheEarliestLine` and the `flight-multipoll` goldens in
+   `internal/app/flight/history_test.go` (its fixture is a control for one property: change-only
+   History and preflight-only log).
 
 ## 10. Maintaining This Document
 

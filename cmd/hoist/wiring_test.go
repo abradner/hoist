@@ -202,23 +202,16 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	}
 }
 
-// TestDriveFuncForCallsProgressThroughoutARealDrive is a regression test for a P1 an
-// adversarial review found (and internal/app's own fix corrected — see AdoptBuilt's and app.go's doc
-// comments): driveFuncFor's own wrapped save reuses the SAME progress callback the preflight
-// used for engine.Drive's per-step history hook (defect B/C: a long single Act streams into
-// the log as it happens, not only once the whole Drive call returns), across the WHOLE
-// promotion, not only its first step. This test is the wiring-level half of that coverage: it
-// proves progress is actually called from real drive steps — branch, commit, push, PR-open,
-// merge — reached through a REAL svc.StartPromotion-produced Drive driving a full,
-// real promotion (the same fixture and driveToDone helper
-// TestTUIStartPromotionDrivesRealPromotionEndToEnd uses), not a stub that never touches
-// progress at all. The other half — that internal/app/app.go's own channel, reused across
-// its preflight-then-adopt-then-drive lifecycle, is never closed while anything can still
-// send on it (the actual panic this bug produced: a send on a closed channel panics
-// unconditionally in Go, select/default only guards a full buffer, never a closed one) — is
-// covered where that lifecycle actually lives, internal/app/app_test.go's
-// TestProgressSurvivesFromPreflightThroughDrive.
-func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
+// TestDriveFuncForDoesNotMirrorHistoryIntoProgress: progress is preflight-only. A step's outcome
+// is a PromotionState.History entry, which the flight screen renders from the state snapshot;
+// echoing each one as a progress line too put every event on screen twice (AGENTS.md §9 entry
+// 14). This drives a full, real promotion (the same fixture and driveToDone helper
+// TestTUIStartPromotionDrivesRealPromotionEndToEnd uses) through a REAL svc.StartPromotion Drive
+// and asserts no progress line arrives after preflight; the recorded history is the positive
+// control that steps really ran. (The channel-lifetime half of the old test — a send on a closed
+// progress channel panics — lives in internal/app/app_test.go's
+// TestProgressSurvivesFromPreflightThroughDrive.)
+func TestDriveFuncForDoesNotMirrorHistoryIntoProgress(t *testing.T) {
 	cfgPath, clone, _ := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
@@ -252,12 +245,15 @@ func TestDriveFuncForCallsProgressThroughoutARealDrive(t *testing.T) {
 		t.Fatal("progress was never called during preflight")
 	}
 
-	driveToDone(t, clone, driveFn, state, 500)
+	final := driveToDone(t, clone, driveFn, state, 500)
+	if len(final.History) == 0 {
+		t.Fatal("positive control: the drive recorded no history, so the assertion below proves nothing")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(lines) <= preflightLines {
-		t.Fatalf("progress was never called during the drive itself: %d lines after preflight, still %d after a full promotion", preflightLines, len(lines))
+	if len(lines) != preflightLines {
+		t.Fatalf("progress mirrored the drive: %d lines after preflight, %d after a full promotion: %q", preflightLines, len(lines), lines)
 	}
 }
 

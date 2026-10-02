@@ -44,7 +44,9 @@ type Mode struct {
 // never anything a caller needs to poll for. Progress reports one short line per preflight
 // stage, mirroring the CLI's own progress lines (runHooksForCLI) and the TUI's own preflight log
 // (buildStartPromotion's report calls) — both now the identical text, since both go through this
-// one function. OnWaiting is passed straight through to engine.StepsFor, for a later Step/Run
+// one function. It carries preflight lines only, never a step's outcome: those are
+// PromotionState.History entries, and echoing them here put every event on the flight screen
+// twice. OnWaiting is passed straight through to engine.StepsFor, for a later Step/Run
 // call's own CommittedStep "waiting for signing approval" wait.
 type Hooks struct {
 	Progress  func(string)
@@ -297,5 +299,5 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	release()
 
 	steps := engine.StepsFor(state, g, f, a, ro, s.settings.ProductionEnvs(), req.Mode.Confirmed, h.OnWaiting)
-	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll, DriverHooks{Progress: h.Progress}), nil
+	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll), nil
 }

@@ -20,7 +20,7 @@ import (
 // actual consumers) read the same as before the PR that replaced the old direct-call CLI drive
 // loop with this Driver.Run call.
 func runDriveForTest(ctx context.Context, steps []engine.Step, s *engine.PromotionState, poll config.PollConfig, stderr io.Writer) error {
-	d := service.NewDriver(steps, s, nil, pollIntervals(poll), service.DriverHooks{})
+	d := service.NewDriver(steps, s, nil, pollIntervals(poll))
 	return d.Run(ctx, runHooksForCLI(stderr))
 }
 

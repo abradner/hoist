@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -46,16 +45,6 @@ type Drive interface {
 	Run(ctx context.Context, h RunHooks) error
 }
 
-// DriverHooks are optional, nil-safe callbacks a Driver invokes as it drives — never anything a
-// caller needs to poll for. Progress reports one short line per step actually persisted (the
-// same "<step>: <detail>" shape cmd/hoist/wiring.go's own driveFuncFor gave the flight screen's
-// preflight log), read off the newest engine.HistoryEntry the moment that step's own save lands
-// — so the operator sees a long single Act (a signed commit, a push) show up before the Step
-// call that contains it ever returns.
-type DriverHooks struct {
-	Progress func(string)
-}
-
 // Driver drives one promotion's steps to completion, one engine.DriveStatus walk per Step call
 // (see DriveStatus's own doc comment for the double-observation problem this replaces: a caller
 // that used to run engine.Drive and then engine.Status every poll — cmd/hoist's driveToCompletion
@@ -86,26 +75,8 @@ type Driver struct {
 // shape because internal/service.StartPromotion and Resume are what build a Driver in
 // production, and are expected to unexport this constructor behind their own request/response
 // types once every caller goes through them.
-func NewDriver(steps []engine.Step, state *engine.PromotionState, save func(*engine.PromotionState) error, poll engine.PollIntervals, hooks DriverHooks) *Driver {
-	wrapped := save
-	if hooks.Progress != nil {
-		progress := hooks.Progress
-		// seen is how much of History has already been reported: only entries appended since
-		// the last save are lines, so an unchanged poll (appendHistory skips repeats) reports
-		// nothing, and a resumed Driver does not re-report what the file already held.
-		seen := len(state.History)
-		wrapped = func(st *engine.PromotionState) error {
-			for ; seen < len(st.History); seen++ {
-				h := st.History[seen]
-				progress(fmt.Sprintf("%s: %s", h.Step, h.Detail))
-			}
-			if save != nil {
-				return save(st)
-			}
-			return nil
-		}
-	}
-	return &Driver{steps: steps, state: state, save: wrapped, poll: poll}
+func NewDriver(steps []engine.Step, state *engine.PromotionState, save func(*engine.PromotionState) error, poll engine.PollIntervals) *Driver {
+	return &Driver{steps: steps, state: state, save: save, poll: poll}
 }
 
 // ID is the promotion this Driver drives.

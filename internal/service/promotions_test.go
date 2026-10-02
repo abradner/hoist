@@ -364,13 +364,12 @@ func TestResumeAppliesOverrideCINoneAndCarriesForward(t *testing.T) {
 	}
 }
 
-// TestResumeWiresProgressThroughHooks is this PR's own TUI parity acceptance test (FB-M2): the
-// TUI's old Resume adapter (cmd/hoist/wiring.go's buildInFlightFuncs, pre-move) built a bare
-// service.DriverHooks{}, so a resumed promotion's own per-step saves never surfaced a progress
-// line the way a freshly started promotion already did through StartPromotion. Before this PR,
-// nothing reached Hooks.Progress on the resume path at all; this drives a real promotion to
-// completion through the Drive Resume returns and asserts at least one progress line arrives.
-func TestResumeWiresProgressThroughHooks(t *testing.T) {
+// TestResumeDoesNotMirrorHistoryIntoProgress: a resumed drive's step outcomes are PromotionState
+// History entries, which the flight screen already renders; Hooks.Progress is preflight-only, so
+// driving a real promotion to completion must report no progress line at all (the earlier
+// "<step>: <detail>" mirror put every event on screen twice). The positive control is that the
+// drive did record history.
+func TestResumeDoesNotMirrorHistoryIntoProgress(t *testing.T) {
 	fx := newInflightFixture(t)
 	s := buildPROpenedPromotionsState(t, fx)
 	if err := fileStore.Save(s); err != nil {
@@ -388,8 +387,11 @@ func TestResumeWiresProgressThroughHooks(t *testing.T) {
 	if err := d.Run(context.Background(), RunHooks{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(lines) == 0 {
-		t.Fatal("expected Resume's Driver to report progress through Hooks.Progress at least once; got none")
+	if len(d.State().History) == 0 {
+		t.Fatal("positive control: the drive recorded no history, so the assertion below proves nothing")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("Resume's Driver mirrored history into Progress: %q", lines)
 	}
 }
 
