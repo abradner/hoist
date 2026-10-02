@@ -162,13 +162,16 @@ replayed to states whose own forge read is later still, and the steps' Observe m
 live calls: a promotion merged mid-scan looks reverted against a base tip fetched before its
 merge, and a base reset mid-scan leaves a reverted promotion looking finished. So when the walk
 is over the scan lists origin's branches once more (`scanGit.unchanged`); only if every branch
-is where the snapshot had it do the scan's verdicts stand. If anything moved, or a pass failed,
-the scan is made again through the live `git.Git`, and `List` archives nothing before that is
-settled. The snapshot is dropped when the scan returns, so `claimTarget`'s second scan, made
-while holding the claim, asks origin again; and `scanGit` writes out every `git.Git` method
-rather than embedding one, refusing the ones that write, so it cannot serve a step that Acts
-and a new method cannot slip through unclassified. The forge and the cluster are still asked
-once per state (§9 entry 15).
+it asked about, and every base tip it fetched, is where the snapshot had it do the scan's
+verdicts stand. If anything moved, or a pass failed, the scan is made again through the live
+`git.Git`, and `List` archives nothing before that is settled. This is agreement at two
+instants — the start and the end of the scan — not continuity: a ref that moves and returns to
+the same commit in between is not seen, and the verdicts are those of a live walk made at the
+closing listing. The snapshot is dropped when the scan returns, so `claimTarget`'s second scan,
+made while holding the claim, asks origin again; and `scanGit` writes out every `git.Git`
+method rather than embedding one, refusing the ones that write, so it cannot serve a step that
+Acts and a new method cannot slip through unclassified. Only git reads are shared: the forge
+and the cluster are asked per state, and again for any state a redo covers (§9 entry 15).
 
 *Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
 `ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
@@ -1130,8 +1133,11 @@ test lives** (if one exists).
    `TestScanOverDirectAndPRPromotionsAsksOriginOnce` for the cost;
    `TestScanDoesNotCallAPromotionFinishedOnAStaleSnapshot`,
    `TestScanDoesNotCallAMergeRevertedOnAStaleBaseTip`,
-   `TestScanDoesNotFailOnAListingAheadOfItsFetch` and
-   `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what a snapshot must never decide.
+   `TestScanDoesNotFailOnAListingAheadOfItsFetch`,
+   `TestResumeByEnvAndListRedoLiveWhenTheSnapshotCannotBeTrusted` and
+   `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what a snapshot must never decide;
+   `TestListAgainstAnUnreachableOriginFailsEachStateOnce` for the failure path, which a cache
+   that retries per state makes dearer than no cache at all.
 
 ## 10. Maintaining This Document
 

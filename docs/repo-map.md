@@ -128,7 +128,8 @@ it reads private state and writes to systems that deploy software.
   The walk shares its git reads of origin across the states it covers (`internal/service`'s
   `scanGit`: one listing of branches, one fetch per base branch, taken afresh by every walk),
   then lists origin's branches again when it is done: its verdicts stand, and anything is
-  archived, only if every branch is where the snapshot had it — otherwise the walk is made
+  archived, only if every branch the walk asked about is where the snapshot had it (agreement
+  at the walk's start and end, not continuity between them) — otherwise the walk is made
   again live. `claimTarget`'s scans and `resume --env`'s candidate scan do the same. The
   snapshot refuses writes and never outlives the walk that took it (AGENTS.md §4.1, §9 entry 15).
 - **Digest normalisation.** Bare tags and `sha-` tags in the source env are pinned to a digest before

@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"maps"
 	"sync"
 	"time"
 
@@ -17,31 +16,41 @@ import (
 // branch still exists — two connections to the remote per state, so a scan cost grew with every
 // promotion an env had ever had (AGENTS.md §9 entry 15: eight finished promotions made `hoist
 // promote` spend 105 of its first 108 seconds here, twice over because claimTarget scans before
-// and after the claim). The forge is still asked once per state; only the git round trips are
-// shared.
+// and after the claim). Only the git round trips are shared; the forge and the cluster are
+// asked per state.
 //
 // The listing and the fetch are two reads of the remote at two instants, replayed to every state
 // that asks, while each state's forge read is live. The steps' Observe methods were written for
 // live calls in a fixed order and can misread that: a promotion merged mid-scan looks reverted
 // against a base tip fetched before its merge, and a base reset mid-scan leaves a reverted
 // promotion looking finished. So nothing a scan learned through a scanGit is used until
-// unchanged has asked origin again, at the end, and found every branch where the snapshot had
-// it. Then the remote the scan saw is the remote as it stood for the whole scan, and each verdict
-// is the one live calls would have reached. If anything moved — or the pass itself failed — the
-// scan is made again through the live git.Git, as if no snapshot existed.
+// unchanged has asked origin again, at the end, and found every branch the scan asked about —
+// and every base tip it fetched — where the snapshot had it. If anything moved, or a pass
+// failed, the scan is made again through the live git.Git, as if no snapshot existed.
+//
+// What that establishes is agreement at two instants, the start and the end of the scan, not
+// continuity between them: a ref that moves away and comes back to the same commit inside one
+// scan is not seen. The verdicts are then the ones a live walk reaches at the closing listing,
+// which is as good an instant as any a live walk would have picked — but it is that, and not
+// proof that nothing happened in between.
+//
+// The cost of the check is one more listing per scan, so a scan over a single state is one
+// round trip dearer than it was, and a scan whose snapshot is not confirmed pays for both
+// passes, forge and cluster reads included. A failed fetch or listing is kept like any other
+// answer: every later state then fails its snapshot pass at once, without another connection,
+// and is observed live.
 //
 // A scanGit lives for one scan: each caller builds its own, so claimTarget's second scan, made
 // while holding the claim, asks origin again (AGENTS.md principle 2). It is for observing only.
 // It holds the wrapped git.Git rather than embedding it, so every method is written out below:
 // the ones that write refuse, and a method added to git.Git later does not compile here until
 // someone decides which kind it is.
-//
-// Only successful answers are kept. A failed fetch or listing is asked again by the next state.
 type scanGit struct {
 	inner git.Git
 
 	mu      sync.Mutex
-	heads   map[remoteKey]map[string]string
+	heads   map[remoteKey]listing
+	asked   map[remoteKey]map[string]bool // the branches LsRemoteBranch was asked about
 	fetched map[fetchKey]fetchResult
 }
 
@@ -51,24 +60,32 @@ type remoteKey struct{ dir, remote string }
 
 type fetchKey struct{ dir, remote, branch string }
 
+type listing struct {
+	heads map[string]string
+	err   error
+}
+
 type fetchResult struct {
 	sha string
 	ok  bool
+	err error
 }
 
 func newScanGit(g git.Git) *scanGit {
-	return &scanGit{inner: g, heads: map[remoteKey]map[string]string{}, fetched: map[fetchKey]fetchResult{}}
+	return &scanGit{inner: g, heads: map[remoteKey]listing{}, asked: map[remoteKey]map[string]bool{}, fetched: map[fetchKey]fetchResult{}}
 }
 
 // unchanged asks origin for its branches once more and reports whether every answer this scan
-// was given still holds: each listing it took is identical now, and each base tip it fetched is
-// where that branch still points. A scan that asked nothing has nothing to confirm. A listing
-// that fails now confirms nothing, and reads as changed.
+// was given still holds: each branch it asked about is where the listing had it (or still
+// absent), and each base tip it fetched is where that branch points now. Branches the scan
+// never asked about are not compared — someone else's push is not this scan's business. A scan
+// that asked nothing has nothing to confirm. An answer that was a failure, or a listing that
+// fails now, confirms nothing.
 func (s *scanGit) unchanged(ctx context.Context) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := map[remoteKey]map[string]string{}
-	listing := func(k remoteKey) (map[string]string, bool) {
+	current := func(k remoteKey) (map[string]string, bool) {
 		if heads, ok := now[k]; ok {
 			return heads, true
 		}
@@ -80,17 +97,26 @@ func (s *scanGit) unchanged(ctx context.Context) bool {
 		return heads, true
 	}
 	for k, was := range s.heads {
-		heads, ok := listing(k)
-		if !ok || !maps.Equal(was, heads) {
+		if was.err != nil {
 			return false
 		}
-	}
-	for k, was := range s.fetched {
-		heads, ok := listing(remoteKey{k.dir, k.remote})
+		heads, ok := current(k)
 		if !ok {
 			return false
 		}
-		if sha, there := heads[k.branch]; there != was.ok || sha != was.sha {
+		for branch := range s.asked[k] {
+			if heads[branch] != was.heads[branch] {
+				return false
+			}
+		}
+	}
+	for k, was := range s.fetched {
+		if was.err != nil {
+			return false
+		}
+		heads, ok := current(remoteKey{k.dir, k.remote})
+		// An absent branch reads as "", which is what a fetch that found none recorded.
+		if !ok || heads[k.branch] != was.sha {
 			return false
 		}
 	}
@@ -102,15 +128,19 @@ func (s *scanGit) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := remoteKey{cloneDir, remote}
-	heads, ok := s.heads[k]
+	l, ok := s.heads[k]
 	if !ok {
-		var err error
-		if heads, err = s.inner.LsRemoteHeads(ctx, cloneDir, remote); err != nil {
-			return "", false, err
-		}
-		s.heads[k] = heads
+		l.heads, l.err = s.inner.LsRemoteHeads(ctx, cloneDir, remote)
+		s.heads[k] = l
 	}
-	sha, found := heads[branch]
+	if l.err != nil {
+		return "", false, l.err
+	}
+	if s.asked[k] == nil {
+		s.asked[k] = map[string]bool{}
+	}
+	s.asked[k][branch] = true
+	sha, found := l.heads[branch]
 	return sha, found, nil
 }
 
@@ -119,15 +149,18 @@ func (s *scanGit) FetchBranch(ctx context.Context, dir, remote, branch string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := fetchKey{dir, remote, branch}
-	if r, ok := s.fetched[k]; ok {
-		return r.sha, r.ok, nil
+	r, ok := s.fetched[k]
+	if !ok {
+		r.sha, r.ok, r.err = s.inner.FetchBranch(ctx, dir, remote, branch)
+		if r.err != nil || !r.ok {
+			r.sha = ""
+		}
+		s.fetched[k] = r
 	}
-	sha, ok, err := s.inner.FetchBranch(ctx, dir, remote, branch)
-	if err != nil {
-		return "", false, err
+	if r.err != nil {
+		return "", false, r.err
 	}
-	s.fetched[k] = fetchResult{sha, ok}
-	return sha, ok, nil
+	return r.sha, r.ok, nil
 }
 
 // The rest of git.Git's reads go straight to the wrapped implementation.

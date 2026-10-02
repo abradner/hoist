@@ -22,6 +22,7 @@ type countingGit struct {
 	git.Git
 	heads, branch, fetch int
 	headsErr, fetchErr   error
+	fetchMissing         bool
 	headsOut             map[string]string
 }
 
@@ -45,6 +46,9 @@ func (c *countingGit) FetchBranch(ctx context.Context, dir, remote, branch strin
 	c.fetch++
 	if c.fetchErr != nil {
 		return "", false, c.fetchErr
+	}
+	if c.fetchMissing {
+		return "", false, nil
 	}
 	if c.Git == nil {
 		return "sha-of-" + branch, true, nil
@@ -94,28 +98,30 @@ func TestScanGitAsksTheRemoteOncePerQuestion(t *testing.T) {
 	}
 }
 
-// A failure is never the scan's answer for the states that follow: the next one asks again.
-func TestScanGitDoesNotKeepAFailure(t *testing.T) {
+// A failure is kept for the scan like any other answer, so an unreachable origin costs one
+// failed connection for the whole snapshot pass rather than one per state — each later state
+// fails at once and is observed live, which is the pass that reports the error.
+func TestScanGitKeepsAFailureForTheScan(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("connection reset")
-	inner := &countingGit{headsErr: boom, fetchErr: boom, headsOut: map[string]string{"main": "aaa"}}
+	inner := &countingGit{headsErr: boom, fetchErr: boom}
 	g := newScanGit(inner)
 
-	if _, _, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
-		t.Fatalf("want the listing's error, got %v", err)
+	for i := 0; i < 3; i++ {
+		if _, _, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
+			t.Fatalf("want the listing's error, got %v", err)
+		}
+		if _, _, err := g.FetchBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
+			t.Fatalf("want the fetch's error, got %v", err)
+		}
 	}
-	if _, _, err := g.FetchBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
-		t.Fatalf("want the fetch's error, got %v", err)
+	if inner.heads != 1 || inner.fetch != 1 {
+		t.Errorf("three states against a dead remote made %d listings and %d fetches, want 1 and 1", inner.heads, inner.fetch)
 	}
-	inner.headsErr, inner.fetchErr = nil, nil
-	if sha, ok, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); err != nil || !ok || sha != "aaa" {
-		t.Errorf("after the remote recovers: %q, %v, %v", sha, ok, err)
-	}
-	if _, ok, err := g.FetchBranch(ctx, "/clone", "origin", "main"); err != nil || !ok {
-		t.Errorf("after the remote recovers: ok=%v err=%v", ok, err)
-	}
-	if inner.heads != 2 || inner.fetch != 2 {
-		t.Errorf("%d listings and %d fetches, want 2 and 2 (the failures retried)", inner.heads, inner.fetch)
+	// And a scan that was answered with a failure is never confirmed, even once origin is back.
+	inner.headsErr, inner.fetchErr, inner.headsOut = nil, nil, map[string]string{"main": "aaa"}
+	if g.unchanged(ctx) {
+		t.Error("a snapshot holding a failure must not be confirmed")
 	}
 }
 
@@ -504,15 +510,18 @@ func TestScanGitRefusesToWrite(t *testing.T) {
 }
 
 // TestScanGitUnchangedComparesEveryAnswerItGave pins the check every scan's verdicts wait on:
-// origin's branches must be exactly where the snapshot had them, for the listings it took and
-// for the base tips it fetched.
+// each branch the scan asked about, and each base tip it fetched, must be where the snapshot
+// had it. A branch the scan never asked about is not its business.
 func TestScanGitUnchangedComparesEveryAnswerItGave(t *testing.T) {
 	ctx := context.Background()
-	scanned := func(heads map[string]string) (*scanGit, *countingGit) {
-		inner := &countingGit{headsOut: heads}
+	// A scan that asked about main, one promotion branch that exists and one that is gone.
+	scanned := func() (*scanGit, *countingGit) {
+		inner := &countingGit{headsOut: map[string]string{"main": "aaa", "hoist/env/one": "bbb", "renovate/x": "rrr"}}
 		g := newScanGit(inner)
-		if _, _, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); err != nil {
-			t.Fatal(err)
+		for _, branch := range []string{"main", "hoist/env/one", "hoist/env/gone"} {
+			if _, _, err := g.LsRemoteBranch(ctx, "/clone", "origin", branch); err != nil {
+				t.Fatal(err)
+			}
 		}
 		return g, inner
 	}
@@ -522,47 +531,59 @@ func TestScanGitUnchangedComparesEveryAnswerItGave(t *testing.T) {
 		t.Error("a scan that asked origin nothing has nothing to confirm")
 	}
 
-	g, inner := scanned(map[string]string{"main": "aaa", "hoist/env/one": "bbb"})
+	g, inner := scanned()
 	if !g.unchanged(ctx) || inner.heads != 2 {
 		t.Errorf("an identical listing must confirm the snapshot, with one more round trip (listings: %d)", inner.heads)
 	}
 
-	for name, now := range map[string]map[string]string{
-		"a branch appeared":    {"main": "aaa", "hoist/env/one": "bbb", "hoist/env/two": "ccc"},
-		"a branch disappeared": {"main": "aaa"},
-		"a branch moved":       {"main": "aaa", "hoist/env/one": "ddd"},
-		"the base moved":       {"main": "eee", "hoist/env/one": "bbb"},
+	for name, tc := range map[string]struct {
+		now  map[string]string
+		want bool
+	}{
+		"an asked branch moved":         {map[string]string{"main": "aaa", "hoist/env/one": "ddd", "renovate/x": "rrr"}, false},
+		"an asked branch disappeared":   {map[string]string{"main": "aaa", "renovate/x": "rrr"}, false},
+		"an absent branch appeared":     {map[string]string{"main": "aaa", "hoist/env/one": "bbb", "hoist/env/gone": "ggg", "renovate/x": "rrr"}, false},
+		"the base moved":                {map[string]string{"main": "eee", "hoist/env/one": "bbb", "renovate/x": "rrr"}, false},
+		"an unrelated branch moved":     {map[string]string{"main": "aaa", "hoist/env/one": "bbb", "renovate/x": "sss"}, true},
+		"an unrelated branch appeared":  {map[string]string{"main": "aaa", "hoist/env/one": "bbb", "renovate/x": "rrr", "feature/y": "yyy"}, true},
+		"an unrelated branch went away": {map[string]string{"main": "aaa", "hoist/env/one": "bbb"}, true},
 	} {
-		g, inner := scanned(map[string]string{"main": "aaa", "hoist/env/one": "bbb"})
-		inner.headsOut = now
-		if g.unchanged(ctx) {
-			t.Errorf("%s: the snapshot must not be confirmed", name)
+		g, inner := scanned()
+		inner.headsOut = tc.now
+		if got := g.unchanged(ctx); got != tc.want {
+			t.Errorf("%s: unchanged = %v, want %v", name, got, tc.want)
 		}
 	}
 
-	g, inner = scanned(map[string]string{"main": "aaa"})
+	g, inner = scanned()
 	inner.headsErr = errors.New("connection reset")
 	if g.unchanged(ctx) {
 		t.Error("a listing that fails confirms nothing")
 	}
 
-	// A fetched tip is checked against the listing too, including a scan that only ever fetched.
-	fetchOnly := func(heads map[string]string) bool {
-		inner := &countingGit{headsOut: heads}
+	// A fetched tip is checked against the listing too, including for a scan that only fetched.
+	fetchOnly := func(missing bool, now map[string]string) bool {
+		inner := &countingGit{headsOut: now, fetchMissing: missing}
 		g := newScanGit(inner)
 		if _, _, err := g.FetchBranch(ctx, "/clone", "origin", "main"); err != nil {
 			t.Fatal(err)
 		}
 		return g.unchanged(ctx)
 	}
-	if !fetchOnly(map[string]string{"main": "sha-of-main"}) {
+	if !fetchOnly(false, map[string]string{"main": "sha-of-main"}) {
 		t.Error("a fetched tip the listing agrees with must be confirmed")
 	}
-	if fetchOnly(map[string]string{"main": "somewhere-else"}) {
+	if fetchOnly(false, map[string]string{"main": "somewhere-else"}) {
 		t.Error("a fetched tip the base has since left must not be confirmed")
 	}
-	if fetchOnly(map[string]string{}) {
+	if fetchOnly(false, map[string]string{}) {
 		t.Error("a fetched branch that no longer exists must not be confirmed")
+	}
+	if !fetchOnly(true, map[string]string{}) {
+		t.Error("a branch the fetch found missing, and that is still missing, must be confirmed")
+	}
+	if fetchOnly(true, map[string]string{"main": "now-it-exists"}) {
+		t.Error("a branch the fetch found missing that has since appeared must not be confirmed")
 	}
 }
 
@@ -664,5 +685,85 @@ func TestListSharesOriginAcrossPromotionsThatNeverGoTerminal(t *testing.T) {
 	if counting.fetch != 1 || counting.heads != 2 || counting.branch != 0 {
 		t.Errorf("List over three never-terminal promotions: %d fetches, %d listings, %d per-branch ls-remotes; want 1, 2, 0",
 			counting.fetch, counting.heads, counting.branch)
+	}
+}
+
+// The same two guards, through the scan's other callers: `resume --env` must not answer from a
+// snapshot origin has moved past, nor report a snapshot's own inconsistency as a promotion it
+// could not confirm; and List must not report that inconsistency as a promotion's error.
+func TestResumeByEnvAndListRedoLiveWhenTheSnapshotCannotBeTrusted(t *testing.T) {
+	t.Run("FindInFlightForEnv: origin moved under the snapshot", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		hooked := &afterFirstListingGit{Git: git.Exec{}, hook: func() {
+			runGitHost(t, fx.clone, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Branch)
+		}}
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return hooked }
+		st, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production")
+		if err != nil || st == nil || st.ID != s.ID {
+			t.Fatalf("the promotion whose branch came back is the one in flight; got %v, %v", st, err)
+		}
+	})
+	t.Run("FindInFlightForEnv: the snapshot pass failed", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		directPromotion(t, fx)
+		runGitHost(t, fx.clone, "fetch", "-q", "origin", "main")
+		runGitHost(t, fx.clone, "merge", "-q", "--ff-only", "origin/main")
+		runGitHost(t, fx.clone, "commit", "-q", "--allow-empty", "-m", "unrelated later commit")
+		runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return &aheadListingGit{Git: git.Exec{}, base: "main"} }
+		var nf *NotFoundError
+		if _, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production"); !errors.As(err, &nf) {
+			t.Fatalf("a landed direct promotion leaves nothing to resume; the snapshot's own error must not be reported: %v", err)
+		}
+	})
+	t.Run("List: the snapshot pass failed", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		directPromotion(t, fx)
+		runGitHost(t, fx.clone, "fetch", "-q", "origin", "main")
+		runGitHost(t, fx.clone, "merge", "-q", "--ff-only", "origin/main")
+		runGitHost(t, fx.clone, "commit", "-q", "--allow-empty", "-m", "unrelated later commit")
+		runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return &aheadListingGit{Git: git.Exec{}, base: "main"} }
+		listed, err := New(base.settings, deps).List(context.Background(), ListOpts{})
+		if err != nil || len(listed) != 1 {
+			t.Fatalf("List = %v, %v", listed, err)
+		}
+		if listed[0].Err != nil {
+			t.Fatalf("the snapshot's own inconsistency was reported as the promotion's error: %v", listed[0].Err)
+		}
+	})
+}
+
+// An unreachable origin costs one failed snapshot pass on top of what it cost before, not a
+// second failed connection per state.
+func TestListAgainstAnUnreachableOriginFailsEachStateOnce(t *testing.T) {
+	fx := newInflightFixture(t)
+	s := finishedPromotion(t, fx)
+	saveStateAs(t, s, "second-finished")
+	saveStateAs(t, s, "third-finished")
+
+	dead := &countingGit{Git: git.Exec{}, fetchErr: errors.New("could not read from remote"), headsErr: errors.New("could not read from remote")}
+	base := withConfig(fx)
+	deps := base.deps
+	deps.Git = func() git.Git { return dead }
+	listed, err := New(base.settings, deps).List(context.Background(), ListOpts{})
+	if err != nil || len(listed) != 3 {
+		t.Fatalf("List = %d entries, %v", len(listed), err)
+	}
+	for _, l := range listed {
+		if l.Err == nil {
+			t.Fatalf("control: %s must report the unreachable origin", l.State.ID)
+		}
+	}
+	// One fetch for the snapshot pass, shared; one per state for the live pass that reports it.
+	if dead.fetch != 4 {
+		t.Errorf("three states against a dead origin made %d fetch attempts, want 4", dead.fetch)
 	}
 }
