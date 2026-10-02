@@ -38,7 +38,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	app := fs.String("app", "", "the Argo Application's own metadata.name to watch (required)")
 	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context (default: the selected repo's kube.context, else the kubeconfig's current context; may also be given before the command)")
 	once := fs.Bool("once", false, "print one snapshot and exit, instead of polling until interrupted")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
