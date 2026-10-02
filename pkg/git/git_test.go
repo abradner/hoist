@@ -485,6 +485,50 @@ func TestObjectExists(t *testing.T) {
 	}
 }
 
+// TestLsRemoteHeadsAgreesWithLsRemoteBranch pins the one property the in-flight scan relies on:
+// the map is the same answer LsRemoteBranch gives, branch by branch — a pushed branch is in it
+// at its tip, a tag named like a branch is not, and a branch nobody pushed is absent.
+func TestLsRemoteHeadsAgreesWithLsRemoteBranch(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	if err := runHost(t, cloneDir, "push", "origin", "HEAD:refs/heads/hoist/env/abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHost(t, cloneDir, "push", "origin", "HEAD:refs/tags/only-a-tag"); err != nil {
+		t.Fatal(err)
+	}
+	// Not a branch, but its name ends like one, and ls-remote's pattern matches by tail.
+	if err := runHost(t, cloneDir, "push", "origin", "HEAD:refs/odd/refs/heads/not-a-branch"); err != nil {
+		t.Fatal(err)
+	}
+	heads, err := g.LsRemoteHeads(ctx(), cloneDir, "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != 2 {
+		t.Fatalf("want exactly main and hoist/env/abc, got %v", heads)
+	}
+	for _, branch := range []string{"main", "hoist/env/abc"} {
+		sha, ok, err := g.LsRemoteBranch(ctx(), cloneDir, "origin", branch)
+		if err != nil || !ok {
+			t.Fatalf("LsRemoteBranch(%s): ok=%v err=%v", branch, ok, err)
+		}
+		if heads[branch] != sha {
+			t.Errorf("%s: LsRemoteHeads says %q, LsRemoteBranch says %q", branch, heads[branch], sha)
+		}
+	}
+	// (Covered by the len check above too: neither the tag nor the tail-matching ref is listed.)
+	if _, ok := heads["only-a-tag"]; ok {
+		t.Errorf("a tag must not appear as a head: %v", heads)
+	}
+	if _, ok := heads["not-a-branch"]; ok {
+		t.Errorf("a ref outside refs/heads/ must not appear as a head: %v", heads)
+	}
+	if _, err := g.LsRemoteHeads(ctx(), cloneDir, "no-such-remote"); err == nil {
+		t.Error("an unconfigured remote must be an error, not an empty map")
+	}
+}
+
 // TestFetchBranchMissingBranchReturnsNotOK is FetchBranch's real-git regression for classifying
 // a branch that plain does not exist on the remote: ok=false, err=nil, not a stderr-text match.
 // This exercises the real fix (an authoritative LsRemoteBranch re-check after the fetch errors)

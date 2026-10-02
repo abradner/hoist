@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
 )
 
 // FindInFlight looks for a promotion state other than skipID targeting repoFullName/targetEnv
@@ -33,8 +34,23 @@ import (
 // rather than taken as parameters: repoFullName is always the SAME forge identity every step
 // list built from prev would use, and s.Git()/s.ForgeFor give exactly that without a caller
 // having to already hold one.
+//
+// The scan is made through a scanGit first — one listing of origin's branches and one fetch of
+// each base, shared by every candidate — and its answer stands only if origin's branches are
+// still where that snapshot had them once the scan is over (scanGit.unchanged). Otherwise, or if
+// the pass failed, the scan is made again through the live git.Git. Either way every call asks
+// origin afresh: the snapshot is built here and dropped on return.
 func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, skipID string) (*engine.PromotionState, engine.StepStatus, error) {
-	g := s.Git()
+	scan := newScanGit(s.Git())
+	if prev, last, err := s.findInFlight(ctx, scan, repoFullName, targetEnv, skipID); err == nil && scan.unchanged(ctx) {
+		return prev, last, nil
+	}
+	return s.findInFlight(ctx, s.Git(), repoFullName, targetEnv, skipID)
+}
+
+// findInFlight is one scan, observing through g. It reads the state files itself, so a second
+// call starts from what is on disk rather than from anything the first one recorded on a state.
+func (s *Service) findInFlight(ctx context.Context, g git.Git, repoFullName, targetEnv, skipID string) (*engine.PromotionState, engine.StepStatus, error) {
 	f, err := s.ForgeFor(repoFullName)
 	if err != nil {
 		return nil, engine.StepStatus{}, err

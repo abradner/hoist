@@ -10,6 +10,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -133,38 +134,18 @@ func (s *Service) Find(id string) (*engine.PromotionState, error) {
 //
 // h.Progress hears one line before the scan starts.
 func (s *Service) FindInFlightForEnv(ctx context.Context, env string, h Hooks) (*engine.PromotionState, error) {
-	states, err := s.deps.Store.List()
+	h.report("re-observing every promotion into " + env + " to find the one in flight")
+	// One scan through a shared snapshot of origin, kept only if nothing went unconfirmed and
+	// origin's branches have not moved under it; otherwise the scan is made again live. See
+	// FindInFlight.
+	scan := newScanGit(s.Git())
+	matches, obsErrs, err := s.inFlightForEnv(ctx, scan, env)
 	if err != nil {
 		return nil, err
 	}
-	h.report("re-observing every promotion into " + env + " to find the one in flight")
-	var matches []*engine.PromotionState
-	var obsErrs []string
-	for _, st := range states {
-		if st.TargetEnv != env {
-			continue
-		}
-		rc, ok := RepoConfigFor(s.settings.Config, st.RepoFullName)
-		if !ok {
-			obsErrs = append(obsErrs, fmt.Sprintf("%s: repo %q is not in the current config; restore it or name this promotion's id explicitly", st.ID, st.RepoFullName))
-			continue
-		}
-		f, ferr := s.ForgeFor(rc.GitHub)
-		if ferr != nil {
-			obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
-			continue
-		}
-		if ferr := EnsureArgoApps(st, rc); ferr != nil {
-			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
-			continue
-		}
-		done, _, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(st, s.Git(), f, nil, nil, nil), st)
-		if oerr != nil {
-			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
-			continue
-		}
-		if !done {
-			matches = append(matches, st)
+	if len(obsErrs) > 0 || !scan.unchanged(ctx) {
+		if matches, obsErrs, err = s.inFlightForEnv(ctx, s.Git(), env); err != nil {
+			return nil, err
 		}
 	}
 	if len(obsErrs) > 0 {
@@ -184,6 +165,44 @@ func (s *Service) FindInFlightForEnv(ctx context.Context, env string, h Hooks) (
 		sort.Strings(ids)
 		return nil, &AmbiguousError{Env: env, IDs: ids}
 	}
+}
+
+// inFlightForEnv is one scan for FindInFlightForEnv, observing through g: the candidates still
+// in flight, and one line for each it could not confirm. Like findInFlight it reads the state
+// files itself, so a second call starts clean.
+func (s *Service) inFlightForEnv(ctx context.Context, g git.Git, env string) (matches []*engine.PromotionState, obsErrs []string, err error) {
+	states, err := s.deps.Store.List()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, st := range states {
+		if st.TargetEnv != env {
+			continue
+		}
+		rc, ok := RepoConfigFor(s.settings.Config, st.RepoFullName)
+		if !ok {
+			obsErrs = append(obsErrs, fmt.Sprintf("%s: repo %q is not in the current config; restore it or name this promotion's id explicitly", st.ID, st.RepoFullName))
+			continue
+		}
+		f, ferr := s.ForgeFor(rc.GitHub)
+		if ferr != nil {
+			obsErrs = append(obsErrs, fmt.Sprintf("%s: building a forge client: %v", st.ID, ferr))
+			continue
+		}
+		if ferr := EnsureArgoApps(st, rc); ferr != nil {
+			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
+			continue
+		}
+		done, _, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(st, g, f, nil, nil, nil), st)
+		if oerr != nil {
+			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
+			continue
+		}
+		if !done {
+			matches = append(matches, st)
+		}
+	}
+	return matches, obsErrs, nil
 }
 
 // Listed is one promotion's own re-observed standing, as `hoist promotions` and the matrix's
@@ -252,14 +271,44 @@ func (s *Service) List(ctx context.Context, o ListOpts) ([]Listed, error) {
 		o.Progress(fmt.Sprintf("re-observing %d promotion(s) against the forge and the cluster", len(states)))
 	}
 
-	out := make([]Listed, 0, len(states))
-	for _, st := range states {
-		out = append(out, s.listOne(ctx, st, o))
+	// Each state is observed first on a copy, through one snapshot of origin shared by the
+	// whole listing (see FindInFlight); a state whose pass failed is observed again live at once.
+	// The rest stand only if origin's branches are where the snapshot had them once every state
+	// has been walked — otherwise they too are observed again, live, from the state as loaded.
+	// Nothing is archived until its verdict is one of those two kinds.
+	out := make([]Listed, len(states))
+	live, scan := s.Git(), newScanGit(s.Git())
+	var viaScan []int
+	for i, st := range states {
+		probe := *st
+		if l := s.listOne(ctx, scan, &probe); l.Err == nil {
+			out[i] = l
+			viaScan = append(viaScan, i)
+			continue
+		}
+		out[i] = s.listOne(ctx, live, st)
+	}
+	if len(viaScan) > 0 && !scan.unchanged(ctx) {
+		for _, i := range viaScan {
+			out[i] = s.listOne(ctx, live, states[i])
+		}
+	}
+	for i := range out {
+		l := &out[i]
+		if l.Done && o.ArchiveDoneOlderThan > 0 && time.Since(l.State.LastActivity()) > o.ArchiveDoneOlderThan {
+			if aerr := s.deps.Store.Archive(l.State.ID); aerr != nil {
+				l.ArchiveErr = aerr
+			} else {
+				l.Archived = true
+			}
+		}
 	}
 	return out, nil
 }
 
-func (s *Service) listOne(ctx context.Context, st *engine.PromotionState, o ListOpts) Listed {
+// listOne re-observes one state through g and reports its standing. It archives nothing: List
+// does that once it knows which verdicts stand.
+func (s *Service) listOne(ctx context.Context, g git.Git, st *engine.PromotionState) Listed {
 	rc, ok := RepoConfigFor(s.settings.Config, st.RepoFullName)
 	if !ok {
 		return Listed{State: *st, Unconfigured: true}
@@ -275,20 +324,13 @@ func (s *Service) listOne(ctx context.Context, st *engine.PromotionState, o List
 	if err := EnsureArgoApps(st, rc); err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(err.Error()))}
 	}
-	done, statuses, err := engine.Status(ctx, engine.ObserveSteps(st, s.Git(), f, a, ro, nil), st)
+	done, statuses, err := engine.Status(ctx, engine.ObserveSteps(st, g, f, a, ro, nil), st)
 	if err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(err.Error()))}
 	}
 	l := Listed{State: *st, Done: done, Statuses: statuses}
 	if n := len(statuses); n > 0 {
 		l.Last = statuses[n-1]
-	}
-	if done && o.ArchiveDoneOlderThan > 0 && time.Since(st.LastActivity()) > o.ArchiveDoneOlderThan {
-		if aerr := s.deps.Store.Archive(st.ID); aerr != nil {
-			l.ArchiveErr = aerr
-		} else {
-			l.Archived = true
-		}
 	}
 	return l
 }
