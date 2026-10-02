@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/abradner/hoist/pkg/redact"
@@ -484,26 +485,58 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 // pattern as internal/app/plan/model.go's View(), which redacts its assembled output once at
 // the final boundary in addition to per-field calls).
 //
-// History records a step's CHANGES, not every re-observation: when the newest entry already
-// recorded for name has the same (redacted) detail, nothing is appended, so a hundred polls of
-// "waiting: CI: 3/4 checks complete" leave one entry — the first, with the time it started
-// being true — and likewise a repeated "already satisfied: …". A changed detail (2/4 -> 3/4,
-// waiting -> acted, satisfied -> blocked) appends. Readers of History are indifferent to the
-// dropped repeats: landedAt and mergedAt want the EARLIEST entry for a step; waitingReporter
-// and historyDetail want the newest waiting entry and the last entry, which a repeat would only
-// have re-stamped later; LastActivity becomes "when something last changed", which is what
-// retention wants.
+// History records CHANGES, not every re-observation, by three rules keyed on the kind of entry:
+//
+//   - A STOPPING entry ("waiting: …", "blocked: …", "act failed: …") is skipped only when it
+//     equals the LAST entry in History overall (same step, same detail): a hundred polls of
+//     "waiting: CI: 3/4 checks complete" leave one entry, the first, with the time it started
+//     being true. Comparing against the step's own newest entry instead would lose a real
+//     return: approval waiting -> a check re-runs -> approval waiting again must record the
+//     second approval wait, since other entries now sit between the two.
+//   - An "already satisfied: …" entry is skipped when it equals that step's own newest entry:
+//     a satisfied step is re-observed on every walk and says the same thing each time.
+//   - "acted" is never skipped: a second write to the world (a re-acted refresh or push) must
+//     leave a record even though its text is identical.
+//
+// A quiet poll — every earlier step satisfied, the stopping step unchanged — appends nothing,
+// because the satisfied entries match their steps' newest and the stop matches the last entry.
+// Readers are indifferent to dropped repeats: landedAt wants the EARLIEST entry for a step;
+// waitingReporter and historyDetail want the newest waiting entry and the last entry, which a
+// repeat would only have re-stamped later; LastActivity becomes "when something last changed".
 func appendHistory(s *PromotionState, name StepName, detail string) {
 	detail = redact.Strings(detail)
-	for i := len(s.History) - 1; i >= 0; i-- {
-		if s.History[i].Step == name {
-			if s.History[i].Detail == detail {
-				return
-			}
-			break
-		}
+	if historyDuplicate(s.History, name, detail) {
+		return
 	}
 	s.History = append(s.History, HistoryEntry{Step: name, At: time.Now(), Detail: detail})
+}
+
+// historyDuplicate applies appendHistory's dedupe rules to one candidate entry against h.
+func historyDuplicate(h []HistoryEntry, name StepName, detail string) bool {
+	switch {
+	case detail == "acted":
+		return false
+	case isStoppingDetail(detail):
+		if n := len(h); n > 0 {
+			return h[n-1].Step == name && h[n-1].Detail == detail
+		}
+		return false
+	}
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Step == name {
+			return h[i].Detail == detail
+		}
+	}
+	return false
+}
+
+func isStoppingDetail(detail string) bool {
+	for _, p := range []string{"waiting: ", "blocked: ", "act failed: "} {
+		if strings.HasPrefix(detail, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // saveIfSet is best-effort: a save failure on a terminal (blocked/waiting) path is logged into
