@@ -1245,22 +1245,39 @@ func TestCIGreenAllIgnoredFallsToCINonePolicy(t *testing.T) {
 
 	s.CINone = "prompt"
 	obs, _ := step.Observe(ctx(), s)
-	if !IsCINonePromptBlock(obs.Blocked) {
-		t.Fatalf("all-ignored under ci.none=prompt should block on the prompt, got %+v", obs)
+	if !IsCINonePromptBlock(obs.Blocked) || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored under ci.none=prompt should block on the prompt and name the ignore, got %+v", obs)
 	}
 	s.CINone = "block"
 	obs, _ = step.Observe(ctx(), s)
-	if obs.Blocked == "" || obs.Satisfied {
-		t.Fatalf("all-ignored under ci.none=block should block, got %+v", obs)
+	if obs.Blocked == "" || obs.Satisfied || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored under ci.none=block should block and name the ignore, got %+v", obs)
 	}
 	s.CINone = "green"
 	obs, _ = step.Observe(ctx(), s)
-	if !obs.Satisfied || !strings.Contains(obs.Detail, "ci.none=green") {
+	if !obs.Satisfied || !strings.Contains(obs.Detail, "ci.none=green") || !strings.Contains(obs.Detail, "ignoring copilot-pull-request-reviewer") {
 		t.Fatalf("all-ignored under ci.none=green satisfies via the policy, got %+v", obs)
 	}
 	// And within grace it waits, same as zero checks.
 	step.Now = fixedNow(s.PR.CreatedAt.Add(10 * time.Second))
-	if obs, _ = step.Observe(ctx(), s); !obs.Waiting {
-		t.Fatalf("all-ignored within grace should wait, got %+v", obs)
+	if obs, _ = step.Observe(ctx(), s); !obs.Waiting || !strings.Contains(obs.Detail, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored within grace should wait and name the ignore, got %+v", obs)
+	}
+}
+
+// TestCIGreenBlockedDetailNamesWhatWasIgnored: a real failure beside an ignored check still
+// tells the operator an ignore is in effect.
+func TestCIGreenBlockedDetailNamesWhatWasIgnored(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {
+		{Name: "copilot-pull-request-reviewer", State: forge.CheckFailure},
+		{Name: "test", State: forge.CheckFailure},
+	}}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	obs, _ := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "test") || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("blocked detail must name the failure and the ignore, got %+v", obs)
 	}
 }

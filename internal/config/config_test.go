@@ -289,6 +289,7 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"production twice", "repos:\n  - path: /x\n    envs: { production: [p, p] }\n", "repos[0].envs.production[1]: \"p\" listed twice"},
 		{"ci.none enum", "repos:\n  - path: /x\n    ci: { none: yellow }\n", "repos[0].ci.none: want one of green|prompt|block"},
 		{"ci.ignore empty", "repos:\n  - path: /x\n    ci: { ignore: [a, ''] }\n", "repos[0].ci.ignore[1]: empty check name"},
+		{"ci.ignore padded", "repos:\n  - path: /x\n    ci: { ignore: [a, ' b'] }\n", "repos[0].ci.ignore[1]: check name \" b\" has leading or trailing whitespace"},
 		{"ci.ignore dup", "repos:\n  - path: /x\n    ci: { ignore: [a, b, a] }\n", "repos[0].ci.ignore[2]: duplicate check name \"a\""},
 		{"ci.grace negative", "repos:\n  - path: /x\n    ci: { grace: -1s }\n", "repos[0].ci.grace: must be a positive duration"},
 		{"digest_sources enum", "repos:\n  - path: /x\n    digest_sources: [pods, argo]\n", "repos[0].digest_sources[1]: want one of pods|manifest|registry"},
@@ -528,6 +529,10 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !c.Found || len(c.Repos) != 1 || len(c.Registries) != 1 || c.Repos[0].Name != "my-gitops" {
 		t.Errorf("example: Found=%v repos=%d registries=%d", c.Found, len(c.Repos), len(c.Registries))
+		return
+	}
+	if got := c.Repos[0].CI.Ignore; len(got) != 1 || got[0] != "copilot-pull-request-reviewer" {
+		t.Errorf("example ci.ignore = %v, want the documented entry", got)
 	}
 }
 

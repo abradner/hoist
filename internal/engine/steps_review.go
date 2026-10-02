@@ -187,10 +187,12 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 			}
 			parts = append(parts, detail)
 		}
-		return Observation{Blocked: strings.Join(parts, "; ")}, nil
+		return Observation{Blocked: strings.Join(parts, "; ") + ignoredNote(sum.Ignored)}, nil
 	}
+	// Every path below names what was ignored, including when ignoring left nothing: "no checks
+	// reported" is false if checks were reported and all of them excluded (principle 1).
+	ignoring := ignoredNote(sum.Ignored)
 	if sum.Total > 0 {
-		ignoring := ignoredNote(sum.Ignored)
 		if sum.Pending > 0 {
 			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete%s", sum.Total-sum.Pending, sum.Total, ignoring)}, nil
 		}
@@ -198,7 +200,7 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 	}
 	elapsed := c.now().Sub(s.PR.CreatedAt)
 	if elapsed < s.CIGrace {
-		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (%s of %s grace elapsed)", elapsed.Round(time.Second), s.CIGrace)}, nil
+		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (%s of %s grace elapsed)%s", elapsed.Round(time.Second), s.CIGrace, ignoring)}, nil
 	}
 	switch s.CINone {
 	case "block":
@@ -206,14 +208,14 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		// ci.none it started with (runResume and a same-id re-run restore it from the state
 		// file, never from current config — PromotionState's policy fields), so "change the
 		// config and re-run" was a path that could not reach this promotion (issue #48).
-		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; block has no override, and this promotion keeps the ci.none it started with, so a config change does not apply to it — wait for the checks to report and re-run, or abandon this promotion (delete its state file, <id>.json under hoist's promotions state directory; `hoist promotions` lists the id) and start again with ci.none set to prompt or green"}, nil
+		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; block has no override, and this promotion keeps the ci.none it started with, so a config change does not apply to it — wait for the checks to report and re-run, or abandon this promotion (delete its state file, <id>.json under hoist's promotions state directory; `hoist promotions` lists the id) and start again with ci.none set to prompt or green" + ignoring}, nil
 	case "green":
-		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green"}, nil
+		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green" + ignoring}, nil
 	default: // "prompt", and any empty value a caller forgot to fill from Normalize's default
 		if s.CINoneOverride {
-			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)"}, nil
+			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)" + ignoring}, nil
 		}
-		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`"}, nil
+		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`" + ignoring}, nil
 	}
 }
 

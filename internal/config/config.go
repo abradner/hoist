@@ -595,6 +595,8 @@ func validateRepo(p *problems, r RepoConfig) {
 		switch {
 		case strings.TrimSpace(n) == "":
 			p.add(ip, "empty check name")
+		case n != strings.TrimSpace(n):
+			p.add(ip, "check name %q has leading or trailing whitespace (matching is exact)", n)
 		case seenIgnore[n]:
 			p.add(ip, "duplicate check name %q", n)
 		default:

@@ -345,3 +345,38 @@ func TestStartPromotionCLIModeAcceptsNilView(t *testing.T) {
 		t.Fatalf("expected a CLI-mode (never LoadRepo'd) request with a nil View to succeed, got: %v", err)
 	}
 }
+
+// TestStartPromotionCarriesCIIgnoreFromConfigAndKeepsItOnRestart pins the ignore list's whole
+// path into state: config -> a new promotion's state, and prior state wins over a changed
+// config on a same-id restart (the list is policy "as of when the promotion started").
+func TestStartPromotionCarriesCIIgnoreFromConfigAndKeepsItOnRestart(t *testing.T) {
+	fx := newInflightFixture(t)
+	plan, repo := mustPlan(t, fx)
+	id := engine.DeriveID("example/gitops", plan)
+	start := func() {
+		t.Helper()
+		if _, err := fx.svc.StartPromotion(context.Background(), StartRequest{Plan: plan, Repo: repo, Mode: Mode{}}, Hooks{}); err != nil {
+			t.Fatalf("StartPromotion: %v", err)
+		}
+	}
+
+	fx.svc.settings.Repo.CI.Ignore = []string{"copilot-pull-request-reviewer"}
+	start()
+	st, err := fx.svc.deps.Store.Load(id)
+	if err != nil || st == nil {
+		t.Fatalf("Load: %v %v", st, err)
+	}
+	if got := strings.Join(st.CIIgnore, ","); got != "copilot-pull-request-reviewer" {
+		t.Fatalf("state.CIIgnore = %q, want the configured list", got)
+	}
+
+	fx.svc.settings.Repo.CI.Ignore = []string{"something-else"}
+	start()
+	st, err = fx.svc.deps.Store.Load(id)
+	if err != nil || st == nil {
+		t.Fatalf("Load: %v %v", st, err)
+	}
+	if got := strings.Join(st.CIIgnore, ","); got != "copilot-pull-request-reviewer" {
+		t.Fatalf("after restart with a changed config state.CIIgnore = %q, want the prior list", got)
+	}
+}
