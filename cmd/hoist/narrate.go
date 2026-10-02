@@ -102,6 +102,9 @@ func (n *narrator) act(e service.ActEvent) {
 	line := redact.Strings(string(e.Step) + ": " + actStarting(e))
 	said := n.said[e.Step]
 	if said.start == line {
+		// Said already, but it is under way again: the silence clock restarts on it, so a
+		// retried push that hangs still gets its "still" line.
+		n.doing, n.since = line, n.now()
 		return
 	}
 	said.start = line

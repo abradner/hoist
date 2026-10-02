@@ -623,3 +623,26 @@ func TestResumeAndAbandonRefuseAFlagSwallowedAsAValue(t *testing.T) {
 		t.Fatalf("abandon: exit %d; stderr: %s", got, errOut.String())
 	}
 }
+
+// A step that acts again prints no second start line, but it is running again: if it then
+// hangs, the "still" line must come. A retried push is where that matters.
+func TestNarratorStillWatchesAStepThatActsAgain(t *testing.T) {
+	var buf bytes.Buffer
+	n := newNarrator(&buf, false)
+	now, advance := fixedClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	n.now = now
+	push := service.ActEvent{Step: engine.StepPushed, State: engine.PromotionState{Branch: "hoist/env/abc"}}
+
+	n.act(push)
+	n.runHooks().OnRetry(errors.New("push failed")) // the drive pauses, then tries again
+	buf.Reset()
+	n.act(push)
+	if buf.Len() != 0 {
+		t.Fatalf("the retry repeated the start line: %q", buf.String())
+	}
+	advance(silenceEvery)
+	n.stillBusy()
+	if got, want := buf.String(), "hoist: still pushed: pushing hoist/env/abc (15s so far)\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
