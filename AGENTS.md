@@ -475,6 +475,15 @@ so `hoist --base dev promote` and `hoist promote --base dev` mean the same thing
 and registry auth follow §4.10's ordering; an empty `--registry-auth`/`--digest-sources` is refused
 with `plan`'s own message on every face.
 
+A command that takes no positional argument — `plan`, `promote`, `deploy`, `restart`,
+`promotions`, `watch` — refuses any leftover one with a usage error naming it
+(`parseFlagsOnly`, `cmd/hoist/main.go`), before the command does anything; it refuses in the
+same way a flag given as the next argument of a value-taking flag (`--confirm-direct
+--dry-run`). `flag.Parse` would otherwise drop the flags after a stray word, or lose the
+swallowed one, in silence (§9 entry 16). `resume` and `abandon` take an id and parse through
+`parseWithID`, which makes the same two refusals on either side of it. *Interim, stated not
+enforced:* the root flag set (flags before the subcommand) is not checked for a swallowed flag.
+
 ### CLI commands
 
 | Command | Purpose | Notes |
@@ -1204,6 +1213,28 @@ test lives** (if one exists).
    `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what a snapshot must never decide;
    `TestListAgainstAnUnreachableOriginFailsEachStateOnce` for the failure path, which a cache
    that retries per state makes dearer than no cache at all.
+
+16. **`flag.Parse` stops at the first positional, and what it leaves is not an error.** What
+   happened: `hoist deploy --env <env> --image <ref> oops --dry-run` performed the deploy —
+   branch, commit, PR, merge — and exited 0; `hoist restart --env <env> oops --dry-run`
+   restarted the env. Found by a reviewer checking why `resume <id> --quiet` was ignored. Root
+   cause: the standard library parses flags up to the first non-flag argument and hands the
+   rest back through `fs.Args()`, flags and all, without complaint. Every hoist command that
+   takes no positional called `fs.Parse(args)` and never looked there, so one stray word
+   silently unset every flag typed after it — including the one flag whose whole job is to make
+   the command safe. No test caught it because every test types its flags correctly. The
+   review of the fix found the same hole by a second door: `--confirm-direct --dry-run` hands
+   `--dry-run` to the other flag as its value — what an unquoted empty shell variable produces —
+   and a deploy with `--confirm-direct` but no `--direct` never looks at that value. Rule: a
+   command that takes no positional parses through `parseFlagsOnly`, which refuses a leftover
+   argument, and a flag taken as another flag's value, by name before the command does
+   anything; one that takes an id parses both sides of it. No subcommand calls `flag.Parse`
+   directly — `TestOnlyTheParsersCallFlagParse` holds an allowlist of the three functions that
+   may: the root, `parseFlagsOnly`, and `parseWithID` for `resume` and `abandon`. And a flag that guards a write
+   gets a test in which something goes wrong on the command line before it. (Numbered 16:
+   entries 14 and 15 are taken by changes in flight when this was written.) Regression tests:
+   `cmd/hoist/stray_test.go`, one per command — the deploy and restart cases assert that
+   nothing was written.
 
 ## 10. Maintaining This Document
 

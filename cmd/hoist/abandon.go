@@ -46,21 +46,32 @@ func reorderConfirmAbandonFirst(args []string) []string {
 // is refused rather than dropped, for the same reason: an argument hoist did not act on should
 // not look accepted. id is "" when none was given.
 func parseWithID(fs *flag.FlagSet, args []string) (id string, err error) {
-	if err := fs.Parse(args); err != nil {
+	refuse := func(err error) (string, error) {
+		fs.Usage()
+		fmt.Fprintf(fs.Output(), "%s: %v\n", fs.Name(), err)
+		return "", err
+	}
+	// parse is flag.Parse behind the same check parseFlagsOnly makes: a flag given as the next
+	// argument of a value-taking flag was swallowed, not set.
+	parse := func(args []string) error {
+		if name, value, swallowed := flagTakenAsValue(fs, args); swallowed {
+			_, err := refuse(fmt.Errorf("--%s takes a value, but what follows it is %s, which looks like a flag; nothing was run. If that really is the value, write --%s=%s", name, value, name, value))
+			return err
+		}
+		return fs.Parse(args)
+	}
+	if err := parse(args); err != nil {
 		return "", err
 	}
 	if fs.NArg() == 0 {
 		return "", nil
 	}
 	id = fs.Arg(0)
-	if err := fs.Parse(fs.Args()[1:]); err != nil {
+	if err := parse(fs.Args()[1:]); err != nil {
 		return "", err
 	}
 	if fs.NArg() > 0 {
-		err := fmt.Errorf("unexpected argument %q after %s", fs.Arg(0), id)
-		fmt.Fprintf(fs.Output(), "%s: %v\n", fs.Name(), err)
-		fs.Usage()
-		return "", err
+		return refuse(fmt.Errorf("unexpected argument %q after %s", fs.Arg(0), id))
 	}
 	return id, nil
 }

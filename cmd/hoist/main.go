@@ -156,6 +156,72 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// parseFlagsOnly parses the command line of a command that takes no positional argument and
+// refuses the two ways the flag package lets an argument go unread without an error (#242):
+//
+//   - A leftover argument. flag.Parse stops at the first non-flag argument and leaves the rest —
+//     flags included — in fs.Args(), unparsed; a command that never looks there runs as if those
+//     flags had not been typed. That is how `deploy … oops --dry-run` performed the deploy and
+//     `restart … oops --dry-run` restarted the env.
+//   - A flag taken as another flag's value. `--confirm-direct --dry-run` hands "--dry-run" to
+//     --confirm-direct as its value, which is what an unquoted empty shell variable produces
+//     (`--confirm-direct $ENV --dry-run`). The dry run is gone and nothing says so. A value
+//     that really does start with a dash is still writable, as --flag=-value.
+//
+// An argument hoist did not act on must not look accepted, least of all when the difference is
+// a write. The error is already printed, after the command's usage so that it is the last line
+// on the terminal, when this returns one; a caller handles it exactly as it handles
+// flag.Parse's.
+func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
+	refuse := func(err error) error {
+		fs.Usage()
+		fmt.Fprintf(fs.Output(), "%s: %v\n", fs.Name(), err)
+		return err
+	}
+	if name, value, swallowed := flagTakenAsValue(fs, args); swallowed {
+		return refuse(fmt.Errorf("--%s takes a value, but what follows it is %s, which looks like a flag; nothing was run. If that really is the value, write --%s=%s", name, value, name, value))
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return refuse(fmt.Errorf("unexpected argument %q: %s takes flags only, and nothing after it was read", fs.Arg(0), fs.Name()))
+	}
+	return nil
+}
+
+// flagTakenAsValue walks args the way flag.Parse will and reports the first value-taking flag
+// whose value, given as the next argument rather than with "=", itself starts with a dash.
+// Boolean flags take no separate value, a lone "-" is an ordinary value, and "--" or the first
+// non-flag argument ends the flags, exactly as in the flag package.
+func flagTakenAsValue(fs *flag.FlagSet, args []string) (name, value string, swallowed bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) < 2 || a[0] != '-' || a == "--" {
+			return "", "", false
+		}
+		n := strings.TrimLeft(a, "-")
+		if strings.Contains(n, "=") {
+			continue
+		}
+		f := fs.Lookup(n)
+		if f == nil {
+			return "", "", false // flag.Parse reports the unknown flag
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		if i+1 >= len(args) {
+			return "", "", false // flag.Parse reports the missing value
+		}
+		if v := args[i+1]; len(v) > 1 && v[0] == '-' {
+			return n, v, true
+		}
+		i++
+	}
+	return "", "", false
+}
+
 // digestFlag is the repeatable --digest repo=repo:tag@sha256:… flag: per-repo overrides
 // handed to gitops.BuildPlan as its digests argument. Set applies image.ParseOverride — the
 // one predicate the plan screen's `o` dialog applies too (#102), so the CLI and the TUI
@@ -338,7 +404,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	fs.StringVar(&rf.registryAuth, "registry-auth", sel.resolve.registryAuth, "comma-separated registry credential sources tried in order: env, keychain, cluster, op; the one that worked is reported by name (default: the matching registries[] entry's auth when configured, else env,keychain,cluster,op; may also be given before the command)")
 	fs.StringVar(&rf.clusterSecret, "cluster-secret", sel.resolve.clusterSecret, "namespace/name of a kubernetes.io/dockerconfigjson pull secret for the cluster credential source (default: the matching registries[] entry's cluster when configured; unset skips the source; may also be given before the command)")
 	fs.StringVar(&rf.opRef, "op-ref", sel.resolve.opRef, "op://vault/item/field for the op credential source, read with `op read` (default: the matching registries[] entry's op when configured; unset skips the source and runs nothing; may also be given before the command)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}

@@ -603,3 +603,23 @@ func TestNarratorDoesNotRepeatAStepThatActsAgain(t *testing.T) {
 		t.Fatalf("two different commits are two outcomes, got %q", buf.String())
 	}
 }
+
+// resume and abandon refuse a flag swallowed as another flag's value, as the flags-only
+// commands do: `resume <id> --kube-context --quiet` would otherwise drive in a context named
+// "--quiet".
+func TestResumeAndAbandonRefuseAFlagSwallowedAsAValue(t *testing.T) {
+	cfgPath, clone, f := newPromoteFixture(t)
+	s := buildPROpenedState(t, clone)
+	savePlannedState(t, s)
+	var out, errOut bytes.Buffer
+	if got := run([]string{"--config", cfgPath, "resume", s.ID, "--kube-context", "--quiet"}, &out, &errOut); got != exitUsage || !strings.Contains(errOut.String(), "--kube-context takes a value, but what follows it is --quiet") {
+		t.Fatalf("resume: exit %d; stderr: %s", got, errOut.String())
+	}
+	if len(f.PRs()) != 0 {
+		t.Fatalf("resume drove the promotion past a command line it refused: %+v", f.PRs())
+	}
+	errOut.Reset()
+	if got := run([]string{"--config", cfgPath, "abandon", s.ID, "--confirm-abandon", "--quiet"}, &out, &errOut); got != exitUsage || !strings.Contains(errOut.String(), "--confirm-abandon takes a value, but what follows it is --quiet") {
+		t.Fatalf("abandon: exit %d; stderr: %s", got, errOut.String())
+	}
+}

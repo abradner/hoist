@@ -62,7 +62,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	repoFilter := fs.String("repo", "", "only list promotions for this repo (owner/name, repos[].github) — default every configured repo")
 	archived := fs.Bool("archived", false, "also list archived promotions (state.retain; still plain, readable JSON under the promotions/archive/ subdirectory)")
 	quiet := fs.Bool("quiet", false, quietUsage)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
