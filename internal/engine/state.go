@@ -80,6 +80,12 @@ type PromotionState struct {
 	// zero checks.
 	CINone  string
 	CIGrace time.Duration
+	// CISettle is RepoConfig.CI.Settle as of when this promotion started: how long after the PR
+	// opens CIGreenStep holds a finished rollup in Waiting before reporting green. A state file
+	// written before this field existed decodes to zero, which is NO settle — exactly the gate
+	// that promotion started under — so an in-flight promotion is never changed by an upgrade
+	// (a state file has no Normalize step to fill the 30s default).
+	CISettle time.Duration
 	// CIIgnore is RepoConfig.CI.Ignore as of when this promotion started: check names (a
 	// check-run's name or a commit status's context) CIGreenStep excludes from the rollup.
 	// Carried in state like CINone, so a resume gates on the same list the promotion began

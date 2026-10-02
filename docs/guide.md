@@ -431,6 +431,15 @@ frozen into a promotion when it starts: a config edit does not reach one already
 apply a new list, `hoist abandon <id>` that promotion and start again. Every CI detail (waiting,
 green, blocked, and the `ci.none` outcomes) names what was ignored.
 
+*Settling.* "Every check I can see is finished" is not "CI is finished": a workflow that has not
+yet created its check-run is invisible to the rollup, and a slow one can fail after the rest went
+green. So a complete rollup is held in Waiting until the PR is `ci.settle` old (default `30s`,
+`settle: 0s` turns it off — your explicit choice, and the one thing here that makes the gate
+weaker). A check that appears and fails inside the window Blocks as usual. The detail names the
+moment it ends, not a ticking counter, so History records it once. Like `ci.none`, it is frozen
+into a promotion when it starts; a promotion begun before the setting existed has no settle
+window, which is the gate it started under.
+
 **Approval.** `` waiting for `hoist approve <id>` from an approver `` — someone in the repo's
 `approvers` list (or, with `collaborators: true`, anyone with write access) comments exactly
 

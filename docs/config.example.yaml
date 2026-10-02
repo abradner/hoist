@@ -25,6 +25,8 @@ repos:
     ci:
       none: green                 # a PR with no checks: green|prompt|block after grace (M4)
       grace: 3m
+      settle: 30s                 # a finished rollup is green only once the PR is this old, so a
+                                  # workflow slow to create its check can still fail it; 0s = off
       ignore: [copilot-pull-request-reviewer]   # OPTIONAL; omit it and nothing is ignored.
                                   # Check names (exact: a check-run's name or a commit
                                   # status's context) that are NOT CI and must not gate or

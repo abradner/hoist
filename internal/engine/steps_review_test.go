@@ -1212,6 +1212,49 @@ func TestCIGreenIgnoresListedCheckAndSaysSo(t *testing.T) {
 	}
 }
 
+// TestCIGreenSettleHoldsAFinishedRollup: one workflow's check is done, another has not created
+// its check-run yet, so the rollup is complete-looking at 5s. Green is withheld until the PR is
+// settle old; a late check that appears and fails inside the window Blocks. settle 0 is the
+// explicit immediate-green choice (and what a pre-settle state file decodes to).
+func TestCIGreenSettleHoldsAFinishedRollup(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {{Name: "kubeconform", State: forge.CheckSuccess}}}
+	s.CISettle = 30 * time.Second
+	at := func(d time.Duration) CIGreenStep {
+		return CIGreenStep{Forge: f, Now: fixedNow(s.PR.CreatedAt.Add(d))}
+	}
+
+	obs, err := at(5*time.Second).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CI: 1/1 checks complete; settling until " + s.PR.CreatedAt.Add(30*time.Second).Format("15:04:05")
+	if !obs.Waiting || obs.Satisfied || obs.Detail != want {
+		t.Fatalf("a finished rollup 5s into a 30s settle must Wait with %q, got %+v", want, obs)
+	}
+	if obs2, _ := at(6*time.Second).Observe(ctx(), s); obs2.Detail != obs.Detail {
+		t.Errorf("the settling detail must be stable per poll (history records every change): %q vs %q", obs.Detail, obs2.Detail)
+	}
+
+	// The late workflow's check appears inside the window, and fails.
+	f.NamedChecksBySHA[s.PushedSHA] = append(f.NamedChecksBySHA[s.PushedSHA], forge.Check{Name: "late-workflow", State: forge.CheckFailure})
+	obs, _ = at(10*time.Second).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "late-workflow") {
+		t.Fatalf("a check that appears and fails during settle must Block, got %+v", obs)
+	}
+	f.NamedChecksBySHA[s.PushedSHA] = f.NamedChecksBySHA[s.PushedSHA][:1]
+
+	if obs, _ = at(31*time.Second).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("past the settle window a complete rollup is green, got %+v", obs)
+	}
+	s.CISettle = 0
+	if obs, _ = at(0).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("settle 0 is immediate green, got %+v", obs)
+	}
+}
+
 func TestCIGreenIgnoredFailureDoesNotBlock(t *testing.T) {
 	fx := newFixture(t)
 	f := &forge.Fake{}

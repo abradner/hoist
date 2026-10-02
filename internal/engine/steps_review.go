@@ -196,6 +196,13 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		if sum.Pending > 0 {
 			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete%s", sum.Total-sum.Pending, sum.Total, ignoring)}, nil
 		}
+		// Every check the rollup can see is done; that is not yet "CI is done" — a workflow that
+		// has not created its check-run is invisible to it. Hold the verdict until the check set
+		// has had s.CISettle to appear (a late check that fails inside the window Blocks above).
+		// Zero is no settle: an explicit `settle: 0s`, or a state file from before the field.
+		if settledAt := s.PR.CreatedAt.Add(s.CISettle); c.now().Before(settledAt) {
+			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete; settling until %s%s", sum.Total, sum.Total, settledAt.Format("15:04:05"), ignoring)}, nil
+		}
 		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)%s", sum.Total, ignoring)}, nil
 	}
 	elapsed := c.now().Sub(s.PR.CreatedAt)

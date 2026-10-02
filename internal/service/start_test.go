@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -378,5 +380,35 @@ func TestStartPromotionCarriesCIIgnoreFromConfigAndKeepsItOnRestart(t *testing.T
 	}
 	if got := strings.Join(st.CIIgnore, ","); got != "copilot-pull-request-reviewer" {
 		t.Fatalf("after restart with a changed config state.CIIgnore = %q, want the prior list", got)
+	}
+}
+
+// TestStartPromotionCarriesCISettleAndKeepsItOnRestart: config -> a new promotion's state, and
+// prior state wins over a changed config on a same-id restart — a restart can never shorten the
+// settle window the promotion began with.
+func TestStartPromotionCarriesCISettleAndKeepsItOnRestart(t *testing.T) {
+	fx := newInflightFixture(t)
+	plan, repo := mustPlan(t, fx)
+	id := engine.DeriveID("example/gitops", plan)
+	start := func() *engine.PromotionState {
+		t.Helper()
+		if _, err := fx.svc.StartPromotion(context.Background(), StartRequest{Plan: plan, Repo: repo, Mode: Mode{}}, Hooks{}); err != nil {
+			t.Fatalf("StartPromotion: %v", err)
+		}
+		st, err := fx.svc.deps.Store.Load(id)
+		if err != nil || st == nil {
+			t.Fatalf("Load: %v %v", st, err)
+		}
+		return st
+	}
+	d := config.Duration(45 * time.Second)
+	fx.svc.settings.Repo.CI.Settle = &d
+	if got := start().CISettle; got != 45*time.Second {
+		t.Fatalf("state.CISettle = %s, want the configured 45s", got)
+	}
+	z := config.Duration(0)
+	fx.svc.settings.Repo.CI.Settle = &z
+	if got := start().CISettle; got != 45*time.Second {
+		t.Fatalf("after restart with a changed config state.CISettle = %s, want the prior 45s", got)
 	}
 }
