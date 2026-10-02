@@ -42,7 +42,23 @@ type progressMsg struct {
 	build BuildID
 	gen   uint64
 	line  string
-	ok    bool
+	// hist is set instead of line when the item is a service.Hooks.OnHistory report: one engine
+	// History entry plus the state as saved with it.
+	hist *historyItem
+	ok   bool
+}
+
+// progressItem is what an entry's channel carries: a preflight/signing text line (Hooks.Progress)
+// or a typed History report (Hooks.OnHistory) — one channel so the two arrive in the order they
+// happened.
+type progressItem struct {
+	line string
+	hist *historyItem
+}
+
+type historyItem struct {
+	entry engine.HistoryEntry
+	state engine.PromotionState
 }
 
 func (progressMsg) sessionEvent() {}

@@ -62,6 +62,12 @@ type Driver struct {
 	state *engine.PromotionState
 	save  func(*engine.PromotionState) error
 	poll  engine.PollIntervals
+
+	// onHistory is Hooks.OnHistory (set by StartPromotion/Resume); seen is how many of
+	// state.History's entries it has already been told about, so only NEWLY appended entries
+	// are reported — those a previous process recorded are the state's past, not news.
+	onHistory func(engine.HistoryEntry, engine.PromotionState)
+	seen      int
 }
 
 // NewDriver builds a Driver over steps, saving through save after every step DriveStatus
@@ -76,7 +82,45 @@ type Driver struct {
 // production, and are expected to unexport this constructor behind their own request/response
 // types once every caller goes through them.
 func NewDriver(steps []engine.Step, state *engine.PromotionState, save func(*engine.PromotionState) error, poll engine.PollIntervals) *Driver {
-	return &Driver{steps: steps, state: state, save: save, poll: poll}
+	return &Driver{steps: steps, state: state, save: save, poll: poll, seen: len(state.History)}
+}
+
+// withOnHistory installs Hooks.OnHistory on d (nil is a no-op) and returns d, so StartPromotion
+// and Resume can attach it without widening NewDriver's signature.
+func (d *Driver) withOnHistory(fn func(engine.HistoryEntry, engine.PromotionState)) *Driver {
+	d.onHistory = fn
+	return d
+}
+
+// saveFunc is the save DriveStatus is handed: d.save, then — only once that save has LANDED —
+// one OnHistory call per History entry appended since the last report, oldest first, each with
+// a copy of the state as just saved. A failed save reports nothing and leaves seen where it
+// was, so the entries are reported by the next save that does land. Called under d.mu (Step
+// holds it for the whole walk), so a callback must not block and must not call back into d.
+func (d *Driver) saveFunc() func(*engine.PromotionState) error {
+	if d.onHistory == nil {
+		return d.save
+	}
+	return func(st *engine.PromotionState) error {
+		if d.save != nil {
+			if err := d.save(st); err != nil {
+				return err
+			}
+		}
+		if d.seen > len(st.History) {
+			d.seen = len(st.History)
+		}
+		if d.seen == len(st.History) {
+			return nil
+		}
+		snap := *st
+		snap.History = append([]engine.HistoryEntry(nil), st.History...)
+		for _, e := range snap.History[d.seen:] {
+			d.onHistory(e, snap)
+		}
+		d.seen = len(snap.History)
+		return nil
+	}
 }
 
 // ID is the promotion this Driver drives.
@@ -122,7 +166,7 @@ func (d *Driver) Step(ctx context.Context) (Tick, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	done, statuses, driveErr := engine.DriveStatus(ctx, d.steps, d.state, d.save)
+	done, statuses, driveErr := engine.DriveStatus(ctx, d.steps, d.state, d.saveFunc())
 
 	var blocked *engine.BlockedError
 	waiting := errors.Is(driveErr, engine.ErrWaiting)

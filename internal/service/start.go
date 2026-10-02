@@ -51,6 +51,14 @@ type Mode struct {
 type Hooks struct {
 	Progress  func(string)
 	OnWaiting func()
+
+	// OnHistory is called by the Driver for each History entry newly appended by a Step walk, at
+	// the moment the state save carrying it has landed — oldest first, once per entry — with a
+	// copy of the state as saved (so e.g. s.PR is populated when the pr-opened entry fires). It
+	// runs on the walking goroutine under the Driver's lock: it must not block and must not call
+	// back into the Driver. Entries already in the state when the Driver was built are not
+	// reported. This, not Progress, is how a step's outcome reaches a screen as it happens.
+	OnHistory func(e engine.HistoryEntry, s engine.PromotionState)
 }
 
 func (h Hooks) report(line string) {
@@ -299,5 +307,5 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	release()
 
 	steps := engine.StepsFor(state, g, f, a, ro, s.settings.ProductionEnvs(), req.Mode.Confirmed, h.OnWaiting)
-	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll), nil
+	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll).withOnHistory(h.OnHistory), nil
 }

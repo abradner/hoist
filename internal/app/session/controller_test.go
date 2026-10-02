@@ -977,7 +977,7 @@ func TestPokeRearmsAFreshListener(t *testing.T) {
 	// would, then run the batch's second element (the fresh listener) and feed its result through
 	// Update — this is exactly what a live progress line needs to actually surface.
 	ch := h.c.entries[build].progressCh
-	ch <- "restarted step"
+	ch <- progressItem{line: "restarted step"}
 	h, _ = harnessUpdate(h, batch[1]())
 
 	snap, ok := h.c.Snapshot("promo-1")
@@ -1406,7 +1406,7 @@ func TestBackendReturningNilDriveAndNilErrIsBuildFailed(t *testing.T) {
 // once an entry's ctx is done, listenCmd's own select returns nil rather than blocking on the
 // channel forever with nobody left to drain it.
 func TestProgressListenerStopsOnCancel(t *testing.T) {
-	ch := make(chan string, 1)
+	ch := make(chan progressItem, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd := listenCmd(ctx, 1, 1, ch)
@@ -1707,7 +1707,7 @@ func TestOverrideCINoneRearmsAFreshListener(t *testing.T) {
 	// element (the fresh listener) and feed its result through Update — exactly what a live
 	// progress line needs to actually surface after an override, not merely the batch shape.
 	ch := h.c.entries[build].progressCh
-	ch <- "override applied, stepping again"
+	ch <- progressItem{line: "override applied, stepping again"}
 	h, _ = harnessUpdate(h, batch[1]())
 
 	snap, ok := h.c.Snapshot("promo-1")
