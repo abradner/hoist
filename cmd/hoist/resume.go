@@ -111,6 +111,14 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		default:
 			fmt.Fprintf(stdout, "%s  %-20s  %s: %s\n", s.ID, s.TargetEnv, l.Last.Step, service.Detail(l.Last.Observation))
 		}
+		// What this same listing tidied up for a promotion it observed landed, and why it left
+		// one alone — indented under the row it belongs to.
+		for _, line := range l.Cleaned {
+			fmt.Fprintf(stdout, "    %s\n", line)
+		}
+		if l.CleanupErr != nil {
+			fmt.Fprintf(stdout, "    not cleaned up: %s\n", redact.Strings(l.CleanupErr.Error()))
+		}
 	}
 	if *archived {
 		arch, err := svc.ListArchived(*repoFilter)
