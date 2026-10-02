@@ -52,6 +52,12 @@ type Git interface {
 	// exist there. This is the one source of truth Observe uses for "has this been pushed"
 	// — never a locally cached belief.
 	LsRemoteBranch(ctx context.Context, cloneDir, remote, branch string) (sha string, ok bool, err error)
+	// LsRemoteHeads reports every branch remote currently has, by name, with its tip — one
+	// round trip for all of them, where LsRemoteBranch is one per branch. It exists for a caller
+	// observing many promotions in one pass (internal/service's in-flight scan), which would
+	// otherwise pay a full connection per promotion to ask the same remote the same kind of
+	// question; a branch absent from the map does not exist on remote.
+	LsRemoteHeads(ctx context.Context, cloneDir, remote string) (heads map[string]string, err error)
 	// FetchBranch fetches remote's current tip of branch into dir's local object database. It
 	// never touches dir's own checked-out branch, working tree or index (never a checkout,
 	// never a fast-forward of a local branch) — that is the guarantee callers actually depend
@@ -509,6 +515,32 @@ func (e Exec) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch strin
 		return "", false, fmt.Errorf("git ls-remote: unparseable output %q", out)
 	}
 	return fields[0], true, nil
+}
+
+// LsRemoteHeads implements Git.
+func (e Exec) LsRemoteHeads(ctx context.Context, cloneDir, remote string) (map[string]string, error) {
+	// The pattern, not --heads: newer git deprecates that flag in favour of --branches, which
+	// older git does not have. A refs/heads/* pattern means the same on both.
+	out, err := e.run(ctx, cloneDir, "ls-remote", remote, "refs/heads/*")
+	if err != nil {
+		return nil, err
+	}
+	heads := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		name, isHead := "", false
+		if len(fields) == 2 {
+			name, isHead = strings.CutPrefix(fields[1], "refs/heads/")
+		}
+		if !isHead || name == "" {
+			return nil, fmt.Errorf("git ls-remote %s refs/heads/*: unparseable line %q", remote, line)
+		}
+		heads[name] = fields[0]
+	}
+	return heads, nil
 }
 
 // FetchBranch implements Git: fetches remote's branch and resolves FETCH_HEAD to the sha it

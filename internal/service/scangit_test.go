@@ -1,0 +1,501 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/gitops"
+)
+
+// countingGit counts the calls that open a connection to the remote. Embedding git.Git means
+// every other method goes to the wrapped implementation (nil in the unit tests below, which
+// never reach one).
+type countingGit struct {
+	git.Git
+	heads, branch, fetch int
+	headsErr, fetchErr   error
+	headsOut             map[string]string
+}
+
+func (c *countingGit) LsRemoteHeads(ctx context.Context, cloneDir, remote string) (map[string]string, error) {
+	c.heads++
+	if c.headsErr != nil {
+		return nil, c.headsErr
+	}
+	if c.headsOut != nil {
+		return c.headsOut, nil
+	}
+	return c.Git.LsRemoteHeads(ctx, cloneDir, remote)
+}
+
+func (c *countingGit) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch string) (string, bool, error) {
+	c.branch++
+	return c.Git.LsRemoteBranch(ctx, cloneDir, remote, branch)
+}
+
+func (c *countingGit) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
+	c.fetch++
+	if c.fetchErr != nil {
+		return "", false, c.fetchErr
+	}
+	if c.Git == nil {
+		return "sha-of-" + branch, true, nil
+	}
+	return c.Git.FetchBranch(ctx, dir, remote, branch)
+}
+
+func TestScanGitAsksTheRemoteOncePerQuestion(t *testing.T) {
+	ctx := context.Background()
+	inner := &countingGit{headsOut: map[string]string{"main": "aaa", "hoist/env/one": "bbb"}}
+	g := newScanGit(inner)
+
+	for _, tc := range []struct {
+		branch, sha string
+		ok          bool
+	}{{"main", "aaa", true}, {"hoist/env/one", "bbb", true}, {"hoist/env/gone", "", false}, {"main", "aaa", true}} {
+		sha, ok, err := g.LsRemoteBranch(ctx, "/clone", "origin", tc.branch)
+		if err != nil || ok != tc.ok || sha != tc.sha {
+			t.Errorf("LsRemoteBranch(%s) = %q, %v, %v; want %q, %v", tc.branch, sha, ok, err, tc.sha, tc.ok)
+		}
+	}
+	if inner.heads != 1 || inner.branch != 0 {
+		t.Errorf("four branch lookups cost %d listings and %d per-branch calls, want 1 and 0", inner.heads, inner.branch)
+	}
+
+	for i := 0; i < 3; i++ {
+		if sha, ok, err := g.FetchBranch(ctx, "/clone", "origin", "main"); err != nil || !ok || sha != "sha-of-main" {
+			t.Fatalf("FetchBranch = %q, %v, %v", sha, ok, err)
+		}
+	}
+	if inner.fetch != 1 {
+		t.Errorf("three fetches of one branch reached the remote %d times, want 1", inner.fetch)
+	}
+
+	// A different clone, remote or branch is a different question.
+	if _, _, err := g.FetchBranch(ctx, "/clone", "origin", "dev"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.FetchBranch(ctx, "/other-clone", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.LsRemoteBranch(ctx, "/other-clone", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if inner.fetch != 3 || inner.heads != 2 {
+		t.Errorf("distinct questions: %d fetches and %d listings, want 3 and 2", inner.fetch, inner.heads)
+	}
+}
+
+// A failure is never the scan's answer for the states that follow: the next one asks again.
+func TestScanGitDoesNotKeepAFailure(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("connection reset")
+	inner := &countingGit{headsErr: boom, fetchErr: boom, headsOut: map[string]string{"main": "aaa"}}
+	g := newScanGit(inner)
+
+	if _, _, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
+		t.Fatalf("want the listing's error, got %v", err)
+	}
+	if _, _, err := g.FetchBranch(ctx, "/clone", "origin", "main"); !errors.Is(err, boom) {
+		t.Fatalf("want the fetch's error, got %v", err)
+	}
+	inner.headsErr, inner.fetchErr = nil, nil
+	if sha, ok, err := g.LsRemoteBranch(ctx, "/clone", "origin", "main"); err != nil || !ok || sha != "aaa" {
+		t.Errorf("after the remote recovers: %q, %v, %v", sha, ok, err)
+	}
+	if _, ok, err := g.FetchBranch(ctx, "/clone", "origin", "main"); err != nil || !ok {
+		t.Errorf("after the remote recovers: ok=%v err=%v", ok, err)
+	}
+	if inner.heads != 2 || inner.fetch != 2 {
+		t.Errorf("%d listings and %d fetches, want 2 and 2 (the failures retried)", inner.heads, inner.fetch)
+	}
+}
+
+// finishedPromotion drives the fixture's app-staging -> app-production plan, as it stands in
+// the clone right now, all the way to done through the fixture's own forge, Argo and rollout
+// fakes, and saves its state file — the shape every earlier promotion into an env has once it is
+// finished, for the git/forge core FindInFlight observes and for List's full walk alike.
+func finishedPromotion(t *testing.T, fx inflightFixture) *engine.PromotionState {
+	t.Helper()
+	r, err := gitops.Discover(fx.clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editApps, err := engine.EditApps(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, id),
+		CloneDir:      fx.clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+		PRTitle:       engine.PRTitle(plan),
+		PRBody:        engine.RenderPRBody(id, plan),
+		Approval:      "auto",
+		CINone:        "green",
+		ArgoNamespace: "argocd",
+		ArgoApps:      argoApps,
+		EditApps:      editApps,
+	}
+	f, err := fx.svc.ForgeFor("example/gitops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := fx.svc.Argo("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro := satisfiedRollout(plan.TargetEnv, plan.Edits)
+	if err := engine.Drive(context.Background(), engine.AllSteps(git.Exec{}, f, a, ro, nil), s, nil); err != nil {
+		t.Fatalf("driving to done: %v", err)
+	}
+	saveStateAs(t, s, s.ID)
+	return s
+}
+
+func saveStateAs(t *testing.T, s *engine.PromotionState, id string) {
+	t.Helper()
+	cp := *s
+	cp.ID = id
+	path, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.SaveState(path, &cp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFindInFlightAsksOriginOncePerScan is the regression test for the scan's cost: three
+// finished promotions into one env used to cost three fetches of the base branch and three
+// per-branch ls-remotes — per scan, with claimTarget scanning twice. One scan now makes one
+// fetch and one listing however many there are, and still reaches the right verdict for each.
+func TestFindInFlightAsksOriginOncePerScan(t *testing.T) {
+	fx := newInflightFixture(t)
+	s := finishedPromotion(t, fx)
+	// Two more state files for the same finished promotion under other ids: FindInFlight
+	// observes each state file it lists, and what matters here is how many it observes.
+	saveStateAs(t, s, "second-finished")
+	saveStateAs(t, s, "third-finished")
+
+	counting := &countingGit{Git: git.Exec{}}
+	deps := fx.svc.deps
+	deps.Git = func() git.Git { return counting }
+	svc := New(fx.svc.settings, deps)
+
+	conflict, status, err := svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("three finished promotions must not conflict: %s stuck at %s: %+v", conflict.ID, status.Step, status.Observation)
+	}
+	if counting.fetch != 1 || counting.heads != 1 || counting.branch != 0 {
+		t.Errorf("one scan over three finished promotions: %d fetches, %d listings, %d per-branch ls-remotes; want 1, 1, 0",
+			counting.fetch, counting.heads, counting.branch)
+	}
+
+	if _, _, err := svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id"); err != nil {
+		t.Fatal(err)
+	}
+	if counting.fetch != 2 || counting.heads != 2 {
+		t.Errorf("a second scan must ask origin again: %d fetches, %d listings in total; want 2, 2", counting.fetch, counting.heads)
+	}
+}
+
+// TestFindInFlightSecondScanSeesWhatChangedOnOrigin pins the half of AGENTS.md principle 2 the
+// scan's shared snapshot could break: what one scan observed is never the next scan's answer.
+// claimTarget's second scan runs while holding the claim precisely to see what appeared since
+// the first.
+func TestFindInFlightSecondScanSeesWhatChangedOnOrigin(t *testing.T) {
+	fx := newInflightFixture(t)
+	s := finishedPromotion(t, fx)
+
+	scan := func() *engine.PromotionState {
+		t.Helper()
+		conflict, _, err := fx.svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conflict
+	}
+	if c := scan(); c != nil {
+		t.Fatalf("control: a merged promotion whose branch is gone is finished, got a conflict with %s", c.ID)
+	}
+	// The promotion's branch reappears on origin: MergedStep no longer reads as done.
+	runGitHost(t, fx.clone, "push", "-q", "origin", s.CommitSHA+":refs/heads/"+s.Branch)
+	if c := scan(); c == nil {
+		t.Fatal("the second scan answered from the first scan's view of origin: the branch now exists there again")
+	}
+}
+
+// TestListAndResumeByEnvAskOriginOncePerScan covers the scan's other two callers: `hoist
+// promotions` (and the matrix's in-flight pane) through List, and `hoist resume --env` through
+// FindInFlightForEnv. Both walk every state file the same way FindInFlight does.
+func TestListAndResumeByEnvAskOriginOncePerScan(t *testing.T) {
+	fx := newInflightFixture(t)
+	s := finishedPromotion(t, fx)
+	saveStateAs(t, s, "second-finished")
+	saveStateAs(t, s, "third-finished")
+
+	withCounting := func() (*Service, *countingGit) {
+		counting := &countingGit{Git: git.Exec{}}
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return counting }
+		return New(base.settings, deps), counting
+	}
+
+	svc, counting := withCounting()
+	listed, err := svc.List(context.Background(), ListOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 3 {
+		t.Fatalf("List = %d entries, want 3", len(listed))
+	}
+	for _, l := range listed {
+		if l.Err != nil || !l.Done {
+			t.Fatalf("control: %s must list as done (err=%v, stopped at %s: %+v)", l.State.ID, l.Err, l.Last.Step, l.Last.Observation)
+		}
+	}
+	if counting.fetch != 1 || counting.heads != 1 || counting.branch != 0 {
+		t.Errorf("List over three promotions: %d fetches, %d listings, %d per-branch ls-remotes; want 1, 1, 0",
+			counting.fetch, counting.heads, counting.branch)
+	}
+
+	svc, counting = withCounting()
+	var nf *NotFoundError
+	if _, err := svc.FindInFlightForEnv(context.Background(), "app-production"); !errors.As(err, &nf) {
+		t.Fatalf("three finished promotions leave nothing to resume: got %v", err)
+	}
+	if counting.fetch != 1 || counting.heads != 1 || counting.branch != 0 {
+		t.Errorf("FindInFlightForEnv over three promotions: %d fetches, %d listings, %d per-branch ls-remotes; want 1, 1, 0",
+			counting.fetch, counting.heads, counting.branch)
+	}
+}
+
+// staleFirstFetchGit answers the first FetchBranch with a base tip from before the promotion
+// under test merged — what a scan's one shared fetch looks like to a promotion whose merge
+// landed after it was taken.
+type staleFirstFetchGit struct {
+	git.Git
+	stale string
+	calls int
+}
+
+func (g *staleFirstFetchGit) FetchBranch(ctx context.Context, dir, remote, branch string) (string, bool, error) {
+	g.calls++
+	if g.calls == 1 {
+		return g.stale, true, nil
+	}
+	return g.Git.FetchBranch(ctx, dir, remote, branch)
+}
+
+// TestScanDoesNotCallAMergeRevertedOnAStaleBaseTip is the regression test for the snapshot's
+// one dangerous property: it is older than the forge read of a state observed later in the
+// scan. A promotion merged after the scan's fetch has a merge commit the fetched tip does not
+// contain, which MergedStep reads as "the base was reset past this merge" — a finished
+// promotion reported as blocking its env, with advice to redo it. Anything the snapshot pass
+// does not find finished is observed again live.
+func TestScanDoesNotCallAMergeRevertedOnAStaleBaseTip(t *testing.T) {
+	fx := newInflightFixture(t)
+	beforeMerge := strings.TrimSpace(outGitHost(t, fx.clone, "rev-parse", "refs/remotes/origin/main"))
+	s := finishedPromotion(t, fx)
+	if s.MergeSHA == beforeMerge || s.MergeSHA == "" {
+		t.Fatalf("control: the promotion must have merged past %s, got %q", beforeMerge, s.MergeSHA)
+	}
+
+	stale := &staleFirstFetchGit{Git: git.Exec{}, stale: beforeMerge}
+	deps := fx.svc.deps
+	deps.Git = func() git.Git { return stale }
+	svc := New(fx.svc.settings, deps)
+
+	conflict, status, err := svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("a finished promotion was reported in flight on the strength of a base tip fetched before it merged: %s: %+v", status.Step, status.Observation)
+	}
+	if stale.calls != 2 {
+		t.Errorf("want the stale answer rejected and origin asked again: %d fetches, want 2", stale.calls)
+	}
+}
+
+// aheadListingGit lists the base branch at a commit the clone has never fetched — what a scan's
+// listing looks like when it was taken after the scan's fetch and something landed in between.
+type aheadListingGit struct {
+	git.Git
+	base string
+}
+
+func (g *aheadListingGit) LsRemoteHeads(ctx context.Context, cloneDir, remote string) (map[string]string, error) {
+	heads, err := g.Git.LsRemoteHeads(ctx, cloneDir, remote)
+	if err != nil {
+		return nil, err
+	}
+	heads[g.base] = strings.Repeat("f", 40)
+	return heads, nil
+}
+
+// directPromotion lands the fixture's plan straight on origin's main in direct mode and saves
+// its state file.
+func directPromotion(t *testing.T, fx inflightFixture) *engine.PromotionState {
+	t.Helper()
+	r, err := gitops.Discover(fx.clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, id),
+		CloneDir:      fx.clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Direct:        true,
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+	}
+	if err := engine.Drive(context.Background(), engine.DirectSteps(git.Exec{}, nil, true, nil), s, nil); err != nil {
+		t.Fatalf("driving the direct promotion: %v", err)
+	}
+	saveStateAs(t, s, s.ID)
+	return s
+}
+
+// A listing that names a base tip the scan's fetch never brought in makes DirectPushedStep read
+// a tree the clone does not have. That error belongs to the snapshot, not to the promotion, and
+// must not become the scan's answer.
+func TestScanDoesNotFailOnAListingAheadOfItsFetch(t *testing.T) {
+	fx := newInflightFixture(t)
+	directPromotion(t, fx)
+	// A later commit on main, so the direct promotion's own commit is no longer the tip and its
+	// Observe has to read the tip's tree rather than match it by sha.
+	runGitHost(t, fx.clone, "fetch", "-q", "origin", "main")
+	runGitHost(t, fx.clone, "merge", "-q", "--ff-only", "origin/main")
+	runGitHost(t, fx.clone, "commit", "-q", "--allow-empty", "-m", "unrelated later commit")
+	runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+
+	deps := fx.svc.deps
+	deps.Git = func() git.Git { return &aheadListingGit{Git: git.Exec{}, base: "main"} }
+	svc := New(fx.svc.settings, deps)
+
+	conflict, status, err := svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatalf("the snapshot's own inconsistency became the scan's error: %v", err)
+	}
+	if conflict != nil {
+		t.Fatalf("a landed direct promotion was reported in flight: %s: %+v", status.Step, status.Observation)
+	}
+}
+
+// TestScanOverDirectAndPRPromotionsAsksOriginOnce puts both kinds of finished promotion — two
+// distinct ones, with their own commits — in one scan: the direct one is superseded by the PR
+// one that followed it, and both read origin's base branch through the same snapshot.
+func TestScanOverDirectAndPRPromotionsAsksOriginOnce(t *testing.T) {
+	fx := newInflightFixture(t)
+	direct := directPromotion(t, fx)
+
+	// A newer build reaches staging, and the clone catches up with origin (the direct push never
+	// moves the clone's own branch), so the next plan promotes it over the direct one's.
+	runGitHost(t, fx.clone, "fetch", "-q", "origin", "main")
+	runGitHost(t, fx.clone, "merge", "-q", "--ff-only", "origin/main")
+	p := filepath.Join(fx.clone, "cluster/apps/app-staging/app/deployment.yaml")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := "ghcr.io/example/app:v3@sha256:" + strings.Repeat("2", 64)
+	lines := strings.Split(string(b), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "image: ghcr.io/") {
+			lines[i] = "          image: " + newer
+		}
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, fx.clone, "commit", "-q", "-a", "-m", "staging runs v3")
+	runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+	viaPR := finishedPromotion(t, fx)
+	if viaPR.ID == direct.ID {
+		t.Fatal("control: the two promotions must be distinct")
+	}
+
+	counting := &countingGit{Git: git.Exec{}}
+	deps := fx.svc.deps
+	deps.Git = func() git.Git { return counting }
+	svc := New(fx.svc.settings, deps)
+
+	conflict, status, err := svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("a superseded direct promotion and a merged one are both finished: %s stuck at %s: %+v", conflict.ID, status.Step, status.Observation)
+	}
+	if counting.fetch != 1 || counting.heads != 1 || counting.branch != 0 {
+		t.Errorf("one scan over a direct and a PR promotion: %d fetches, %d listings, %d per-branch ls-remotes; want 1, 1, 0",
+			counting.fetch, counting.heads, counting.branch)
+	}
+}
+
+// A scanGit that reached a step's Act would hide the Act's own effect from the next Observe;
+// it refuses to write at all, so that wiring mistake fails the first time it runs.
+func TestScanGitRefusesToWrite(t *testing.T) {
+	ctx := context.Background()
+	g := newScanGit(&countingGit{})
+	_, commitErr := g.Commit(ctx, "/wt", "msg", nil, 0, nil)
+	for name, err := range map[string]error{
+		"Worktree":           g.Worktree(ctx, "/clone", "/wt", "b", "main"),
+		"WorktreeAtRef":      g.WorktreeAtRef(ctx, "/clone", "/wt", "main"),
+		"RemoveWorktree":     g.RemoveWorktree(ctx, "/clone", "/wt"),
+		"Commit":             commitErr,
+		"Push":               g.Push(ctx, "/wt", "origin", "b"),
+		"PushHeadTo":         g.PushHeadTo(ctx, "/wt", "origin", "main"),
+		"DeleteRemoteBranch": g.DeleteRemoteBranch(ctx, "/clone", "origin", "b"),
+	} {
+		if !errors.Is(err, errScanGitWrite) {
+			t.Errorf("%s: want the read-only refusal, got %v", name, err)
+		}
+	}
+}

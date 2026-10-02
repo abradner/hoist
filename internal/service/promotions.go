@@ -10,6 +10,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -137,6 +138,7 @@ func (s *Service) FindInFlightForEnv(ctx context.Context, env string) (*engine.P
 	}
 	var matches []*engine.PromotionState
 	var obsErrs []string
+	live, scan := s.Git(), newScanGit(s.Git())
 	for _, st := range states {
 		if st.TargetEnv != env {
 			continue
@@ -155,7 +157,9 @@ func (s *Service) FindInFlightForEnv(ctx context.Context, env string) (*engine.P
 			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, ferr))
 			continue
 		}
-		done, _, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(st, s.Git(), f, nil, nil, nil), st)
+		done, _, oerr := observeThroughScan(st, scan, live, func(g git.Git, st *engine.PromotionState) (bool, engine.StepStatus, error) {
+			return engine.ObserveAll(ctx, engine.ObserveSteps(st, g, f, nil, nil, nil), st)
+		})
 		if oerr != nil {
 			obsErrs = append(obsErrs, fmt.Sprintf("%s: %v", st.ID, oerr))
 			continue
@@ -242,13 +246,15 @@ func (s *Service) List(ctx context.Context, o ListOpts) ([]Listed, error) {
 		states = filtered
 	}
 	out := make([]Listed, 0, len(states))
+	// One snapshot for the whole listing: see FindInFlight.
+	scan := newScanGit(s.Git())
 	for _, st := range states {
-		out = append(out, s.listOne(ctx, st, o))
+		out = append(out, s.listOne(ctx, scan, st, o))
 	}
 	return out, nil
 }
 
-func (s *Service) listOne(ctx context.Context, st *engine.PromotionState, o ListOpts) Listed {
+func (s *Service) listOne(ctx context.Context, scan *scanGit, st *engine.PromotionState, o ListOpts) Listed {
 	rc, ok := RepoConfigFor(s.settings.Config, st.RepoFullName)
 	if !ok {
 		return Listed{State: *st, Unconfigured: true}
@@ -264,7 +270,9 @@ func (s *Service) listOne(ctx context.Context, st *engine.PromotionState, o List
 	if err := EnsureArgoApps(st, rc); err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(err.Error()))}
 	}
-	done, statuses, err := engine.Status(ctx, engine.ObserveSteps(st, s.Git(), f, a, ro, nil), st)
+	done, statuses, err := observeThroughScan(st, scan, s.Git(), func(g git.Git, st *engine.PromotionState) (bool, []engine.StepStatus, error) {
+		return engine.Status(ctx, engine.ObserveSteps(st, g, f, a, ro, nil), st)
+	})
 	if err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(err.Error()))}
 	}

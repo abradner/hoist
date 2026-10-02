@@ -154,6 +154,19 @@ bytes, since a file with two occurrences of one image repo (a Deployment and its
 a whole-file predicate on the strength of either one, and a false *intact* here silently retires
 the one-in-flight-per-env rule (#167).
 
+**A scan over many state files shares its git reads of origin, and trusts them for one verdict
+only.** `FindInFlight`, `FindInFlightForEnv` and `List` each observe every prior promotion
+through `observeThroughScan` (`internal/service/scangit.go`): a first pass against a `scanGit`
+that lists origin's branches once and fetches each base branch once for the whole scan, and —
+unless that pass finds the promotion *finished* — a second pass through the live `git.Git`, as
+if no snapshot existed. The asymmetry is the rule: the listing and the fetch are taken at two
+instants and replayed to states whose own forge read is later still, so a promotion merged
+mid-scan looks reverted against a base tip fetched before its merge. A finished verdict from the
+snapshot is exposed only to the races a live walk already had; any other verdict from it is not
+evidence. The snapshot is dropped when the scan returns, so `claimTarget`'s second scan, made
+while holding the claim, asks origin again; and `scanGit` refuses every writing method, so it
+cannot serve a step that Acts. The forge is still asked once per state (§9 entry 15).
+
 *Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
 `ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
 superseded promotion will never see again — so such a promotion stops blocking its env (which is
@@ -1083,6 +1096,34 @@ test lives** (if one exists).
    `internal/app/kitty_decode_test.go`, which decodes the extended CSI-u form a terminal sends
    once `ReportAlternateKeys` is actually granted and asserts the shifted punctuation comes out
    right.
+
+15. **A scan that opens a connection per item costs as much as the history is long.** What
+   happened: `hoist promote` printed nothing for two minutes before its first line. 105 of the
+   first 108 seconds were `claimTarget`'s two in-flight scans: eight finished promotions into
+   the target env, each re-observed by `MergedStep.Observe` with its own `git fetch` of the base
+   branch and its own `git ls-remote` for a branch deleted weeks ago — two connections to the
+   remote at about three seconds each, per state, per scan. Nothing was wrong with any single
+   observation, and the fixtures never showed it: a test has one prior promotion and a local
+   bare origin where a round trip is free. Root cause: "re-observe every state" was implemented
+   as "every state asks the remote for itself", so the cost was linear in every promotion the
+   env had ever had — and states #168 leaves non-terminal are never archived, so it only grew.
+   Rule: a scan shares its git reads of the remote across the states it walks (`scanGit`: one
+   listing of branches, one fetch per base), but only to recognise a *finished* promotion; the
+   snapshot lives for exactly one scan (principle 2 — the next scan asks again) and cannot
+   write. The first version of this fix shared the snapshot for every verdict, and an
+   independent review reproduced what that costs: the steps' Observe methods assume live calls
+   in a fixed order, so a promotion merged after the scan's one fetch read as reverted, and a
+   listing newer than the fetch sent `DirectPushedStep` to a tree the clone did not have. A
+   cache in front of code written for live calls is safe only for the answers that staleness
+   cannot fake. A new step whose Observe talks to the remote gets its call counted in a
+   multi-state scan test, not just asserted correct for one state. And a command that goes
+   quiet is measured before it is explained: the first guess here was digest resolution, which
+   took 0.1s. Regression tests, in `internal/service/scangit_test.go`:
+   `TestFindInFlightAsksOriginOncePerScan`, `TestListAndResumeByEnvAskOriginOncePerScan` and
+   `TestScanOverDirectAndPRPromotionsAsksOriginOnce` for the cost;
+   `TestScanDoesNotCallAMergeRevertedOnAStaleBaseTip`,
+   `TestScanDoesNotFailOnAListingAheadOfItsFetch` and
+   `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what the snapshot must never decide.
 
 ## 10. Maintaining This Document
 

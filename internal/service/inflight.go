@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
 )
 
 // FindInFlight looks for a promotion state other than skipID targeting repoFullName/targetEnv
@@ -33,8 +34,13 @@ import (
 // rather than taken as parameters: repoFullName is always the SAME forge identity every step
 // list built from prev would use, and s.Git()/s.ForgeFor give exactly that without a caller
 // having to already hold one.
+//
+// Every candidate is observed through observeThroughScan: a finished promotion — the kind an
+// env accumulates — is recognised from one listing of origin's branches and one fetch of the
+// base shared across the whole scan, and anything not finished is observed again live. The
+// snapshot is built here and dropped on return, so every call asks origin afresh.
 func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, skipID string) (*engine.PromotionState, engine.StepStatus, error) {
-	g := s.Git()
+	live, scan := s.Git(), newScanGit(s.Git())
 	f, err := s.ForgeFor(repoFullName)
 	if err != nil {
 		return nil, engine.StepStatus{}, err
@@ -47,7 +53,9 @@ func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, ski
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(prev, g, f, nil, nil, nil), prev)
+		done, last, oerr := observeThroughScan(prev, scan, live, func(g git.Git, st *engine.PromotionState) (bool, engine.StepStatus, error) {
+			return engine.ObserveAll(ctx, engine.ObserveSteps(st, g, f, nil, nil, nil), st)
+		})
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}
