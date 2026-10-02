@@ -173,6 +173,22 @@ method rather than embedding one, refusing the ones that write, so it cannot ser
 Acts and a new method cannot slip through unclassified. Only git reads are shared: the forge
 and the cluster are asked per state, and again for any state a redo covers (§9 entry 15).
 
+**Landing is self-contained proof on both paths, so nothing after it may depend on the
+worktree or the promotion's own branch.** `MergedStep.Observe` (PR path) and
+`DirectPushedStep.Observe` (direct path) each answer from origin and the clone's object database
+alone. `landedGuard` (`internal/engine/landed_guard.go`) wraps every step a promotion needs only
+*before* it lands — `BranchedStep`, `CommittedStep`, and on the PR path `PushedStep` — in every
+step list, and reports the wrapped step satisfied once the landing step is, asking the wrapped
+step first and the landing step at most once per walk on the guards' behalf — never after the
+walker's own up-front probe of it failed or said no (`landingWalk`) — so the cost is counted and
+small: one extra landing observation in a PR-path promotion's life (at its first push), and one
+per walk for a landed direct promotion whose worktree is gone. `ObserveAll`/`Status`/`DriveStatus` also probe
+`MergedStep` up front, but that is an optimisation with a hole — `DriveStatus`'s probe runs only
+when the recorded `Phase` is already past the merge — and the guard, not the probe, is what makes
+the property hold. A new step that reads `WorktreeDir`, the local branch or the remote branch
+goes before the landing step and inside the guard: a landed promotion must read done, and must
+resume without rebuilding anything, whether or not its worktree still exists (§9 entry 17).
+
 *Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
 `ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
 superseded promotion will never see again — so such a promotion stops blocking its env (which is
@@ -1244,6 +1260,31 @@ test lives** (if one exists).
    entries 14 and 15 are taken by changes in flight when this was written.) Regression tests:
    `cmd/hoist/stray_test.go`, one per command — the deploy and restart cases assert that
    nothing was written.
+
+17. **A step that observes its own scratch space makes "done" depend on never tidying up.** What
+   happened: a direct promotion is observed through `BranchedStep` and `CommittedStep`, which
+   read the promotion's worktree, and nothing short-circuited them once the push had landed.
+   Deleting a landed direct promotion's worktree (by hand, which was always possible, or by the
+   cleanup this entry was written for) made it read as stopped at Branched: `FindInFlight` then
+   refused every later promotion into that env — #166's wedge by another route. The PR path had
+   the same hole in a narrower place: `DriveStatus` probes `MergedStep` first, but only when the
+   recorded `Phase` is already *past* the merge, so a promotion saved at exactly `merged` walked
+   from the top on resume, rebuilt its worktree from the base tip and blocked in `CommittedStep`
+   on whatever unrelated commit was there (found by an independent review of the cleanup stack,
+   before it was pushed — the author had traced the same path and called it "messy but
+   converging"). Root cause: the proof that a promotion finished lived partly in a cache
+   directory, which is the one place §4.1 says truth is never kept, and an up-front probe gated
+   on a hint is an optimisation, not a guarantee. Rule: once the landing step is satisfied from
+   the remote, no step asks the local worktree or the promotion's own branch anything —
+   `landedGuard` enforces it per step, in every list — and removing a worktree is only ever done
+   on top of it. A probe that reads a landing step out of order does so on a copy of the state
+   and only when `engine.LandingObservable` says there is something to judge. Regression tests:
+   `TestDirectModeLandedPromotionDoesNotNeedItsWorktree`, its control
+   `TestDirectModeUnlandedPromotionStillNeedsItsWorktree`, `TestLandedGuard` and
+   `TestDirectModeLandingIsNotInferredFromAStateWithNothingToJudgeBy` in `internal/engine`;
+   `TestFindInFlightDoesNotBlockAfterALandedDirectDeployLosesItsWorktree` and
+   `TestResumingAMergedPromotionSavedAtTheMergeDoesNotNeedItsWorktree` in
+   `internal/service/inflight_test.go`.
 
 ## 10. Maintaining This Document
 
