@@ -64,6 +64,11 @@ var registry = []op{
 		TUI:  "shift+d on the plan and deploy confirm screens (T3-08: was m; the tag picker's own direct-commit gesture retired in T3-07 — direct mode is only ever offered on a confirm screen now, after the diff is already on screen), each behind a huh.Confirm dialog and never offered for a production target",
 	},
 	{
+		Name: "quiet: drop the CLI's progress lines",
+		CLI:  "promote --quiet deploy --quiet resume --quiet promotions --quiet abandon --quiet",
+		TUI:  "nothing to switch off: the CLI's progress lines on stderr are what the flight screen's log and the in-flight pane already are, on a screen the operator chose to open; esc leaves it without stopping the drive",
+	},
+	{
 		Name: "deploy one named image into an env",
 		CLI:  "deploy --env --image --dry-run --repo --apps-root --promotable",
 		TUI:  "matrix.OpenTagsMsg t (T3-04: was d), tags.SelectedMsg enter (T3-07: was space), deploy.StartMsg enter; d on the deploy screen is the dry run's diff; esc on the deploy confirm (deploy.BackMsg) returns to the tag picker, not the matrix (T3-08: the picker stays on the stack underneath); deploy.RefreshMsg r (T3-09) rebuilds the diff at fresh origin, same path as the plan screen's own r",

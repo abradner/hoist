@@ -48,9 +48,15 @@ type Mode struct {
 // PromotionState.History entries, and echoing them here put every event on the flight screen
 // twice. OnWaiting is passed straight through to engine.StepsFor, for a later Step/Run
 // call's own CommittedStep "waiting for signing approval" wait.
+//
+// OnAct reports each step's Act as it is about to run (ActEvent) — the one signal that a
+// commit or a push is under way, since History, and so OnHistory below, only hears of an Act
+// once it has returned. Only the CLI sets it. AbandonWith and FindInFlightForEnv take a Hooks
+// too and use Progress alone.
 type Hooks struct {
 	Progress  func(string)
 	OnWaiting func()
+	OnAct     func(ActEvent)
 
 	// OnHistory is called by the Driver for each History entry newly appended by a Step walk, at
 	// the moment the state save carrying it has landed — oldest first, once per entry — with a
@@ -306,6 +312,6 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	// for the whole run.
 	release()
 
-	steps := engine.StepsFor(state, g, f, a, ro, s.settings.ProductionEnvs(), req.Mode.Confirmed, h.OnWaiting)
+	steps := announce(engine.StepsFor(state, g, f, a, ro, s.settings.ProductionEnvs(), req.Mode.Confirmed, h.OnWaiting), h.OnAct)
 	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll).withOnHistory(h.OnHistory), nil
 }

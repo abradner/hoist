@@ -62,6 +62,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fs.StringVar(&rf.clusterSecret, "cluster-secret", sel.resolve.clusterSecret, "namespace/name of a pull secret for the cluster credential source (see hoist plan -h; may also be given before the command)")
 	fs.StringVar(&rf.opRef, "op-ref", sel.resolve.opRef, "op://vault/item/field for the op credential source (see hoist plan -h; may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block, which has no override)")
+	quiet := fs.Bool("quiet", false, quietUsage)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -121,7 +122,14 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// can never reach one and not the other again. It runs
 	// under the same signal/deadline ctx as everything after it, so ^C or the poll deadline can
 	// interrupt resolution too, not just the drive that follows it.
-	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
+	// From here every line on stderr goes through the narrator, whose "still …" line is written
+	// from its own goroutine; stop runs before this function's own final messages are read.
+	n := newNarrator(stderr, *quiet)
+	stopNarrator := n.watch()
+	defer stopNarrator()
+	stderr = n
+
+	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests, Progress: n.progress})
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
 		return exitFailure
@@ -136,12 +144,14 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		}
 	}
 	req := pc.Request(service.Mode{Direct: *direct, Confirmed: true, OverrideCINone: *overrideCINone})
-	d, err := svc.StartPromotion(ctx, req, service.Hooks{OnWaiting: onWaiting})
+	d, err := svc.StartPromotion(ctx, req, n.hooks(onWaiting))
 	if code, done := renderStartError(stdout, stderr, "hoist promote", err); done {
 		return code
 	}
+	// Preflight is over; what runs next is the drive's first walk, which announces its own Acts.
+	n.idle()
 
-	err = d.Run(ctx, runHooksForCLI(stderr))
+	err = d.Run(ctx, n.runHooks())
 	s := d.State()
 	return reportDriveResult(stdout, stderr, "hoist promote", plan.SourceEnv, plan.TargetEnv, &s, err)
 }

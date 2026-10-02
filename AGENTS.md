@@ -471,6 +471,26 @@ with `plan`'s own message on every face.
 | `config show` / `config path` | Print effective config / where it was read from | Pure decode-and-check; always safe. |
 | *(no command)* `hoist --repo <path>` | Opens the env × family matrix TUI | See below. |
 
+**What the drive commands print.** `promote`, `deploy` and `resume` narrate on stderr through
+one `narrator` (`cmd/hoist/narrate.go`): a `hoist: <phase>` line as each preflight phase starts
+(`service.Hooks.Progress`, and `PlanRequest.Progress` for digest resolution), a
+`hoist: <step>: <what>` line as each step's Act starts (`service.Hooks.OnAct`, a step wrapper
+only the CLI asks for — History hears of an Act only once it has returned) and a `…: done` line
+when its outcome is saved — carrying the commit, the PR's URL, the merge —
+(`service.Hooks.OnHistory`; only `acted` entries are printed, since a wait, a block and a
+failed Act each already have a line),
+and a `hoist: still … (15s so far)` line when the phase last announced has gone `silenceEvery`
+without other output. Waits keep `waitingReporter`'s lines and its ten-minute heartbeat.
+`promotions` and `abandon` announce their re-observation the same way (`ListOpts.Progress`,
+`Service.AbandonWith`). The narrator is also the `io.Writer` every other stderr line of those
+commands goes through, for two reasons: its `Write` redacts (`pkg/redact`, §4.10), so nothing
+reaches the terminal unredacted whatever its caller did; and it holds the one lock, since the
+"still" line is written from a second goroutine. stdout is untouched: it is
+the summary, the listing, or the plan, and nothing else. `--quiet` on those five commands drops
+the phase, act and "still" lines only. `resume` and `abandon` parse flags on either side of
+their id (`parseWithID`) and refuse a second positional — `resume <id> --override-ci-none`,
+the order the guide shows, used to leave the flag unparsed and silently ignored.
+
 ### TUI
 
 `hoist --repo <path>` with no subcommand opens the env × family matrix; every promoting/deploying

@@ -61,6 +61,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to re-observe every promotion in, instead of each repo's own kube.context (may also be given before the command)")
 	repoFilter := fs.String("repo", "", "only list promotions for this repo (owner/name, repos[].github) — default every configured repo")
 	archived := fs.Bool("archived", false, "also list archived promotions (state.retain; still plain, readable JSON under the promotions/archive/ subdirectory)")
+	quiet := fs.Bool("quiet", false, quietUsage)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -73,7 +74,14 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	ctx, stop := boundedCommandContext(set.Deadline)
 	defer stop()
 
-	listed, err := svc.List(ctx, service.ListOpts{RepoFullName: *repoFilter, ArchiveDoneOlderThan: set.Retain})
+	n := newNarrator(stderr, *quiet)
+	stopNarrator := n.watch()
+	defer stopNarrator()
+	stderr = n
+
+	listed, err := svc.List(ctx, service.ListOpts{RepoFullName: *repoFilter, ArchiveDoneOlderThan: set.Retain, Progress: n.progress})
+	// Everything after the re-observation is this command's own output.
+	n.idle()
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist promotions: %v\n", err)
 		return exitFailure
@@ -139,13 +147,14 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	env := fs.String("env", "", "resume the (single, non-terminal) promotion targeting this env, instead of naming an id")
 	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to observe and drive the promotion in, instead of its repo's own kube.context (may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway")
-	if err := fs.Parse(args); err != nil {
+	quiet := fs.Bool("quiet", false, quietUsage)
+	id, err := parseWithID(fs, args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return exitUsage
 	}
-	id := fs.Arg(0)
 	if (id == "") == (*env == "") {
 		fmt.Fprintln(stderr, "hoist resume: give exactly one of <id> or --env <target-env>")
 		fs.Usage()
@@ -157,6 +166,11 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	ctx, stop := boundedCommandContext(set.Deadline)
 	defer stop()
 
+	n := newNarrator(stderr, *quiet)
+	stopNarrator := n.watch()
+	defer stopNarrator()
+	stderr = n
+
 	if id == "" {
 		// obsErrs (service.UnconfirmedError) collects a re-observation failure per candidate
 		// instead of silently filtering it out of consideration (a transient GitHub/git error
@@ -164,7 +178,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		// could misleadingly report "no in-flight promotion" with one candidate, or silently
 		// resolve to a different one with several, without ever confirming the choice was
 		// actually unambiguous).
-		st, err := svc.FindInFlightForEnv(ctx, *env)
+		st, err := svc.FindInFlightForEnv(ctx, *env, n.hooks(nil))
 		if err != nil {
 			var ambiguous *service.AmbiguousError
 			if errors.As(err, &ambiguous) {
@@ -175,6 +189,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			return exitFailure
 		}
 		id = st.ID
+		n.idle()
 	}
 
 	waited := false
@@ -191,12 +206,12 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// all, on the belief that runResume could not reach envs.production for the gate; it can, so
 	// the honest fix is svc.Resume driving DirectSteps rather than declining (see its own doc
 	// comment).
-	d, err := svc.Resume(ctx, id, service.ResumeOpts{OverrideCINone: *overrideCINone, Hooks: service.Hooks{OnWaiting: onWaiting}})
+	d, err := svc.Resume(ctx, id, service.ResumeOpts{OverrideCINone: *overrideCINone, Hooks: n.hooks(onWaiting)})
 	if err != nil {
 		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
 		return exitFailure
 	}
-	err = d.Run(ctx, runHooksForCLI(stderr))
+	err = d.Run(ctx, n.runHooks())
 	s := d.State()
 	return reportDriveResult(stdout, stderr, "hoist resume", s.SourceEnv, s.TargetEnv, &s, err)
 }
