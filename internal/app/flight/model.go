@@ -270,11 +270,6 @@ func (m Model) Mirror(s session.Snapshot) Model {
 	} else {
 		m.errNotice = ""
 	}
-	if m.width > 0 && m.height > 0 {
-		// View lays out its own copy, so the RETAINED viewport must see new content here for
-		// layout's "was it at the bottom?" test to compare against what the operator last saw.
-		m = m.layout()
-	}
 	return m
 }
 
@@ -988,8 +983,24 @@ func (m Model) logView() string {
 // later moment than the oldest line in the log below it (preflight runs before any History
 // exists).
 func (m Model) startedAt() time.Time {
-	return StartedAtWithLog(m.state, m.buildLog)
+	return StartedAtBefore(m.state, firstLogAt(m.buildLog))
 }
+
+// firstLogAt is the earliest timestamped progress line, the zero time when there is none —
+// the plain value rows.go's StartedAtBefore takes, so rows.go never names a session type.
+func firstLogAt(log []session.LogLine) time.Time {
+	var first time.Time
+	for _, l := range log {
+		if !l.At.IsZero() && (first.IsZero() || l.At.Before(first)) {
+			first = l.At
+		}
+	}
+	return first
+}
+
+// FirstLogAt is firstLogAt for the root, which builds the matrix's in-flight summary from a
+// Snapshot's log and must agree with the flight header about when a promotion started.
+func FirstLogAt(log []session.LogLine) time.Time { return firstLogAt(log) }
 
 // notes is the transient notice and the last plumbing error, word-wrapped.
 func (m Model) notes() string {
