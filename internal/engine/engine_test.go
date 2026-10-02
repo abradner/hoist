@@ -208,3 +208,58 @@ func TestObserveAllObservesFinalStepExactlyOnce(t *testing.T) {
 		t.Fatalf("last = %+v, want the final step's own Observation", last)
 	}
 }
+
+// detailStep is a Step whose Observation is whatever its pointer currently holds, so a test can
+// change the world between walks.
+type detailStep struct {
+	name StepName
+	obs  *Observation
+}
+
+func (d detailStep) Name() StepName { return d.name }
+func (d detailStep) Observe(context.Context, *PromotionState) (Observation, error) {
+	return *d.obs, nil
+}
+func (d detailStep) Act(context.Context, *PromotionState) error { return nil }
+
+// TestHistoryRecordsChangesNotReobservations: an operator staring at a promotion for an hour
+// must see each fact once. Ten polls of an unchanged "already satisfied" step plus an unchanged
+// waiting step leave exactly the first walk's two entries; a changed waiting detail (CI 3/4 ->
+// 4/4) appends one; the first occurrence keeps its original time.
+func TestHistoryRecordsChangesNotReobservations(t *testing.T) {
+	waiting := &Observation{Waiting: true, Detail: "CI: 3/4 checks complete"}
+	steps := []Step{
+		detailStep{StepBranched, &Observation{Satisfied: true, Detail: "worktree already present"}},
+		detailStep{StepCIGreen, waiting},
+	}
+	s := &PromotionState{}
+	for i := 0; i < 10; i++ {
+		_, _, err := DriveStatus(ctx(), steps, s, nil)
+		if !errors.Is(err, ErrWaiting) {
+			t.Fatalf("walk %d: err = %v, want ErrWaiting", i, err)
+		}
+	}
+	if len(s.History) != 2 {
+		t.Fatalf("after 10 identical walks History has %d entries, want 2: %+v", len(s.History), s.History)
+	}
+	first := s.History[1].At
+
+	*waiting = Observation{Waiting: true, Detail: "CI: 4/4 checks complete"}
+	if _, _, err := DriveStatus(ctx(), steps, s, nil); !errors.Is(err, ErrWaiting) {
+		t.Fatal(err)
+	}
+	if len(s.History) != 3 || s.History[2].Detail != "waiting: CI: 4/4 checks complete" {
+		t.Fatalf("a changed detail must append exactly one entry: %+v", s.History)
+	}
+	if !s.History[1].At.Equal(first) {
+		t.Fatal("the first occurrence must keep its time")
+	}
+
+	*waiting = Observation{Satisfied: true, Detail: "green"}
+	if _, _, err := DriveStatus(ctx(), steps, s, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.History[len(s.History)-1].Detail; got != "already satisfied: green" || len(s.History) != 4 {
+		t.Fatalf("waiting -> satisfied must append: %+v", s.History)
+	}
+}

@@ -483,8 +483,27 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 // already does its own best-effort scrubbing where it can (the same belt-and-suspenders
 // pattern as internal/app/plan/model.go's View(), which redacts its assembled output once at
 // the final boundary in addition to per-field calls).
+//
+// History records a step's CHANGES, not every re-observation: when the newest entry already
+// recorded for name has the same (redacted) detail, nothing is appended, so a hundred polls of
+// "waiting: CI: 3/4 checks complete" leave one entry — the first, with the time it started
+// being true — and likewise a repeated "already satisfied: …". A changed detail (2/4 -> 3/4,
+// waiting -> acted, satisfied -> blocked) appends. Readers of History are indifferent to the
+// dropped repeats: landedAt and mergedAt want the EARLIEST entry for a step; waitingReporter
+// and historyDetail want the newest waiting entry and the last entry, which a repeat would only
+// have re-stamped later; LastActivity becomes "when something last changed", which is what
+// retention wants.
 func appendHistory(s *PromotionState, name StepName, detail string) {
-	s.History = append(s.History, HistoryEntry{Step: name, At: time.Now(), Detail: redact.Strings(detail)})
+	detail = redact.Strings(detail)
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if s.History[i].Step == name {
+			if s.History[i].Detail == detail {
+				return
+			}
+			break
+		}
+	}
+	s.History = append(s.History, HistoryEntry{Step: name, At: time.Now(), Detail: detail})
 }
 
 // saveIfSet is best-effort: a save failure on a terminal (blocked/waiting) path is logged into

@@ -195,3 +195,39 @@ func TestDriverStepRetryWaitsAtTheFailedStepsCadence(t *testing.T) {
 		})
 	}
 }
+
+// TestDriverProgressReportsOnlyNewHistory: the progress line mirrors a history entry, so a poll
+// that appends nothing (an unchanged wait) must emit nothing, and a changed detail emits once.
+func TestDriverProgressReportsOnlyNewHistory(t *testing.T) {
+	obs := &engine.Observation{Waiting: true, Detail: "CI: 3/4"}
+	steps := []engine.Step{progressStep{engine.StepCIGreen, obs}}
+	var lines []string
+	d := NewDriver(steps, &engine.PromotionState{}, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{},
+		DriverHooks{Progress: func(l string) { lines = append(lines, l) }})
+	for i := 0; i < 5; i++ {
+		if _, err := d.Step(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("5 unchanged polls emitted %d lines, want 1: %q", len(lines), lines)
+	}
+	*obs = engine.Observation{Waiting: true, Detail: "CI: 4/4"}
+	if _, err := d.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || !strings.Contains(lines[1], "CI: 4/4") {
+		t.Fatalf("a changed detail must emit once more: %q", lines)
+	}
+}
+
+type progressStep struct {
+	name engine.StepName
+	obs  *engine.Observation
+}
+
+func (p progressStep) Name() engine.StepName { return p.name }
+func (p progressStep) Observe(context.Context, *engine.PromotionState) (engine.Observation, error) {
+	return *p.obs, nil
+}
+func (p progressStep) Act(context.Context, *engine.PromotionState) error { return nil }

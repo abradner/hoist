@@ -90,9 +90,13 @@ func NewDriver(steps []engine.Step, state *engine.PromotionState, save func(*eng
 	wrapped := save
 	if hooks.Progress != nil {
 		progress := hooks.Progress
+		// seen is how much of History has already been reported: only entries appended since
+		// the last save are lines, so an unchanged poll (appendHistory skips repeats) reports
+		// nothing, and a resumed Driver does not re-report what the file already held.
+		seen := len(state.History)
 		wrapped = func(st *engine.PromotionState) error {
-			if n := len(st.History); n > 0 {
-				h := st.History[n-1]
+			for ; seen < len(st.History); seen++ {
+				h := st.History[seen]
 				progress(fmt.Sprintf("%s: %s", h.Step, h.Detail))
 			}
 			if save != nil {
