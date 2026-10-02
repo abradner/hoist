@@ -91,6 +91,25 @@ type EnvsConfig struct {
 type CIConfig struct {
 	None  string   `yaml:"none"`  // green|prompt|block; default green
 	Grace Duration `yaml:"grace"` // how long to wait for checks to appear; default 3m
+	// Settle is how long after the PR opens a finished rollup must stand before CIGreenStep
+	// reports green: a workflow that has not yet created its check-run is invisible to the
+	// rollup, so "every check I can see is done" is not "CI is done" until the check set has had
+	// time to appear. A pointer so an explicit `settle: 0s` (immediate green, the operator's
+	// choice) is distinguishable from unset (the default, DefaultCISettle); Normalize fills it.
+	Settle *Duration `yaml:"settle,omitempty"`
+	// Ignore lists check names (a check-run's name or a commit status's context, exact match)
+	// CIGreenStep excludes from the rollup: things that report as checks but are not CI, like
+	// a code-review bot's run. Explicit and per repo; no default ever ignores a check.
+	Ignore []string `yaml:"ignore,omitempty"`
+}
+
+// SettleDuration is the effective ci.settle: the configured value, or DefaultCISettle when the
+// config was never normalized. Unset never means zero here — zero is an explicit `settle: 0s`.
+func (c CIConfig) SettleDuration() time.Duration {
+	if c.Settle == nil {
+		return time.Duration(DefaultCISettle)
+	}
+	return time.Duration(*c.Settle)
 }
 
 // KubeConfig names the kubeconfig context hoist reads pods from (M2), and, from M5, where
@@ -174,6 +193,7 @@ const (
 	DefaultAppsRoot      = "cluster/apps"
 	DefaultCINone        = "green"
 	DefaultCIGrace       = Duration(3 * time.Minute)
+	DefaultCISettle      = Duration(30 * time.Second)
 	DefaultArgoNamespace = "argocd"
 	// DefaultMigrationsPath is pkg/migrate's Rails default, restated here so Normalize fills
 	// the same value the app repo's .hoist.yaml would override.
@@ -301,6 +321,10 @@ func (c *Config) Normalize() error {
 		}
 		if r.CI.Grace == 0 {
 			r.CI.Grace = DefaultCIGrace
+		}
+		if r.CI.Settle == nil {
+			d := DefaultCISettle
+			r.CI.Settle = &d
 		}
 		if r.DigestSources == nil {
 			r.DigestSources = append([]string(nil), defaultDigestSources...)
@@ -584,6 +608,23 @@ func validateRepo(p *problems, r RepoConfig) {
 	validateEnum(p, k+".ci.none", r.CI.None, "green", "prompt", "block")
 	if r.CI.Grace <= 0 {
 		p.add(k+".ci.grace", "must be a positive duration, got %s", r.CI.Grace)
+	}
+	if r.CI.Settle != nil && *r.CI.Settle < 0 {
+		p.add(k+".ci.settle", "must not be negative (0s turns the settle window off), got %s", *r.CI.Settle)
+	}
+	seenIgnore := map[string]bool{}
+	for i, n := range r.CI.Ignore {
+		ip := fmt.Sprintf("%s.ci.ignore[%d]", k, i)
+		switch {
+		case strings.TrimSpace(n) == "":
+			p.add(ip, "empty check name")
+		case n != strings.TrimSpace(n):
+			p.add(ip, "check name %q has leading or trailing whitespace (matching is exact)", n)
+		case seenIgnore[n]:
+			p.add(ip, "duplicate check name %q", n)
+		default:
+			seenIgnore[n] = true
+		}
 	}
 	validateList(p, k+".digest_sources", r.DigestSources, "pods", "manifest", "registry")
 	for img, repo := range r.Apps {

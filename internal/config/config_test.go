@@ -71,7 +71,7 @@ func TestLoadFullFile(t *testing.T) {
 			},
 			Approvers:     []string{"me"},
 			Collaborators: true,
-			CI:            CIConfig{None: "prompt", Grace: Duration(90 * time.Second)},
+			CI:            CIConfig{None: "prompt", Grace: Duration(90 * time.Second), Settle: durPtr(DefaultCISettle)},
 			Kube:          KubeConfig{Context: "my-cluster", ArgoNamespace: "argocd"},
 			DigestSources: []string{"pods", "registry"},
 			Apps:          map[string]string{"ghcr.io/me/app": "me/app"},
@@ -108,6 +108,7 @@ func TestDefaults(t *testing.T) {
 		"promotable":                         r.Promotable,
 		"ci.none":                            r.CI.None,
 		"ci.grace":                           r.CI.Grace,
+		"ci.settle":                          r.CI.SettleDuration(),
 		"digest_sources":                     strings.Join(r.DigestSources, ","),
 		"approval[prod]":                     r.Envs.Approval["prod"],
 		"registries.auth":                    strings.Join(c.Registries[0].Auth, ","),
@@ -132,6 +133,7 @@ func TestDefaults(t *testing.T) {
 			"promotable":                         []string(nil),
 			"ci.none":                            "green",
 			"ci.grace":                           Duration(3 * time.Minute),
+			"ci.settle":                          30 * time.Second,
 			"digest_sources":                     "pods,manifest,registry",
 			"approval[prod]":                     "comment",
 			"registries.auth":                    "env,keychain,cluster,op",
@@ -288,6 +290,10 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"approval enum", "repos:\n  - path: /x\n    envs: { approval: { app-production: maybe } }\n", "repos[0].envs.approval.app-production: want one of comment|auto, got \"maybe\""},
 		{"production twice", "repos:\n  - path: /x\n    envs: { production: [p, p] }\n", "repos[0].envs.production[1]: \"p\" listed twice"},
 		{"ci.none enum", "repos:\n  - path: /x\n    ci: { none: yellow }\n", "repos[0].ci.none: want one of green|prompt|block"},
+		{"ci.ignore empty", "repos:\n  - path: /x\n    ci: { ignore: [a, ''] }\n", "repos[0].ci.ignore[1]: empty check name"},
+		{"ci.ignore padded", "repos:\n  - path: /x\n    ci: { ignore: [a, ' b'] }\n", "repos[0].ci.ignore[1]: check name \" b\" has leading or trailing whitespace"},
+		{"ci.ignore dup", "repos:\n  - path: /x\n    ci: { ignore: [a, b, a] }\n", "repos[0].ci.ignore[2]: duplicate check name \"a\""},
+		{"ci.settle negative", "repos:\n  - path: /x\n    ci: { settle: -1s }\n", "repos[0].ci.settle: must not be negative"},
 		{"ci.grace negative", "repos:\n  - path: /x\n    ci: { grace: -1s }\n", "repos[0].ci.grace: must be a positive duration"},
 		{"digest_sources enum", "repos:\n  - path: /x\n    digest_sources: [pods, argo]\n", "repos[0].digest_sources[1]: want one of pods|manifest|registry"},
 		{"digest_sources empty", "repos:\n  - path: /x\n    digest_sources: []\n", "repos[0].digest_sources: must not be empty"},
@@ -500,7 +506,7 @@ func TestRedactedAndMarshal(t *testing.T) {
 	if c.Registries[0].Op != "op://vault/item/field" {
 		t.Error("Redacted mutated the original")
 	}
-	for _, want := range []string{"grace: 1m30s", "deadline: 5h0m0s", "apps_root: k8s/apps", "path: ~/src/my-gitops"} {
+	for _, want := range []string{"grace: 1m30s", "settle: 30s", "deadline: 5h0m0s", "apps_root: k8s/apps", "path: ~/src/my-gitops"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("effective config lacks %q:\n%s", want, s)
 		}
@@ -526,6 +532,10 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !c.Found || len(c.Repos) != 1 || len(c.Registries) != 1 || c.Repos[0].Name != "my-gitops" {
 		t.Errorf("example: Found=%v repos=%d registries=%d", c.Found, len(c.Repos), len(c.Registries))
+		return
+	}
+	if got := c.Repos[0].CI.Ignore; len(got) != 1 || got[0] != "copilot-pull-request-reviewer" {
+		t.Errorf("example ci.ignore = %v, want the documented entry", got)
 	}
 }
 
@@ -617,5 +627,50 @@ func TestSourcesOfSortedAndScoped(t *testing.T) {
 	}
 	if got := envs.SourcesOf("nope"); got != nil {
 		t.Fatalf("SourcesOf(nope) = %v, want nil", got)
+	}
+}
+
+// TestCIIgnoreDefaultsToNothingAndShows pins §4.5's neighbour: no default ever ignores a check,
+// and an explicit list round-trips through `config show`'s marshal.
+func TestCIIgnoreDefaultsToNothingAndShows(t *testing.T) {
+	c, err := Load(write(t, "repos:\n  - path: /x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Repos[0].CI.Ignore) != 0 {
+		t.Fatalf("default ci.ignore = %v, want empty", c.Repos[0].CI.Ignore)
+	}
+	c, err = Load(write(t, "repos:\n  - path: /x\n    ci: { ignore: [copilot-pull-request-reviewer] }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := c.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "copilot-pull-request-reviewer") {
+		t.Fatalf("config show lacks the ignore entry:\n%s", out)
+	}
+}
+
+func durPtr(d Duration) *Duration { return &d }
+
+// settle: 0s is an explicit operator choice (immediate green) and must survive Normalize, which
+// fills only an UNSET settle; a pointer is what tells the two apart.
+func TestCISettleZeroIsExplicitNotDefault(t *testing.T) {
+	c, err := Load(write(t, "repos:\n  - path: /x\n    ci: { settle: 0s }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Repos[0].CI.SettleDuration(); got != 0 {
+		t.Fatalf("explicit settle: 0s became %s", got)
+	}
+	out, err := c.Marshal()
+	if err != nil || !strings.Contains(string(out), "settle: 0s") {
+		t.Fatalf("config show must keep the explicit 0s (err=%v):\n%s", err, out)
+	}
+	var unnormalized CIConfig
+	if got := unnormalized.SettleDuration(); got != time.Duration(DefaultCISettle) {
+		t.Fatalf("a never-normalized config must read as the default, not zero: %s", got)
 	}
 }

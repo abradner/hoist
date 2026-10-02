@@ -1159,3 +1159,177 @@ func TestMergedDisconnectedAncestryInShallowCloneNamesTheClone(t *testing.T) {
 		t.Errorf("full clone control: reverted=%v err=%v why=%s", reverted, err, why)
 	}
 }
+
+// reviewerRollup is the incident's shape: three real CI runs, green, plus Copilot's review
+// reported as a check-run that is still pending.
+func reviewerRollup() []forge.Check {
+	return []forge.Check{
+		{Name: "kubeconform", State: forge.CheckSuccess},
+		{Name: "yq", State: forge.CheckSuccess},
+		{Name: "helm-render", State: forge.CheckSuccess},
+		{Name: "copilot-pull-request-reviewer", State: forge.CheckPending},
+	}
+}
+
+func TestCIGreenWithoutIgnoreWaitsOnTheReviewer(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: reviewerRollup()}
+
+	obs, err := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Waiting || obs.Detail != "CI: 3/4 checks complete" {
+		t.Fatalf("without an ignore list the step waits on 3/4, got %+v", obs)
+	}
+}
+
+func TestCIGreenIgnoresListedCheckAndSaysSo(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: reviewerRollup()}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer", "matches-nothing"}
+
+	obs, err := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("expected satisfied with the reviewer ignored, got %+v", obs)
+	}
+	if want := "CI green (3 checks) · ignoring copilot-pull-request-reviewer"; obs.Detail != want {
+		t.Fatalf("detail = %q, want %q (an entry matching nothing must not be listed)", obs.Detail, want)
+	}
+
+	// Still-waiting detail names it too.
+	f.NamedChecksBySHA[s.PushedSHA][0].State = forge.CheckPending
+	obs, _ = (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if want := "CI: 2/3 checks complete · ignoring copilot-pull-request-reviewer"; !obs.Waiting || obs.Detail != want {
+		t.Fatalf("waiting detail = %+v, want %q", obs, want)
+	}
+}
+
+// TestCIGreenSettleHoldsAFinishedRollup: one workflow's check is done, another has not created
+// its check-run yet, so the rollup is complete-looking at 5s. Green is withheld until the PR is
+// settle old; a late check that appears and fails inside the window Blocks. settle 0 is the
+// explicit immediate-green choice (and what a pre-settle state file decodes to).
+func TestCIGreenSettleHoldsAFinishedRollup(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {{Name: "kubeconform", State: forge.CheckSuccess}}}
+	// GitHub and the state file hand back UTC; the operator reads a wall clock, so the detail
+	// must name the local time. A fixed non-UTC local zone makes the two differ.
+	oldLocal := time.Local
+	time.Local = time.FixedZone("test", 5*3600+1800)
+	t.Cleanup(func() { time.Local = oldLocal })
+	s.PR.CreatedAt = s.PR.CreatedAt.UTC()
+	s.CISettle = 30 * time.Second
+	at := func(d time.Duration) CIGreenStep {
+		return CIGreenStep{Forge: f, Now: fixedNow(s.PR.CreatedAt.Add(d))}
+	}
+
+	obs, err := at(5*time.Second).Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CI: 1/1 checks complete; settling until " + s.PR.CreatedAt.Add(30*time.Second).In(time.Local).Format("15:04:05")
+	if !obs.Waiting || obs.Satisfied || obs.Detail != want {
+		t.Fatalf("a finished rollup 5s into a 30s settle must Wait with %q, got %+v", want, obs)
+	}
+	if obs2, _ := at(6*time.Second).Observe(ctx(), s); obs2.Detail != obs.Detail {
+		t.Errorf("the settling detail must be stable per poll (history records every change): %q vs %q", obs.Detail, obs2.Detail)
+	}
+
+	// The late workflow's check appears inside the window, and fails.
+	f.NamedChecksBySHA[s.PushedSHA] = append(f.NamedChecksBySHA[s.PushedSHA], forge.Check{Name: "late-workflow", State: forge.CheckFailure})
+	obs, _ = at(10*time.Second).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "late-workflow") {
+		t.Fatalf("a check that appears and fails during settle must Block, got %+v", obs)
+	}
+	f.NamedChecksBySHA[s.PushedSHA] = f.NamedChecksBySHA[s.PushedSHA][:1]
+
+	if obs, _ = at(30*time.Second).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("now == settledAt is the exact boundary and is green, got %+v", obs)
+	}
+	if obs, _ = at(31*time.Second).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("past the settle window a complete rollup is green, got %+v", obs)
+	}
+	s.CISettle = 0
+	if obs, _ = at(0).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("settle 0 is immediate green, got %+v", obs)
+	}
+}
+
+func TestCIGreenIgnoredFailureDoesNotBlock(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	rollup := reviewerRollup()
+	rollup[3].State = forge.CheckFailure
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: rollup}
+
+	// Positive control: unignored, the same failure blocks.
+	obs, _ := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "copilot-pull-request-reviewer") {
+		t.Fatalf("control: unignored failure should block, got %+v", obs)
+	}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	obs, _ = (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !obs.Satisfied || obs.Blocked != "" {
+		t.Fatalf("ignored failing check must not block, got %+v", obs)
+	}
+}
+
+// TestCIGreenAllIgnoredFallsToCINonePolicy: ignoring every check is not green by itself; it is
+// "no checks reported", and ci.none decides.
+func TestCIGreenAllIgnoredFallsToCINonePolicy(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {{Name: "copilot-pull-request-reviewer", State: forge.CheckSuccess}}}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	s.CIGrace = time.Minute
+	step := CIGreenStep{Forge: f, Now: fixedNow(s.PR.CreatedAt.Add(2 * time.Minute))}
+
+	s.CINone = "prompt"
+	obs, _ := step.Observe(ctx(), s)
+	if !IsCINonePromptBlock(obs.Blocked) || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored under ci.none=prompt should block on the prompt and name the ignore, got %+v", obs)
+	}
+	s.CINone = "block"
+	obs, _ = step.Observe(ctx(), s)
+	if obs.Blocked == "" || obs.Satisfied || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored under ci.none=block should block and name the ignore, got %+v", obs)
+	}
+	s.CINone = "green"
+	obs, _ = step.Observe(ctx(), s)
+	if !obs.Satisfied || !strings.Contains(obs.Detail, "ci.none=green") || !strings.Contains(obs.Detail, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored under ci.none=green satisfies via the policy, got %+v", obs)
+	}
+	// And within grace it waits, same as zero checks.
+	step.Now = fixedNow(s.PR.CreatedAt.Add(10 * time.Second))
+	if obs, _ = step.Observe(ctx(), s); !obs.Waiting || !strings.Contains(obs.Detail, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("all-ignored within grace should wait and name the ignore, got %+v", obs)
+	}
+}
+
+// TestCIGreenBlockedDetailNamesWhatWasIgnored: a real failure beside an ignored check still
+// tells the operator an ignore is in effect.
+func TestCIGreenBlockedDetailNamesWhatWasIgnored(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {
+		{Name: "copilot-pull-request-reviewer", State: forge.CheckFailure},
+		{Name: "test", State: forge.CheckFailure},
+	}}
+	s.CIIgnore = []string{"copilot-pull-request-reviewer"}
+	obs, _ := (CIGreenStep{Forge: f}).Observe(ctx(), s)
+	if !strings.Contains(obs.Blocked, "test") || !strings.Contains(obs.Blocked, "ignoring copilot-pull-request-reviewer") {
+		t.Fatalf("blocked detail must name the failure and the ignore, got %+v", obs)
+	}
+}

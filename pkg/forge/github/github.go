@@ -256,7 +256,7 @@ const maxCheckRunPages = 10
 // name is upstream text nothing here wrote (a CI system can name a job anything), so both name
 // lists go through redact.Strings at this adaptor boundary the same way translateErr already
 // does for GitHub's own free-form error messages (AGENTS.md invariant 6).
-func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, error) {
+func (c *Client) Checks(ctx context.Context, sha string, ignore []string) (forge.CheckSummary, error) {
 	var runs []checkRun
 	// lastPageFull tracks whether the loop's final iteration returned a full 100-row page:
 	// true only when the loop ran out of pages (maxCheckRunPages) without ever seeing a
@@ -319,41 +319,41 @@ func (c *Client) Checks(ctx context.Context, sha string) (forge.CheckSummary, er
 		return forge.CheckSummary{}, translateErr("listing commit statuses", err)
 	}
 
-	var s forge.CheckSummary
-	s.Total = len(runs) + len(combined.Statuses)
+	checks := make([]forge.Check, 0, len(runs)+len(combined.Statuses))
 	for _, r := range runs {
 		name := r.Name
 		if name == "" {
 			name = "(unnamed check)"
 		}
+		st := forge.CheckFailure
 		switch {
 		case r.Status != "completed":
-			s.Pending++
+			st = forge.CheckPending
 		case r.Conclusion == "success" || r.Conclusion == "neutral":
-			s.Success++
+			st = forge.CheckSuccess
 		case r.Conclusion == "skipped":
-			s.Skipped++
-			s.SkippedNames = append(s.SkippedNames, redact.Strings(name))
-		default:
-			s.Failure++
-			s.FailedNames = append(s.FailedNames, redact.Strings(name))
+			st = forge.CheckSkipped
 		}
+		checks = append(checks, forge.Check{Name: name, State: st})
 	}
-	for _, st := range combined.Statuses {
-		name := st.Context
+	for _, status := range combined.Statuses {
+		name := status.Context
 		if name == "" {
 			name = "(unnamed status)"
 		}
-		switch st.State {
+		st := forge.CheckFailure // "failure", "error", or anything else unrecognized — never silently green
+		switch status.State {
 		case "pending":
-			s.Pending++
+			st = forge.CheckPending
 		case "success":
-			s.Success++
-		default: // "failure", "error", or anything else unrecognized — never silently green
-			s.Failure++
-			s.FailedNames = append(s.FailedNames, redact.Strings(name))
+			st = forge.CheckSuccess
 		}
+		checks = append(checks, forge.Check{Name: name, State: st})
 	}
+	// ignore is matched here, against the exact check-run name or status context — filtering at
+	// the adaptor keeps pkg/ free of internal/ imports (§4.3) and gives the fake and this client
+	// one shared counting function, forge.Summarize.
+	s := forge.Summarize(checks, ignore)
 	return s, nil
 }
 

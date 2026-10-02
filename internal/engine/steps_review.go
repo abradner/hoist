@@ -159,7 +159,7 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 	if sha == "" {
 		sha = s.CommitSHA
 	}
-	sum, err := c.Forge.Checks(ctx, sha)
+	sum, err := c.Forge.Checks(ctx, sha, s.CIIgnore)
 	if err != nil {
 		// Known bug classes: a 404 or permissions hiccup must be retried, never read as "zero
 		// checks reported" — returning the error here (rather than a zero CheckSummary with a
@@ -187,17 +187,33 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 			}
 			parts = append(parts, detail)
 		}
-		return Observation{Blocked: strings.Join(parts, "; ")}, nil
+		return Observation{Blocked: strings.Join(parts, "; ") + ignoredNote(sum.Ignored)}, nil
 	}
+	// Every path below names what was ignored, including when ignoring left nothing: "no checks
+	// reported" is false if checks were reported and all of them excluded (principle 1).
+	ignoring := ignoredNote(sum.Ignored)
 	if sum.Total > 0 {
 		if sum.Pending > 0 {
-			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete", sum.Total-sum.Pending, sum.Total)}, nil
+			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete%s", sum.Total-sum.Pending, sum.Total, ignoring)}, nil
 		}
-		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)", sum.Total)}, nil
+		// Every check the rollup can see is done; that is not yet "CI is done" — a workflow that
+		// has not created its check-run is invisible to it. Hold the verdict until the check set
+		// has had s.CISettle to appear (a late check that fails inside the window Blocks above).
+		// Zero is no settle: an explicit `settle: 0s`, or a state file from before the field.
+		// Stated limit (principle 1): the anchor is the PR's creation, so this covers the FIRST
+		// WAVE of checks only. A check created later (a job behind `needs:`, a workflow_run-chained
+		// workflow, a late bot status) is not waited for and reopens "all visible checks complete"
+		// exactly as before. Envs with comment approval re-observe CI on every pass up to the
+		// merge; branch-protection required checks are the authoritative guard.
+		// Clock skew: a local clock ahead by X shortens the window by X; it can never wait forever.
+		if settledAt := s.PR.CreatedAt.Add(s.CISettle); c.now().Before(settledAt) {
+			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete; settling until %s%s", sum.Total, sum.Total, settledAt.Local().Format("15:04:05"), ignoring)}, nil
+		}
+		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)%s", sum.Total, ignoring)}, nil
 	}
 	elapsed := c.now().Sub(s.PR.CreatedAt)
 	if elapsed < s.CIGrace {
-		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (%s of %s grace elapsed)", elapsed.Round(time.Second), s.CIGrace)}, nil
+		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (%s of %s grace elapsed)%s", elapsed.Round(time.Second), s.CIGrace, ignoring)}, nil
 	}
 	switch s.CINone {
 	case "block":
@@ -205,15 +221,26 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		// ci.none it started with (runResume and a same-id re-run restore it from the state
 		// file, never from current config — PromotionState's policy fields), so "change the
 		// config and re-run" was a path that could not reach this promotion (issue #48).
-		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; block has no override, and this promotion keeps the ci.none it started with, so a config change does not apply to it — wait for the checks to report and re-run, or abandon this promotion (delete its state file, <id>.json under hoist's promotions state directory; `hoist promotions` lists the id) and start again with ci.none set to prompt or green"}, nil
+		return Observation{Blocked: "no checks reported after the grace period and ci.none=block; block has no override, and this promotion keeps the ci.none it started with, so a config change does not apply to it — wait for the checks to report and re-run, or abandon this promotion (delete its state file, <id>.json under hoist's promotions state directory; `hoist promotions` lists the id) and start again with ci.none set to prompt or green" + ignoring}, nil
 	case "green":
-		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green"}, nil
+		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green" + ignoring}, nil
 	default: // "prompt", and any empty value a caller forgot to fill from Normalize's default
 		if s.CINoneOverride {
-			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)"}, nil
+			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)" + ignoring}, nil
 		}
-		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`"}, nil
+		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`" + ignoring}, nil
 	}
+}
+
+// ignoredNote is the suffix naming the checks repos[].ci.ignore excluded, so an ignored check is
+// never silently skipped: " · ignoring a, b", or "" when nothing matched.
+func ignoredNote(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	n := append([]string(nil), names...)
+	sort.Strings(n)
+	return " · ignoring " + strings.Join(n, ", ")
 }
 
 // ciNonePromptBlockedPrefix is the one reason text CIGreenStep produces for "ci.none=prompt
