@@ -424,11 +424,14 @@ repos:
 Match is exact, by name, across both check-runs and commit statuses: every check bearing that
 name is ignored, and the literal `(unnamed check)` is matchable. Ignored checks are
 excluded from the count and from failure and skipped blocking, and the step says so:
-`CI: 3/3 checks complete · ignoring copilot-pull-request-reviewer`. Nothing is ignored by
+`CI: 2/3 checks complete · ignoring copilot-pull-request-reviewer` while something is pending,
+then `CI: 3/3 checks complete; settling until 14:02:31 · ignoring copilot-pull-request-reviewer`
+during the settle window below, then
+`CI green (3 checks) · ignoring copilot-pull-request-reviewer`. Nothing is ignored by
 default, and an entry that matches no reported check is not listed. If every reported check is
 ignored, that counts as *no checks reported* and `ci.none` decides. Like `ci.none`, the list is
 frozen into a promotion when it starts: a config edit does not reach one already in flight. To
-apply a new list, `hoist abandon <id>` that promotion and start again. Every CI detail (waiting,
+apply a new list, `hoist abandon <id> --confirm-abandon=<id>` that promotion and start again. Every CI detail (waiting,
 green, blocked, and the `ci.none` outcomes) names what was ignored.
 
 *Settling.* "Every check I can see is finished" is not "CI is finished": a workflow that has not
