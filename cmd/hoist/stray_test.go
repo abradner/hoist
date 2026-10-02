@@ -197,12 +197,7 @@ func TestOnlyTheParsersCallFlagParse(t *testing.T) {
 	allowed := map[string]string{
 		"run":            "the root flag set: what is left over is the subcommand",
 		"parseFlagsOnly": "the checked parser itself",
-		"parseWithID":    "the id-taking parser resume and abandon share (#241)",
-		// Interim, stated not enforced: these two take an id and still parse directly, so a flag
-		// after the id, and a second positional, are dropped in silence. #241 moves both onto
-		// parseWithID; these two lines go when it lands.
-		"runResume":  "interim until #241",
-		"runAbandon": "interim until #241",
+		"parseWithID":    "the id-taking parser resume and abandon share",
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {

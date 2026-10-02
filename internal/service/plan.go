@@ -30,6 +30,9 @@ type PlanRequest struct {
 	// Overrides are the operator's own per-repo digest overrides (`--digest`, the plan
 	// screen's o dialog): each wins outright over whatever Source resolves to.
 	Overrides map[string]image.Ref
+	// Progress, when set, hears one line before digest resolution starts — the one part of
+	// planning that asks the cluster and the registry. Only the CLI sets it.
+	Progress func(string)
 }
 
 // PlannedChange is what Plan returns: the built gitops.Plan (its Warnings already carry
@@ -133,6 +136,13 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 	opts := s.settings.Resolve
 	var res *Resolution
 	if len(opts.Order) > 0 {
+		if req.Progress != nil {
+			names := make([]string, len(opts.Order))
+			for i, src := range opts.Order {
+				names[i] = string(src)
+			}
+			req.Progress("resolving what " + req.Source + " runs to digests (" + strings.Join(names, ", ") + ")")
+		}
 		var err error
 		res, err = s.resolveImages(ctx, r, req.Source, req.Overrides)
 		if err != nil {

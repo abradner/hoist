@@ -301,7 +301,7 @@ func TestListAndResumeByEnvAskOriginOncePerScan(t *testing.T) {
 
 	svc, counting = withCounting()
 	var nf *NotFoundError
-	if _, err := svc.FindInFlightForEnv(context.Background(), "app-production"); !errors.As(err, &nf) {
+	if _, err := svc.FindInFlightForEnv(context.Background(), "app-production", Hooks{}); !errors.As(err, &nf) {
 		t.Fatalf("three finished promotions leave nothing to resume: got %v", err)
 	}
 	if counting.fetch != 1 || counting.heads != 2 || counting.branch != 0 {
@@ -701,7 +701,7 @@ func TestResumeByEnvAndListRedoLiveWhenTheSnapshotCannotBeTrusted(t *testing.T) 
 		base := withConfig(fx)
 		deps := base.deps
 		deps.Git = func() git.Git { return hooked }
-		st, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production")
+		st, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production", Hooks{})
 		if err != nil || st == nil || st.ID != s.ID {
 			t.Fatalf("the promotion whose branch came back is the one in flight; got %v, %v", st, err)
 		}
@@ -717,7 +717,7 @@ func TestResumeByEnvAndListRedoLiveWhenTheSnapshotCannotBeTrusted(t *testing.T) 
 		deps := base.deps
 		deps.Git = func() git.Git { return &aheadListingGit{Git: git.Exec{}, base: "main"} }
 		var nf *NotFoundError
-		if _, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production"); !errors.As(err, &nf) {
+		if _, err := New(base.settings, deps).FindInFlightForEnv(context.Background(), "app-production", Hooks{}); !errors.As(err, &nf) {
 			t.Fatalf("a landed direct promotion leaves nothing to resume; the snapshot's own error must not be reported: %v", err)
 		}
 	})

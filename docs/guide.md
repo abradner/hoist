@@ -153,6 +153,36 @@ hoist plan    --from app-staging --to app-production --dry-run
 hoist promote --from app-staging --to app-production
 ```
 
+**What the CLI prints while it works.** `promote`, `deploy` and `resume` say what they are doing
+on stderr, one line as each phase starts and one as each write finishes; stdout stays the final
+summary, so a script reading it sees what it always did:
+
+```
+hoist: resolving what app-staging runs to digests (pods, manifest, registry)
+hoist: checking your checkout against origin/main
+hoist: claiming app-production and checking for a conflicting promotion
+hoist: saving promotion state
+hoist: branched: creating branch hoist/app-production/k3v9q2x7ab in its own worktree
+hoist: branched: done
+hoist: committed: committing
+hoist promote: waiting for signing approval...
+hoist: committed: done, commit 4f0c…
+hoist: pushed: pushing hoist/app-production/k3v9q2x7ab
+hoist: pushed: done
+hoist: pr-opened: opening the pull request
+hoist: pr-opened: done, https://github.com/me/my-gitops/pull/42
+hoist: ci-green: waiting: CI: 1/3 checks complete
+```
+
+The PR's URL is on the line that opens it. A phase that runs 15 seconds with nothing else to say
+repeats itself with a clock — `hoist: still pushed: pushing … (15s so far)` — so a slow push or
+a signing prompt you have not answered never looks like a hang; a wait on someone else (CI, an
+approval, Argo, a rollout) prints when its reason changes and then every ten minutes. `--quiet`
+drops the progress lines — the "done" lines with them, so the PR's URL then first shows in the
+approval instructions — and keeps the waits, the signing notice, the approval instructions and
+every error. `promotions` and `abandon` name what they are re-observing the same way, and take
+`--quiet` too.
+
 **What it plans.** For every first-party image repo the target already carries, the build the
 source environment is running: its pods first, then the manifest's own pin, then a registry lookup
 of the tag, in `digest_sources` order. A repo the target does not carry is listed as untouched, not

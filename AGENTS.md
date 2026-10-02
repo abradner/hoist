@@ -489,10 +489,9 @@ A command that takes no positional argument — `plan`, `promote`, `deploy`, `re
 (`parseFlagsOnly`, `cmd/hoist/main.go`), before the command does anything; it refuses in the
 same way a flag given as the next argument of a value-taking flag (`--confirm-direct
 --dry-run`). `flag.Parse` would otherwise drop the flags after a stray word, or lose the
-swallowed one, in silence (§9 entry 16). *Interim, stated not enforced:* `resume` and `abandon`
-take an id and still call `flag.Parse` directly, so a flag after the id and a second positional
-are dropped there until #241 lands; and the root flag set (flags before the subcommand) is not
-checked for a swallowed flag.
+swallowed one, in silence (§9 entry 16). `resume` and `abandon` take an id and parse through
+`parseWithID`, which makes the same two refusals on either side of it. *Interim, stated not
+enforced:* the root flag set (flags before the subcommand) is not checked for a swallowed flag.
 
 ### CLI commands
 
@@ -508,6 +507,33 @@ checked for a swallowed flag.
 | `watch --app <name> [--once]` | Read-only: one Application's sync/health/revision and its Deployments'/Jobs'/CronJobs' rollout progress | Never calls `Refresh` — only `Get`/`Deployment`/`JobLike`, since watching is not promoting. The TUI's `watch` screen package likewise imports neither `pkg/argo` nor `pkg/rollout`; a test pins its import list. |
 | `config show` / `config path` | Print effective config / where it was read from | Pure decode-and-check; always safe. |
 | *(no command)* `hoist --repo <path>` | Opens the env × family matrix TUI | See below. |
+
+**What the drive commands print.** `promote`, `deploy` and `resume` narrate on stderr through
+one `narrator` (`cmd/hoist/narrate.go`): a `hoist: <phase>` line as each preflight phase starts
+(`service.Hooks.Progress`, and `PlanRequest.Progress` for digest resolution), a
+`hoist: <step>: <what>` line as each step's Act starts (`service.Hooks.OnAct`, a step wrapper
+only the CLI asks for — History hears of an Act only once it has returned) and a `…: done` line
+when its outcome is saved — carrying the commit, the PR's URL, the merge —
+(`service.Hooks.OnHistory`; only `acted` entries are printed, since a wait, a block and a
+failed Act each already have a line),
+and a `hoist: still … (15s so far)` line when the phase last announced has gone `silenceEvery`
+without other output. Waits keep `waitingReporter`'s lines and its ten-minute heartbeat.
+`promotions` and `abandon` announce their re-observation the same way (`ListOpts.Progress`,
+`Service.AbandonWith`). A step that acts again prints nothing it has already said, so
+`argo-refreshed`, which re-requests on every poll, appears once. From the point a command
+builds it — after flag parsing and setup, before planning — the narrator is also the
+`io.Writer` every other stderr line goes through, for two reasons: its `Write` redacts
+(`pkg/redact`, §4.10), so nothing written from then on reaches the terminal unredacted whatever
+its caller did; and it holds the one lock, since the "still" line is written from a second
+goroutine. Usage errors and the setup errors before that point go to stderr directly, as they
+always have; no credential is loaded that early. The narration writes nothing to stdout, which
+stays the summary, the listing, or the plan. `--quiet` on those five commands drops
+the phase lines, the act lines (start and "done", so the PR's URL then first appears in the
+approval instructions) and the "still" lines, and nothing else. `resume` and `abandon` parse flags on either side of
+their id (`parseWithID`) and refuse a second positional — `resume <id> --override-ci-none`,
+the order the guide shows, used to leave the flag unparsed and silently ignored. That is a
+change in what those two invocations do, stdout included: the first now honours its flag, the
+second is a usage error where it used to run.
 
 ### TUI
 
@@ -1161,28 +1187,6 @@ test lives** (if one exists).
    `internal/app/flight/history_test.go` (its fixture models what the engine really writes:
    `acted` ×4, then one `already satisfied` per step and the wait once more, then nothing).
 
-16. **`flag.Parse` stops at the first positional, and what it leaves is not an error.** What
-   happened: `hoist deploy --env <env> --image <ref> oops --dry-run` performed the deploy —
-   branch, commit, PR, merge — and exited 0; `hoist restart --env <env> oops --dry-run`
-   restarted the env. Found by a reviewer checking why `resume <id> --quiet` was ignored. Root
-   cause: the standard library parses flags up to the first non-flag argument and hands the
-   rest back through `fs.Args()`, flags and all, without complaint. Every hoist command that
-   takes no positional called `fs.Parse(args)` and never looked there, so one stray word
-   silently unset every flag typed after it — including the one flag whose whole job is to make
-   the command safe. No test caught it because every test types its flags correctly. The
-   review of the fix found the same hole by a second door: `--confirm-direct --dry-run` hands
-   `--dry-run` to the other flag as its value — what an unquoted empty shell variable produces —
-   and a deploy with `--confirm-direct` but no `--direct` never looks at that value. Rule: a
-   command that takes no positional parses through `parseFlagsOnly`, which refuses a leftover
-   argument, and a flag taken as another flag's value, by name before the command does
-   anything; one that takes an id parses both sides of it. No subcommand calls `flag.Parse`
-   directly — `TestOnlyTheParsersCallFlagParse` holds an allowlist, which names `resume` and
-   `abandon` as interim until #241 gives them their own parser. And a flag that guards a write
-   gets a test in which something goes wrong on the command line before it. (Numbered 16:
-   entries 14 and 15 are taken by changes in flight when this was written.) Regression tests:
-   `cmd/hoist/stray_test.go`, one per command — the deploy and restart cases assert that
-   nothing was written.
-
 15. **A scan that opens a connection per item costs as much as the history is long.** What
    happened: `hoist promote` printed nothing for two minutes before its first line. 105 of the
    first 108 seconds were `claimTarget`'s two in-flight scans: eight finished promotions into
@@ -1218,6 +1222,28 @@ test lives** (if one exists).
    `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what a snapshot must never decide;
    `TestListAgainstAnUnreachableOriginFailsEachStateOnce` for the failure path, which a cache
    that retries per state makes dearer than no cache at all.
+
+16. **`flag.Parse` stops at the first positional, and what it leaves is not an error.** What
+   happened: `hoist deploy --env <env> --image <ref> oops --dry-run` performed the deploy —
+   branch, commit, PR, merge — and exited 0; `hoist restart --env <env> oops --dry-run`
+   restarted the env. Found by a reviewer checking why `resume <id> --quiet` was ignored. Root
+   cause: the standard library parses flags up to the first non-flag argument and hands the
+   rest back through `fs.Args()`, flags and all, without complaint. Every hoist command that
+   takes no positional called `fs.Parse(args)` and never looked there, so one stray word
+   silently unset every flag typed after it — including the one flag whose whole job is to make
+   the command safe. No test caught it because every test types its flags correctly. The
+   review of the fix found the same hole by a second door: `--confirm-direct --dry-run` hands
+   `--dry-run` to the other flag as its value — what an unquoted empty shell variable produces —
+   and a deploy with `--confirm-direct` but no `--direct` never looks at that value. Rule: a
+   command that takes no positional parses through `parseFlagsOnly`, which refuses a leftover
+   argument, and a flag taken as another flag's value, by name before the command does
+   anything; one that takes an id parses both sides of it. No subcommand calls `flag.Parse`
+   directly — `TestOnlyTheParsersCallFlagParse` holds an allowlist of the three functions that
+   may: the root, `parseFlagsOnly`, and `parseWithID` for `resume` and `abandon`. And a flag that guards a write
+   gets a test in which something goes wrong on the command line before it. (Numbered 16:
+   entries 14 and 15 are taken by changes in flight when this was written.) Regression tests:
+   `cmd/hoist/stray_test.go`, one per command — the deploy and restart cases assert that
+   nothing was written.
 
 ## 10. Maintaining This Document
 

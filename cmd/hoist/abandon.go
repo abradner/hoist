@@ -39,6 +39,43 @@ func reorderConfirmAbandonFirst(args []string) []string {
 	return args
 }
 
+// parseWithID parses a command line that takes one positional id among its flags, in either
+// order. flag.Parse stops at the first non-flag argument, so a flag typed after the id — the
+// order the guide itself shows for `hoist resume <id> --override-ci-none` — would be left
+// unparsed and silently ignored; this parses what follows the id as well. A second positional
+// is refused rather than dropped, for the same reason: an argument hoist did not act on should
+// not look accepted. id is "" when none was given.
+func parseWithID(fs *flag.FlagSet, args []string) (id string, err error) {
+	refuse := func(err error) (string, error) {
+		fs.Usage()
+		fmt.Fprintf(fs.Output(), "%s: %v\n", fs.Name(), err)
+		return "", err
+	}
+	// parse is flag.Parse behind the same check parseFlagsOnly makes: a flag given as the next
+	// argument of a value-taking flag was swallowed, not set.
+	parse := func(args []string) error {
+		if name, value, swallowed := flagTakenAsValue(fs, args); swallowed {
+			_, err := refuse(fmt.Errorf("--%s takes a value, but what follows it is %s, which looks like a flag; nothing was run. If that really is the value, write --%s=%s", name, value, name, value))
+			return err
+		}
+		return fs.Parse(args)
+	}
+	if err := parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() == 0 {
+		return "", nil
+	}
+	id = fs.Arg(0)
+	if err := parse(fs.Args()[1:]); err != nil {
+		return "", err
+	}
+	if fs.NArg() > 0 {
+		return refuse(fmt.Errorf("unexpected argument %q after %s", fs.Arg(0), id))
+	}
+	return id, nil
+}
+
 // runAbandon is `hoist abandon <id>`: the CLI face of abandonPromotion, gated on
 // --confirm-abandon repeating the id (a second, distinct confirming argument — AGENTS.md §8,
 // the same shape --confirm-direct/--confirm-production use).
@@ -46,13 +83,14 @@ func runAbandon(args []string, cfg *config.Config, stdout, stderr io.Writer) int
 	fs := flag.NewFlagSet("hoist abandon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	confirm := fs.String("confirm-abandon", "", "repeat the promotion's own id exactly to confirm — required, never inferred from <id> alone")
-	if err := fs.Parse(reorderConfirmAbandonFirst(args)); err != nil {
+	quiet := fs.Bool("quiet", false, quietUsage)
+	id, err := parseWithID(fs, reorderConfirmAbandonFirst(args))
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return exitUsage
 	}
-	id := fs.Arg(0)
 	if id == "" {
 		fmt.Fprintln(stderr, "hoist abandon: give the promotion's id")
 		fs.Usage()
@@ -68,7 +106,13 @@ func runAbandon(args []string, cfg *config.Config, stdout, stderr io.Writer) int
 	ctx, stop := boundedCommandContext(set.Deadline)
 	defer stop()
 
-	lines, err := svc.Abandon(ctx, id)
+	n := newNarrator(stderr, *quiet)
+	stopNarrator := n.watch()
+	defer stopNarrator()
+	stderr = n
+
+	lines, err := svc.AbandonWith(ctx, id, n.hooks(nil))
+	n.idle()
 	for _, line := range lines {
 		fmt.Fprintf(stdout, "hoist abandon: %s\n", line)
 	}

@@ -131,7 +131,10 @@ func (s *Service) Find(id string) (*engine.PromotionState, error) {
 // once the scan finishes, naming every candidate it could not confirm.
 //
 // Moved unchanged in substance from cmd/hoist/resume.go's own --env matching loop.
-func (s *Service) FindInFlightForEnv(ctx context.Context, env string) (*engine.PromotionState, error) {
+//
+// h.Progress hears one line before the scan starts.
+func (s *Service) FindInFlightForEnv(ctx context.Context, env string, h Hooks) (*engine.PromotionState, error) {
+	h.report("re-observing every promotion into " + env + " to find the one in flight")
 	// One scan through a shared snapshot of origin, kept only if nothing went unconfirmed and
 	// origin's branches have not moved under it; otherwise the scan is made again live. See
 	// FindInFlight.
@@ -234,9 +237,13 @@ type Listed struct {
 // ArchiveDoneOlderThan is the retention window (state.retain) past which a Done promotion is
 // moved to the archive as part of this same call — 0 (or negative) disables archiving entirely,
 // matching `hoist promotions`' own "retain: 0 means never archive" reading of the config.
+//
+// Progress, when set, hears one line before the re-observation starts, naming how many
+// promotions it covers — the listing prints nothing of its own until every one is observed.
 type ListOpts struct {
 	RepoFullName         string
 	ArchiveDoneOlderThan time.Duration
+	Progress             func(string)
 }
 
 // List re-observes every live promotion state file — `hoist promotions`' own listing and the
@@ -260,6 +267,10 @@ func (s *Service) List(ctx context.Context, o ListOpts) ([]Listed, error) {
 		}
 		states = filtered
 	}
+	if o.Progress != nil && len(states) > 0 {
+		o.Progress(fmt.Sprintf("re-observing %d promotion(s) against the forge and the cluster", len(states)))
+	}
+
 	// Each state is observed first on a copy, through one snapshot of origin shared by the
 	// whole listing (see FindInFlight); a state whose pass failed is observed again live at once.
 	// The rest stand only if origin's branches are where the snapshot had them once every state
@@ -413,7 +424,7 @@ func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, e
 		return nil, err
 	}
 
-	steps := engine.StepsFor(st, s.Git(), f, a, ro, rc.Envs.Production, true, o.Hooks.OnWaiting)
+	steps := announce(engine.StepsFor(st, s.Git(), f, a, ro, rc.Envs.Production, true, o.Hooks.OnWaiting), o.Hooks.OnAct)
 	return NewDriver(steps, st, s.deps.Store.Save, s.settings.Poll).withOnHistory(o.Hooks.OnHistory), nil
 }
 
@@ -443,6 +454,13 @@ func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, e
 //
 // Moved unchanged in substance from cmd/hoist/abandon.go's abandonPromotion.
 func (s *Service) Abandon(ctx context.Context, id string) ([]string, error) {
+	return s.AbandonWith(ctx, id, Hooks{})
+}
+
+// AbandonWith is Abandon with h.Progress hearing each phase as it starts: the re-observation,
+// then each write. Abandon itself keeps its signature for app.Service, whose caller reports an
+// abandon through the activity log instead.
+func (s *Service) AbandonWith(ctx context.Context, id string, h Hooks) ([]string, error) {
 	st, err := s.Find(id)
 	if err != nil {
 		return nil, err
@@ -458,6 +476,7 @@ func (s *Service) Abandon(ctx context.Context, id string) ([]string, error) {
 	}
 	g := s.Git()
 
+	h.report("re-observing " + id + " to confirm it has not landed")
 	done, status, err := engine.ObserveAll(ctx, engine.ObserveSteps(st, g, f, nil, nil, nil), st)
 	if err != nil {
 		return nil, fmt.Errorf("checking whether %s has already landed: %w", id, err)
@@ -472,6 +491,7 @@ func (s *Service) Abandon(ctx context.Context, id string) ([]string, error) {
 	// first when it's in the step list, and MergedStep.Observe's own findOwnPR unconditionally
 	// re-fetches the live PR and assigns it back to st.PR before this ever runs.
 	if st.PR != nil && !st.PR.Merged && !st.PR.Closed {
+		h.report(fmt.Sprintf("closing PR #%d", st.PR.Number))
 		if _, err := f.ClosePR(ctx, st.PR.Number); err != nil {
 			return lines, fmt.Errorf("closing PR #%d: %w", st.PR.Number, err)
 		}
@@ -482,6 +502,7 @@ func (s *Service) Abandon(ctx context.Context, id string) ([]string, error) {
 	// no-ops for it by construction; this guard just skips the pointless remote call rather than
 	// relying on DeleteRemoteBranch's own idempotency to make it harmless.
 	if !st.Direct && st.Branch != "" {
+		h.report("deleting branch " + st.Branch + " on origin")
 		if err := g.DeleteRemoteBranch(ctx, st.CloneDir, "origin", st.Branch); err != nil {
 			return lines, fmt.Errorf("deleting branch %s: %w", st.Branch, err)
 		}

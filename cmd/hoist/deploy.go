@@ -47,6 +47,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	confirmDirect := fs.String("confirm-direct", "", "the operator's explicit second acknowledgement required alongside --direct: must repeat --env's exact value (refused otherwise)")
 	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context for the Argo/rollout steps (the selected repo's kube.context when configured; may also be given before the command)")
 	overrideCINone := fs.Bool("override-ci-none", false, "when ci.none is prompt, treat a PR with no reported checks as passing after the grace period anyway (has no effect on ci.none: block)")
+	quiet := fs.Bool("quiet", false, quietUsage)
 	dryRun := fs.Bool("dry-run", false, "print the diff this deploy would make and exit without touching git, the forge or the cluster")
 	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -131,6 +132,13 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		return 0
 	}
 
+	// A dry run above printed its plan and returned; only a real deploy narrates. From here
+	// every line on stderr goes through the narrator (see runPromote).
+	n := newNarrator(stderr, *quiet)
+	stopNarrator := n.watch()
+	defer stopNarrator()
+	stderr = n
+
 	waited := false
 	onWaiting := func() {
 		if !waited {
@@ -139,12 +147,14 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		}
 	}
 	req := pc.Request(service.Mode{Direct: *direct, Confirmed: true, OverrideCINone: *overrideCINone})
-	d, err := svc.StartPromotion(ctx, req, service.Hooks{OnWaiting: onWaiting})
+	d, err := svc.StartPromotion(ctx, req, n.hooks(onWaiting))
 	if code, done := renderStartError(stdout, stderr, "hoist deploy", err); done {
 		return code
 	}
+	// Preflight is over; what runs next is the drive's first walk, which announces its own Acts.
+	n.idle()
 
-	err = d.Run(ctx, runHooksForCLI(stderr))
+	err = d.Run(ctx, n.runHooks())
 	s := d.State()
 	return reportDriveResult(stdout, stderr, "hoist deploy", s.SourceEnv, s.TargetEnv, &s, err)
 }
