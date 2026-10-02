@@ -1,0 +1,40 @@
+╭─ hoist · promotion · in flight ──────────────────────────────────────────────────────────────────────────────────────╮
+│abcd1234   app-staging → app-production                                                                 started 2m ago│
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                                                              │
+│✓ commit                                                                                                              │
+│✓ push                                                                                                                │
+│✓ PR                                                                                                                  │
+│… CI                                                                                                                  │
+│    CI: 3/4 checks complete                                                                                           │
+│· approval                                                                                                            │
+│· merge                                                                                                               │
+│· argo refresh                                                                                                        │
+│· argo sync                                                                                                           │
+│· rollout                                                                                                             │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│next check in 12s · r now                                                                                             │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│history                                                                                                               │
+│2m ago  checking your checkout against origin/main                                                                    │
+│2m ago  claiming app-production                                                                                       │
+│1m ago  saving promotion state                                                                                        │
+│1m ago  branch        acted                                                                                           │
+│1m ago  commit        acted                                                                                           │
+│1m ago  push          acted                                                                                           │
+│1m ago  PR            acted                                                                                           │
+│1m ago  CI            waiting: CI: 2/4 checks complete                                                                │
+│1m ago  branch        already satisfied: worktree already present                                                     │
+│1m ago  commit        already satisfied: commit already on the branch                                                 │
+│1m ago  push          already satisfied: branch already on origin                                                     │
+│1m ago  PR            already satisfied: PR #103 already open                                                         │
+│1m ago  CI            waiting: CI: 2/4 checks complete                                                                │
+│just now  CI            waiting: CI: 3/4 checks complete                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                        esc back (keeps running) · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help

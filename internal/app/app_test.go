@@ -495,18 +495,19 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // adversarial reviews of this same commit found: the build goroutine plan.StartMsg/
 // deploy.StartMsg spawn used to close progressCh the instant startPromotion returned
 // (`defer close(progressCh)`) — on the wrong assumption that the channel's job ended with
-// preflight. But cmd/hoist's real driveFuncFor reuses the SAME progress callback for
-// engine.Drive's own per-step save hook (defect B/C: a long single Act streams into the log as
-// it happens, not only once the whole Drive call returns) — so the very first real drive call
-// after a successful build sent on an already-closed channel, and a send on a closed channel
-// panics unconditionally in Go; select/default only guards a full buffer, never a closed one.
-// No other test in this file could have caught it: every other fake Start/driveFn pair here
-// (stubDriveFn and friends) never calls progress from the driveFn side at all, so the bug's
-// actual trigger — the SAME closure called again, later, from a different goroutine, after the
-// build's own goroutine returned — never fired. This one does: the fake DriveFunc below calls
-// progress from a REAL DriveFunc, driven through the REAL plan.StartMsg → promotionBuiltMsg →
-// AdoptBuilt → driveCmd path, the same sequence a real cmd/hoist wiring drives — proving app.go
-// itself never closes the channel out from under a drive that is still going to use it.
+// preflight. But the Hooks built for that preflight are held by the Driver for its whole life: a
+// later Step calls Hooks.OnWaiting (the signing wait) and its saves call Hooks.OnHistory, both
+// sending on the SAME channel — so the first real drive call after a successful build sent on an
+// already-closed channel, and a send on a closed channel panics unconditionally in Go;
+// select/default only guards a full buffer, never a closed one. No other test in this file could
+// have caught it: every other fake Start/driveFn pair here (stubDriveFn and friends) never calls
+// a hook from the driveFn side at all, so the bug's actual trigger — the SAME hooks called again,
+// later, after the build's own goroutine returned — never fired. This one does: the fake
+// DriveFunc below calls progress from a REAL DriveFunc, driven through the REAL plan.StartMsg →
+// promotionBuiltMsg → AdoptBuilt → driveCmd path — proving app.go itself never closes the
+// channel out from under a drive that is still going to use it. (The channel now carries
+// preflight and signing-wait TEXT only; a step's outcome is a History entry, reported through
+// Hooks.OnHistory — see session's TestStartReportsHistoryLiveAndTheTickReplacesIt.)
 func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, progress func(string)) (engine.PromotionState, session.Driver, error) {
 		// Preflight: exactly what svc.StartPromotion's own Hooks.Progress calls do.
@@ -514,11 +515,11 @@ func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 		progress("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
 		s := engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv}
 		return s, funcDriver{StepFunc: func(context.Context) (service.Tick, error) {
-			// Drive: exactly what newDriverFor's own wrapped save does — call the SAME
+			// Drive: what a Step's signing wait does (Hooks.OnWaiting) — call the SAME
 			// progress closure the preflight above just used, from a call that only
 			// happens after the build goroutine that constructed it has already
 			// returned. This is the exact shape that panicked.
-			progress("branched: acted")
+			progress("waiting for signing approval")
 			s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: "acted"})
 			return service.Tick{State: s, Done: true}, nil
 		}}, nil
@@ -3706,5 +3707,64 @@ func TestWatchFooterNoContradiction(t *testing.T) {
 	}
 	if !strings.Contains(v, "r refresh") {
 		t.Errorf("the watch footer should offer r refresh:\n%s", v)
+	}
+}
+
+// TestLiveHistoryReportReachesTheAttachedFlightScreenBeforeTheTick: a step's outcome reported
+// through Hooks.OnHistory shows on the attached flight screen as soon as it is saved, not when
+// the step's tick lands. The Step command is never run here, so no tick can have put the line
+// on screen. apply's default case (session.ChangeProgress -> mirrorAttached) is what carries
+// it; making that case a no-op fails this test.
+func TestLiveHistoryReportReachesTheAttachedFlightScreenBeforeTheTick(t *testing.T) {
+	const marker = "LIVEMARK committed on a branch"
+	state := engine.PromotionState{ID: "abcd1234", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	drv := &funcDriver{StateFunc: func() engine.PromotionState { return state }}
+	drv.StepFunc = func(context.Context) (service.Tick, error) { return service.Tick{State: state}, nil }
+	var hooks service.Hooks
+	svc := &fakeService{
+		startFn: func(context.Context, gitops.Plan, startOpts, func(string)) (engine.PromotionState, session.Driver, error) {
+			return state, drv, nil
+		},
+		onHooks: func(h service.Hooks) { hooks = h },
+	}
+	tm, startCmd := sizedWithService(t, svc, Promotion{}).Update(plan.StartMsg{Plan: gitops.Plan{SourceEnv: "app-staging", TargetEnv: "app-production"}})
+	if startCmd == nil {
+		t.Fatal("StartMsg produced no command")
+	}
+
+	// The same descent sessionBuildCmd does, keeping the listener it leaves uncalled.
+	outer, ok := startCmd().(tea.BatchMsg)
+	if !ok || len(outer) < 2 || outer[1] == nil {
+		t.Fatalf("start command yields %#v, want tea.BatchMsg(fs.Init(), sessCmd)", startCmd)
+	}
+	inner, ok := outer[1]().(tea.BatchMsg)
+	if !ok || len(inner) < 2 || inner[0] == nil || inner[1] == nil {
+		t.Fatalf("session command yields %#v, want tea.BatchMsg(buildCmd, listenCmd)", outer[1])
+	}
+	next, _ := tm.Update(inner[0]())
+	m := next.(Model)
+	if hooks.OnHistory == nil {
+		t.Fatal("the controller built Hooks without OnHistory")
+	}
+	if strings.Contains(plain(m), marker) {
+		t.Fatalf("control: the marker is on screen before any report:\n%s", plain(m))
+	}
+
+	entry := engine.HistoryEntry{Step: engine.StepCommitted, At: time.Now(), Detail: marker}
+	saved := state
+	saved.History = []engine.HistoryEntry{entry}
+	hooks.OnHistory(entry, saved)
+
+	got := make(chan tea.Msg, 1)
+	go func() { got <- inner[1]() }()
+	select {
+	case msg := <-got:
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the OnHistory report never reached the listener")
+	}
+	if v := plain(m); !strings.Contains(v, marker) {
+		t.Fatalf("the live history report is not on the flight screen before the tick lands:\n%s", v)
 	}
 }

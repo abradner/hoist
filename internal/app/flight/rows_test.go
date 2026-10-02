@@ -1,6 +1,9 @@
 package flight
 
 import (
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +182,46 @@ func TestPRURL(t *testing.T) {
 	url, ok := PRURL(engine.PromotionState{PR: &forge.PR{URL: "https://example.invalid/pr/97"}})
 	if !ok || url != "https://example.invalid/pr/97" {
 		t.Errorf("PRURL = %q, %v, want the PR's URL, true", url, ok)
+	}
+}
+
+// TestRowsFileHasNoTerminalDependency pins rows.go's header claim (AGENTS.md §4.8): the derived
+// row/time logic is plain values, so it must not import the session package (which depends on
+// Bubble Tea), Bubble Tea, or Lip Gloss. The positive control is that the imports were parsed
+// at all and include the engine, which rows.go does use.
+func TestRowsFileHasNoTerminalDependency(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "rows.go", nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEngine := false
+	for _, imp := range f.Imports {
+		p := strings.Trim(imp.Path.Value, `"`)
+		if strings.HasSuffix(p, "/internal/engine") {
+			sawEngine = true
+		}
+		if strings.HasSuffix(p, "/internal/app/session") || strings.Contains(p, "bubbletea") || strings.Contains(p, "lipgloss") || strings.Contains(p, "/bubbles") {
+			t.Errorf("rows.go imports %s: it must stay free of the terminal", p)
+		}
+	}
+	if !sawEngine {
+		t.Fatal("rows.go's imports did not include the engine — the probe is broken")
+	}
+}
+
+func TestStartedAtBefore(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	hist := engine.PromotionState{History: []engine.HistoryEntry{{At: t0}}}
+	if got := StartedAtBefore(hist, t0.Add(-time.Minute)); !got.Equal(t0.Add(-time.Minute)) {
+		t.Errorf("earlier log line: got %v", got)
+	}
+	if got := StartedAtBefore(hist, t0.Add(time.Minute)); !got.Equal(t0) {
+		t.Errorf("later log line: got %v", got)
+	}
+	if got := StartedAtBefore(hist, time.Time{}); !got.Equal(t0) {
+		t.Errorf("no log: got %v", got)
+	}
+	if got := StartedAtBefore(engine.PromotionState{}, t0); !got.Equal(t0) {
+		t.Errorf("no history: got %v", got)
 	}
 }

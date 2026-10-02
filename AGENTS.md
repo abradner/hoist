@@ -1093,6 +1093,45 @@ test lives** (if one exists).
    `internal/app/kitty_decode_test.go`, which decodes the extended CSI-u form a terminal sends
    once `ReportAlternateKeys` is actually granted and asserts the shifted punctuation comes out
    right.
+14. **A log that records every observation is a log nobody can read, and two feeds of one event
+   read as two events.** What happened: on a real promotion two minutes old the flight screen's
+   history showed ~60 lines. `engine.DriveStatus` appended a History entry for every step on every
+   walk ("already satisfied: …" for steps settled long ago, the same "waiting: …" each poll), so
+   History — which is persisted — grew by one entry per step per poll for as long as a human took
+   to approve; `service.Driver` additionally echoed each new entry as a `<step>: <detail>` progress
+   line, which the controller stored as `Snapshot.Log`, and `flight.logView` printed History and
+   then that log, so every event appeared twice, in two formats, in two concatenated
+   chronological runs (times visibly jumping back from "just now" to "2m ago"). Root cause: a log
+   of *observations* where the reader wanted a log of *changes*, and one fact published through two
+   channels with each consumer assuming the other did not exist. Rule: `appendHistory` records
+   changes by three rules keyed on the kind of entry — a STOPPING entry (`waiting: …`,
+   `blocked: …`, `act failed: …`) is skipped only when it equals History's LAST entry overall
+   (comparing against the step's own newest instead lost a real return: approval waiting, a check
+   re-runs, approval waiting again); an `already satisfied: …` entry is skipped when it equals
+   that step's own newest; `acted` is never skipped, since a second write to the world must leave
+   a record. So History is the change log (the first occurrence keeps its time; readers `landedAt`,
+   `waitingReporter`, `historyDetail` and `LastActivity` were checked and none needs per-poll
+   entries), and a state file written before this rule is compacted by the same rules in memory
+   when loaded (`engine.CompactHistory`, applied in `LoadState`; it reaches disk with the next
+   ordinary save). `Hooks.Progress` carries preflight and signing-wait lines only; a step's
+   outcome reaches a screen as a typed event — `Hooks.OnHistory(entry, state)`, called by the
+   Driver for each newly appended entry once the save carrying it has landed — which
+   `session.Controller` folds into the entry's snapshot (state History and the step row, never
+   `Snapshot.Log`) and the walk's own tick then replaces, so each event is on screen once and
+   still appears as it is saved, not when a whole `Step` returns. `flight.logView` merges the two
+   disjoint sources into ONE list ordered by time, stably, with plain step labels, follows its
+   newest line unless the operator has scrolled up, and the header's and the pane's "started"
+   share one origin (`flight.StartedAtWithLog`: the earliest line in either). Regression tests:
+   `TestHistoryRecordsChangesNotReobservations`, `TestHistoryStopRecordedWhenItIsNotTheLastEntry`,
+   `TestHistoryBlockedAgainRecorded`, `TestHistoryRepeatedActedIsKept` and
+   `TestCompactHistoryCollapsesLegacyNoise` in `internal/engine`;
+   `TestDriverReportsEachHistoryEntryAsItIsSaved` and `TestResumeDoesNotMirrorHistoryIntoProgress`
+   in `internal/service`; `TestStartReportsHistoryLiveAndTheTickReplacesIt` in
+   `internal/app/session`; `TestStartedHasOneOriginInHeaderAndPane` in `internal/app`;
+   `TestLogViewIsOneChronologicalListEachEventOnce`, `TestLogViewKeepsHistoryOrderForEqualTimes`,
+   `TestLogFollowsItsNewestLine` and the `flight-multipoll` goldens in
+   `internal/app/flight/history_test.go` (its fixture models what the engine really writes:
+   `acted` ×4, then one `already satisfied` per step and the wait once more, then nothing).
 
 16. **`flag.Parse` stops at the first positional, and what it leaves is not an error.** What
    happened: `hoist deploy --env <env> --image <ref> oops --dry-run` performed the deploy —

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -184,6 +185,9 @@ const (
 	ChangeAbandonFailed
 	ChangeListed
 	ChangeRefused
+	// ChangeProgress: a preflight line or a live History report landed on the entry; the screen
+	// showing it should re-mirror the snapshot, and nothing else about the entry changed.
+	ChangeProgress
 )
 
 // Change is one thing Update decided happened, for the caller (the wiring PR's own root Update)
@@ -271,7 +275,7 @@ type entry struct {
 	landed bool
 
 	log        []LogLine
-	progressCh chan string
+	progressCh chan progressItem
 
 	abandoning bool
 	// abandonIssued is set the moment Backend.Abandon is actually dispatched for this entry —
@@ -409,14 +413,14 @@ func (c Controller) Relist() (Controller, tea.Cmd) {
 	return c, c.listCmd(c.listGen)
 }
 
-func listenCmd(ctx context.Context, build BuildID, gen uint64, ch chan string) tea.Cmd {
+func listenCmd(ctx context.Context, build BuildID, gen uint64, ch chan progressItem) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
 		select {
-		case line, ok := <-ch:
-			return progressMsg{build: build, gen: gen, line: line, ok: ok}
+		case item, ok := <-ch:
+			return progressMsg{build: build, gen: gen, line: item.line, hist: item.hist, ok: ok}
 		case <-ctx.Done():
 			// This is the fix for the goroutine leak app.go's own buildCmd doc comment
 			// describes: once this entry's ctx is done (deadline, cancel, or a fresh one from a
@@ -433,18 +437,27 @@ func newCtx(now func() time.Time, deadline time.Duration) (context.Context, cont
 	return ctx, cancel, deadlineAt
 }
 
-// startHooks builds the service.Hooks a build/resume/drive shares — progress reports one short
-// line per stage (preflight and, later, per-step saves alike, since Driver.Step's own progress
-// hook is the identical callback), and OnWaiting reports through the same channel so the two
-// read as one continuous log, mirroring app.go's own startHooks one layer up.
-func startHooks(ch chan string) service.Hooks {
-	progress := func(line string) {
+// startHooks builds the service.Hooks a build/resume/drive shares. Progress reports one short
+// text line per preflight stage and OnWaiting the signing wait, both through the entry's one
+// channel. OnHistory sends each newly saved History entry down the same channel as a typed item
+// (never as text), so a step's outcome reaches the screen as it is saved, in order with the
+// text lines. Every send is non-blocking: a full channel drops the item, which costs nothing
+// lasting — the state the next Step tick carries holds every entry.
+func startHooks(ch chan progressItem) service.Hooks {
+	send := func(it progressItem) {
 		select {
-		case ch <- line:
+		case ch <- it:
 		default:
 		}
 	}
-	return service.Hooks{Progress: progress, OnWaiting: func() { progress("waiting for signing approval") }}
+	progress := func(line string) { send(progressItem{line: line}) }
+	return service.Hooks{
+		Progress:  progress,
+		OnWaiting: func() { progress("waiting for signing approval") },
+		OnHistory: func(e engine.HistoryEntry, s engine.PromotionState) {
+			send(progressItem{hist: &historyItem{entry: e, state: s}})
+		},
+	}
 }
 
 // Start begins a fresh StartPromotion for req, tracked under a new BuildID — refused outright
@@ -460,7 +473,7 @@ func (c Controller) Start(req service.StartRequest, source, target string) (Cont
 	c.nextBuild++
 	build := BuildID(c.nextBuild)
 	ctx, cancel, deadlineAt := newCtx(c.cfg.Now, c.cfg.Deadline)
-	ch := make(chan string, 32)
+	ch := make(chan progressItem, 64)
 	e := entry{
 		build: build, phase: Building, busy: true, gen: 1,
 		source: source, target: target, direct: req.Mode.Direct,
@@ -489,7 +502,7 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 	c.nextBuild++
 	build := BuildID(c.nextBuild)
 	ctx, cancel, deadlineAt := newCtx(c.cfg.Now, c.cfg.Deadline)
-	ch := make(chan string, 32)
+	ch := make(chan progressItem, 64)
 	e := entry{
 		build: build, id: id, phase: Building, busy: true, gen: 1,
 		ctx: ctx, cancel: cancel, deadlineAt: deadlineAt,
@@ -498,9 +511,9 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 	c = c.withEntry(e)
 	backend := c.backend
 	resumeCmd := func() tea.Msg {
-		// Hooks{Progress, OnWaiting} fixes FB-M2: a resumed drive now reports
-		// live log lines exactly as a freshly started one already did (service.Resume's own doc
-		// comment on ResumeOpts.Hooks).
+		// The same hooks a fresh Start gets: a resumed drive's signing-wait line and, above all,
+		// its OnHistory reports reach the entry live (Resume has no preflight, so Progress itself
+		// stays quiet — service.ResumeOpts' own doc comment).
 		d, err := backend.Resume(ctx, id, service.ResumeOpts{Hooks: startHooks(ch)})
 		return toBuiltMsg(build, e.gen, d, err)
 	}
@@ -940,9 +953,61 @@ func (c Controller) onProgress(msg progressMsg) (Controller, tea.Cmd, []Change) 
 		c = c.withEntry(e)
 		return c, nil, nil
 	}
-	e.log = append(append([]LogLine(nil), e.log...), LogLine{At: c.cfg.Now(), Text: msg.line})
+	if msg.hist != nil {
+		e = applyHistory(e, *msg.hist)
+	} else {
+		e.log = append(append([]LogLine(nil), e.log...), LogLine{At: c.cfg.Now(), Text: msg.line})
+	}
 	c = c.withEntry(e)
-	return c, listenCmd(e.ctx, e.build, e.gen, e.progressCh), nil
+	return c, listenCmd(e.ctx, e.build, e.gen, e.progressCh), []Change{{Kind: ChangeProgress, Build: e.build, ID: e.id}}
+}
+
+// applyHistory folds one live OnHistory report into e's snapshot: the state as saved with the
+// entry replaces e.state — but only when it carries MORE History than e.state already does, so
+// a report that arrives after the Step tick it belongs to (the channel and the tick are
+// separate commands, in no fixed order) can never roll the snapshot back — and the step's row
+// is updated from the entry. The text of the entry is NOT added to e.log: the flight screen
+// renders History itself, and the tick that ends the walk replaces e.state wholesale, so each
+// entry is on screen exactly once whichever way the two arrive.
+func applyHistory(e entry, h historyItem) entry {
+	if len(h.state.History) <= len(e.state.History) {
+		return e
+	}
+	e.state = h.state
+	e.statuses = upsertStatus(e.statuses, statusOf(h.entry))
+	return e
+}
+
+// statusOf is the row-level meaning of one History entry: acted and already-satisfied entries
+// mark their step done, a waiting or blocked entry marks it the step the promotion is stopped
+// at. act failed has no row meaning of its own (the tick carries the error), so it reports the
+// step as not yet satisfied.
+func statusOf(h engine.HistoryEntry) engine.StepStatus {
+	st := engine.StepStatus{Step: h.Step}
+	switch {
+	case h.Detail == "acted":
+		st.Satisfied, st.Detail = true, "acted"
+	case strings.HasPrefix(h.Detail, "already satisfied: "):
+		st.Satisfied, st.Detail = true, strings.TrimPrefix(h.Detail, "already satisfied: ")
+	case strings.HasPrefix(h.Detail, "waiting: "):
+		st.Waiting, st.Detail = true, strings.TrimPrefix(h.Detail, "waiting: ")
+	case strings.HasPrefix(h.Detail, "blocked: "):
+		st.Blocked = strings.TrimPrefix(h.Detail, "blocked: ")
+	default:
+		st.Detail = h.Detail
+	}
+	return st
+}
+
+func upsertStatus(in []engine.StepStatus, st engine.StepStatus) []engine.StepStatus {
+	out := append([]engine.StepStatus(nil), in...)
+	for i := range out {
+		if out[i].Step == st.Step {
+			out[i] = st
+			return out
+		}
+	}
+	return append(out, st)
 }
 
 func (c Controller) onStep(msg stepMsg) (Controller, tea.Cmd, []Change) {

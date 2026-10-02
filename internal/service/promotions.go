@@ -306,12 +306,10 @@ func (s *Service) ListArchived(repoFullName string) ([]*engine.PromotionState, e
 // ResumeOpts is Resume's own per-call configuration: OverrideCINone is the CLI's
 // --override-ci-none / the TUI's already-applied `c` gesture (a fresh CINoneOverride to seed
 // onto the state before driving, distinct from Driver.OverrideCINone's own mid-flight version of
-// the same flag); Hooks carries the progress/onWaiting callbacks the returned Drive is built
-// with — wiring Hooks.Progress into the Driver here (DriverHooks{Progress: o.Hooks.Progress})
-// gives any CALLER that passes a Hooks value the same per-step progress a freshly started
-// promotion already gets through StartPromotion. Both faces pass Hooks: the CLI's runResume,
-// and the TUI through session.Controller's resume (startHooks), so a resumed promotion's flight
-// screen shows the same live progress line a freshly started one does.
+// the same flag); Hooks carries OnWaiting, passed to engine.StepsFor for the returned Drive, and
+// OnHistory, installed on it. Hooks.Progress is preflight-only and Resume has no preflight, so
+// it reports nothing here: a resumed promotion's events reach a caller as OnHistory calls (one
+// per History entry, as its save lands), never as a second stream of progress text.
 type ResumeOpts struct {
 	OverrideCINone bool
 	Hooks          Hooks
@@ -374,7 +372,7 @@ func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, e
 	}
 
 	steps := engine.StepsFor(st, s.Git(), f, a, ro, rc.Envs.Production, true, o.Hooks.OnWaiting)
-	return NewDriver(steps, st, s.deps.Store.Save, s.settings.Poll, DriverHooks{Progress: o.Hooks.Progress}), nil
+	return NewDriver(steps, st, s.deps.Store.Save, s.settings.Poll).withOnHistory(o.Hooks.OnHistory), nil
 }
 
 // Abandon retires promotion id for good: releases the state file and, if it opened a PR, closes

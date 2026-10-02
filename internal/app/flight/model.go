@@ -665,9 +665,16 @@ func (m Model) layout() Model {
 	// section and the "history" label above it are unconditional too.
 	sections++
 	fixed++ // the "history" label above the log
+	// The log follows its newest line: a viewport sitting at the bottom stays at the bottom when
+	// content arrives (or the pane resizes), so the operator watching a promotion sees the
+	// current event rather than the first screenful. One who has scrolled up keeps their place.
+	follow := m.log.AtBottom()
 	m.log.SetWidth(m.width - 2)
 	m.log.SetHeight(max(ui.BodyHeight(m.height, sections)-fixed, 3))
 	m.log.SetContent(m.logView())
+	if follow {
+		m.log.GotoBottom()
+	}
 	return m
 }
 
@@ -776,7 +783,7 @@ func (m Model) headerSection() string {
 		left += "   " + m.styles.Warn.Render("direct")
 	}
 	var right []string
-	if start := StartedAt(m.state); !start.IsZero() {
+	if start := m.startedAt(); !start.IsZero() {
 		right = append(right, "started "+ui.Ago(m.now(), start))
 	}
 	if !m.deadlineAt.IsZero() && !m.done {
@@ -940,27 +947,60 @@ func (m Model) actionSection() string {
 	return ""
 }
 
-// logView renders state.History first, then buildLog — chronological order, oldest to
-// newest: state.History is the settled record up to the last landed Tick (or, before the first
-// one has landed at all, empty); buildLog is the controller's own progress log for this build —
-// preflight lines before a PromotionState exists, or a step mid-Act during drive that hasn't
-// reached its own appendHistory yet.
+// logView renders ONE chronological list, each event once. Two sources feed it, disjoint by
+// construction: state.History (what the engine recorded — one entry per CHANGE of a step's
+// state, see engine.appendHistory) and buildLog (the controller's Hooks.Progress lines, which
+// are preflight and signing-wait lines only — internal/service never echoes a History entry
+// into Progress). They are merged by time, stably, so a progress line that ties a history entry
+// reads first, and every row uses the step's plain Label rather than the raw engine name.
 func (m Model) logView() string {
 	if len(m.buildLog) == 0 && len(m.state.History) == 0 {
 		return m.styles.Dim.Render("(no history yet)")
 	}
-	var b strings.Builder
-	// Relative times through ui.Ago, and the step's own plain label rather than the raw
-	// engine.StepName (UX-M4) — "12m ago  approval  no approval comment yet" instead of an
-	// RFC3339 timestamp and a bare StepName the operator would have to decode.
-	for _, h := range m.state.History {
-		fmt.Fprintf(&b, "%s  %-12s  %s\n", ui.Ago(m.now(), h.At), Label(h.Step), h.Detail)
+	type row struct {
+		at   time.Time
+		text string
 	}
+	rows := make([]row, 0, len(m.buildLog)+len(m.state.History))
 	for _, line := range m.buildLog {
-		fmt.Fprintf(&b, "%s  %s\n", ui.Ago(m.now(), line.At), line.Text)
+		rows = append(rows, row{line.At, line.Text})
+	}
+	for _, h := range m.state.History {
+		rows = append(rows, row{h.At, fmt.Sprintf("%-12s  %s", Label(h.Step), h.Detail)})
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].at.Before(rows[j].at) })
+	var b strings.Builder
+	// Relative times through ui.Ago — "12m ago  approval  no approval comment yet", never an
+	// RFC3339 timestamp (UX-M4).
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%s  %s\n", ui.Ago(m.now(), r.at), r.text)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
+
+// startedAt is when this promotion began from the operator's point of view: the earlier of the
+// first History entry and the first progress line, so the header's "started" never claims a
+// later moment than the oldest line in the log below it (preflight runs before any History
+// exists).
+func (m Model) startedAt() time.Time {
+	return StartedAtBefore(m.state, firstLogAt(m.buildLog))
+}
+
+// firstLogAt is the earliest timestamped progress line, the zero time when there is none —
+// the plain value rows.go's StartedAtBefore takes, so rows.go never names a session type.
+func firstLogAt(log []session.LogLine) time.Time {
+	var first time.Time
+	for _, l := range log {
+		if !l.At.IsZero() && (first.IsZero() || l.At.Before(first)) {
+			first = l.At
+		}
+	}
+	return first
+}
+
+// FirstLogAt is firstLogAt for the root, which builds the matrix's in-flight summary from a
+// Snapshot's log and must agree with the flight header about when a promotion started.
+func FirstLogAt(log []session.LogLine) time.Time { return firstLogAt(log) }
 
 // notes is the transient notice and the last plumbing error, word-wrapped.
 func (m Model) notes() string {

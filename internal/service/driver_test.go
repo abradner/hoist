@@ -45,7 +45,7 @@ func TestDriverRunRetriesTransientRolloutErrors(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
-	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Rollout: 5 * time.Millisecond}, DriverHooks{})
+	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Rollout: 5 * time.Millisecond})
 	err = d.Run(ctx, RunHooks{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded (a transient rollout error must be retried until the deadline, not aborted on the first hiccup)", err)
@@ -84,7 +84,7 @@ func TestDriverRunDoesNotRetryArgoRefreshNotFound(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Argo: 5 * time.Millisecond}, DriverHooks{})
+	d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, engine.PollIntervals{Argo: 5 * time.Millisecond})
 	start := time.Now()
 	err := d.Run(ctx, RunHooks{})
 	elapsed := time.Since(start)
@@ -178,7 +178,7 @@ func TestDriverStepRetryWaitsAtTheFailedStepsCadence(t *testing.T) {
 			// step is caught regardless of which case is running.
 			s := &engine.PromotionState{Phase: engine.StepCIGreen}
 			steps := []engine.Step{stubObserveErrStep{name: tc.failStep, err: tc.stepErr}}
-			d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, poll, DriverHooks{})
+			d := NewDriver(steps, s, func(*engine.PromotionState) error { return nil }, poll)
 
 			tick, err := d.Step(context.Background())
 

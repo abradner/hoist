@@ -45,7 +45,7 @@ func TestDriverStepIsOneWalk(t *testing.T) {
 		countingStep{name: engine.StepCommitted, obs: engine.Observation{Waiting: true, Detail: "waiting for signing approval"}, observe: &obs2},
 	}
 	s := &engine.PromotionState{ID: "test-one-walk"}
-	d := NewDriver(steps, s, nil, engine.PollIntervals{}, DriverHooks{})
+	d := NewDriver(steps, s, nil, engine.PollIntervals{})
 
 	tick, err := d.Step(context.Background())
 	if err != nil {

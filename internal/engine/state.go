@@ -244,12 +244,11 @@ func ArchiveDir() (string, error) {
 // Two known, accepted edge cases (recorded rather than fixed,
 // since both are narrow and the single-operator CLI mostly serializes itself):
 //
-//   - `LastActivity`'s own "when did anything last happen" reading resets every time
-//     `engine.Drive` re-saves a state — including a pure re-observation of an already-satisfied
-//     step (`Drive`'s own doc comment: it saves after *every* step, not only ones that acted).
-//     So a `hoist resume <id>` of a long-done promotion pushes its own retention clock back out
-//     to a fresh state.retain window — arguably correct (an operator explicitly touched it), but
-//     worth knowing retention measures "last touched", not strictly "last changed".
+//   - `LastActivity` reads the newest History entry, and History records changes only
+//     (appendHistory: a pure re-observation of an unchanged step appends nothing), so a
+//     `hoist resume <id>` of a long-done promotion does NOT push its retention clock back out
+//     the way it did while every re-observation was recorded: retention measures "last
+//     changed". A resume that acts again (a re-acted step appends an "acted" entry) does count.
 //   - A `hoist promotions` archiving id and a concurrent `hoist resume <id>` that already loaded
 //     the pre-archive state can race: `SaveState` after `ArchiveState`'s own rename recreates a
 //     live file at the now-vacated path, alongside the archived copy — a duplicate, not a lost
@@ -371,7 +370,29 @@ func LoadState(path string) (*PromotionState, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	s.History = CompactHistory(s.History)
 	return &s, nil
+}
+
+// CompactHistory replays h through appendHistory's dedupe rules and returns what a state written
+// by the current engine would have recorded: the first occurrence of every change, with its
+// time, and none of the repeats. A state file written before History recorded changes only can
+// hold thousands of identical re-observations, which would otherwise flood the flight screen
+// and the retention clock. It is applied in memory when a state is loaded and reaches disk only
+// with the next ordinary save; it is idempotent (an already-compacted History comes back equal),
+// and h itself is never modified.
+func CompactHistory(h []HistoryEntry) []HistoryEntry {
+	out := make([]HistoryEntry, 0, len(h))
+	for _, e := range h {
+		if historyDuplicate(out, e.Step, e.Detail) {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return h
+	}
+	return out
 }
 
 // ListStates reads every promotion state file under $XDG_STATE_HOME/hoist/promotions/, sorted

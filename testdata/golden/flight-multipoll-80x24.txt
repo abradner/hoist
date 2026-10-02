@@ -1,0 +1,24 @@
+╭─ hoist · promotion · in flight ──────────────────────────────────────────────╮
+│abcd1234   app-staging → app-production                         started 2m ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                      │
+│✓ commit                                                                      │
+│✓ push                                                                        │
+│✓ PR                                                                          │
+│… CI                                                                          │
+│    CI: 3/4 checks complete                                                   │
+│· approval                                                                    │
+│· merge                                                                       │
+│· argo refresh                                                                │
+│· argo sync                                                                   │
+│· rollout                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│next check in 12s · r now                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│history                                                                       │
+│1m ago  push          already satisfied: branch already on origin             │
+│1m ago  PR            already satisfied: PR #103 already open                 │
+│1m ago  CI            waiting: CI: 2/4 checks complete                        │
+│just now  CI            waiting: CI: 3/4 checks complete                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+esc back · o open PR · w watch · l log · shift+x abandon · r re-observe · ? help
