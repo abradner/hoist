@@ -61,7 +61,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	kubeContext := fs.String("kube-context", sel.kubeOverride(), "kubeconfig context to re-observe every promotion in, instead of each repo's own kube.context (may also be given before the command)")
 	repoFilter := fs.String("repo", "", "only list promotions for this repo (owner/name, repos[].github) — default every configured repo")
 	archived := fs.Bool("archived", false, "also list archived promotions (state.retain; still plain, readable JSON under the promotions/archive/ subdirectory)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}

@@ -46,7 +46,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	confirmProduction := fs.String("confirm-production", "", "required when --env is listed in the selected repo's envs.production: repeat --env's exact value to acknowledge restarting production (refused otherwise)")
 	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context to restart in (the selected repo's kube.context when configured; may also be given before the command)")
 	dryRun := fs.Bool("dry-run", false, "print what would be restarted, and any reason a restart would not be graceful, without touching the cluster")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
