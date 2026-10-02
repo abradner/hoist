@@ -100,9 +100,15 @@ var registry = []op{
 		TUI:  "q, only from the matrix (T3-03), with drives running, behind a confirm; esc on the flight screen only stops watching — the drive continues and enter re-attaches",
 	},
 	{
-		Name: "abandon a promotion that never landed: retire its state, close its PR and delete its branch if it opened either — refused outright if the promotion has already landed",
+		Name: "abandon a promotion that never landed: retire its state, remove its worktree and local branch, close its PR and delete its remote branch if it opened either — refused outright if the promotion has already landed",
 		CLI:  "abandon --confirm-abandon",
 		TUI:  "flight.AbandonMsg shift+x on the flight screen, behind a huh.Confirm (T3-06: was capital X); shift+x on the matrix's own in-flight pane (T3-04) reuses the same message rather than a second matrix-owned one",
+	},
+	{
+		Name: "remove what finished promotions left on this machine: the worktree and local branch of every promotion observed landed, orphaned worktrees, long-unused registry cache entries",
+		CLI:  "gc --dry-run",
+		TUI:  "the in-flight pane's own re-observation removes a landed promotion's worktree and local branch as it lists it (Service.CleanupLanded — the same call gc makes per state file), and a drive the session is running does so on the tick that lands it; a removal made by the listing, and each refusal once, is an activity-log entry",
+		Gap:  "orphaned worktrees (no state file) and the registry cache are swept only by gc, and nothing in the TUI shows what gc --dry-run would list — #246",
 	},
 	{
 		Name: "watch one Application converge, outside any promotion",
