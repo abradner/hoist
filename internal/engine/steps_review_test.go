@@ -1221,6 +1221,12 @@ func TestCIGreenSettleHoldsAFinishedRollup(t *testing.T) {
 	f := &forge.Fake{}
 	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
 	f.NamedChecksBySHA = map[string][]forge.Check{s.PushedSHA: {{Name: "kubeconform", State: forge.CheckSuccess}}}
+	// GitHub and the state file hand back UTC; the operator reads a wall clock, so the detail
+	// must name the local time. A fixed non-UTC local zone makes the two differ.
+	oldLocal := time.Local
+	time.Local = time.FixedZone("test", 5*3600+1800)
+	t.Cleanup(func() { time.Local = oldLocal })
+	s.PR.CreatedAt = s.PR.CreatedAt.UTC()
 	s.CISettle = 30 * time.Second
 	at := func(d time.Duration) CIGreenStep {
 		return CIGreenStep{Forge: f, Now: fixedNow(s.PR.CreatedAt.Add(d))}
@@ -1230,7 +1236,7 @@ func TestCIGreenSettleHoldsAFinishedRollup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "CI: 1/1 checks complete; settling until " + s.PR.CreatedAt.Add(30*time.Second).Format("15:04:05")
+	want := "CI: 1/1 checks complete; settling until " + s.PR.CreatedAt.Add(30*time.Second).In(time.Local).Format("15:04:05")
 	if !obs.Waiting || obs.Satisfied || obs.Detail != want {
 		t.Fatalf("a finished rollup 5s into a 30s settle must Wait with %q, got %+v", want, obs)
 	}
@@ -1246,6 +1252,9 @@ func TestCIGreenSettleHoldsAFinishedRollup(t *testing.T) {
 	}
 	f.NamedChecksBySHA[s.PushedSHA] = f.NamedChecksBySHA[s.PushedSHA][:1]
 
+	if obs, _ = at(30*time.Second).Observe(ctx(), s); !obs.Satisfied {
+		t.Fatalf("now == settledAt is the exact boundary and is green, got %+v", obs)
+	}
 	if obs, _ = at(31*time.Second).Observe(ctx(), s); !obs.Satisfied {
 		t.Fatalf("past the settle window a complete rollup is green, got %+v", obs)
 	}

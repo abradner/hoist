@@ -200,8 +200,14 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		// has not created its check-run is invisible to it. Hold the verdict until the check set
 		// has had s.CISettle to appear (a late check that fails inside the window Blocks above).
 		// Zero is no settle: an explicit `settle: 0s`, or a state file from before the field.
+		// Stated limit (principle 1): the anchor is the PR's creation, so this covers the FIRST
+		// WAVE of checks only. A check created later (a job behind `needs:`, a workflow_run-chained
+		// workflow, a late bot status) is not waited for and reopens "all visible checks complete"
+		// exactly as before. Envs with comment approval re-observe CI on every pass up to the
+		// merge; branch-protection required checks are the authoritative guard.
+		// Clock skew: a local clock ahead by X shortens the window by X; it can never wait forever.
 		if settledAt := s.PR.CreatedAt.Add(s.CISettle); c.now().Before(settledAt) {
-			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete; settling until %s%s", sum.Total, sum.Total, settledAt.Format("15:04:05"), ignoring)}, nil
+			return Observation{Waiting: true, Detail: fmt.Sprintf("CI: %d/%d checks complete; settling until %s%s", sum.Total, sum.Total, settledAt.Local().Format("15:04:05"), ignoring)}, nil
 		}
 		return Observation{Satisfied: true, Detail: fmt.Sprintf("CI green (%d checks)%s", sum.Total, ignoring)}, nil
 	}

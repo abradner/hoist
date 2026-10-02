@@ -438,7 +438,12 @@ green, blocked, and the `ci.none` outcomes) names what was ignored.
 yet created its check-run is invisible to the rollup, and a slow one can fail after the rest went
 green. So a complete rollup is held in Waiting until the PR is `ci.settle` old (default `30s`,
 `settle: 0s` turns it off — your explicit choice, and the one thing here that makes the gate
-weaker). A check that appears and fails inside the window Blocks as usual. The detail names the
+weaker). A check that appears and fails inside the window Blocks as usual. The window is
+anchored at the PR opening, so it covers the first wave of checks only: a check created later (a
+job behind `needs:`, a workflow chained with `workflow_run`, a late bot status) is not waited for.
+Envs with comment approval re-observe CI on every pass up to the merge, and your branch
+protection's required checks are the authoritative guard, not this window. The time shown is your
+local clock. The detail names the
 moment it ends, not a ticking counter, so History records it once. Like `ci.none`, it is frozen
 into a promotion when it starts; a promotion begun before the setting existed has no settle
 window, which is the gate it started under.
