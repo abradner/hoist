@@ -122,6 +122,9 @@ type Model struct {
 	// call of its own: the listed-but-not-live entries in the last full listing are still good,
 	// only the live ones need refreshing.
 	lastList []service.Listed
+	// cleanupRefusalNoted is the ids whose refused cleanup the activity log already carries
+	// (noteCleanups) — copied on write, never mutated in place, since Model is a value.
+	cleanupRefusalNoted map[string]bool
 
 	// poll, openURL and openPRMode are Promotion's remaining fields, unpacked here — see
 	// Promotion's own doc comment for what each one is and why a nil OpenURL degrades to a
@@ -347,6 +350,33 @@ func startErrorNotice(err error) string {
 		return "starting a promotion is not wired up"
 	}
 	return fmt.Sprintf("could not start promotion: %v", err)
+}
+
+// noteCleanups records what a listing removed. Service.List removes a landed promotion's
+// worktree and local branch as it observes it (service.CleanupLanded, docs/repo-map.md R-011),
+// and the in-flight pane's listing runs on a timer — so without an entry here, directories and
+// branches on the operator's machine would be deleted by a poll with nothing on screen saying so.
+// A drive this session is running cleans up on the tick that lands it instead, before any
+// listing sees it; that removal has no entry of its own beyond the drive's own "landed" (#249).
+// A removal happens once per promotion and gets one entry. A refusal would otherwise repeat on
+// every poll for as long as its cause stands, so it is recorded once per promotion per session.
+func (m Model) noteCleanups(list []service.Listed) Model {
+	for _, l := range list {
+		id := l.State.ID
+		if len(l.Cleaned) > 0 {
+			m = m.note(activity.Info, fmt.Sprintf("%s landed: removed its worktree and local branch", id), strings.Join(l.Cleaned, "\n"), "")
+		}
+		if l.CleanupErr != nil && !m.cleanupRefusalNoted[id] {
+			noted := make(map[string]bool, len(m.cleanupRefusalNoted)+1)
+			for k := range m.cleanupRefusalNoted {
+				noted[k] = true
+			}
+			noted[id] = true
+			m.cleanupRefusalNoted = noted
+			m = m.note(activity.Info, fmt.Sprintf("%s: its worktree and local branch were left in place", id), l.CleanupErr.Error(), "")
+		}
+	}
+	return m
 }
 
 // note appends one activity.Entry — every former `m.notice = ...` site in this file now calls
@@ -895,6 +925,7 @@ func (m Model) apply(changes []session.Change) (Model, tea.Cmd) {
 			m = m.popBuildFailed(ch.Build, ch.Err)
 		case session.ChangeListed:
 			m.lastList = ch.List
+			m = m.noteCleanups(ch.List)
 			m = m.remergeInFlight()
 		case session.ChangeStepped:
 			// For a drive running here, the pane reflects this
