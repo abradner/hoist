@@ -520,7 +520,8 @@ func (e Exec) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch strin
 // LsRemoteHeads implements Git.
 func (e Exec) LsRemoteHeads(ctx context.Context, cloneDir, remote string) (map[string]string, error) {
 	// The pattern, not --heads: newer git deprecates that flag in favour of --branches, which
-	// older git does not have. A refs/heads/* pattern means the same on both.
+	// older git does not have. A pattern is matched against the tail of a ref name, though, so
+	// it also returns a ref like refs/odd/refs/heads/x; only refs/heads/ itself names a branch.
 	out, err := e.run(ctx, cloneDir, "ls-remote", remote, "refs/heads/*")
 	if err != nil {
 		return nil, err
@@ -531,14 +532,12 @@ func (e Exec) LsRemoteHeads(ctx context.Context, cloneDir, remote string) (map[s
 			continue
 		}
 		fields := strings.Fields(line)
-		name, isHead := "", false
-		if len(fields) == 2 {
-			name, isHead = strings.CutPrefix(fields[1], "refs/heads/")
-		}
-		if !isHead || name == "" {
+		if len(fields) != 2 {
 			return nil, fmt.Errorf("git ls-remote %s refs/heads/*: unparseable line %q", remote, line)
 		}
-		heads[name] = fields[0]
+		if name, isHead := strings.CutPrefix(fields[1], "refs/heads/"); isHead && name != "" {
+			heads[name] = fields[0]
+		}
 	}
 	return heads, nil
 }

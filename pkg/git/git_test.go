@@ -497,6 +497,10 @@ func TestLsRemoteHeadsAgreesWithLsRemoteBranch(t *testing.T) {
 	if err := runHost(t, cloneDir, "push", "origin", "HEAD:refs/tags/only-a-tag"); err != nil {
 		t.Fatal(err)
 	}
+	// Not a branch, but its name ends like one, and ls-remote's pattern matches by tail.
+	if err := runHost(t, cloneDir, "push", "origin", "HEAD:refs/odd/refs/heads/not-a-branch"); err != nil {
+		t.Fatal(err)
+	}
 	heads, err := g.LsRemoteHeads(ctx(), cloneDir, "origin")
 	if err != nil {
 		t.Fatal(err)
@@ -513,8 +517,12 @@ func TestLsRemoteHeadsAgreesWithLsRemoteBranch(t *testing.T) {
 			t.Errorf("%s: LsRemoteHeads says %q, LsRemoteBranch says %q", branch, heads[branch], sha)
 		}
 	}
+	// (Covered by the len check above too: neither the tag nor the tail-matching ref is listed.)
 	if _, ok := heads["only-a-tag"]; ok {
 		t.Errorf("a tag must not appear as a head: %v", heads)
+	}
+	if _, ok := heads["not-a-branch"]; ok {
+		t.Errorf("a ref outside refs/heads/ must not appear as a head: %v", heads)
 	}
 	if _, err := g.LsRemoteHeads(ctx(), cloneDir, "no-such-remote"); err == nil {
 		t.Error("an unconfigured remote must be an error, not an empty map")

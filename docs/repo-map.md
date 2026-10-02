@@ -126,11 +126,11 @@ it reads private state and writes to systems that deploy software.
   so a promotion merged or closed outside hoist reads as such on the next poll, and `r` hands the
   flight screen a state re-derived the same way `hoist resume` would, not the pane's own row.
   The walk shares its git reads of origin across the states it covers (`internal/service`'s
-  `scanGit`: one listing of branches, one fetch per base branch, taken afresh by every walk) —
-  but only a *finished* verdict is accepted from that snapshot; anything else is observed again
-  live (`observeThroughScan`). `claimTarget`'s scans and `resume --env`'s candidate scan do the
-  same. The snapshot refuses writes and never outlives the walk that took it (AGENTS.md §4.1,
-  §9 entry 15).
+  `scanGit`: one listing of branches, one fetch per base branch, taken afresh by every walk),
+  then lists origin's branches again when it is done: its verdicts stand, and anything is
+  archived, only if every branch is where the snapshot had it — otherwise the walk is made
+  again live. `claimTarget`'s scans and `resume --env`'s candidate scan do the same. The
+  snapshot refuses writes and never outlives the walk that took it (AGENTS.md §4.1, §9 entry 15).
 - **Digest normalisation.** Bare tags and `sha-` tags in the source env are pinned to a digest before
   they are written to the target: `pkg/resolve` asks the source namespace's pods, then the
   manifest's pin, then the registry, and every disagreement between them is a warning with a

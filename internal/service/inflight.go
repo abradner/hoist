@@ -35,12 +35,22 @@ import (
 // list built from prev would use, and s.Git()/s.ForgeFor give exactly that without a caller
 // having to already hold one.
 //
-// Every candidate is observed through observeThroughScan: a finished promotion — the kind an
-// env accumulates — is recognised from one listing of origin's branches and one fetch of the
-// base shared across the whole scan, and anything not finished is observed again live. The
-// snapshot is built here and dropped on return, so every call asks origin afresh.
+// The scan is made through a scanGit first — one listing of origin's branches and one fetch of
+// each base, shared by every candidate — and its answer stands only if origin's branches are
+// still where that snapshot had them once the scan is over (scanGit.unchanged). Otherwise, or if
+// the pass failed, the scan is made again through the live git.Git. Either way every call asks
+// origin afresh: the snapshot is built here and dropped on return.
 func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, skipID string) (*engine.PromotionState, engine.StepStatus, error) {
-	live, scan := s.Git(), newScanGit(s.Git())
+	scan := newScanGit(s.Git())
+	if prev, last, err := s.findInFlight(ctx, scan, repoFullName, targetEnv, skipID); err == nil && scan.unchanged(ctx) {
+		return prev, last, nil
+	}
+	return s.findInFlight(ctx, s.Git(), repoFullName, targetEnv, skipID)
+}
+
+// findInFlight is one scan, observing through g. It reads the state files itself, so a second
+// call starts from what is on disk rather than from anything the first one recorded on a state.
+func (s *Service) findInFlight(ctx context.Context, g git.Git, repoFullName, targetEnv, skipID string) (*engine.PromotionState, engine.StepStatus, error) {
 	f, err := s.ForgeFor(repoFullName)
 	if err != nil {
 		return nil, engine.StepStatus{}, err
@@ -53,9 +63,7 @@ func (s *Service) FindInFlight(ctx context.Context, repoFullName, targetEnv, ski
 		if prev.ID == skipID || prev.RepoFullName != repoFullName || prev.TargetEnv != targetEnv {
 			continue
 		}
-		done, last, oerr := observeThroughScan(prev, scan, live, func(g git.Git, st *engine.PromotionState) (bool, engine.StepStatus, error) {
-			return engine.ObserveAll(ctx, engine.ObserveSteps(st, g, f, nil, nil, nil), st)
-		})
+		done, last, oerr := engine.ObserveAll(ctx, engine.ObserveSteps(prev, g, f, nil, nil, nil), prev)
 		if oerr != nil {
 			return prev, last, fmt.Errorf("checking whether promotion %s is still in flight: %w", prev.ID, oerr)
 		}

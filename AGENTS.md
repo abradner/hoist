@@ -154,18 +154,21 @@ bytes, since a file with two occurrences of one image repo (a Deployment and its
 a whole-file predicate on the strength of either one, and a false *intact* here silently retires
 the one-in-flight-per-env rule (#167).
 
-**A scan over many state files shares its git reads of origin, and trusts them for one verdict
-only.** `FindInFlight`, `FindInFlightForEnv` and `List` each observe every prior promotion
-through `observeThroughScan` (`internal/service/scangit.go`): a first pass against a `scanGit`
-that lists origin's branches once and fetches each base branch once for the whole scan, and —
-unless that pass finds the promotion *finished* — a second pass through the live `git.Git`, as
-if no snapshot existed. The asymmetry is the rule: the listing and the fetch are taken at two
-instants and replayed to states whose own forge read is later still, so a promotion merged
-mid-scan looks reverted against a base tip fetched before its merge. A finished verdict from the
-snapshot is exposed only to the races a live walk already had; any other verdict from it is not
-evidence. The snapshot is dropped when the scan returns, so `claimTarget`'s second scan, made
-while holding the claim, asks origin again; and `scanGit` refuses every writing method, so it
-cannot serve a step that Acts. The forge is still asked once per state (§9 entry 15).
+**A scan over many state files shares its git reads of origin, and uses them only once it has
+confirmed they held.** `FindInFlight`, `FindInFlightForEnv` and `List` each make their walk
+through a `scanGit` (`internal/service/scangit.go`) that lists origin's branches once and
+fetches each base branch once for the whole scan. Those two reads are taken at two instants and
+replayed to states whose own forge read is later still, and the steps' Observe methods assume
+live calls: a promotion merged mid-scan looks reverted against a base tip fetched before its
+merge, and a base reset mid-scan leaves a reverted promotion looking finished. So when the walk
+is over the scan lists origin's branches once more (`scanGit.unchanged`); only if every branch
+is where the snapshot had it do the scan's verdicts stand. If anything moved, or a pass failed,
+the scan is made again through the live `git.Git`, and `List` archives nothing before that is
+settled. The snapshot is dropped when the scan returns, so `claimTarget`'s second scan, made
+while holding the claim, asks origin again; and `scanGit` writes out every `git.Git` method
+rather than embedding one, refusing the ones that write, so it cannot serve a step that Acts
+and a new method cannot slip through unclassified. The forge and the cluster are still asked
+once per state (§9 entry 15).
 
 *Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
 `ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
@@ -1108,22 +1111,27 @@ test lives** (if one exists).
    as "every state asks the remote for itself", so the cost was linear in every promotion the
    env had ever had — and states #168 leaves non-terminal are never archived, so it only grew.
    Rule: a scan shares its git reads of the remote across the states it walks (`scanGit`: one
-   listing of branches, one fetch per base), but only to recognise a *finished* promotion; the
+   listing of branches, one fetch per base) and then asks for the listing once more; its
+   verdicts stand only if nothing moved, and otherwise the scan is made again live. The
    snapshot lives for exactly one scan (principle 2 — the next scan asks again) and cannot
-   write. The first version of this fix shared the snapshot for every verdict, and an
-   independent review reproduced what that costs: the steps' Observe methods assume live calls
-   in a fixed order, so a promotion merged after the scan's one fetch read as reverted, and a
-   listing newer than the fetch sent `DirectPushedStep` to a tree the clone did not have. A
-   cache in front of code written for live calls is safe only for the answers that staleness
-   cannot fake. A new step whose Observe talks to the remote gets its call counted in a
+   write. Three versions of this fix were needed, and each review found what the last one
+   assumed: sharing the snapshot for every verdict let a promotion merged after the scan's one
+   fetch read as reverted; trusting it only for "finished" let a base reset mid-scan leave a
+   reverted promotion finished, and left `List` paying twice for every promotion #168 keeps
+   non-terminal — the very states that accumulate. A cache in front of code written for live
+   calls needs a check that the cached world was the real one for as long as it was used; an
+   argument that staleness is harmless for this verdict or that one is the thing reviewers kept
+   disproving. A new step whose Observe talks to the remote gets its call counted in a
    multi-state scan test, not just asserted correct for one state. And a command that goes
    quiet is measured before it is explained: the first guess here was digest resolution, which
    took 0.1s. Regression tests, in `internal/service/scangit_test.go`:
-   `TestFindInFlightAsksOriginOncePerScan`, `TestListAndResumeByEnvAskOriginOncePerScan` and
+   `TestFindInFlightAsksOriginOncePerScan`, `TestListAndResumeByEnvAskOriginOncePerScan`,
+   `TestListSharesOriginAcrossPromotionsThatNeverGoTerminal` and
    `TestScanOverDirectAndPRPromotionsAsksOriginOnce` for the cost;
+   `TestScanDoesNotCallAPromotionFinishedOnAStaleSnapshot`,
    `TestScanDoesNotCallAMergeRevertedOnAStaleBaseTip`,
    `TestScanDoesNotFailOnAListingAheadOfItsFetch` and
-   `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what the snapshot must never decide.
+   `TestFindInFlightSecondScanSeesWhatChangedOnOrigin` for what a snapshot must never decide.
 
 ## 10. Maintaining This Document
 
