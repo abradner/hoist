@@ -1093,20 +1093,35 @@ test lives** (if one exists).
    then that log, so every event appeared twice, in two formats, in two concatenated
    chronological runs (times visibly jumping back from "just now" to "2m ago"). Root cause: a log
    of *observations* where the reader wanted a log of *changes*, and one fact published through two
-   channels with each consumer assuming the other did not exist. Rule: `appendHistory` records a
-   step's entry only when its detail differs from that step's newest entry, so History is the
-   change log (the first occurrence keeps its time; readers `landedAt`, `mergedAt`,
+   channels with each consumer assuming the other did not exist. Rule: `appendHistory` records
+   changes by three rules keyed on the kind of entry — a STOPPING entry (`waiting: …`,
+   `blocked: …`, `act failed: …`) is skipped only when it equals History's LAST entry overall
+   (comparing against the step's own newest instead lost a real return: approval waiting, a check
+   re-runs, approval waiting again); an `already satisfied: …` entry is skipped when it equals
+   that step's own newest; `acted` is never skipped, since a second write to the world must leave
+   a record. So History is the change log (the first occurrence keeps its time; readers `landedAt`,
    `waitingReporter`, `historyDetail` and `LastActivity` were checked and none needs per-poll
-   entries); `Hooks.Progress` carries preflight and signing-wait lines only — an outcome reaches a
-   screen through `PromotionState.History`, never also as a progress line; and `flight.logView`
-   merges the two disjoint sources into ONE list ordered by time, stably, with plain step labels,
-   while the header's "started" counts from the earliest line in it. Regression tests:
-   `TestHistoryRecordsChangesNotReobservations` in `internal/engine/engine_test.go`,
-   `TestResumeDoesNotMirrorHistoryIntoProgress` in `internal/service/promotions_test.go`,
-   `TestLogViewIsOneChronologicalListEachEventOnce`, `TestLogViewMergesByTimeNotBySource`,
-   `TestHeaderStartedUsesTheEarliestLine` and the `flight-multipoll` goldens in
-   `internal/app/flight/history_test.go` (its fixture is a control for one property: change-only
-   History and preflight-only log).
+   entries), and a state file written before this rule is compacted by the same rules in memory
+   when loaded (`engine.CompactHistory`, applied in `LoadState`; it reaches disk with the next
+   ordinary save). `Hooks.Progress` carries preflight and signing-wait lines only; a step's
+   outcome reaches a screen as a typed event — `Hooks.OnHistory(entry, state)`, called by the
+   Driver for each newly appended entry once the save carrying it has landed — which
+   `session.Controller` folds into the entry's snapshot (state History and the step row, never
+   `Snapshot.Log`) and the walk's own tick then replaces, so each event is on screen once and
+   still appears as it is saved, not when a whole `Step` returns. `flight.logView` merges the two
+   disjoint sources into ONE list ordered by time, stably, with plain step labels, follows its
+   newest line unless the operator has scrolled up, and the header's and the pane's "started"
+   share one origin (`flight.StartedAtWithLog`: the earliest line in either). Regression tests:
+   `TestHistoryRecordsChangesNotReobservations`, `TestHistoryStopRecordedWhenItIsNotTheLastEntry`,
+   `TestHistoryBlockedAgainRecorded`, `TestHistoryRepeatedActedIsKept` and
+   `TestCompactHistoryCollapsesLegacyNoise` in `internal/engine`;
+   `TestDriverReportsEachHistoryEntryAsItIsSaved` and `TestResumeDoesNotMirrorHistoryIntoProgress`
+   in `internal/service`; `TestStartReportsHistoryLiveAndTheTickReplacesIt` in
+   `internal/app/session`; `TestStartedHasOneOriginInHeaderAndPane` in `internal/app`;
+   `TestLogViewIsOneChronologicalListEachEventOnce`, `TestLogViewKeepsHistoryOrderForEqualTimes`,
+   `TestLogFollowsItsNewestLine` and the `flight-multipoll` goldens in
+   `internal/app/flight/history_test.go` (its fixture models what the engine really writes:
+   `acted` ×4, then one `already satisfied` per step and the wait once more, then nothing).
 
 ## 10. Maintaining This Document
 

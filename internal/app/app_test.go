@@ -495,18 +495,19 @@ func TestStartMsgBuildsFlightScreenOnSuccess(t *testing.T) {
 // adversarial reviews of this same commit found: the build goroutine plan.StartMsg/
 // deploy.StartMsg spawn used to close progressCh the instant startPromotion returned
 // (`defer close(progressCh)`) — on the wrong assumption that the channel's job ended with
-// preflight. But cmd/hoist's real driveFuncFor reuses the SAME progress callback for
-// engine.Drive's own per-step save hook (defect B/C: a long single Act streams into the log as
-// it happens, not only once the whole Drive call returns) — so the very first real drive call
-// after a successful build sent on an already-closed channel, and a send on a closed channel
-// panics unconditionally in Go; select/default only guards a full buffer, never a closed one.
-// No other test in this file could have caught it: every other fake Start/driveFn pair here
-// (stubDriveFn and friends) never calls progress from the driveFn side at all, so the bug's
-// actual trigger — the SAME closure called again, later, from a different goroutine, after the
-// build's own goroutine returned — never fired. This one does: the fake DriveFunc below calls
-// progress from a REAL DriveFunc, driven through the REAL plan.StartMsg → promotionBuiltMsg →
-// AdoptBuilt → driveCmd path, the same sequence a real cmd/hoist wiring drives — proving app.go
-// itself never closes the channel out from under a drive that is still going to use it.
+// preflight. But the Hooks built for that preflight are held by the Driver for its whole life: a
+// later Step calls Hooks.OnWaiting (the signing wait) and its saves call Hooks.OnHistory, both
+// sending on the SAME channel — so the first real drive call after a successful build sent on an
+// already-closed channel, and a send on a closed channel panics unconditionally in Go;
+// select/default only guards a full buffer, never a closed one. No other test in this file could
+// have caught it: every other fake Start/driveFn pair here (stubDriveFn and friends) never calls
+// a hook from the driveFn side at all, so the bug's actual trigger — the SAME hooks called again,
+// later, after the build's own goroutine returned — never fired. This one does: the fake
+// DriveFunc below calls progress from a REAL DriveFunc, driven through the REAL plan.StartMsg →
+// promotionBuiltMsg → AdoptBuilt → driveCmd path — proving app.go itself never closes the
+// channel out from under a drive that is still going to use it. (The channel now carries
+// preflight and signing-wait TEXT only; a step's outcome is a History entry, reported through
+// Hooks.OnHistory — see session's TestStartReportsHistoryLiveAndTheTickReplacesIt.)
 func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 	promo := testPromo{Start: func(_ context.Context, p gitops.Plan, _ startOpts, progress func(string)) (engine.PromotionState, session.Driver, error) {
 		// Preflight: exactly what svc.StartPromotion's own Hooks.Progress calls do.
@@ -514,11 +515,11 @@ func TestProgressSurvivesFromPreflightThroughDrive(t *testing.T) {
 		progress("claiming " + p.TargetEnv + " and checking for a conflicting promotion")
 		s := engine.PromotionState{ID: "abcd1234", SourceEnv: p.SourceEnv, TargetEnv: p.TargetEnv}
 		return s, funcDriver{StepFunc: func(context.Context) (service.Tick, error) {
-			// Drive: exactly what newDriverFor's own wrapped save does — call the SAME
+			// Drive: what a Step's signing wait does (Hooks.OnWaiting) — call the SAME
 			// progress closure the preflight above just used, from a call that only
 			// happens after the build goroutine that constructed it has already
 			// returned. This is the exact shape that panicked.
-			progress("branched: acted")
+			progress("waiting for signing approval")
 			s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: "acted"})
 			return service.Tick{State: s, Done: true}, nil
 		}}, nil

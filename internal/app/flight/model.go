@@ -270,6 +270,11 @@ func (m Model) Mirror(s session.Snapshot) Model {
 	} else {
 		m.errNotice = ""
 	}
+	if m.width > 0 && m.height > 0 {
+		// View lays out its own copy, so the RETAINED viewport must see new content here for
+		// layout's "was it at the bottom?" test to compare against what the operator last saw.
+		m = m.layout()
+	}
 	return m
 }
 
@@ -665,9 +670,16 @@ func (m Model) layout() Model {
 	// section and the "history" label above it are unconditional too.
 	sections++
 	fixed++ // the "history" label above the log
+	// The log follows its newest line: a viewport sitting at the bottom stays at the bottom when
+	// content arrives (or the pane resizes), so the operator watching a promotion sees the
+	// current event rather than the first screenful. One who has scrolled up keeps their place.
+	follow := m.log.AtBottom()
 	m.log.SetWidth(m.width - 2)
 	m.log.SetHeight(max(ui.BodyHeight(m.height, sections)-fixed, 3))
 	m.log.SetContent(m.logView())
+	if follow {
+		m.log.GotoBottom()
+	}
 	return m
 }
 
@@ -976,13 +988,7 @@ func (m Model) logView() string {
 // later moment than the oldest line in the log below it (preflight runs before any History
 // exists).
 func (m Model) startedAt() time.Time {
-	start := StartedAt(m.state)
-	for _, l := range m.buildLog {
-		if !l.At.IsZero() && (start.IsZero() || l.At.Before(start)) {
-			start = l.At
-		}
-	}
-	return start
+	return StartedAtWithLog(m.state, m.buildLog)
 }
 
 // notes is the transient notice and the last plumbing error, word-wrapped.

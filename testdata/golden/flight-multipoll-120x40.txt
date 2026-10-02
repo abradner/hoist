@@ -25,11 +25,11 @@
 │1m ago  PR            acted                                                                                           │
 │1m ago  CI            waiting: CI: 2/4 checks complete                                                                │
 │1m ago  branch        already satisfied: worktree already present                                                     │
+│1m ago  commit        already satisfied: commit already on the branch                                                 │
+│1m ago  push          already satisfied: branch already on origin                                                     │
+│1m ago  PR            already satisfied: PR #103 already open                                                         │
+│1m ago  CI            waiting: CI: 2/4 checks complete                                                                │
 │just now  CI            waiting: CI: 3/4 checks complete                                                              │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

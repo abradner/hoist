@@ -511,9 +511,9 @@ func (c Controller) Resume(id string) (Controller, BuildID, tea.Cmd, error) {
 	c = c.withEntry(e)
 	backend := c.backend
 	resumeCmd := func() tea.Msg {
-		// Hooks{Progress, OnWaiting} fixes FB-M2: a resumed drive now reports
-		// live log lines exactly as a freshly started one already did (service.Resume's own doc
-		// comment on ResumeOpts.Hooks).
+		// The same hooks a fresh Start gets: a resumed drive's signing-wait line and, above all,
+		// its OnHistory reports reach the entry live (Resume has no preflight, so Progress itself
+		// stays quiet — service.ResumeOpts' own doc comment).
 		d, err := backend.Resume(ctx, id, service.ResumeOpts{Hooks: startHooks(ch)})
 		return toBuiltMsg(build, e.gen, d, err)
 	}

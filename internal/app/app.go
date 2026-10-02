@@ -1108,6 +1108,8 @@ func summaryForSnapshot(s session.Snapshot) flight.Summary {
 	// listing (summaryFor's own path never sets this) — so the pane can say so
 	// (matrix.compactLine/expandedSections).
 	sum.Live = true
+	// "started" has one origin, shared with the flight header: preflight lines count too.
+	sum.StartedAt = flight.StartedAtWithLog(state, s.Log)
 	// Carried through even once ID is known, so a caller never has to branch on phase to decide
 	// which handle to use — matrix.ResumeMsg always has this session's own BuildID available for
 	// a still-Building entry, which has no promotion id yet for Resume(id) to look up:

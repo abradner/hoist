@@ -71,7 +71,10 @@ func TestRegistryKeysAreHonoured(t *testing.T) {
 				// Tall enough that the history section keeps a few rows rather than
 				// collapsing to "…" entirely (AGENTS.md §9 entry 10's own degrade-by-height).
 				m = notBusy(t, manyHistoryState()).SetSize(80, 18)
+				// The log opens on its newest line, so the keys that scroll DOWN start from the top.
 				switch e.Name {
+				case keys.PgDn.Name, keys.Down.Name, keys.End.Name:
+					m, _ = m.Update(uitest.KeyFor(keys.Home.Show))
 				case keys.PgUp.Name, keys.Home.Name:
 					m, _ = m.Update(uitest.KeyFor(keys.End.Show))
 				case keys.Up.Name:

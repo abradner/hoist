@@ -566,8 +566,12 @@ func TestLogScrollsByKeypress(t *testing.T) {
 		s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
 	}
 	m := NewAttached(stepping(s, false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	if !m.log.AtBottom() || m.log.YOffset() == 0 {
+		t.Fatalf("a log longer than its pane opens on its newest line: offset=%d", m.log.YOffset())
+	}
+	m = uitest.Keys(m, updateFn, "home")
 	if m.log.YOffset() != 0 {
-		t.Fatalf("log starts at the top: offset=%d", m.log.YOffset())
+		t.Fatalf("home did not reach the top: offset=%d", m.log.YOffset())
 	}
 	m = uitest.Keys(m, updateFn, "down", "down", "down")
 	if m.log.YOffset() != 3 {
@@ -588,6 +592,7 @@ func TestDUnboundDoesNotScrollTheLog(t *testing.T) {
 		s.History = append(s.History, engine.HistoryEntry{Step: engine.StepBranched, Detail: fmt.Sprintf("entry %d", i)})
 	}
 	m := NewAttached(stepping(s, false, nil), PollDurations{}).SetSize(80, 24).SetStyles(ui.NewStyles(true))
+	m = uitest.Keys(m, updateFn, "home")
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	if m.log.YOffset() != 0 {
 		t.Errorf("\"d\" scrolled the log: offset=%d, want 0", m.log.YOffset())
