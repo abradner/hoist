@@ -479,6 +479,164 @@ func TestFindInFlightDoesNotBlockAfterASupersededDirectDeploy(t *testing.T) {
 	}
 }
 
+// TestFindInFlightDoesNotBlockAfterALandedDirectDeployLosesItsWorktree is the service-level face
+// of engine's TestDirectModeLandedPromotionDoesNotNeedItsWorktree: the one-in-flight-per-env rule
+// observes a direct state through BranchedStep and CommittedStep, which read the worktree. With
+// the worktree gone — removed after landing, or cleared by hand — a finished direct deploy read
+// as stopped at Branched and refused every later promotion into its env. The state here is saved
+// by the drive that landed it and loaded back by FindInFlight, exactly as in production.
+func TestFindInFlightDoesNotBlockAfterALandedDirectDeployLosesItsWorktree(t *testing.T) {
+	fx := newInflightFixture(t)
+
+	r, err := gitops.Discover(fx.clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath, err := engine.StatePath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID:            id,
+		RepoFullName:  "example/gitops",
+		SourceEnv:     plan.SourceEnv,
+		TargetEnv:     plan.TargetEnv,
+		Branch:        engine.BranchName(plan.TargetEnv, id),
+		CloneDir:      fx.clone,
+		WorktreeDir:   wt,
+		Base:          "main",
+		Direct:        true,
+		Edits:         plan.Edits,
+		CommitMessage: engine.RenderCommitMessage(id, plan),
+	}
+	if err := engine.Drive(context.Background(), engine.DirectSteps(git.Exec{}, nil, true, nil), s, nil); err != nil {
+		t.Fatalf("driving the direct deploy: %v", err)
+	}
+	if err := engine.SaveState(statePath, s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive control: with the worktree still there the deploy is already not in flight, so
+	// what the second call below proves is about the worktree and nothing else.
+	if conflict, _, err := fx.svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id"); err != nil || conflict != nil {
+		t.Fatalf("fixture precondition: a landed direct deploy should not be in flight (conflict=%v err=%v)", conflict, err)
+	}
+
+	if err := (git.Exec{}).RemoveWorktree(context.Background(), fx.clone, wt); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, fx.clone, "branch", "-D", s.Branch)
+
+	conflict, status, err := fx.svc.FindInFlight(context.Background(), "example/gitops", "app-production", "a-brand-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict != nil {
+		t.Fatalf("a landed direct deploy whose worktree is gone must not refuse every later promotion into app-production — reported stuck at %s: %+v",
+			status.Step, status.Observation)
+	}
+}
+
+// TestResumingAMergedPromotionSavedAtTheMergeDoesNotNeedItsWorktree is the PR-path face of the
+// same rule, and the one shape DriveStatus's own merge probe does not cover: that probe runs only
+// when the recorded Phase is PAST the merge, and a promotion can be saved at exactly "merged" —
+// killed between the merge and the first Argo step, or its Argo client erroring on the first
+// observation. Resuming one of those walked from Branched. With the worktree gone it rebuilt one
+// from the base tip and CommittedStep then blocked on whatever unrelated commit was there —
+// permanently, since every later resume did the same.
+func TestResumingAMergedPromotionSavedAtTheMergeDoesNotNeedItsWorktree(t *testing.T) {
+	fx := newInflightFixture(t)
+
+	r, err := gitops.Discover(fx.clone, "cluster/apps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := engine.DeriveID("example/gitops", plan)
+	wt, err := engine.WorktreeDir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argoApps, err := engine.ArgoAppNames(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editApps, err := engine.EditApps(r, plan.TargetEnv, plan.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &engine.PromotionState{
+		ID: id, RepoFullName: "example/gitops", SourceEnv: plan.SourceEnv, TargetEnv: plan.TargetEnv,
+		Branch: engine.BranchName(plan.TargetEnv, id), CloneDir: fx.clone, WorktreeDir: wt, Base: "main",
+		Edits: plan.Edits, CommitMessage: engine.RenderCommitMessage(id, plan),
+		PRTitle: engine.PRTitle(plan), PRBody: engine.RenderPRBody(id, plan),
+		Approval: "auto", CINone: "green",
+		ArgoNamespace: "argocd", ArgoApps: argoApps, EditApps: editApps,
+	}
+	f, err := fx.svc.deps.Forge("example/gitops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _, err := fx.svc.deps.Argo("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro, _, err := fx.svc.deps.Rollout("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := git.Exec{}
+	// Through the merge and no further: the walk ends with Phase recorded as exactly "merged".
+	if err := engine.Drive(context.Background(), engine.CoreSteps(g, f, nil), s, nil); err != nil {
+		t.Fatalf("driving to merged: %v", err)
+	}
+	if s.Phase != engine.StepMerged {
+		t.Fatalf("fixture precondition: Phase = %s, want %s", s.Phase, engine.StepMerged)
+	}
+
+	// The worktree and local branch go, and somebody else's commit lands on the base.
+	if err := g.RemoveWorktree(context.Background(), fx.clone, wt); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, fx.clone, "branch", "-D", s.Branch)
+	origin := strings.TrimSpace(outGitHost(t, fx.clone, "remote", "get-url", "origin"))
+	other := filepath.Join(t.TempDir(), "someone-else")
+	runGitHost(t, "", "clone", "-q", origin, other)
+	if err := os.WriteFile(filepath.Join(other, "UNRELATED.md"), []byte("unrelated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitHost(t, other, "add", "UNRELATED.md")
+	runGitHost(t, other, "commit", "-q", "-m", "an unrelated later commit")
+	runGitHost(t, other, "push", "-q", "origin", "main")
+
+	err = engine.Drive(context.Background(), engine.AllSteps(g, f, a, ro, nil), s, nil)
+	var blocked *engine.BlockedError
+	if errors.As(err, &blocked) {
+		t.Fatalf("resuming a merged promotion must not block on a step it finished before merging: blocked at %s: %s", blocked.Step, blocked.Reason)
+	}
+	if _, statErr := os.Lstat(wt); !os.IsNotExist(statErr) {
+		t.Fatalf("resuming a merged promotion rebuilt its worktree at %s (stat err = %v)", wt, statErr)
+	}
+	if _, exists, lerr := g.LsRemoteBranch(context.Background(), fx.clone, "origin", s.Branch); lerr != nil || exists {
+		t.Fatalf("resuming a merged promotion re-pushed %s to origin: exists=%v err=%v", s.Branch, exists, lerr)
+	}
+	if idx := map[engine.StepName]bool{engine.StepArgoRefreshed: true, engine.StepArgoSynced: true, engine.StepRolledOut: true}; !idx[s.Phase] {
+		t.Fatalf("the resume should have moved on to the convergence steps, Phase = %s (err = %v)", s.Phase, err)
+	}
+}
+
 // claimThenWriteConflictStore wraps a real StateStore (the FileStore an inflightFixture already
 // uses, per AGENTS.md's own design doc: a claim/race test must use the real, atomic filesystem
 // Claim) so that the moment its embedded Claim returns successfully, a conflicting state file for

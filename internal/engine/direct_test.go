@@ -793,3 +793,157 @@ func TestDirectModeJudgesEachOccurrenceNotTheWholeFile(t *testing.T) {
 		})
 	}
 }
+
+// removePromotionWorktree does to a promotion's worktree what cleanup after landing does (and
+// what an operator clearing a cache directory by hand has always been able to do): deregisters it
+// from the clone and deletes the directory and the local branch that lived in it.
+func removePromotionWorktree(t *testing.T, s *PromotionState) {
+	t.Helper()
+	if err := (git.Exec{}).RemoveWorktree(ctx(), s.CloneDir, s.WorktreeDir); err != nil {
+		t.Fatalf("removing the worktree: %v", err)
+	}
+	runHost(t, s.CloneDir, "branch", "-D", s.Branch)
+	if _, err := os.Stat(s.WorktreeDir); !os.IsNotExist(err) {
+		t.Fatalf("fixture precondition: %s should be gone, stat err = %v", s.WorktreeDir, err)
+	}
+}
+
+// TestDirectModeLandedPromotionDoesNotNeedItsWorktree is the property every later cleanup of a
+// landed promotion's worktree rests on. A direct promotion is observed through BranchedStep and
+// CommittedStep, which both read the worktree, and — unlike the PR path, where MergedStep is
+// probed first — nothing short-circuited them once the push had landed. So a landed direct
+// promotion whose worktree was gone read as not done, which is the same wedge as #166 by another
+// route: FindInFlight observes a direct state through exactly this list and refused every later
+// promotion into that env.
+//
+// The state is the one a state file would hold (CommitSHA and ExpectedBlobs persisted by the
+// drive that landed it), not a freshly derived one: a state with no CommitSHA has nothing to
+// prove it ever committed, and is the negative control below.
+func TestDirectModeLandedPromotionDoesNotNeedItsWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		afterLand func(t *testing.T, fx fixture)
+	}{
+		{name: "intact at the base tip", afterLand: func(*testing.T, fixture) {}},
+		{name: "superseded by a later deploy", afterLand: func(t *testing.T, fx fixture) {
+			supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFixture(t)
+			wt := filepath.Join(t.TempDir(), "wt")
+			g := git.Exec{}
+
+			s := newState(fx, wt)
+			s.Direct = true
+			if err := Drive(ctx(), DirectSteps(g, nil, true, nil), s, nil); err != nil {
+				t.Fatalf("landing the direct promotion: %v", err)
+			}
+			tc.afterLand(t, fx)
+			removePromotionWorktree(t, s)
+
+			done, last, err := ObserveAll(ctx(), ObserveSteps(s, g, nil, nil, nil, nil), s)
+			if err != nil {
+				t.Fatalf("ObserveAll: %v", err)
+			}
+			if !done {
+				t.Fatalf("a landed direct promotion must read done without its worktree; stopped at %s: %+v", last.Step, last.Observation)
+			}
+			sdone, statuses, err := Status(ctx(), ObserveSteps(s, g, nil, nil, nil, nil), s)
+			if err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			if !sdone {
+				t.Fatalf("Status must agree with ObserveAll; statuses = %+v", statuses)
+			}
+
+			// Driving it again (hoist resume) must neither fail nor bring the worktree back.
+			if err := Drive(ctx(), DirectSteps(g, nil, true, nil), s, nil); err != nil {
+				t.Fatalf("re-driving a landed direct promotion without its worktree: %v", err)
+			}
+			if _, err := os.Stat(wt); !os.IsNotExist(err) {
+				t.Fatalf("re-driving a landed promotion recreated its worktree at %s (stat err = %v)", wt, err)
+			}
+		})
+	}
+}
+
+// TestDirectModeUnlandedPromotionStillNeedsItsWorktree is the control for the test above: the
+// short-circuit is earned by the push having landed, never by a commit merely existing. A
+// promotion that committed but never pushed, and then lost its worktree, is not done, and driving
+// it rebuilds the worktree and lands it.
+func TestDirectModeUnlandedPromotionStillNeedsItsWorktree(t *testing.T) {
+	fx := newFixture(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	g := git.Exec{}
+
+	s := newState(fx, wt)
+	s.Direct = true
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if err := (CommittedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	if s.CommitSHA == "" {
+		t.Fatal("fixture precondition: expected a commit")
+	}
+	removePromotionWorktree(t, s)
+
+	done, last, err := ObserveAll(ctx(), ObserveSteps(s, g, nil, nil, nil, nil), s)
+	if err != nil {
+		t.Fatalf("ObserveAll: %v", err)
+	}
+	if done {
+		t.Fatalf("a promotion that never pushed is not done, worktree or no worktree: %+v", last)
+	}
+	if last.Step != StepBranched {
+		t.Fatalf("stopped at %s, want %s: the missing worktree is what is unsatisfied", last.Step, StepBranched)
+	}
+
+	if err := Drive(ctx(), DirectSteps(g, nil, true, nil), s, nil); err != nil {
+		t.Fatalf("driving an unlanded promotion must rebuild its worktree and land it: %v", err)
+	}
+	tip, ok, err := g.LsRemoteBranch(ctx(), fx.cloneDir, "origin", "main")
+	if err != nil || !ok {
+		t.Fatalf("reading origin/main: %v (ok=%v)", err, ok)
+	}
+	if tip != s.CommitSHA {
+		t.Fatalf("origin/main = %s, want this promotion's commit %s", tip, s.CommitSHA)
+	}
+}
+
+// TestDirectModeLandingIsNotInferredFromAStateWithNothingToJudgeBy: DirectPushedStep.Observe
+// judges a moved base by content, and assumes CommittedStep already recorded the blobs and edits
+// to judge it by. Asked out of order about a state that records a commit but neither — a
+// truncated or hand-written state file — its content check has nothing to compare and answers
+// "intact". The guard must not turn that into "landed, worktree not needed".
+func TestDirectModeLandingIsNotInferredFromAStateWithNothingToJudgeBy(t *testing.T) {
+	fx := newFixture(t)
+	g := git.Exec{}
+	seed, ok, err := g.RevParse(ctx(), fx.cloneDir, "HEAD")
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	// origin/main moves on, so the recorded commit is in its history but is not its tip.
+	supersedeBase(t, fx, "ghcr.io/example/app:v3@sha256:"+strings.Repeat("2", 64))
+
+	s := newState(fx, filepath.Join(t.TempDir(), "never-created"))
+	s.Direct = true
+	s.CommitSHA = seed
+	s.Edits = nil
+	s.ExpectedBlobs = nil
+	obs, err := (DirectPushedStep{Git: g}).Observe(ctx(), &PromotionState{CloneDir: s.CloneDir, Base: s.Base, CommitSHA: seed, Direct: true})
+	if err != nil || !obs.Satisfied {
+		t.Fatalf("fixture precondition: the bare landing step is expected to be vacuously satisfied here (obs=%+v err=%v) — if it no longer is, this test's premise is gone", obs, err)
+	}
+
+	guarded := guardLanded(BranchedStep{Git: g}, DirectPushedStep{Git: g})
+	got, err := guarded.Observe(ctx(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Satisfied {
+		t.Fatalf("a state with no edits or blobs on record proves no landing: %+v", got)
+	}
+}

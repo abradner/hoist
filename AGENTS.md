@@ -154,6 +154,20 @@ bytes, since a file with two occurrences of one image repo (a Deployment and its
 a whole-file predicate on the strength of either one, and a false *intact* here silently retires
 the one-in-flight-per-env rule (#167).
 
+**Landing is self-contained proof on both paths, so nothing after it may depend on the
+worktree or the promotion's own branch.** `MergedStep.Observe` (PR path) and
+`DirectPushedStep.Observe` (direct path) each answer from origin and the clone's object database
+alone. `landedGuard` (`internal/engine/landed_guard.go`) wraps every step a promotion needs only
+*before* it lands — `BranchedStep`, `CommittedStep`, and on the PR path `PushedStep` — in every
+step list, and reports the wrapped step satisfied once the landing step is, asking the wrapped
+step first, so an ordinary walk pays one extra landing observation at most (the PR path's push
+step, once). `ObserveAll`/`Status`/`DriveStatus` also probe
+`MergedStep` up front, but that is an optimisation with a hole — `DriveStatus`'s probe runs only
+when the recorded `Phase` is already past the merge — and the guard, not the probe, is what makes
+the property hold. A new step that reads `WorktreeDir`, the local branch or the remote branch
+goes before the landing step and inside the guard: a landed promotion must read done, and must
+resume without rebuilding anything, whether or not its worktree still exists (§9 entry 17).
+
 *Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
 `ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
 superseded promotion will never see again — so such a promotion stops blocking its env (which is
@@ -1083,6 +1097,31 @@ test lives** (if one exists).
    `internal/app/kitty_decode_test.go`, which decodes the extended CSI-u form a terminal sends
    once `ReportAlternateKeys` is actually granted and asserts the shifted punctuation comes out
    right.
+
+17. **A step that observes its own scratch space makes "done" depend on never tidying up.** What
+   happened: a direct promotion is observed through `BranchedStep` and `CommittedStep`, which
+   read the promotion's worktree, and nothing short-circuited them once the push had landed.
+   Deleting a landed direct promotion's worktree (by hand, which was always possible, or by the
+   cleanup this entry was written for) made it read as stopped at Branched: `FindInFlight` then
+   refused every later promotion into that env — #166's wedge by another route. The PR path had
+   the same hole in a narrower place: `DriveStatus` probes `MergedStep` first, but only when the
+   recorded `Phase` is already *past* the merge, so a promotion saved at exactly `merged` walked
+   from the top on resume, rebuilt its worktree from the base tip and blocked in `CommittedStep`
+   on whatever unrelated commit was there (found by an independent review of the cleanup stack,
+   before it was pushed — the author had traced the same path and called it "messy but
+   converging"). Root cause: the proof that a promotion finished lived partly in a cache
+   directory, which is the one place §4.1 says truth is never kept, and an up-front probe gated
+   on a hint is an optimisation, not a guarantee. Rule: once the landing step is satisfied from
+   the remote, no step asks the local worktree or the promotion's own branch anything —
+   `landedGuard` enforces it per step, in every list — and removing a worktree is only ever done
+   on top of it. A probe that reads a landing step out of order does so on a copy of the state
+   and only when `engine.LandingObservable` says there is something to judge. Regression tests:
+   `TestDirectModeLandedPromotionDoesNotNeedItsWorktree`, its control
+   `TestDirectModeUnlandedPromotionStillNeedsItsWorktree`, `TestLandedGuard` and
+   `TestDirectModeLandingIsNotInferredFromAStateWithNothingToJudgeBy` in `internal/engine`;
+   `TestFindInFlightDoesNotBlockAfterALandedDirectDeployLosesItsWorktree` and
+   `TestResumingAMergedPromotionSavedAtTheMergeDoesNotNeedItsWorktree` in
+   `internal/service/inflight_test.go`.
 
 ## 10. Maintaining This Document
 
