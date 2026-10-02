@@ -441,6 +441,43 @@ hoist resume <id> --override-ci-none
 
 — and `block` has no override at all: fix why CI did not run.
 
+*A check that is not CI.* Some things report as checks without being CI — GitHub runs Copilot's
+review as a check-run named `copilot-pull-request-reviewer`, so a repo with three real checks
+showed `CI: 3/4 checks complete` and waited on the reviewer. List such names per repo:
+
+```yaml
+repos:
+  - path: ~/src/my-gitops
+    ci: { ignore: [copilot-pull-request-reviewer] }
+```
+
+Match is exact, by name, across both check-runs and commit statuses: every check bearing that
+name is ignored, and the literal `(unnamed check)` is matchable. Ignored checks are
+excluded from the count and from failure and skipped blocking, and the step says so:
+`CI: 2/3 checks complete · ignoring copilot-pull-request-reviewer` while something is pending,
+then `CI: 3/3 checks complete; settling until 14:02:31 · ignoring copilot-pull-request-reviewer`
+during the settle window below, then
+`CI green (3 checks) · ignoring copilot-pull-request-reviewer`. Nothing is ignored by
+default, and an entry that matches no reported check is not listed. If every reported check is
+ignored, that counts as *no checks reported* and `ci.none` decides. Like `ci.none`, the list is
+frozen into a promotion when it starts: a config edit does not reach one already in flight. To
+apply a new list, `hoist abandon <id> --confirm-abandon=<id>` that promotion and start again. Every CI detail (waiting,
+green, blocked, and the `ci.none` outcomes) names what was ignored.
+
+*Settling.* "Every check I can see is finished" is not "CI is finished": a workflow that has not
+yet created its check-run is invisible to the rollup, and a slow one can fail after the rest went
+green. So a complete rollup is held in Waiting until the PR is `ci.settle` old (default `30s`,
+`settle: 0s` turns it off — your explicit choice, and the one thing here that makes the gate
+weaker). A check that appears and fails inside the window Blocks as usual. The window is
+anchored at the PR opening, so it covers the first wave of checks only: a check created later (a
+job behind `needs:`, a workflow chained with `workflow_run`, a late bot status) is not waited for.
+Envs with comment approval re-observe CI on every pass up to the merge, and your branch
+protection's required checks are the authoritative guard, not this window. The time shown is your
+local clock. The detail names the
+moment it ends, not a ticking counter, so History records it once. Like `ci.none`, it is frozen
+into a promotion when it starts; a promotion begun before the setting existed has no settle
+window, which is the gate it started under.
+
 **Approval.** `` waiting for `hoist approve <id>` from an approver `` — someone in the repo's
 `approvers` list (or, with `collaborators: true`, anyone with write access) comments exactly
 

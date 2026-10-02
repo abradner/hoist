@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // ErrStaleHead is returned (wrapped) by MergePR when the PR's current head sha no longer
@@ -68,9 +70,70 @@ type PR struct {
 // ran" at this layer. CIGreenStep therefore treats any Skipped>0 as blocking, the same as
 // Failure>0 (AGENTS.md §2 principle 5: "warn, don't block, except where the runbook blocks" — a
 // required check that never ran is exactly that exception). SkippedNames mirrors FailedNames.
+//
+// Ignored names every check the caller's ignore list (repos[].ci.ignore) excluded: an ignored
+// check is counted in none of Total/Pending/Success/Failure/Skipped, so a failing or hung
+// ignored check can neither block nor satisfy the gate, and it is reported here so the step can
+// say what it did not wait for (nothing is skipped silently). Only names that matched a check
+// that was actually reported appear — an ignore entry matching nothing is not listed.
 type CheckSummary struct {
 	Total, Pending, Success, Failure, Skipped int
 	FailedNames, SkippedNames                 []string
+	Ignored                                   []string
+}
+
+// CheckState is one reported check's classification, before it is counted.
+type CheckState int
+
+// The CheckState values; the trailing comments say what each one covers.
+const (
+	CheckPending CheckState = iota // not yet complete (a check-run not `completed`, a `pending` status)
+	CheckSuccess                   // success or neutral
+	CheckSkipped                   // a check-run that concluded `skipped`
+	CheckFailure                   // any other conclusion, or an unrecognised status state
+)
+
+// Check is one check-run or commit status as an adaptor saw it: its name (a check-run's name or
+// a status's context) and classified state.
+type Check struct {
+	Name  string
+	State CheckState
+}
+
+// Summarize folds checks into a CheckSummary, excluding every check whose Name equals an entry
+// of ignore exactly. It is the one place checks are counted, shared by the GitHub adaptor and
+// the fake so the ignore semantics cannot drift between them. Every name returned goes through
+// redact.Strings: a check's name is upstream text nothing in hoist wrote.
+func Summarize(checks []Check, ignore []string) CheckSummary {
+	skip := make(map[string]bool, len(ignore))
+	for _, n := range ignore {
+		skip[n] = true
+	}
+	var s CheckSummary
+	seen := map[string]bool{}
+	for _, c := range checks {
+		if skip[c.Name] {
+			if !seen[c.Name] {
+				seen[c.Name] = true
+				s.Ignored = append(s.Ignored, redact.Strings(c.Name))
+			}
+			continue
+		}
+		s.Total++
+		switch c.State {
+		case CheckPending:
+			s.Pending++
+		case CheckSuccess:
+			s.Success++
+		case CheckSkipped:
+			s.Skipped++
+			s.SkippedNames = append(s.SkippedNames, redact.Strings(c.Name))
+		default:
+			s.Failure++
+			s.FailedNames = append(s.FailedNames, redact.Strings(c.Name))
+		}
+	}
+	return s
 }
 
 // Comment is one issue/PR comment. AuthorType is the GitHub account "type" of the commenter
@@ -158,7 +221,7 @@ type Forge interface {
 	GetPR(ctx context.Context, number int) (PR, bool, error)
 	// Checks reports the check-run rollup for sha. Stubbed/minimal is fine for M3; M4 extends
 	// it into a gate.
-	Checks(ctx context.Context, sha string) (CheckSummary, error)
+	Checks(ctx context.Context, sha string, ignore []string) (CheckSummary, error)
 	// Comments lists comments on prNumber posted at or after since. Stubbed/minimal is fine
 	// for M3; M4 scans these for the approval magic comment.
 	Comments(ctx context.Context, prNumber int, since time.Time) ([]Comment, error)

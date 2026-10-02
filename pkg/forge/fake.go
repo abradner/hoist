@@ -31,6 +31,11 @@ type Fake struct {
 	// permissions hiccup a caller must retry rather than treat as authoritative absence).
 	ChecksBySHA map[string]CheckSummary
 	ChecksErr   error
+	// NamedChecksBySHA configures Checks with individual named checks, folded through Summarize
+	// with the caller's ignore list exactly as the real adaptor does; it takes precedence over
+	// ChecksBySHA for a sha present in both. ChecksBySHA's pre-folded summaries cannot be
+	// filtered, so the ignore list only reaches this one.
+	NamedChecksBySHA map[string][]Check
 	// CommentsByPR and CommentsErr configure Comments. AddComment is the intended way tests
 	// populate CommentsByPR (thread-safe); the field itself may also be set directly before any
 	// concurrent use begins.
@@ -199,12 +204,15 @@ func (f *Fake) GetPR(_ context.Context, number int) (PR, bool, error) {
 
 // Checks implements Forge: sha's configured CheckSummary (ChecksBySHA), or the zero value
 // (no checks reported) when nothing was configured for it.
-func (f *Fake) Checks(_ context.Context, sha string) (CheckSummary, error) {
+func (f *Fake) Checks(_ context.Context, sha string, ignore []string) (CheckSummary, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, "Checks "+sha)
 	if f.ChecksErr != nil {
 		return CheckSummary{}, f.ChecksErr
+	}
+	if named, ok := f.NamedChecksBySHA[sha]; ok {
+		return Summarize(named, ignore), nil
 	}
 	return f.ChecksBySHA[sha], nil
 }
