@@ -546,6 +546,8 @@ hoist promotions --archived           # also list what's already been archived (
 hoist resume <id>             # continue one from wherever it actually is
 hoist resume --env <target>   # the same, for the one non-terminal promotion targeting that env
 hoist abandon <id> --confirm-abandon=<id>   # retire one that never landed — not a rollback
+hoist gc --dry-run            # list leftover worktrees, branches and cache entries; removes nothing
+hoist gc                      # remove them
 ```
 
 `hoist promotions` also retires what it finds: a promotion it re-observes as terminal — done —
@@ -573,6 +575,22 @@ whose recorded paths are not the ones its own id names is refused ("not cleaned 
 than followed. In the TUI a removal the in-flight pane's own listing makes, and each refusal
 once, is an entry in the activity log (`l`); a promotion this session is driving is tidied as it
 lands, without a separate entry (#249).
+
+`hoist gc` sweeps what that leaves and what older versions left. It does the same landed-promotion
+cleanup for every state file, then removes *orphaned* worktrees — a directory under
+`$XDG_CACHE_HOME/hoist/worktrees` that no live state file names, which is what every abandoned
+promotion left behind before abandon cleaned up after itself — and registry cache entries
+(`$XDG_CACHE_HOME/hoist/registry`) nothing has read for 90 days. An orphan has no state file to
+re-observe, so it is removed only when it is unmistakably hoist's own: its name is a promotion
+id, it is a registered worktree of a configured clone on that id's `hoist/<env>/<id>` branch, and
+`git status` in it is clean. A commit that exists only on that branch does not save it — that is
+what an abandoned promotion looks like, and why orphans are never removed automatically. Anything
+else under that directory is kept and named with the reason. Run `--dry-run` first: it makes the
+same checks and prints the same lines, worded "would", and removes nothing (it does observe, so
+origin's base branch is fetched, as on any listing). `gc` never touches a state file; retention
+(above) archives those. It exits non-zero if something could not be checked or removed, as
+distinct from deliberately kept. It works from the config file's `repos[]`, like
+`hoist promotions`. There is no TUI key for it (#246).
 
 On the matrix, `tab` then `enter` on the pane does the same for what it lists, and `shift+x`
 there abandons the one under the cursor behind a confirm. A finished promotion leaves the pane;
