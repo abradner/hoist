@@ -69,11 +69,11 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 func gcSummary(rep service.GCReport, dryRun bool) string {
 	incomplete := ""
 	if n := len(rep.Failed); n > 0 {
-		incomplete = fmt.Sprintf("; sweep incomplete — %d could not be checked", n)
+		incomplete = fmt.Sprintf("; sweep incomplete — %d could not be checked or removed", n)
 	}
 	switch {
 	case len(rep.Removed) == 0 && len(rep.Failed) > 0:
-		return fmt.Sprintf("sweep incomplete — %d could not be checked; nothing was removed", len(rep.Failed))
+		return fmt.Sprintf("sweep incomplete — %d could not be checked or removed; nothing was removed", len(rep.Failed))
 	case len(rep.Removed) == 0:
 		return "nothing to remove"
 	case dryRun:

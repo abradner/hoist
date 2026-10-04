@@ -109,11 +109,11 @@ func TestGCSummaryDoesNotClaimADecisionItDidNotMake(t *testing.T) {
 	}{
 		{"nothing there", service.GCReport{}, false, "nothing to remove"},
 		{"only kept", service.GCReport{Kept: []string{"k"}}, false, "nothing to remove"},
-		{"only failed", service.GCReport{Failed: []string{"f", "g"}}, false, "sweep incomplete — 2 could not be checked; nothing was removed"},
+		{"only failed", service.GCReport{Failed: []string{"f", "g"}}, false, "sweep incomplete — 2 could not be checked or removed; nothing was removed"},
 		{"removed", service.GCReport{Removed: []string{"r"}}, false, "1 removed"},
-		{"removed and failed", service.GCReport{Removed: []string{"r"}, Failed: []string{"f"}}, false, "1 removed; sweep incomplete — 1 could not be checked"},
+		{"removed and failed", service.GCReport{Removed: []string{"r"}, Failed: []string{"f"}}, false, "1 removed; sweep incomplete — 1 could not be checked or removed"},
 		{"dry run", service.GCReport{Removed: []string{"r", "s"}}, true, "2 to remove — nothing was touched; run `hoist gc` to remove them"},
-		{"dry run and failed", service.GCReport{Removed: []string{"r"}, Failed: []string{"f"}}, true, "1 to remove — nothing was touched; run `hoist gc` to remove them; sweep incomplete — 1 could not be checked"},
+		{"dry run and failed", service.GCReport{Removed: []string{"r"}, Failed: []string{"f"}}, true, "1 to remove — nothing was touched; run `hoist gc` to remove them; sweep incomplete — 1 could not be checked or removed"},
 	} {
 		if got := gcSummary(tc.rep, tc.dryRun); got != tc.want {
 			t.Errorf("%s: gcSummary = %q, want %q", tc.name, got, tc.want)

@@ -72,7 +72,8 @@ func TestLandedGuard(t *testing.T) {
 		{"not landed: inner's own answer stands", "c1", unsatisfied, notLanded, false, false, false, 1},
 		{"not landed: inner's block stands", "c1", blocked, notLanded, false, true, false, 1},
 		{"not landed: inner's error stands", "c1", failing, notLanded, false, false, true, 1},
-		{"landing probe fails: inner's answer stands", "c1", unsatisfied, landingFails, false, false, false, 1},
+		// Could not ask is not "not landed": the wrapped step's answer would license an Act.
+		{"landing probe fails: an error, not the inner's answer", "c1", unsatisfied, landingFails, false, false, true, 1},
 		{"no commit on record: nothing could have landed, nothing is asked", "", unsatisfied, landedAs(""), false, false, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,11 +185,11 @@ func TestWalkersDoNotAskAgainAfterTheirOwnProbe(t *testing.T) {
 				}
 				// The up-front probe, plus the walk reaching MergedStep in its own turn only if it
 				// got that far; never an ask on the guard's behalf.
+				// One ask, the walker's own probe. When it failed the walk stops at the guarded
+				// step with that failure rather than acting and reaching MergedStep again.
 				want := 1
-				if walker == "DriveStatus" && tc.fails {
-					// Branched acts and the walk reaches MergedStep in its own turn; a probe that
-					// failed is not reused there, so that turn is a second, legitimate ask.
-					want = 2
+				if tc.fails && acted != 0 {
+					t.Fatalf("%s: a step Acted after the landing probe failed", walker)
 				}
 				if calls != want {
 					t.Fatalf("%s asked the landing step %d times, want %d: the guard asked again after the probe", walker, calls, want)
@@ -247,17 +248,35 @@ func TestLandedGuardDoesNotActOnAFailedLookupForAPromotionOnRecordAsLanded(t *te
 			} else {
 				_, _, err = Status(context.Background(), steps, s)
 			}
-			if err == nil {
-				t.Fatal("a landed promotion whose landing could not be confirmed must surface as an error, not as stopped at Branched")
+			var unknown *LandingUnknownError
+			if !errors.As(err, &unknown) {
+				t.Fatalf("err = %v (%T): a promotion whose landing could not be confirmed must surface as LandingUnknownError, not as stopped at Branched", err, err)
 			}
 		})
 	}
 
-	// Control: a promotion never seen to land is still on its way, and its steps act as before
-	// whatever the forge is doing — the lookup is a short-circuit there, not a precondition.
-	t.Run("never recorded as landed", func(t *testing.T) {
+	// The state file's record of landing plays no part: a promotion can land without its state
+	// file saying so (merged by hand; killed between the merge and the save), and a listing
+	// cleans up from its own observation without saving anything.
+	t.Run("not recorded as landed", func(t *testing.T) {
 		acted = 0
 		s := &PromotionState{CommitSHA: "c1", Base: "main"}
+		_, err := guardLanded(unsatisfied, landingFails).Observe(context.Background(), s)
+		var unknown *LandingUnknownError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("err = %v, want a *LandingUnknownError whatever the state records", err)
+		}
+		steps := []Step{guardLanded(unsatisfied, landingFails), landingFails, after}
+		s.Phase = StepPROpened
+		if _, _, err := DriveStatus(context.Background(), steps, s, nil); !Retryable(err) || acted != 0 {
+			t.Fatalf("DriveStatus: err=%v acted=%d, want a retryable error and no Act", err, acted)
+		}
+	})
+
+	// Control: with nothing committed there is nothing that could have landed, and the forge
+	// is not consulted at all — a first run proceeds whatever the forge is doing.
+	t.Run("nothing committed yet", func(t *testing.T) {
+		s := &PromotionState{Base: "main"}
 		obs, err := guardLanded(unsatisfied, landingFails).Observe(context.Background(), s)
 		if err != nil || obs.Satisfied {
 			t.Fatalf("the wrapped step's own answer must stand: obs=%+v err=%v", obs, err)

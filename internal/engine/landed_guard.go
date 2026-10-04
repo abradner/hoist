@@ -58,17 +58,24 @@ func (l landedGuard) Observe(ctx context.Context, s *PromotionState) (Observatio
 	if err == nil && cleanlySatisfied(obs) {
 		return obs, nil
 	}
-	switch answer, lerr := l.landed(ctx, s); {
-	case answer == landingYes:
+	switch answer, lerr := l.landed(ctx, s); answer {
+	case landingYes:
 		return Observation{Satisfied: true, Detail: "already landed on origin/" + s.Base + "; no longer needed"}, nil
-	case answer == landingUnknown && s.LandedSHA() != "":
-		// The promotion is on record as landed and the landing step could not be asked. The
-		// wrapped step is unsatisfied only because its worktree or branch was tidied away, so
-		// its own answer would have the walk Act — rebuild the worktree, re-push the branch —
-		// on the strength of one failed lookup. Not knowing is an error to retry, never a
-		// licence to act. (The recorded sha is a hint about which mistake is the dangerous
-		// one, not evidence: a promotion with none recorded has never been seen to land, and
-		// for it the wrapped step's answer is the ordinary one.)
+	case landingUnknown:
+		// The landing step could not be asked. The wrapped step may be unsatisfied only because
+		// its worktree or branch was tidied away after landing, and its own answer would then
+		// have the walk Act — rebuild the worktree, re-push a merged branch — on the strength of
+		// one failed lookup. Not knowing is an error to retry, never a licence to act.
+		//
+		// This holds whatever the state file records. An earlier version acted on "unknown"
+		// unless the state recorded a landed sha, and a promotion can land without its state
+		// file ever saying so: merged on the forge by hand, or the process killed between the
+		// merge and the save — and a listing cleans up from its own observation without saving
+		// anything. Using the record to decide which answer to trust is what §4.1 rules out.
+		//
+		// The cost is to a promotion still on its way: with the forge or origin unreachable it
+		// waits a poll instead of pushing (PR path), or instead of rebuilding a worktree someone
+		// removed. Both need the same remote on their very next step.
 		return Observation{}, &LandingUnknownError{Step: l.landing.Name(), Err: lerr}
 	}
 	return obs, err

@@ -189,9 +189,11 @@ the property hold. A new step that reads `WorktreeDir`, the local branch or the 
 goes before the landing step and inside the guard: a landed promotion must read done, and must
 resume without rebuilding anything, whether or not its worktree still exists (§9 entry 17). The
 landing answer is three-valued for the same reason "did this land" is: *landed*, *not landed*,
-and *could not be asked*. For a promotion on record as landed, the third is a retryable error
-(`engine.LandingUnknownError`), never the wrapped step's own "not satisfied" — one failed forge
-lookup during the rollout wait must not rebuild a worktree and re-push a merged branch. And a
+and *could not be asked*. The third is a retryable error (`engine.LandingUnknownError`), never
+the wrapped step's own "not satisfied" — one failed forge lookup during the rollout wait must
+not rebuild a worktree and re-push a merged branch — and it is that whatever the state file
+records: a promotion can land without its state file saying so (merged by hand, killed between
+the merge and the save), and a listing cleans up from its own observation without saving. And a
 merged PR counts as this run's landing only when the forge names this run's commit as its head;
 a forge that does not say is not agreement (#41).
 
@@ -1304,9 +1306,13 @@ test lives** (if one exists).
    answer, so "the lookup failed" had to stop meaning "not landed" — the first version let one
    forge 502 have `BranchedStep` rebuild the worktree, `PushedStep` re-push the merged branch
    and `CommittedStep` block on an unrelated commit, ending `hoist promote` with a false reason.
-   A short-circuit that something now *depends on* needs an answer for "could not ask".
+   A short-circuit that something now *depends on* needs an answer for "could not ask". The
+   first fix gave that answer only when the state file recorded a landed sha, which left the
+   hole open for every promotion that landed without its file saying so — the state file used to
+   decide which answer to trust, the thing §4.1 exists to rule out; the gate was removed.
    `TestLandedGuardDoesNotActOnAFailedLookupForAPromotionOnRecordAsLanded`,
-   `TestALandedCleanedPromotionDoesNotRedoItselfWhenOneLookupFails`.
+   `TestALandedCleanedPromotionDoesNotRedoItselfWhenOneLookupFails`,
+   `TestAPromotionThatLandedWithoutItsStateFileSayingSoDoesNotRedoItself`.
 
 ## 10. Maintaining This Document
 

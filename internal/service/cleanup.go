@@ -208,12 +208,42 @@ func (s *Service) tipIsOnTheRemote(ctx context.Context, st *engine.PromotionStat
 func (s *Service) cleanupPending(ctx context.Context, st *engine.PromotionState) (bool, error) {
 	dir, branch, clone, err := s.cleanupTarget(st)
 	if err != nil {
+		// A state file hoist will not follow for a removal is only worth reporting when there
+		// is something it would have removed. A clone that moved in the config, a cache
+		// directory that changed, an id from before ids had this shape: with nothing at the
+		// promotion's own path and no such branch, there is nothing left behind and nothing to
+		// say — and saying it on every listing, for every finished promotion of that repo,
+		// would also keep each of them from ever being archived.
+		var refused *engine.CleanupRefusedError
+		if errors.As(err, &refused) && !s.somethingLeftBehind(ctx, st) {
+			return false, nil
+		}
 		return false, err
 	}
 	if _, err := os.Lstat(dir); err == nil {
 		return true, nil
 	}
 	return s.Git().LocalBranchExists(ctx, clone, branch)
+}
+
+// somethingLeftBehind reports whether anything exists where promotion st's worktree and branch
+// would be, looking only at places derived from its id: the path under the hoist cache, and the
+// branch of that name in the configured clone for its repo. It is used only to decide whether a
+// refusal is worth reporting, never to decide a removal; when it cannot tell, it says yes.
+func (s *Service) somethingLeftBehind(ctx context.Context, st *engine.PromotionState) bool {
+	dir, err := engine.WorktreeDir(st.ID)
+	if err != nil {
+		return true
+	}
+	if _, err := os.Lstat(dir); err == nil {
+		return true
+	}
+	clone, ok := s.cloneDirFor(st.RepoFullName)
+	if !ok || st.TargetEnv == "" || st.ID == "" {
+		return false
+	}
+	exists, err := s.Git().LocalBranchExists(ctx, clone, engine.BranchName(st.TargetEnv, st.ID))
+	return err != nil || exists
 }
 
 // observeLanding asks the landing step, and only the landing step, about a copy of st — the

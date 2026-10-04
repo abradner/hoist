@@ -189,6 +189,15 @@ func (d *Driver) Step(ctx context.Context) (Tick, error) {
 		phase = stepErr.Step
 	}
 
+	wait := engine.PollInterval(d.poll, phase)
+	var unknown *engine.LandingUnknownError
+	if errors.As(outErr, &unknown) && d.poll.Approval > 0 {
+		// The landing could not be confirmed: a forge or origin that is not answering. The
+		// error names whichever guarded step reported it, which has no poll knob of its own and
+		// would be retried every two seconds; ask again at the cadence the forge is polled at.
+		wait = d.poll.Approval
+	}
+
 	return Tick{
 		State:    *d.state,
 		Done:     done,
@@ -196,7 +205,7 @@ func (d *Driver) Step(ctx context.Context) (Tick, error) {
 		Waiting:  waiting,
 		Blocked:  blocked,
 		Retry:    engine.Retryable(outErr),
-		Wait:     engine.PollInterval(d.poll, phase),
+		Wait:     wait,
 	}, outErr
 }
 
