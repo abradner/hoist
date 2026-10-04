@@ -598,6 +598,11 @@ func TestResumingAMergedPromotionSavedAtTheMergeDoesNotNeedItsWorktree(t *testin
 		t.Fatal(err)
 	}
 	g := git.Exec{}
+	// The forge reports which commit a PR's head is, as GitHub does; the fake has to be told.
+	if err := engine.Drive(context.Background(), engine.Steps(g, f, nil), s, nil); err != nil {
+		t.Fatalf("driving to PR-opened: %v", err)
+	}
+	fx.f.SetHeadSHA(s.PR.Number, s.CommitSHA)
 	// Through the merge and no further: the walk ends with Phase recorded as exactly "merged".
 	if err := engine.Drive(context.Background(), engine.CoreSteps(g, f, nil), s, nil); err != nil {
 		t.Fatalf("driving to merged: %v", err)

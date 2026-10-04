@@ -560,7 +560,7 @@ touched — `--repo`/`--archived` only change what's *listed*, never what gets a
 **What is cleaned up, and when.** A promotion's worktree
 (`$XDG_CACHE_HOME/hoist/worktrees/<id>`) and its local branch `hoist/<env>/<id>` in your clone
 are scratch space, and hoist removes both as soon as it observes the promotion *landed* — merged
-with its remote branch deleted, or (direct mode) pushed and still in effect on the base. That
+with its remote branch deleted, or (direct mode) pushed and either still in effect on the base or since superseded there by a later deploy. That
 happens on the tick that lands it while hoist is driving, and otherwise the next time anything
 lists it (`hoist promotions`, the matrix's in-flight pane); `hoist promotions` prints what it
 removed under the row. It does not wait for the rollout, since nothing after the landing reads
@@ -572,7 +572,8 @@ in the base branch) — so a second run of the same promotion, or a state file t
 not cost you the only copy of a commit. Only ever that one directory under the hoist cache and
 that one branch: your checkout, index and other branches are never touched, and a state file
 whose recorded paths are not the ones its own id names is refused ("not cleaned up: …") rather
-than followed. In the TUI a removal the in-flight pane's own listing makes, and each refusal
+than followed. A promotion left like that is not archived either: it stays in `hoist promotions`
+with the reason until it is dealt with. In the TUI a removal the in-flight pane's own listing makes, and each refusal
 once, is an entry in the activity log (`l`); a promotion this session is driving is tidied as it
 lands, without a separate entry (#249).
 
@@ -589,7 +590,8 @@ else under that directory is kept and named with the reason. Run `--dry-run` fir
 same checks and prints the same lines, worded "would", and removes nothing (it does observe, so
 origin's base branch is fetched, as on any listing). `gc` never touches a state file; retention
 (above) archives those. It exits non-zero if something could not be checked or removed, as
-distinct from deliberately kept. It works from the config file's `repos[]`, like
+distinct from deliberately kept, and its last line then says the sweep was incomplete rather
+than "nothing to remove". It works from the config file's `repos[]`, like
 `hoist promotions`. There is no TUI key for it (#246).
 
 On the matrix, `tab` then `enter` on the pane does the same for what it lists, and `shift+x`

@@ -126,6 +126,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		}
 		if l.CleanupErr != nil {
 			fmt.Fprintf(stdout, "    not cleaned up: %s\n", redact.Strings(l.CleanupErr.Error()))
+			fmt.Fprintf(stdout, "    (it stays listed until that is dealt with: `hoist gc --dry-run` shows what is on disk; remove the worktree or branch by hand if they are not wanted)\n")
 		}
 	}
 	if *archived {

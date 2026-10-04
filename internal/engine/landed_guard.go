@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -37,7 +38,9 @@ import (
 //   - a landed direct promotion whose worktree is gone: one per walk, on top of
 //     DirectPushedStep's own turn;
 //   - an origin that cannot be reached: none beyond what the walk already paid — a failed
-//     probe is not asked again.
+//     probe is not asked again in that walk. For a promotion on record as landed the guarded
+//     step then reports LandingUnknownError rather than its own "not satisfied", so nothing
+//     Acts on a lookup that failed.
 type landedGuard struct {
 	inner   Step
 	landing Step
@@ -55,8 +58,25 @@ func (l landedGuard) Observe(ctx context.Context, s *PromotionState) (Observatio
 	if err == nil && cleanlySatisfied(obs) {
 		return obs, nil
 	}
-	if l.landed(ctx, s) {
+	switch answer, lerr := l.landed(ctx, s); answer {
+	case landingYes:
 		return Observation{Satisfied: true, Detail: "already landed on origin/" + s.Base + "; no longer needed"}, nil
+	case landingUnknown:
+		// The landing step could not be asked. The wrapped step may be unsatisfied only because
+		// its worktree or branch was tidied away after landing, and its own answer would then
+		// have the walk Act — rebuild the worktree, re-push a merged branch — on the strength of
+		// one failed lookup. Not knowing is an error to retry, never a licence to act.
+		//
+		// This holds whatever the state file records. An earlier version acted on "unknown"
+		// unless the state recorded a landed sha, and a promotion can land without its state
+		// file ever saying so: merged on the forge by hand, or the process killed between the
+		// merge and the save — and a listing cleans up from its own observation without saving
+		// anything. Using the record to decide which answer to trust is what §4.1 rules out.
+		//
+		// The cost is to a promotion still on its way: with the forge or origin unreachable it
+		// waits a poll instead of pushing (PR path), or instead of rebuilding a worktree someone
+		// removed. Both need the same remote on their very next step.
+		return Observation{}, &LandingUnknownError{Step: l.landing.Name(), Err: lerr}
 	}
 	return obs, err
 }
@@ -67,36 +87,65 @@ func (l landedGuard) Act(ctx context.Context, s *PromotionState) error { return 
 // landed asks the landing step about a COPY of s — a short-circuit must not be what records a
 // merge sha or a pushed sha on the promotion; the landing step does that itself when the walk
 // reaches it — and counts only an answer that is about this promotion's own recorded commit.
-func (l landedGuard) landed(ctx context.Context, s *PromotionState) bool {
+// A landing step that could not be asked is landingUnknown, with why.
+func (l landedGuard) landed(ctx context.Context, s *PromotionState) (landingAnswer, error) {
 	if !LandingObservable(s) {
-		return false
+		return landingNo, nil
 	}
 	// One answer per walk: a walk guards up to three steps with the same landing step, and
 	// the walker itself may already have asked it (see landingWalk).
 	walk := landingWalkFrom(ctx)
-	if landed, known := walk.get(); known {
-		return landed
+	if answer, known, err := walk.get(); known {
+		return answer, err
 	}
-	landed := l.observeLanded(ctx, s)
-	walk.set(landed)
-	return landed
+	answer, err := l.observeLanded(ctx, s)
+	walk.set(answer, err)
+	return answer, err
 }
 
-func (l landedGuard) observeLanded(ctx context.Context, s *PromotionState) bool {
+func (l landedGuard) observeLanded(ctx context.Context, s *PromotionState) (landingAnswer, error) {
 	cp := *s
 	obs, err := l.landing.Observe(ctx, &cp)
-	if err != nil || !cleanlySatisfied(obs) {
-		return false
+	if err != nil {
+		return landingUnknown, err
+	}
+	if !cleanlySatisfied(obs) {
+		return landingNo, nil
 	}
 	// A merged PR found by this promotion's branch name is not necessarily THIS run's: the id
 	// is deterministic, so promoting the same digest set into the same env twice reuses the
-	// branch name, and the forge still holds the first run's merged PR (#41). When the forge
-	// says which commit that PR merged, it has to be the one on record here.
-	if !cp.Direct && cp.PR != nil && cp.PR.HeadSHA != "" && cp.PR.HeadSHA != s.CommitSHA {
-		return false
+	// branch name, and the forge still holds the first run's merged PR (#41). The commit the
+	// forge says that PR merged has to be the one on record here.
+	// A forge that does not say is not taken as agreement.
+	if !cp.Direct && (cp.PR == nil || cp.PR.HeadSHA != s.CommitSHA) {
+		return landingNo, nil
 	}
-	return true
+	return landingYes, nil
 }
+
+// landingAnswer is what a walk knows about whether its promotion has landed.
+type landingAnswer int
+
+const (
+	landingNo landingAnswer = iota
+	landingYes
+	// landingUnknown: the landing step was asked and failed to answer.
+	landingUnknown
+)
+
+// LandingUnknownError is a guarded step's Observe error when its promotion is on record as
+// landed, the step itself is not satisfied, and the landing step could not be asked. Step is
+// the landing step that failed. It is retryable (Retryable): the next poll asks again.
+type LandingUnknownError struct {
+	Step StepName
+	Err  error
+}
+
+func (e *LandingUnknownError) Error() string {
+	return fmt.Sprintf("could not confirm this promotion is still landed (%s: observe: %v); nothing was redone", e.Step, e.Err)
+}
+
+func (e *LandingUnknownError) Unwrap() error { return e.Err }
 
 // LandingObservable reports whether s records enough for a landing step's Observe to be asked
 // about it at all: a commit, and — for a direct promotion, whose landing is judged by content —
@@ -124,7 +173,8 @@ func cleanlySatisfied(o Observation) bool { return o.Satisfied && !o.Waiting && 
 type landingWalk struct {
 	mu     sync.Mutex
 	known  bool
-	landed bool
+	answer landingAnswer
+	err    error
 }
 
 type landingWalkKey struct{}
@@ -139,26 +189,33 @@ func landingWalkFrom(ctx context.Context) *landingWalk {
 	return w
 }
 
-func (w *landingWalk) get() (landed, known bool) {
+func (w *landingWalk) get() (answer landingAnswer, known bool, err error) {
 	if w == nil {
-		return false, false
+		return landingNo, false, nil
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.landed, w.known
+	return w.answer, w.known, w.err
 }
 
-func (w *landingWalk) set(landed bool) {
+func (w *landingWalk) set(answer landingAnswer, err error) {
 	if w == nil {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.known, w.landed = true, landed
+	w.known, w.answer, w.err = true, answer, err
 }
 
-// probedNotLanded records that the walker's own up-front probe of the landing step did not come
-// back cleanly satisfied — unsatisfied, waiting, blocked, or an error. The guards then take that
-// as the walk's answer instead of asking again: a second forge lookup and a second fetch per
-// state, which against an unreachable origin is a second failed connection per state.
-func probedNotLanded(ctx context.Context) { landingWalkFrom(ctx).set(false) }
+// probedNotLanded records what the walker's own up-front probe of the landing step found when
+// it did not come back cleanly satisfied: not landed (unsatisfied, waiting or blocked), or —
+// when the probe itself failed — unknown, with the failure. The guards then take that as the
+// walk's answer instead of asking again: a second forge lookup and a second fetch per state,
+// which against an unreachable origin is a second failed connection per state.
+func probedNotLanded(ctx context.Context, probeErr error) {
+	if probeErr != nil {
+		landingWalkFrom(ctx).set(landingUnknown, probeErr)
+		return
+	}
+	landingWalkFrom(ctx).set(landingNo, nil)
+}

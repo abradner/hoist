@@ -239,6 +239,12 @@ func (s *scanGit) DeleteLocalBranch(context.Context, string, string) (bool, erro
 	return false, errScanGitWrite
 }
 
+func (s *scanGit) DeleteLocalBranchAt(context.Context, string, string, string) (bool, error) {
+	return false, errScanGitWrite
+}
+
+func (s *scanGit) RemoveCleanWorktree(context.Context, string, string) error { return errScanGitWrite }
+
 func (s *scanGit) Commit(context.Context, string, string, []string, time.Duration, func()) (string, error) {
 	return "", errScanGitWrite
 }

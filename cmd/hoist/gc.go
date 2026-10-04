@@ -59,13 +59,26 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 	if len(rep.Failed) > 0 {
 		code = exitFailure
 	}
-	switch {
-	case len(rep.Removed) == 0:
-		fmt.Fprintln(stdout, "hoist gc: nothing to remove")
-	case *dryRun:
-		fmt.Fprintf(stdout, "hoist gc: %d to remove — nothing was touched; run `hoist gc` to remove them\n", len(rep.Removed))
-	default:
-		fmt.Fprintf(stdout, "hoist gc: %d removed\n", len(rep.Removed))
-	}
+	fmt.Fprintf(stdout, "hoist gc: %s\n", gcSummary(rep, *dryRun))
 	return code
+}
+
+// gcSummary is the last line `hoist gc` prints: what was done, and — kept apart from it — that
+// part of the sweep could not be checked. "nothing to remove" is a decision, and is only said
+// when the sweep got to make it.
+func gcSummary(rep service.GCReport, dryRun bool) string {
+	incomplete := ""
+	if n := len(rep.Failed); n > 0 {
+		incomplete = fmt.Sprintf("; sweep incomplete — %d could not be checked or removed", n)
+	}
+	switch {
+	case len(rep.Removed) == 0 && len(rep.Failed) > 0:
+		return fmt.Sprintf("sweep incomplete — %d could not be checked or removed; nothing was removed", len(rep.Failed))
+	case len(rep.Removed) == 0:
+		return "nothing to remove"
+	case dryRun:
+		return fmt.Sprintf("%d to remove — nothing was touched; run `hoist gc` to remove them%s", len(rep.Removed), incomplete)
+	default:
+		return fmt.Sprintf("%d removed%s", len(rep.Removed), incomplete)
+	}
 }

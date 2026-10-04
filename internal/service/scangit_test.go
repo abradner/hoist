@@ -656,15 +656,18 @@ func TestScanGitRefusesToWrite(t *testing.T) {
 	g := newScanGit(&countingGit{})
 	_, commitErr := g.Commit(ctx, "/wt", "msg", nil, 0, nil)
 	_, deleteLocalErr := g.DeleteLocalBranch(ctx, "/clone", "b")
+	_, deleteAtErr := g.DeleteLocalBranchAt(ctx, "/clone", "b", "sha")
 	for name, err := range map[string]error{
-		"Worktree":           g.Worktree(ctx, "/clone", "/wt", "b", "main"),
-		"WorktreeAtRef":      g.WorktreeAtRef(ctx, "/clone", "/wt", "main"),
-		"RemoveWorktree":     g.RemoveWorktree(ctx, "/clone", "/wt"),
-		"Commit":             commitErr,
-		"Push":               g.Push(ctx, "/wt", "origin", "b"),
-		"PushHeadTo":         g.PushHeadTo(ctx, "/wt", "origin", "main"),
-		"DeleteRemoteBranch": g.DeleteRemoteBranch(ctx, "/clone", "origin", "b"),
-		"DeleteLocalBranch":  deleteLocalErr,
+		"Worktree":            g.Worktree(ctx, "/clone", "/wt", "b", "main"),
+		"WorktreeAtRef":       g.WorktreeAtRef(ctx, "/clone", "/wt", "main"),
+		"RemoveWorktree":      g.RemoveWorktree(ctx, "/clone", "/wt"),
+		"Commit":              commitErr,
+		"Push":                g.Push(ctx, "/wt", "origin", "b"),
+		"PushHeadTo":          g.PushHeadTo(ctx, "/wt", "origin", "main"),
+		"DeleteRemoteBranch":  g.DeleteRemoteBranch(ctx, "/clone", "origin", "b"),
+		"DeleteLocalBranch":   deleteLocalErr,
+		"DeleteLocalBranchAt": deleteAtErr,
+		"RemoveCleanWorktree": g.RemoveCleanWorktree(ctx, "/clone", "/wt"),
 	} {
 		if !errors.Is(err, errScanGitWrite) {
 			t.Errorf("%s: want the read-only refusal, got %v", name, err)

@@ -151,17 +151,26 @@ func (s *Service) removeOrphan(ctx context.Context, name string, dryRun bool) ([
 	}
 	g := s.Git()
 	clone, branch, found := "", "", false
+	var askErr error
 	for _, c := range s.configuredClones() {
-		// A configured checkout that cannot be asked (moved, deleted, not a repository) is not
-		// one this worktree is shown to belong to; it must not stop the others being asked.
+		// A configured checkout that cannot be asked (moved, deleted, not a repository) must not
+		// stop the others being asked — but it has not been ruled out either.
 		on, registered, err := g.WorktreeBranch(ctx, c, dir)
 		if err != nil {
+			if askErr == nil {
+				askErr = fmt.Errorf("could not ask %s whether this is its worktree: %w", c, err)
+			}
 			continue
 		}
 		if registered {
 			clone, branch, found = c, on, true
 			break
 		}
+	}
+	if !found && askErr != nil {
+		// No clone that could be asked owns it, and one could not be asked: ownership was not
+		// decided, which is a failure to check, not a decision to keep.
+		return nil, askErr
 	}
 	if !found {
 		return nil, &engine.CleanupRefusedError{ID: name, Reason: "it is not a registered worktree of any configured clone"}
@@ -176,7 +185,18 @@ func (s *Service) removeOrphan(ctx context.Context, name string, dryRun bool) ([
 	if dirty {
 		return nil, &engine.CleanupRefusedError{ID: name, Reason: "it has uncommitted changes"}
 	}
-	return s.removeWorktreeAndBranch(ctx, clone, dir, branch, dryRun)
+	tip, _, err := g.RevParse(ctx, clone, "refs/heads/"+branch)
+	if err != nil {
+		return nil, err
+	}
+	// The state files were listed once, at the start. A promotion re-run under this id since
+	// then has saved a state file and is using this worktree: look again, last thing.
+	if st, err := s.deps.Store.Load(name); err != nil {
+		return nil, err
+	} else if st != nil {
+		return nil, &engine.CleanupRefusedError{ID: name, Reason: "a promotion with this id has started since the sweep began"}
+	}
+	return s.removeWorktreeAndBranch(ctx, clone, dir, branch, removal{dryRun: dryRun, tip: tip})
 }
 
 // isPromotionBranch reports whether branch is exactly hoist/<env>/<id> for some single-segment

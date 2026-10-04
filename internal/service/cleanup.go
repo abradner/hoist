@@ -54,7 +54,7 @@ func (s *Service) cleanupLanded(ctx context.Context, st *engine.PromotionState, 
 	if err := s.tipIsOnTheRemote(ctx, st, tip, mergedHead); err != nil {
 		return nil, err
 	}
-	return s.removePromotionFiles(ctx, st, dryRun)
+	return s.removePromotionFiles(ctx, st, removal{dryRun: dryRun, tip: tip})
 }
 
 // cleanupObservedLanded is CleanupLanded for a caller that has just observed st landed and will
@@ -90,7 +90,7 @@ func (s *Service) cleanupObservedLanded(ctx context.Context, st *engine.Promotio
 		}
 		return nil, err
 	}
-	lines, err := s.removePromotionFiles(ctx, st, false)
+	lines, err := s.removePromotionFiles(ctx, st, removal{tip: tip})
 	if err != nil {
 		s.keep(st.ID, tip, err)
 	}
@@ -208,12 +208,42 @@ func (s *Service) tipIsOnTheRemote(ctx context.Context, st *engine.PromotionStat
 func (s *Service) cleanupPending(ctx context.Context, st *engine.PromotionState) (bool, error) {
 	dir, branch, clone, err := s.cleanupTarget(st)
 	if err != nil {
+		// A state file hoist will not follow for a removal is only worth reporting when there
+		// is something it would have removed. A clone that moved in the config, a cache
+		// directory that changed, an id from before ids had this shape: with nothing at the
+		// promotion's own path and no such branch, there is nothing left behind and nothing to
+		// say — and saying it on every listing, for every finished promotion of that repo,
+		// would also keep each of them from ever being archived.
+		var refused *engine.CleanupRefusedError
+		if errors.As(err, &refused) && !s.somethingLeftBehind(ctx, st) {
+			return false, nil
+		}
 		return false, err
 	}
 	if _, err := os.Lstat(dir); err == nil {
 		return true, nil
 	}
 	return s.Git().LocalBranchExists(ctx, clone, branch)
+}
+
+// somethingLeftBehind reports whether anything exists where promotion st's worktree and branch
+// would be, looking only at places derived from its id: the path under the hoist cache, and the
+// branch of that name in the configured clone for its repo. It is used only to decide whether a
+// refusal is worth reporting, never to decide a removal; when it cannot tell, it says yes.
+func (s *Service) somethingLeftBehind(ctx context.Context, st *engine.PromotionState) bool {
+	dir, err := engine.WorktreeDir(st.ID)
+	if err != nil {
+		return true
+	}
+	if _, err := os.Lstat(dir); err == nil {
+		return true
+	}
+	clone, ok := s.cloneDirFor(st.RepoFullName)
+	if !ok || st.TargetEnv == "" || st.ID == "" {
+		return false
+	}
+	exists, err := s.Git().LocalBranchExists(ctx, clone, engine.BranchName(st.TargetEnv, st.ID))
+	return err != nil || exists
 }
 
 // observeLanding asks the landing step, and only the landing step, about a copy of st — the
@@ -266,12 +296,25 @@ func (s *Service) cleanupTarget(st *engine.PromotionState) (dir, branch, clone s
 	return dir, branch, clone, nil
 }
 
+// removal says how removeWorktreeAndBranch may remove. An automatic cleanup, and the gc sweep,
+// pass the branch tip their checks were made at and no force: the worktree is removed by git's
+// own non-force removal (which refuses anything modified or untracked) and the branch only if
+// it is still at that tip — so a file written, or a commit made, between the check and the
+// removal is refused, not lost. Force is for an abandon alone: the operator confirmed retiring
+// that promotion, whatever its worktree holds.
+type removal struct {
+	dryRun bool
+	force  bool
+	tip    string
+}
+
 // removePromotionFiles is the removal itself, with no opinion about whether st has landed: its
-// two callers have each established why the worktree is no longer needed (CleanupLanded by
-// observing the landing; Abandon by observing that nothing landed and holding the operator's
-// confirmation). It never removes a worktree registered on any branch but the promotion's own,
-// and deletes the branch only after the worktree that had it checked out is gone.
-func (s *Service) removePromotionFiles(ctx context.Context, st *engine.PromotionState, dryRun bool) ([]string, error) {
+// callers have each established why the worktree is no longer needed (the landed paths by
+// observing the landing and checking the worktree and tip; Abandon by observing that nothing
+// landed and holding the operator's confirmation). It never removes a worktree registered on
+// any branch but the promotion's own, and deletes the branch only after the worktree that had
+// it checked out is gone.
+func (s *Service) removePromotionFiles(ctx context.Context, st *engine.PromotionState, how removal) ([]string, error) {
 	dir, branch, clone, err := s.cleanupTarget(st)
 	if err != nil {
 		return nil, err
@@ -283,7 +326,13 @@ func (s *Service) removePromotionFiles(ctx context.Context, st *engine.Promotion
 	if registered && on != branch {
 		return nil, &engine.CleanupRefusedError{ID: st.ID, Reason: fmt.Sprintf("the worktree at %s is on %q, not %q", dir, on, branch)}
 	}
-	return s.removeWorktreeAndBranch(ctx, clone, dir, branch, dryRun)
+	if _, statErr := os.Lstat(dir); statErr == nil && !registered {
+		// There, but not this clone's worktree: possibly another repo's live worktree for the
+		// same id, named by a state file that has the repo wrong. Not removed on any path —
+		// an abandon's confirmation is for the promotion, not for whatever sits at its path.
+		return nil, &engine.CleanupRefusedError{ID: st.ID, Reason: dir + " exists but is not a registered worktree of " + clone}
+	}
+	return s.removeWorktreeAndBranch(ctx, clone, dir, branch, how)
 }
 
 // removeWorktreeAndBranch removes dir (a worktree of clone, or a leftover directory where one
@@ -291,7 +340,7 @@ func (s *Service) removePromotionFiles(ctx context.Context, st *engine.Promotion
 // still checked out. It is handed a directory and branch its caller already derived and
 // checked; it derives and checks nothing itself. With dryRun it removes nothing and words the
 // same lines "would …".
-func (s *Service) removeWorktreeAndBranch(ctx context.Context, clone, dir, branch string, dryRun bool) ([]string, error) {
+func (s *Service) removeWorktreeAndBranch(ctx context.Context, clone, dir, branch string, how removal) ([]string, error) {
 	g := s.Git()
 	var lines []string
 
@@ -301,17 +350,23 @@ func (s *Service) removeWorktreeAndBranch(ctx context.Context, clone, dir, branc
 	}
 	_, statErr := os.Lstat(dir)
 	if registered || statErr == nil {
-		if dryRun {
+		switch {
+		case how.dryRun:
 			lines = append(lines, "would remove worktree "+dir)
-		} else {
+		case how.force:
 			if err := g.RemoveWorktree(ctx, clone, dir); err != nil {
+				return lines, fmt.Errorf("removing worktree %s: %w", dir, err)
+			}
+			lines = append(lines, "removed worktree "+dir)
+		default:
+			if err := g.RemoveCleanWorktree(ctx, clone, dir); err != nil {
 				return lines, fmt.Errorf("removing worktree %s: %w", dir, err)
 			}
 			lines = append(lines, "removed worktree "+dir)
 		}
 	}
 
-	if dryRun {
+	if how.dryRun {
 		exists, err := g.LocalBranchExists(ctx, clone, branch)
 		if err != nil {
 			return lines, err
@@ -321,7 +376,17 @@ func (s *Service) removeWorktreeAndBranch(ctx context.Context, clone, dir, branc
 		}
 		return lines, nil
 	}
-	deleted, err := g.DeleteLocalBranch(ctx, clone, branch)
+	var deleted bool
+	switch {
+	case how.force:
+		deleted, err = g.DeleteLocalBranch(ctx, clone, branch)
+	case how.tip == "":
+		// The caller found no local branch when it checked; one that has appeared since was
+		// not part of what it decided, and is left.
+		return lines, nil
+	default:
+		deleted, err = g.DeleteLocalBranchAt(ctx, clone, branch, how.tip)
+	}
 	if err != nil {
 		return lines, fmt.Errorf("deleting local branch %s: %w", branch, err)
 	}

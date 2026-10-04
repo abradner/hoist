@@ -1084,6 +1084,98 @@ func TestDeleteLocalBranchRefusesTheClonesOwnCheckout(t *testing.T) {
 	}
 }
 
+// TestRemoveCleanWorktreeRefusesWhatGitCallsDirty: the non-force removal is git's own check and
+// removal in one, so a file that appears after a caller looked is still there afterwards.
+func TestRemoveCleanWorktreeRefusesWhatGitCallsDirty(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := g.Worktree(ctx(), cloneDir, wt, "hoist/app-production/clean", "main"); err != nil {
+		t.Fatal(err)
+	}
+	late := filepath.Join(wt, "written-after-the-check.txt")
+	if err := os.WriteFile(late, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveCleanWorktree(ctx(), cloneDir, wt); err == nil {
+		t.Fatal("a worktree with an untracked file must not be removed without force")
+	}
+	if _, err := os.Stat(late); err != nil {
+		t.Fatalf("the file must survive the refused removal: %v", err)
+	}
+	if err := os.Remove(late); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveCleanWorktree(ctx(), cloneDir, wt); err != nil {
+		t.Fatalf("a clean worktree is removed: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("the worktree directory should be gone: %v", err)
+	}
+	// Already gone, by hand: deregistered rather than refused.
+	wt2 := filepath.Join(t.TempDir(), "wt2")
+	if err := g.Worktree(ctx(), cloneDir, wt2, "hoist/app-production/gone2", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wt2); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveCleanWorktree(ctx(), cloneDir, wt2); err != nil {
+		t.Fatalf("a worktree whose directory is gone is deregistered: %v", err)
+	}
+	if _, registered, err := g.WorktreeBranch(ctx(), cloneDir, wt2); err != nil || registered {
+		t.Fatalf("still registered: %v %v", registered, err)
+	}
+	if err := g.RemoveCleanWorktree(ctx(), cloneDir, cloneDir); err == nil {
+		t.Fatal("the clone itself must be refused")
+	}
+}
+
+// TestDeleteLocalBranchAtOnlyDeletesTheCommitThatWasChecked: the branch goes only if it is still
+// where the caller saw it, and never while a worktree has it checked out.
+func TestDeleteLocalBranchAtOnlyDeletesTheCommitThatWasChecked(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	wt := filepath.Join(t.TempDir(), "wt")
+	const branch = "hoist/app-production/at"
+	if err := g.Worktree(ctx(), cloneDir, wt, branch, "main"); err != nil {
+		t.Fatal(err)
+	}
+	checked, _, err := g.RevParse(ctx(), cloneDir, "refs/heads/"+branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := g.DeleteLocalBranchAt(ctx(), cloneDir, branch, checked); err == nil || deleted {
+		t.Fatalf("checked out in a worktree: deleted=%v err=%v, want it refused", deleted, err)
+	}
+	// A commit lands on the branch after the caller looked.
+	if err := os.WriteFile(filepath.Join(wt, "late.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	late, err := g.Commit(ctx(), wt, "made after the check", []string{"late.txt"}, time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RemoveWorktree(ctx(), cloneDir, wt); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := g.DeleteLocalBranchAt(ctx(), cloneDir, branch, checked); err == nil || deleted {
+		t.Fatalf("the branch moved since it was checked: deleted=%v err=%v, want it refused", deleted, err)
+	}
+	if now, ok, err := g.RevParse(ctx(), cloneDir, "refs/heads/"+branch); err != nil || !ok || now != late {
+		t.Fatalf("the later commit must still be on the branch: %q ok=%v err=%v", now, ok, err)
+	}
+	if deleted, err := g.DeleteLocalBranchAt(ctx(), cloneDir, branch, late); err != nil || !deleted {
+		t.Fatalf("at the commit it is at, it is deleted: deleted=%v err=%v", deleted, err)
+	}
+	if deleted, err := g.DeleteLocalBranchAt(ctx(), cloneDir, branch, late); err != nil || deleted {
+		t.Fatalf("an absent branch is a no-op: deleted=%v err=%v", deleted, err)
+	}
+	if deleted, err := g.DeleteLocalBranchAt(ctx(), cloneDir, "main", ""); err == nil || deleted {
+		t.Fatal("an empty tip must be refused")
+	}
+}
+
 func TestWorktreeDirty(t *testing.T) {
 	cloneDir, _ := newTestRepo(t)
 	wt := filepath.Join(t.TempDir(), "wt")

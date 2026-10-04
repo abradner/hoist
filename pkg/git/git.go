@@ -60,6 +60,19 @@ type Git interface {
 	// is checked out in any worktree — the clone's included — is left to stand and returned as
 	// the error: this never detaches or switches anything to get its way.
 	DeleteLocalBranch(ctx context.Context, cloneDir, branch string) (deleted bool, err error)
+	// RemoveCleanWorktree removes the linked worktree at worktreeDir only if git itself agrees
+	// it holds nothing: `git worktree remove` WITHOUT --force, which refuses a worktree with a
+	// modified or untracked file, and no os.RemoveAll afterwards. It is what an automatic
+	// cleanup uses, so that a file written into the worktree after the caller's own check is
+	// not silently deleted — the check and the removal are then git's one operation, not two
+	// of ours. A worktree whose directory is already gone has nothing in it to lose and is
+	// deregistered as RemoveWorktree does.
+	RemoveCleanWorktree(ctx context.Context, cloneDir, worktreeDir string) error
+	// DeleteLocalBranchAt deletes cloneDir's local branch only if it still points at tip — the
+	// commit the caller checked — and is not checked out in any worktree, reporting whether
+	// there was a branch to delete. A branch that has moved is an error, never a deletion: a
+	// commit made after the caller looked is not what the caller decided was safe to lose.
+	DeleteLocalBranchAt(ctx context.Context, cloneDir, branch, tip string) (deleted bool, err error)
 	// WorktreeDirty reports whether worktreeDir has anything `git status` would show: a
 	// modified, staged or untracked file. It says nothing about commits that exist only on
 	// the worktree's branch.
@@ -381,6 +394,45 @@ func (e Exec) DeleteLocalBranch(ctx context.Context, cloneDir, branch string) (b
 	}
 	if _, err := e.run(ctx, cloneDir, "branch", "-D", "--", branch); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// RemoveCleanWorktree implements Git.
+func (e Exec) RemoveCleanWorktree(ctx context.Context, cloneDir, worktreeDir string) error {
+	if err := guardDisposablePath(cloneDir, worktreeDir); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(worktreeDir); os.IsNotExist(err) {
+		return e.RemoveWorktree(ctx, cloneDir, worktreeDir)
+	}
+	_, err := e.run(ctx, cloneDir, "worktree", "remove", worktreeDir)
+	return err
+}
+
+// DeleteLocalBranchAt implements Git.
+func (e Exec) DeleteLocalBranchAt(ctx context.Context, cloneDir, branch, tip string) (bool, error) {
+	if branch == "" || strings.HasPrefix(branch, "-") || tip == "" {
+		return false, fmt.Errorf("refusing to delete local branch %q at %q: not a branch name and a commit", branch, tip)
+	}
+	exists, err := e.localBranchExists(ctx, cloneDir, branch)
+	if err != nil || !exists {
+		return false, err
+	}
+	// update-ref has no notion of "checked out somewhere", which `git branch -D` refuses on;
+	// keep that guard by asking the worktree registry first.
+	entries, err := e.listWorktrees(ctx, cloneDir)
+	if err != nil {
+		return false, fmt.Errorf("git worktree list: %w", err)
+	}
+	for _, w := range entries {
+		if w.branch == branch {
+			return false, fmt.Errorf("cannot delete branch %q: it is checked out in the worktree at %s", branch, w.path)
+		}
+	}
+	// Compare-and-delete: the ref goes only if it is still at tip.
+	if _, err := e.run(ctx, cloneDir, "update-ref", "-d", "refs/heads/"+branch, tip); err != nil {
+		return false, fmt.Errorf("branch %q is no longer at %s: %w", branch, tip, err)
 	}
 	return true, nil
 }

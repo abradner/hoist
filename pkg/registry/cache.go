@@ -153,6 +153,7 @@ func PruneCache(maxAge time.Duration, now time.Time, dryRun bool) ([]string, err
 		return nil, err
 	}
 	var removed []string
+	var inspectErr error
 	for _, e := range entries {
 		limit := maxAge
 		switch {
@@ -163,7 +164,18 @@ func PruneCache(maxAge time.Duration, now time.Time, dryRun bool) ([]string, err
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) <= limit {
+		if os.IsNotExist(err) {
+			continue // removed by someone else between the listing and here
+		}
+		if err != nil {
+			// An entry of our own shape that could not be inspected was not decided about; the
+			// rest are still pruned, and the caller is told.
+			if inspectErr == nil {
+				inspectErr = fmt.Errorf("registry: cache: inspecting %s: %w", filepath.Join(dir, e.Name()), err)
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() || now.Sub(info.ModTime()) <= limit {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
@@ -174,7 +186,7 @@ func PruneCache(maxAge time.Duration, now time.Time, dryRun bool) ([]string, err
 		}
 		removed = append(removed, path)
 	}
-	return removed, nil
+	return removed, inspectErr
 }
 
 // saveCache writes meta's entry atomically — a temp file in the same directory, then

@@ -11,6 +11,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -774,4 +775,524 @@ func TestTipIsOnTheRemoteAcceptsTheCommitTheMergedPRMerged(t *testing.T) {
 			t.Fatalf("mergedHead=%q: err = %v, want a refusal — the tip is neither that commit nor on the base", head, err)
 		}
 	}
+}
+
+// changedAfterTheCheck is a git.Git that answers the cleanup's own checks as they were a moment
+// ago and lets everything else through: the worktree was clean and the branch was at the commit
+// that landed when the cleanup looked, and are not any more by the time it removes them.
+type changedAfterTheCheck struct {
+	git.Git
+	cleanWhenChecked bool   // WorktreeDirty answers false whatever is there now
+	tipWhenChecked   string // RevParse of the promotion's branch answers this, if set
+	branchRef        string
+}
+
+func (c changedAfterTheCheck) WorktreeDirty(ctx context.Context, dir string) (bool, error) {
+	if c.cleanWhenChecked {
+		return false, nil
+	}
+	return c.Git.WorktreeDirty(ctx, dir)
+}
+
+func (c changedAfterTheCheck) RevParse(ctx context.Context, dir, rev string) (string, bool, error) {
+	if c.tipWhenChecked != "" && rev == c.branchRef {
+		return c.tipWhenChecked, true, nil
+	}
+	return c.Git.RevParse(ctx, dir, rev)
+}
+
+// TestAutomaticCleanupDoesNotRemoveWhatChangedAfterItLooked: the checks and the removal are
+// separate moments. A file written into the worktree, or a commit made on the branch, in
+// between must be refused by the removal itself — git's own non-force worktree removal, and a
+// branch deletion that only succeeds at the commit that was checked — not lost.
+func TestAutomaticCleanupDoesNotRemoveWhatChangedAfterItLooked(t *testing.T) {
+	withGit := func(fx inflightFixture, g git.Git) *Service {
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return g }
+		return New(base.Settings(), deps)
+	}
+
+	t.Run("a file appears in the worktree", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := landedDirectState(t, fx)
+		late := filepath.Join(s.WorktreeDir, "written-after-the-check.txt")
+		if err := os.WriteFile(late, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		svc := withGit(fx, changedAfterTheCheck{Git: git.Exec{}, cleanWhenChecked: true})
+		lines, err := svc.CleanupLanded(context.Background(), s)
+		if err == nil || len(lines) != 0 {
+			t.Fatalf("CleanupLanded = %q, %v — the removal must fail rather than delete the file", lines, err)
+		}
+		mustExist(t, late)
+		if !branchExists(t, fx.clone, s.Branch) {
+			t.Fatal("the branch must not be deleted when its worktree could not be removed")
+		}
+	})
+
+	t.Run("a commit lands on the branch", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := landedDirectState(t, fx)
+		checked := strings.TrimSpace(outGitHost(t, fx.clone, "rev-parse", "refs/heads/"+s.Branch))
+		if err := os.WriteFile(filepath.Join(s.WorktreeDir, "late.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		late, err := (git.Exec{}).Commit(context.Background(), s.WorktreeDir, "made after the check", []string{"late.txt"}, time.Minute, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc := withGit(fx, changedAfterTheCheck{Git: git.Exec{}, tipWhenChecked: checked, branchRef: "refs/heads/" + s.Branch})
+		_, err = svc.CleanupLanded(context.Background(), s)
+		if err == nil {
+			t.Fatal("the branch moved after it was checked; deleting it must fail")
+		}
+		if now := strings.TrimSpace(outGitHost(t, fx.clone, "rev-parse", "refs/heads/"+s.Branch)); now != late {
+			t.Fatalf("the later commit must still be on the branch: %s, want %s", now, late)
+		}
+	})
+}
+
+// failingRemovalGit fails the removal itself, as a locked index or a full disk would.
+type failingRemovalGit struct{ git.Git }
+
+func (failingRemovalGit) RemoveCleanWorktree(context.Context, string, string) error {
+	return errors.New("unable to remove: device busy")
+}
+
+// TestListDoesNotArchiveAPromotionWhoseCleanupFailed: nothing lists an archived state, so a
+// landed promotion archived on the same pass its cleanup FAILED would never be retried and its
+// worktree would stay for good. One whose cleanup was refused is not archived either: it stays
+// listed with the reason rather than becoming an orphan for the gc sweep.
+func TestListDoesNotArchiveAPromotionWhoseCleanupFailed(t *testing.T) {
+	old := func(s *engine.PromotionState) {
+		at := time.Now().Add(-48 * time.Hour)
+		s.GeneratedAt = at
+		for i := range s.History {
+			s.History[i].At = at
+		}
+	}
+	t.Run("cleanup failed", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		old(s)
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return failingRemovalGit{git.Exec{}} }
+		listed, err := New(base.Settings(), deps).List(context.Background(), ListOpts{ArchiveDoneOlderThan: time.Hour})
+		if err != nil || len(listed) != 1 {
+			t.Fatalf("List = %+v, %v", listed, err)
+		}
+		if !listed[0].Done || listed[0].CleanupErr == nil {
+			t.Fatalf("control: the promotion must be done with a failed cleanup: %+v", listed[0])
+		}
+		if listed[0].Archived {
+			t.Fatal("a promotion whose cleanup failed was archived; nothing would ever retry it")
+		}
+		if st, err := fileStore.Load(s.ID); err != nil || st == nil {
+			t.Fatalf("the state file must still be live: %v, %v", st, err)
+		}
+	})
+	t.Run("control: cleanup succeeded", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		old(s)
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := withConfig(fx).List(context.Background(), ListOpts{ArchiveDoneOlderThan: time.Hour})
+		if err != nil || len(listed) != 1 || listed[0].CleanupErr != nil || !listed[0].Archived {
+			t.Fatalf("a finished, cleaned, old promotion is archived as before: %+v, %v", listed, err)
+		}
+	})
+	t.Run("cleanup refused", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		old(s)
+		if err := os.WriteFile(filepath.Join(s.WorktreeDir, "uncommitted.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := withConfig(fx).List(context.Background(), ListOpts{ArchiveDoneOlderThan: time.Hour})
+		if err != nil || len(listed) != 1 || listed[0].CleanupErr == nil {
+			t.Fatalf("control: want one entry with a refused cleanup: %+v, %v", listed, err)
+		}
+		if listed[0].Archived {
+			t.Fatal("a promotion whose worktree was deliberately left must stay listed with the reason; archived, it becomes an orphan the gc sweep judges by a weaker rule")
+		}
+	})
+}
+
+// TestAbandonLeavesADirectoryThatIsNotItsClonesWorktree: an abandon's confirmation is for the
+// promotion. A directory at the promotion's path that the state's clone does not have registered
+// as a worktree — another repo's live worktree for the same id, named by a state file with the
+// repo wrong — is not what was confirmed, and RemoveWorktree would end in os.RemoveAll.
+func TestAbandonLeavesADirectoryThatIsNotItsClonesWorktree(t *testing.T) {
+	fx := newInflightFixture(t)
+	s := buildPROpenedPromotionsState(t, fx)
+	scratch := filepath.Join(s.WorktreeDir, "live-work.txt")
+	if err := os.WriteFile(scratch, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origin := strings.TrimSpace(outGitHost(t, fx.clone, "remote", "get-url", "origin"))
+	cloneB := filepath.Join(t.TempDir(), "repo-b")
+	runGitHost(t, "", "clone", "-q", origin, cloneB)
+	base := withConfig(fx)
+	set := base.Settings()
+	cfg := *set.Config
+	cfg.Repos = append(append([]config.RepoConfig{}, cfg.Repos...), config.RepoConfig{GitHub: "example/other", Dir: cloneB})
+	set.Config = &cfg
+	svc := New(set, base.deps)
+
+	forged := *s
+	forged.RepoFullName = "example/other"
+	forged.CloneDir = cloneB
+	forged.PR = nil
+	if err := fileStore.Save(&forged); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := svc.Abandon(context.Background(), forged.ID)
+	if err != nil {
+		t.Fatalf("Abandon: %v (%v)", err, lines)
+	}
+	if linesWith(lines, "left the worktree and local branch in place") != 1 || linesWith(lines, "removed worktree") != 0 {
+		t.Fatalf("abandon's actions %q: want the directory left, and said so", lines)
+	}
+	mustExist(t, scratch)
+}
+
+// flakyForge fails its PR lookups a set number of times, then answers.
+type flakyForge struct {
+	forge.Forge
+	failures *int
+}
+
+func (f flakyForge) down() error {
+	if *f.failures > 0 {
+		*f.failures--
+		return errors.New("502 Bad Gateway")
+	}
+	return nil
+}
+
+func (f flakyForge) GetPR(ctx context.Context, number int) (forge.PR, bool, error) {
+	if err := f.down(); err != nil {
+		return forge.PR{}, false, err
+	}
+	return f.Forge.GetPR(ctx, number)
+}
+
+func (f flakyForge) FindPR(ctx context.Context, headBranch, marker string) (forge.PR, bool, error) {
+	if err := f.down(); err != nil {
+		return forge.PR{}, false, err
+	}
+	return f.Forge.FindPR(ctx, headBranch, marker)
+}
+
+// flakyRemoteGit fails its per-branch ls-remote a set number of times, then answers.
+type flakyRemoteGit struct {
+	git.Git
+	failures *int
+}
+
+func (g flakyRemoteGit) LsRemoteBranch(ctx context.Context, cloneDir, remote, branch string) (string, bool, error) {
+	if *g.failures > 0 {
+		*g.failures--
+		return "", false, errors.New("could not read from remote repository")
+	}
+	return g.Git.LsRemoteBranch(ctx, cloneDir, remote, branch)
+}
+
+// TestALandedCleanedPromotionDoesNotRedoItselfWhenOneLookupFails is the whole thing end to end,
+// on both paths: land, clean up, then one poll of the wait on the rollout in which the landing
+// cannot be confirmed. Nothing may be rebuilt, re-committed or re-pushed on that poll; the drive
+// reports a retryable error; and the next poll carries on as if nothing had happened.
+func TestALandedCleanedPromotionDoesNotRedoItselfWhenOneLookupFails(t *testing.T) {
+	rolloutPending := func(t *testing.T, fx inflightFixture) {
+		t.Helper()
+		ro, _, err := fx.svc.deps.Rollout("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ro.(*rollout.Fake).SetDeployment("app-production", "app", rollout.DeploymentStatus{
+			Namespace: "app-production", Name: "app",
+			Images: []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@sha256:" + strings.Repeat("1", 64)}},
+		})
+	}
+	untouched := func(t *testing.T, fx inflightFixture, s engine.PromotionState) {
+		t.Helper()
+		mustBeGone(t, s.WorktreeDir)
+		if branchExists(t, fx.clone, s.Branch) {
+			t.Fatalf("the local branch %s was recreated", s.Branch)
+		}
+		if _, exists, err := (git.Exec{}).LsRemoteBranch(context.Background(), fx.clone, "origin", s.Branch); err != nil || exists {
+			t.Fatalf("the promotion's branch was pushed to origin again: exists=%v err=%v", exists, err)
+		}
+	}
+
+	t.Run("PR path, forge lookup fails", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		rolloutPending(t, fx)
+		s := buildPROpenedPromotionsState(t, fx)
+		fx.f.SetHeadSHA(s.PR.Number, s.CommitSHA)
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		failures := 0
+		base := withConfig(fx)
+		deps := base.deps
+		inner := deps.Forge
+		deps.Forge = func(repo string) (forge.Forge, error) {
+			f, err := inner(repo)
+			return flakyForge{Forge: f, failures: &failures}, err
+		}
+		deps.NoCache = true
+		svc := New(base.Settings(), deps)
+
+		d, err := svc.Resume(context.Background(), s.ID, ResumeOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tick, err := d.Step(context.Background()); err != nil || !tick.Waiting || !engine.Landed(tick.Statuses) {
+			t.Fatalf("fixture precondition: land and wait on the rollout: %+v, %v", tick, err)
+		}
+		landed := d.State()
+		untouched(t, fx, landed)
+
+		failures = 100 // the forge is down for the whole of the next poll
+		tick, err := d.Step(context.Background())
+		failures = 0
+		if err == nil {
+			t.Fatalf("the poll could not confirm the landing and must say so: %+v", tick)
+		}
+		if !engine.Retryable(err) || !tick.Retry {
+			t.Fatalf("err = %v (retry=%v), want a retryable error so the wait goes on", err, tick.Retry)
+		}
+		untouched(t, fx, landed)
+
+		if tick, err := d.Step(context.Background()); err != nil || !tick.Waiting {
+			t.Fatalf("the next poll, with the forge back, carries on waiting on the rollout: %+v, %v", tick, err)
+		}
+		untouched(t, fx, landed)
+	})
+
+	t.Run("direct path, origin lookup fails", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := landedDirectState(t, fx)
+		if lines, err := withConfig(fx).CleanupLanded(context.Background(), s); err != nil || len(lines) != 2 {
+			t.Fatalf("fixture precondition: clean up the landed promotion: %q, %v", lines, err)
+		}
+		failures := 100
+		steps := engine.DirectSteps(flakyRemoteGit{Git: git.Exec{}, failures: &failures}, nil, true, nil)
+		before := len(s.History)
+		err := engine.Drive(context.Background(), steps, s, nil)
+		if err == nil || !engine.Retryable(err) {
+			t.Fatalf("err = %v, want a retryable error and nothing redone", err)
+		}
+		untouched(t, fx, *s)
+		for _, h := range s.History[before:] {
+			if strings.Contains(h.Detail, "acted") {
+				t.Fatalf("a step acted on the failed poll: %+v", h)
+			}
+		}
+
+		failures = 0
+		if err := engine.Drive(context.Background(), steps, s, nil); err != nil {
+			t.Fatalf("with origin back the landed promotion is simply done: %v", err)
+		}
+		untouched(t, fx, *s)
+	})
+}
+
+// TestAPromotionThatLandedWithoutItsStateFileSayingSoDoesNotRedoItself: a promotion can land
+// without the state file ever recording it — its PR merged on the forge by hand, or the process
+// killed between the merge and the save — and a listing then cleans up after it from its own
+// observation, saving nothing. So the state file says "PR open", the worktree and branch are
+// gone, and the next poll cannot reach the forge. What the state file records must play no part
+// in whether that poll may Act (AGENTS.md §4.1): nothing is rebuilt or re-pushed, the error is
+// retryable, and the poll after it carries on.
+func TestAPromotionThatLandedWithoutItsStateFileSayingSoDoesNotRedoItself(t *testing.T) {
+	untouched := func(t *testing.T, fx inflightFixture, s *engine.PromotionState) {
+		t.Helper()
+		mustBeGone(t, s.WorktreeDir)
+		if branchExists(t, fx.clone, s.Branch) {
+			t.Fatalf("the local branch %s was recreated", s.Branch)
+		}
+		if _, exists, err := (git.Exec{}).LsRemoteBranch(context.Background(), fx.clone, "origin", s.Branch); err != nil || exists {
+			t.Fatalf("the promotion's branch was pushed to origin: exists=%v err=%v", exists, err)
+		}
+	}
+
+	t.Run("PR merged outside hoist", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := buildPROpenedPromotionsState(t, fx)
+		fx.f.SetHeadSHA(s.PR.Number, s.CommitSHA)
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		// Merged on the forge and its branch deleted, by someone else.
+		f, err := fx.svc.deps.Forge("example/gitops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.MergePR(context.Background(), s.PR.Number, s.CommitSHA); err != nil {
+			t.Fatal(err)
+		}
+		runGitHost(t, fx.clone, "push", "-q", "origin", "--delete", s.Branch)
+
+		listed, err := withConfig(fx).List(context.Background(), ListOpts{})
+		if err != nil || len(listed) != 1 || len(listed[0].Cleaned) != 2 {
+			t.Fatalf("fixture precondition: the listing cleans up the merged promotion: %+v, %v", listed, err)
+		}
+		onDisk, err := fileStore.Load(s.ID)
+		if err != nil || onDisk == nil || onDisk.MergeSHA != "" {
+			t.Fatalf("fixture precondition: the state file must still not record the merge: %+v, %v", onDisk, err)
+		}
+
+		failures := 100
+		base := withConfig(fx)
+		set := base.Settings()
+		set.Poll.Approval = 7 * time.Second
+		deps := base.deps
+		inner := deps.Forge
+		deps.Forge = func(repo string) (forge.Forge, error) {
+			f, err := inner(repo)
+			return flakyForge{Forge: f, failures: &failures}, err
+		}
+		deps.NoCache = true
+		d, err := New(set, deps).Resume(context.Background(), s.ID, ResumeOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tick, err := d.Step(context.Background())
+		if err == nil || !tick.Retry {
+			t.Fatalf("the forge is down: want a retryable error, got retry=%v err=%v", tick.Retry, err)
+		}
+		if tick.Wait != 7*time.Second {
+			t.Errorf("Wait = %s, want the forge's own poll cadence (7s), not the 2s default of the step that reported it", tick.Wait)
+		}
+		untouched(t, fx, s)
+
+		failures = 0
+		if tick, err := d.Step(context.Background()); err != nil || !engine.Landed(tick.Statuses) {
+			t.Fatalf("with the forge back the promotion is seen merged and carries on: %+v, %v", tick, err)
+		}
+		untouched(t, fx, s)
+	})
+
+	t.Run("direct push landed, never saved", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		r, err := gitops.Discover(fx.clone, "cluster/apps")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := gitops.BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := engine.DeriveID("example/gitops", plan)
+		wt, err := engine.WorktreeDir(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &engine.PromotionState{
+			ID: id, RepoFullName: "example/gitops", SourceEnv: plan.SourceEnv, TargetEnv: plan.TargetEnv,
+			Branch: engine.BranchName(plan.TargetEnv, id), CloneDir: fx.clone, WorktreeDir: wt, Base: "main",
+			Direct: true, Edits: plan.Edits, CommitMessage: engine.RenderCommitMessage(id, plan),
+		}
+		g := git.Exec{}
+		if err := (engine.BranchedStep{Git: g}).Act(context.Background(), s); err != nil {
+			t.Fatal(err)
+		}
+		if err := (engine.CommittedStep{Git: g}).Act(context.Background(), s); err != nil {
+			t.Fatal(err)
+		}
+		// Saved after the commit; then the push lands and the process dies before saving it.
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		runGitHost(t, wt, "push", "-q", "origin", "HEAD:refs/heads/main")
+		if lines, err := withConfig(fx).CleanupLanded(context.Background(), s); err != nil || len(lines) != 2 {
+			t.Fatalf("fixture precondition: clean up the landed promotion: %q, %v", lines, err)
+		}
+		loaded, err := fileStore.Load(s.ID)
+		if err != nil || loaded == nil || loaded.PushedSHA != "" {
+			t.Fatalf("fixture precondition: the state file must not record the push: %+v, %v", loaded, err)
+		}
+
+		failures := 100
+		steps := engine.DirectSteps(flakyRemoteGit{Git: g, failures: &failures}, nil, true, nil)
+		before := len(loaded.History)
+		err = engine.Drive(context.Background(), steps, loaded, nil)
+		if err == nil || !engine.Retryable(err) {
+			t.Fatalf("origin is down: want a retryable error, got %v", err)
+		}
+		for _, h := range loaded.History[before:] {
+			if strings.Contains(h.Detail, "acted") {
+				t.Fatalf("a step acted on the failed poll: %+v", h)
+			}
+		}
+		untouched(t, fx, loaded)
+
+		failures = 0
+		if err := engine.Drive(context.Background(), steps, loaded, nil); err != nil {
+			t.Fatalf("with origin back the landed promotion is simply done: %v", err)
+		}
+		untouched(t, fx, loaded)
+	})
+}
+
+// TestARefusalWithNothingLeftBehindIsNotReported: a state file hoist will not follow for a
+// removal (here: its recorded worktree is under some other cache directory, as after a changed
+// XDG_CACHE_HOME) is only worth a line when there is something where its worktree or branch
+// would be. With nothing there it must be silent — and must not hold up archiving, or every
+// finished promotion of a repo whose clone moved would be listed, and re-observed, for ever.
+func TestARefusalWithNothingLeftBehindIsNotReported(t *testing.T) {
+	old := func(s *engine.PromotionState) {
+		at := time.Now().Add(-48 * time.Hour)
+		s.GeneratedAt = at
+		for i := range s.History {
+			s.History[i].At = at
+		}
+	}
+	t.Run("nothing left behind", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		if lines, err := withConfig(fx).CleanupLanded(context.Background(), s); err != nil || len(lines) != 2 {
+			t.Fatalf("fixture precondition: %q, %v", lines, err)
+		}
+		old(s)
+		s.WorktreeDir = "/some/other/cache/hoist/worktrees/" + s.ID
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := withConfig(fx).List(context.Background(), ListOpts{ArchiveDoneOlderThan: time.Hour})
+		if err != nil || len(listed) != 1 {
+			t.Fatalf("List = %+v, %v", listed, err)
+		}
+		if listed[0].CleanupErr != nil {
+			t.Fatalf("nothing is left behind, so there is nothing to report: %v", listed[0].CleanupErr)
+		}
+		if !listed[0].Archived {
+			t.Fatal("a finished promotion with nothing left behind is archived as before")
+		}
+	})
+	t.Run("control: its worktree is still there", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		old(s)
+		s.WorktreeDir = "/some/other/cache/hoist/worktrees/" + s.ID
+		if err := fileStore.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := withConfig(fx).List(context.Background(), ListOpts{ArchiveDoneOlderThan: time.Hour})
+		if err != nil || len(listed) != 1 || listed[0].CleanupErr == nil || listed[0].Archived {
+			t.Fatalf("a refusal with a worktree still on disk is reported and holds the archive: %+v, %v", listed, err)
+		}
+	})
 }
