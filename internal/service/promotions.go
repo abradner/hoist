@@ -312,6 +312,15 @@ func (s *Service) List(ctx context.Context, o ListOpts) ([]Listed, error) {
 			st := l.State
 			l.Cleaned, l.CleanupErr = s.cleanupObservedLanded(ctx, &st)
 		}
+		// A promotion whose worktree or branch is still there — the cleanup failed, or looked
+		// and refused — is not archived. Nothing lists an archived state: a failed cleanup would
+		// never be retried, and a refused one would turn into an orphan that `hoist gc` judges
+		// by a weaker rule (it does not ask whether the branch tip is on the remote), so "kept
+		// because that commit exists nowhere else" would become "deleted by the next sweep".
+		// It stays listed, with the reason, until someone deals with it.
+		if l.CleanupErr != nil {
+			continue
+		}
 		if l.Done && o.ArchiveDoneOlderThan > 0 && time.Since(l.State.LastActivity()) > o.ArchiveDoneOlderThan {
 			if aerr := s.deps.Store.Archive(l.State.ID); aerr != nil {
 				l.ArchiveErr = aerr
@@ -532,7 +541,7 @@ func (s *Service) AbandonWith(ctx context.Context, id string, h Hooks) ([]string
 	// (re-observed above) and the operator confirmed, so the worktree holds nothing hoist would
 	// not rebuild from the same plan. A refusal — the paths could not be shown to be hoist's own
 	// — is reported and does not stop the abandon; a real failure does.
-	cleaned, cerr := s.removePromotionFiles(ctx, st, false)
+	cleaned, cerr := s.removePromotionFiles(ctx, st, removal{force: true})
 	lines = append(lines, cleaned...)
 	var refused *engine.CleanupRefusedError
 	switch {

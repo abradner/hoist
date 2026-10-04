@@ -69,12 +69,18 @@ func RetryableStep(step StepName) bool {
 }
 
 // Retryable is the full retry decision a drive loop makes on an error Drive (or Status) returns:
-// true only for a *StepError naming a RetryableStep whose underlying error is not one of
-// IsNotFound's structural sentinels. Anything else — an error that isn't a *StepError at all, a
+// true for a *LandingUnknownError, and otherwise only for a *StepError naming a RetryableStep
+// whose underlying error is not one of IsNotFound's structural sentinels. Anything else — an error that isn't a *StepError at all, a
 // *StepError on a step with no configured retry, ctx cancellation, a rejected push, a broken git
 // binary — is terminal: waiting for it will not make it succeed, so a drive loop reports it
 // immediately rather than polling until the deadline.
 func Retryable(err error) bool {
+	// A landed promotion whose landing could not be confirmed this poll: a failed lookup while
+	// waiting on Argo or the rollout, whatever step's guard reported it. The wait goes on.
+	var unknown *LandingUnknownError
+	if errors.As(err, &unknown) {
+		return !IsNotFound(unknown.Err)
+	}
 	var stepErr *StepError
 	if !errors.As(err, &stepErr) || !RetryableStep(stepErr.Step) {
 		return false

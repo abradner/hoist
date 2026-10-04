@@ -63,7 +63,9 @@ func TestLandedGuard(t *testing.T) {
 		{"inner unsatisfied, landed with this commit", "c1", unsatisfied, landedAs("c1"), true, false, false, 1},
 		{"inner blocked, landed with this commit", "c1", blocked, landedAs("c1"), true, false, false, 1},
 		{"inner errors, landed with this commit", "c1", failing, landedAs("c1"), true, false, false, 1},
-		{"forge does not say which commit merged", "c1", unsatisfied, landedAs(""), true, false, false, 1},
+		// Not saying is not agreeing: without a head sha a merged PR found by branch name could
+		// be any earlier run's.
+		{"forge does not say which commit merged", "c1", unsatisfied, landedAs(""), false, false, false, 1},
 		// #41: the merged PR on this branch name merged a DIFFERENT commit — an earlier run of
 		// the same id. That is not this run landing.
 		{"landed PR merged some other commit", "c2", unsatisfied, landedAs("c1"), false, false, false, 1},
@@ -110,8 +112,9 @@ func TestLandedGuard(t *testing.T) {
 func TestLandedGuardAsksTheLandingStepOncePerWalk(t *testing.T) {
 	for _, landedAnswer := range []bool{true, false} {
 		calls := 0
-		landing := stubStep{name: StepMerged, observe: func(*PromotionState) (Observation, error) {
+		landing := stubStep{name: StepMerged, observe: func(st *PromotionState) (Observation, error) {
 			calls++
+			st.PR = &forge.PR{Number: 7, Merged: landedAnswer, HeadSHA: "c1"}
 			return Observation{Satisfied: landedAnswer}, nil
 		}}
 		unsatisfied := func(name StepName) Step {
@@ -193,6 +196,73 @@ func TestWalkersDoNotAskAgainAfterTheirOwnProbe(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestLandedGuardDoesNotActOnAFailedLookupForAPromotionOnRecordAsLanded: once cleanup removes a
+// landed promotion's worktree, its pre-landing steps are unsatisfied for good and only the
+// landing answer keeps the walk from redoing them. If that answer cannot be had — one forge 502,
+// one dropped connection, on any poll of a wait that lasts as long as the rollout does — the
+// guard must report that it does not know, not hand back "not satisfied" for the walk to Act on.
+func TestLandedGuardDoesNotActOnAFailedLookupForAPromotionOnRecordAsLanded(t *testing.T) {
+	down := errors.New("502 from the forge")
+	landingFails := stubStep{name: StepMerged, observe: func(*PromotionState) (Observation, error) { return Observation{}, down }}
+	acted := 0
+	unsatisfied := stubStep{name: StepBranched, observe: func(*PromotionState) (Observation, error) { return Observation{}, nil }, acted: &acted}
+	after := stubStep{name: StepArgoRefreshed, observe: func(*PromotionState) (Observation, error) { return Observation{Waiting: true}, nil }}
+
+	t.Run("on record as landed", func(t *testing.T) {
+		s := &PromotionState{CommitSHA: "c1", MergeSHA: "m1", Base: "main"}
+		_, err := guardLanded(unsatisfied, landingFails).Observe(context.Background(), s)
+		var unknown *LandingUnknownError
+		if !errors.As(err, &unknown) || unknown.Step != StepMerged || !errors.Is(err, down) {
+			t.Fatalf("err = %v (%T), want a *LandingUnknownError naming %s and wrapping the lookup's failure", err, err, StepMerged)
+		}
+		if !Retryable(err) {
+			t.Fatal("not knowing whether a landed promotion is still landed is a reason to ask again, not to stop")
+		}
+	})
+
+	// The same thing through each walker, with the walker's own probe being what failed.
+	for _, phase := range []StepName{StepArgoRefreshed, StepMerged} {
+		t.Run("DriveStatus at phase "+string(phase), func(t *testing.T) {
+			acted = 0
+			s := &PromotionState{CommitSHA: "c1", MergeSHA: "m1", Base: "main", Phase: phase}
+			steps := []Step{guardLanded(unsatisfied, landingFails), landingFails, after}
+			_, _, err := DriveStatus(context.Background(), steps, s, nil)
+			if acted != 0 {
+				t.Fatalf("a step Acted (%d times) on a promotion recorded as landed, on the strength of a failed lookup", acted)
+			}
+			if !Retryable(err) {
+				t.Fatalf("err = %v, want it retryable so the wait goes on", err)
+			}
+		})
+	}
+	for _, walker := range []string{"ObserveAll", "Status"} {
+		t.Run(walker, func(t *testing.T) {
+			s := &PromotionState{CommitSHA: "c1", MergeSHA: "m1", Base: "main"}
+			steps := []Step{guardLanded(unsatisfied, landingFails), landingFails, after}
+			var err error
+			if walker == "ObserveAll" {
+				_, _, err = ObserveAll(context.Background(), steps, s)
+			} else {
+				_, _, err = Status(context.Background(), steps, s)
+			}
+			if err == nil {
+				t.Fatal("a landed promotion whose landing could not be confirmed must surface as an error, not as stopped at Branched")
+			}
+		})
+	}
+
+	// Control: a promotion never seen to land is still on its way, and its steps act as before
+	// whatever the forge is doing — the lookup is a short-circuit there, not a precondition.
+	t.Run("never recorded as landed", func(t *testing.T) {
+		acted = 0
+		s := &PromotionState{CommitSHA: "c1", Base: "main"}
+		obs, err := guardLanded(unsatisfied, landingFails).Observe(context.Background(), s)
+		if err != nil || obs.Satisfied {
+			t.Fatalf("the wrapped step's own answer must stand: obs=%+v err=%v", obs, err)
+		}
+	})
 }
 
 func TestLandingObservable(t *testing.T) {

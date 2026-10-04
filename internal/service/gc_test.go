@@ -357,3 +357,56 @@ func TestGCAsksEveryConfiguredCloneEvenWhenOneCannotBeAsked(t *testing.T) {
 	}
 	mustBeGone(t, orphan)
 }
+
+// TestGCReportsAnOrphanNoCloneCouldBeAskedAboutAsFailed: when no configured checkout could be
+// asked whether a directory is its worktree, ownership was never decided. That is a failure to
+// check, not "kept because nobody owns it".
+func TestGCReportsAnOrphanNoCloneCouldBeAskedAboutAsFailed(t *testing.T) {
+	fx := newInflightFixture(t)
+	base := withConfig(fx)
+	set := base.Settings()
+	set.RepoDir = ""
+	set.Repo = nil
+	set.Config = &config.Config{Repos: []config.RepoConfig{{GitHub: "someone/gone", Dir: "/aaa-hoist-test-does-not-exist"}}}
+	svc := New(set, base.deps)
+
+	orphan := gcWorktree(t, fx, "orphan2222", "hoist/app-staging/orphan2222")
+	rep, err := svc.GC(context.Background(), GCOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Failed) != 1 || !strings.Contains(rep.Failed[0], orphan) || len(rep.Kept) != 0 || len(rep.Removed) != 0 {
+		t.Fatalf("GC = %+v, want the orphan under Failed and nothing else", rep)
+	}
+	mustExist(t, orphan)
+}
+
+// appearsOnLoad is a StateStore whose List does not show a state that Load then finds: the
+// promotion re-run under an orphan's id after the sweep listed the state files.
+type appearsOnLoad struct {
+	StateStore
+	id string
+}
+
+func (a appearsOnLoad) Load(id string) (*engine.PromotionState, error) {
+	if id == a.id {
+		return &engine.PromotionState{ID: id}, nil
+	}
+	return a.StateStore.Load(id)
+}
+
+func TestGCLooksAgainForAStateFileBeforeRemovingAnOrphan(t *testing.T) {
+	fx := newInflightFixture(t)
+	base := withConfig(fx)
+	orphan := gcWorktree(t, fx, "orphan2222", "hoist/app-staging/orphan2222")
+	deps := base.deps
+	deps.Store = appearsOnLoad{StateStore: FileStore{}, id: "orphan2222"}
+	rep, err := New(base.Settings(), deps).GC(context.Background(), GCOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Removed) != 0 || linesContaining(rep.Kept, "has started since the sweep began") != 1 {
+		t.Fatalf("GC = %+v, want the worktree kept because its id is live again", rep)
+	}
+	mustExist(t, orphan)
+}

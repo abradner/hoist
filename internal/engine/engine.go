@@ -183,7 +183,7 @@ func DriveStatus(ctx context.Context, steps []Step, s *PromotionState, save func
 		if start == 0 {
 			// The merge was asked about and is not there (or could not be asked): the guarded
 			// steps below take that as this walk's answer rather than asking again.
-			probedNotLanded(ctx)
+			probedNotLanded(ctx, perr)
 		}
 		// A probe error is deliberately not handled here — it falls through to the main loop,
 		// which re-Observes this same step in its own turn and reports the error through the
@@ -303,7 +303,7 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil || !cleanlySatisfied(obs) {
 			// The guarded steps the walk below reaches take this as its answer (landingWalk).
-			probedNotLanded(ctx)
+			probedNotLanded(ctx, oerr)
 		}
 		switch {
 		case oerr != nil:
@@ -427,7 +427,7 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 		obs, oerr := steps[mi].Observe(ctx, s)
 		if oerr != nil || !cleanlySatisfied(obs) {
 			// The guarded steps the walk below reaches take this as its answer (landingWalk).
-			probedNotLanded(ctx)
+			probedNotLanded(ctx, oerr)
 		}
 		switch {
 		case oerr != nil:
