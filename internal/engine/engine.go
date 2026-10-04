@@ -170,13 +170,20 @@ func DriveStatus(ctx context.Context, steps []Step, s *PromotionState, save func
 	start := 0
 	probedIdx := -1
 	var probed Observation
+	ctx = withLandingWalk(ctx)
 	if mergedIdx >= 0 && mergedIdx < len(steps)-1 && phaseIndex(steps, s.Phase) > mergedIdx {
-		if obs, perr := steps[mergedIdx].Observe(ctx, s); perr == nil {
+		obs, perr := steps[mergedIdx].Observe(ctx, s)
+		if perr == nil {
 			probedIdx, probed = mergedIdx, obs
 			if obs.Blocked == "" && !obs.Waiting && obs.Satisfied {
 				start = mergedIdx + 1
 				statuses = append(statuses, StepStatus{Step: steps[mergedIdx].Name(), Observation: obs})
 			}
+		}
+		if start == 0 {
+			// The merge was asked about and is not there (or could not be asked): the guarded
+			// steps below take that as this walk's answer rather than asking again.
+			probedNotLanded(ctx)
 		}
 		// A probe error is deliberately not handled here — it falls through to the main loop,
 		// which re-Observes this same step in its own turn and reports the error through the
@@ -290,9 +297,14 @@ type StepStatus struct {
 func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool, last StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
 	var probeErr error
+	ctx = withLandingWalk(ctx)
 	mi := phaseIndex(steps, StepMerged)
 	if mi >= 0 {
 		obs, oerr := steps[mi].Observe(ctx, s)
+		if oerr != nil || !cleanlySatisfied(obs) {
+			// The guarded steps the walk below reaches take this as its answer (landingWalk).
+			probedNotLanded(ctx)
+		}
 		switch {
 		case oerr != nil:
 			// The probe is a short-circuit, never the only observation of the merge: on a
@@ -409,9 +421,14 @@ func ObserveAll(ctx context.Context, steps []Step, s *PromotionState) (done bool
 func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, statuses []StepStatus, err error) {
 	start, probedIdx, probed := 0, -1, Observation{}
 	var probeErr error
+	ctx = withLandingWalk(ctx)
 	mi := phaseIndex(steps, StepMerged)
 	if mi >= 0 {
 		obs, oerr := steps[mi].Observe(ctx, s)
+		if oerr != nil || !cleanlySatisfied(obs) {
+			// The guarded steps the walk below reaches take this as its answer (landingWalk).
+			probedNotLanded(ctx)
+		}
 		switch {
 		case oerr != nil:
 			// A failed probe is not a failed Status: the walk below observes every step in

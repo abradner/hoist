@@ -14,10 +14,14 @@ import (
 
 // Steps returns the four steps, in order, wired to g and f.
 func Steps(g git.Git, f forge.Forge, onWaiting func()) []Step {
+	// The three steps a promotion only needs before it merges are guarded by the merge itself
+	// (see landedGuard): once MergedStep is satisfied, a missing worktree or a deleted remote
+	// branch is not something to redo.
+	merged := MergedStep{Forge: f, Git: g}
 	return []Step{
-		BranchedStep{Git: g},
-		CommittedStep{Git: g, OnWaiting: onWaiting},
-		PushedStep{Git: g},
+		guardLanded(BranchedStep{Git: g}, merged),
+		guardLanded(CommittedStep{Git: g, OnWaiting: onWaiting}, merged),
+		guardLanded(PushedStep{Git: g}, merged),
 		PROpenedStep{Forge: f},
 	}
 }
@@ -58,7 +62,10 @@ func CoreSteps(g git.Git, f forge.Forge, onWaiting func()) []Step {
 func ObserveSteps(s *PromotionState, g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiting func()) []Step {
 	core := CoreSteps(g, f, onWaiting)
 	if s != nil && s.Direct {
-		core = []Step{BranchedStep{Git: g}, CommittedStep{Git: g, OnWaiting: onWaiting}, DirectPushedStep{Git: g}}
+		// Branched and Committed are guarded exactly as in DirectSteps: a landed direct promotion
+		// must read done whether or not its worktree still exists (see landedGuard).
+		pushed := DirectPushedStep{Git: g}
+		core = []Step{guardLanded(BranchedStep{Git: g}, pushed), guardLanded(CommittedStep{Git: g, OnWaiting: onWaiting}, pushed), pushed}
 	}
 	if a == nil && ro == nil {
 		return core
@@ -89,7 +96,9 @@ func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
 
 // DirectSteps returns the steps a direct-mode promotion drives: the production/confirmation
 // gate, then the same branch-and-commit steps the PR flow uses (BranchedStep, CommittedStep —
-// unmodified), then DirectPushedStep in place of PushedStep+PROpenedStep.
+// unmodified), then DirectPushedStep in place of PushedStep+PROpenedStep. The two worktree steps
+// are wrapped in landedGuard, so that once the push has landed neither is asked about a worktree
+// the promotion no longer needs.
 //
 // productionEnvs MUST be RepoConfig.Envs.Production passed through exactly as loaded, never
 // filtered, narrowed, or recomputed by the caller — DirectCommitGateStep's whole guarantee
@@ -101,11 +110,12 @@ func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
 // CLI, its documented equivalent (cmd/hoist) — never a default, never inferred from anything
 // else in the promotion.
 func DirectSteps(g git.Git, productionEnvs []string, confirmed bool, onWaiting func()) []Step {
+	pushed := DirectPushedStep{Git: g}
 	return []Step{
 		DirectCommitGateStep{ProductionEnvs: productionEnvs, Confirmed: confirmed},
-		BranchedStep{Git: g},
-		CommittedStep{Git: g, OnWaiting: onWaiting},
-		DirectPushedStep{Git: g},
+		guardLanded(BranchedStep{Git: g}, pushed),
+		guardLanded(CommittedStep{Git: g, OnWaiting: onWaiting}, pushed),
+		pushed,
 	}
 }
 
