@@ -262,8 +262,9 @@ matrix opens for a cell) — it asks which family first when the promotion touch
 was (branch, commit, push, PR, merge, Argo, rollout — whatever step is next still happens), and
 `tab` to focus the matrix's own in-flight pane below, then `enter` on the row, re-attaches to the
 exact same running drive later, never starting a second one. `shift+x` (a write, kept out of reach of a mistyped key)
-*abandons* it instead: behind a confirm, it retires the state file and, if it opened a PR, closes
-it and deletes the branch. It refuses outright if the promotion has already landed — abandoning is
+*abandons* it instead: behind a confirm, it retires the state file, removes the promotion's
+worktree and its local `hoist/<env>/<id>` branch from your clone and, if it opened a PR, closes
+it and deletes the remote branch. It refuses outright if the promotion has already landed — abandoning is
 not a rollback, so a landed one needs `hoist deploy` or a fresh promotion to undo, not a
 state-file delete — and it is never offered at all once the promotion is done. `l` shows the
 activity log here too, not only from the matrix. `q` quits hoist, but only from the matrix:
@@ -553,6 +554,25 @@ moves from the live promotions dir to a sibling `archive/` subdirectory — stil
 deletable JSON file, just out of the default listing. This never happens on age alone: a promotion
 has to be re-observed as done first, every time, so a genuinely stuck one (however old) is never
 touched — `--repo`/`--archived` only change what's *listed*, never what gets archived.
+
+**What is cleaned up, and when.** A promotion's worktree
+(`$XDG_CACHE_HOME/hoist/worktrees/<id>`) and its local branch `hoist/<env>/<id>` in your clone
+are scratch space, and hoist removes both as soon as it observes the promotion *landed* — merged
+with its remote branch deleted, or (direct mode) pushed and still in effect on the base. That
+happens on the tick that lands it while hoist is driving, and otherwise the next time anything
+lists it (`hoist promotions`, the matrix's in-flight pane); `hoist promotions` prints what it
+removed under the row. It does not wait for the rollout, since nothing after the landing reads
+either. A promotion that has not landed keeps both, whatever is in them, until it lands or you
+abandon it. And "landed" alone is not enough: before removing anything hoist looks at the
+worktree and branch themselves, and leaves them if the worktree has uncommitted changes or the
+branch's tip is a commit that is not on the remote (neither the commit the merged PR merged, nor
+in the base branch) — so a second run of the same promotion, or a state file that is wrong, does
+not cost you the only copy of a commit. Only ever that one directory under the hoist cache and
+that one branch: your checkout, index and other branches are never touched, and a state file
+whose recorded paths are not the ones its own id names is refused ("not cleaned up: …") rather
+than followed. In the TUI a removal the in-flight pane's own listing makes, and each refusal
+once, is an entry in the activity log (`l`); a promotion this session is driving is tidied as it
+lands, without a separate entry (#249).
 
 On the matrix, `tab` then `enter` on the pane does the same for what it lists, and `shift+x`
 there abandons the one under the cursor behind a confirm. A finished promotion leaves the pane;

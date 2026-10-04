@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,6 +282,15 @@ func TestListAndResumeByEnvAskOriginOncePerScan(t *testing.T) {
 		return New(base.settings, deps), counting
 	}
 
+	// A landed promotion's first listing also tidies up after it (Service.CleanupLanded), and
+	// that asks origin about the one promotion, live — deliberately not through the scan's
+	// snapshot, since it is about to delete something. It happens once per promotion, so it is
+	// paid here, before anything is counted; TestListPaysForCleanupOncePerPromotion pins that
+	// the listing counted below, and every one after it, is back to the scan's own cost.
+	if _, err := withConfig(fx).List(context.Background(), ListOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
 	svc, counting := withCounting()
 	listed, err := svc.List(context.Background(), ListOpts{})
 	if err != nil {
@@ -488,12 +498,164 @@ func TestScanOverDirectAndPRPromotionsAsksOriginOnce(t *testing.T) {
 	}
 }
 
+// TestListPaysForCleanupOncePerPromotion: cleaning up after a landed promotion asks origin about
+// it live — one promotion's worth of the per-state traffic the shared scan exists to remove. That
+// is the price of not deleting anything on a snapshot's say-so, and it must be a one-off: the
+// listing that cleans pays it, and the next listing over the same promotions is exactly the
+// scan's own cost again (one fetch, two listings, no per-branch ls-remote). Covers the two
+// shapes that pile up: finished, and landed but never satisfied at rolled-out (#168).
+func TestListPaysForCleanupOncePerPromotion(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		superseded bool
+	}{{"finished", false}, {"landed, never rolled out", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newInflightFixture(t)
+			s := finishedPromotion(t, fx)
+			if tc.superseded {
+				ro, err := fx.svc.Rollout("")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ro.(*rollout.Fake).SetDeployment("app-production", "app", rollout.DeploymentStatus{
+					Namespace: "app-production", Name: "app", Complete: true,
+					Images: []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v9@sha256:" + strings.Repeat("9", 64)}},
+				})
+			}
+			list := func() ([]Listed, *countingGit) {
+				counting := &countingGit{Git: git.Exec{}}
+				base := withConfig(fx)
+				deps := base.deps
+				deps.Git = func() git.Git { return counting }
+				listed, err := New(base.settings, deps).List(context.Background(), ListOpts{})
+				if err != nil || len(listed) != 1 {
+					t.Fatalf("List = %v, %v", listed, err)
+				}
+				return listed, counting
+			}
+
+			first, c1 := list()
+			if len(first[0].Cleaned) != 2 || first[0].CleanupErr != nil {
+				t.Fatalf("control: the first listing must clean up the landed promotion (worktree and branch): %+v", first[0])
+			}
+			if first[0].Done == tc.superseded {
+				t.Fatalf("control: done = %v, want %v", first[0].Done, !tc.superseded)
+			}
+			if _, err := os.Lstat(s.WorktreeDir); !os.IsNotExist(err) {
+				t.Fatalf("the worktree should be gone: %v", err)
+			}
+			// The scan's own 1 fetch and 2 listings, plus the cleanup's live look at this one
+			// promotion: a fetch and a per-branch ls-remote to re-observe the merge, and a fetch
+			// to place the branch tip on the base (the fake forge reports no head sha to compare).
+			if c1.fetch != 3 || c1.heads != 2 || c1.branch != 1 {
+				t.Errorf("the listing that cleans up: %d fetches, %d listings, %d per-branch ls-remotes; want 3, 2, 1", c1.fetch, c1.heads, c1.branch)
+			}
+
+			second, c2 := list()
+			if len(second[0].Cleaned) != 0 || second[0].CleanupErr != nil {
+				t.Fatalf("there is nothing left to clean on the second listing: %+v", second[0])
+			}
+			if c2.fetch != 1 || c2.heads != 2 || c2.branch != 0 {
+				t.Errorf("the listing after cleanup: %d fetches, %d listings, %d per-branch ls-remotes; want the scan's own 1, 2, 0", c2.fetch, c2.heads, c2.branch)
+			}
+		})
+	}
+}
+
+// TestListDoesNotAskOriginAgainAboutAPromotionItIsLeavingInPlace: a landed promotion whose
+// worktree and branch are NOT removed is listed again on every poll, with something still
+// pending every time. It must not cost a live look at origin every time: the TUI lists every
+// poll.approval, and a promotion left in place can stay that way for good.
+func TestListDoesNotAskOriginAgainAboutAPromotionItIsLeavingInPlace(t *testing.T) {
+	scanOnly := func(t *testing.T, c *countingGit, what string) {
+		t.Helper()
+		if c.fetch != 1 || c.heads != 2 || c.branch != 0 {
+			t.Errorf("%s: %d fetches, %d listings, %d per-branch ls-remotes; want the scan's own 1, 2, 0", what, c.fetch, c.heads, c.branch)
+		}
+	}
+	// One Service across the listings, as the TUI has: what it remembers is per process.
+	service := func(fx inflightFixture) (*Service, *countingGit) {
+		counting := &countingGit{Git: git.Exec{}}
+		base := withConfig(fx)
+		deps := base.deps
+		deps.Git = func() git.Git { return counting }
+		return New(base.settings, deps), counting
+	}
+	reset := func(c *countingGit) { c.fetch, c.heads, c.branch = 0, 0, 0 }
+
+	// Refused by a local check: origin is never asked on the cleanup's behalf, not even once.
+	t.Run("uncommitted file in the worktree", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		if err := os.WriteFile(filepath.Join(s.WorktreeDir, "left-behind.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		svc, c := service(fx)
+		for i := 1; i <= 3; i++ {
+			reset(c)
+			listed, err := svc.List(context.Background(), ListOpts{})
+			if err != nil || len(listed) != 1 || listed[0].CleanupErr == nil || len(listed[0].Cleaned) != 0 {
+				t.Fatalf("listing %d: want the promotion left in place with the reason: %+v, %v", i, listed, err)
+			}
+			scanOnly(t, c, fmt.Sprintf("listing %d", i))
+		}
+		if _, err := os.Lstat(s.WorktreeDir); err != nil {
+			t.Fatalf("the worktree must be left: %v", err)
+		}
+	})
+
+	// Refused only after asking origin (the branch tip is a commit that is nowhere on the
+	// remote — the same id run a second time, #41): the first listing pays for the look, and
+	// the ones after it do not, until the branch moves.
+	t.Run("branch tip is not on the remote", func(t *testing.T) {
+		fx := newInflightFixture(t)
+		s := finishedPromotion(t, fx)
+		commit := func(name string) {
+			if err := os.WriteFile(filepath.Join(s.WorktreeDir, name), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (git.Exec{}).Commit(context.Background(), s.WorktreeDir, "a second run's commit", []string{name}, time.Minute, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		commit("second-run.txt")
+		svc, c := service(fx)
+
+		listed, err := svc.List(context.Background(), ListOpts{})
+		if err != nil || len(listed) != 1 || listed[0].CleanupErr == nil {
+			t.Fatalf("first listing: want the promotion left in place: %+v, %v", listed, err)
+		}
+		if c.fetch <= 1 {
+			t.Fatalf("control: the first listing must have asked origin on the cleanup's behalf (%d fetches), or the listings below prove nothing", c.fetch)
+		}
+		for i := 2; i <= 3; i++ {
+			reset(c)
+			listed, err := svc.List(context.Background(), ListOpts{})
+			if err != nil || len(listed) != 1 || listed[0].CleanupErr == nil {
+				t.Fatalf("listing %d: the reason must still be reported: %+v, %v", i, listed, err)
+			}
+			scanOnly(t, c, fmt.Sprintf("listing %d", i))
+		}
+
+		// The branch moves: what was remembered was about the old tip, so origin is asked again.
+		commit("third-run.txt")
+		reset(c)
+		if _, err := svc.List(context.Background(), ListOpts{}); err != nil {
+			t.Fatal(err)
+		}
+		if c.fetch <= 1 {
+			t.Errorf("after the branch moved the cleanup must look again, got %d fetches", c.fetch)
+		}
+	})
+}
+
 // A scanGit that reached a step's Act would hide the Act's own effect from the next Observe;
 // it refuses to write at all, so that wiring mistake fails the first time it runs.
 func TestScanGitRefusesToWrite(t *testing.T) {
 	ctx := context.Background()
 	g := newScanGit(&countingGit{})
 	_, commitErr := g.Commit(ctx, "/wt", "msg", nil, 0, nil)
+	_, deleteLocalErr := g.DeleteLocalBranch(ctx, "/clone", "b")
 	for name, err := range map[string]error{
 		"Worktree":           g.Worktree(ctx, "/clone", "/wt", "b", "main"),
 		"WorktreeAtRef":      g.WorktreeAtRef(ctx, "/clone", "/wt", "main"),
@@ -502,6 +664,7 @@ func TestScanGitRefusesToWrite(t *testing.T) {
 		"Push":               g.Push(ctx, "/wt", "origin", "b"),
 		"PushHeadTo":         g.PushHeadTo(ctx, "/wt", "origin", "main"),
 		"DeleteRemoteBranch": g.DeleteRemoteBranch(ctx, "/clone", "origin", "b"),
+		"DeleteLocalBranch":  deleteLocalErr,
 	} {
 		if !errors.Is(err, errScanGitWrite) {
 			t.Errorf("%s: want the read-only refusal, got %v", name, err)
@@ -666,6 +829,15 @@ func TestListSharesOriginAcrossPromotionsThatNeverGoTerminal(t *testing.T) {
 		Complete:  true,
 	})
 
+	// A landed promotion's first listing also tidies up after it (Service.CleanupLanded), and
+	// that asks origin about the one promotion, live — deliberately not through the scan's
+	// snapshot, since it is about to delete something. It happens once per promotion, so it is
+	// paid here, before anything is counted; TestListPaysForCleanupOncePerPromotion pins that
+	// the listing counted below, and every one after it, is back to the scan's own cost.
+	if _, err := withConfig(fx).List(context.Background(), ListOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
 	counting := &countingGit{Git: git.Exec{}}
 	base := withConfig(fx)
 	deps := base.deps
@@ -749,6 +921,14 @@ func TestListAgainstAnUnreachableOriginFailsEachStateOnce(t *testing.T) {
 	saveStateAs(t, s, "second-finished")
 	saveStateAs(t, s, "third-finished")
 
+	// A finished promotion's first listing also cleans up after it; this test is about every
+	// listing after that, with the worktrees gone — the steady state, and the one in which the
+	// steps before the merge have nothing local to be satisfied by and so depend on the walk
+	// not asking origin about the landing a second time (engine's
+	// TestWalkersDoNotAskAgainAfterTheirOwnProbe).
+	if _, err := withConfig(fx).List(context.Background(), ListOpts{}); err != nil {
+		t.Fatal(err)
+	}
 	dead := &countingGit{Git: git.Exec{}, fetchErr: errors.New("could not read from remote"), headsErr: errors.New("could not read from remote")}
 	base := withConfig(fx)
 	deps := base.deps

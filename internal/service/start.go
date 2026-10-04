@@ -318,5 +318,5 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	release()
 
 	steps := announce(engine.StepsFor(state, g, f, a, ro, s.settings.ProductionEnvs(), req.Mode.Confirmed, h.OnWaiting), h.OnAct)
-	return NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll).withOnHistory(h.OnHistory), nil
+	return &cleaningDrive{Drive: NewDriver(steps, state, s.deps.Store.Save, s.settings.Poll).withOnHistory(h.OnHistory), svc: s}, nil
 }

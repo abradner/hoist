@@ -28,6 +28,13 @@ type Service struct {
 	argos    map[string]argo.Argo
 	rollouts map[string]rollout.Rollout
 
+	// cleanupKept remembers, for this process, a landed promotion whose cleanup was refused or
+	// failed AFTER origin was asked about it, keyed by id with the local branch tip it was
+	// judged at (cleanup.go). Without it a listing that polls would pay that origin traffic
+	// again on every poll for as long as the reason stands.
+	cleanupMu   sync.Mutex
+	cleanupKept map[string]keptCleanup
+
 	view RepoView
 	// refreshMu serializes LoadRepo(RepoFromOrigin) against itself, WITHIN this one process:
 	// it removes and recreates one fixed cached worktree (repoViewDir, keyed only by the clone

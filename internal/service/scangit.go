@@ -205,6 +205,14 @@ func (s *scanGit) WorktreeBranch(ctx context.Context, cloneDir, worktreeDir stri
 	return s.inner.WorktreeBranch(ctx, cloneDir, worktreeDir)
 }
 
+func (s *scanGit) LocalBranchExists(ctx context.Context, cloneDir, branch string) (bool, error) {
+	return s.inner.LocalBranchExists(ctx, cloneDir, branch)
+}
+
+func (s *scanGit) WorktreeDirty(ctx context.Context, worktreeDir string) (bool, error) {
+	return s.inner.WorktreeDirty(ctx, worktreeDir)
+}
+
 func (s *scanGit) Log(ctx context.Context, worktreeDir, revRange string) ([]string, error) {
 	return s.inner.Log(ctx, worktreeDir, revRange)
 }
@@ -226,6 +234,10 @@ func (s *scanGit) WorktreeAtRef(context.Context, string, string, string) error {
 }
 
 func (s *scanGit) RemoveWorktree(context.Context, string, string) error { return errScanGitWrite }
+
+func (s *scanGit) DeleteLocalBranch(context.Context, string, string) (bool, error) {
+	return false, errScanGitWrite
+}
 
 func (s *scanGit) Commit(context.Context, string, string, []string, time.Duration, func()) (string, error) {
 	return "", errScanGitWrite

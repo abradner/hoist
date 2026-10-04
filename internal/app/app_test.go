@@ -2532,6 +2532,63 @@ func TestRestartKeyWithNoClusterSaysSo(t *testing.T) {
 // matters once the matrix is shown again. What still matters, and is still asserted here: the
 // boot listing reaches the pane, resuming attaches the flight screen, and popping back to the
 // matrix (flight.BackMsg) re-lists at once rather than waiting for the next tick.
+// TestListingThatCleanedUpSaysSoInTheActivityLog: the in-flight pane's listing removes a landed
+// promotion's worktree and local branch on a timer. The activity log is the only place the TUI
+// can say that happened — one entry per removal, and one (not one per poll) for a refusal.
+func TestListingThatCleanedUpSaysSoInTheActivityLog(t *testing.T) {
+	landed := engine.PromotionState{ID: "landed2222", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	refused := engine.PromotionState{ID: "refused222", SourceEnv: "app-staging", TargetEnv: "app-production"}
+	calls := 0
+	inFlight := fakeInFlight{List: func(context.Context) ([]service.Listed, error) {
+		calls++
+		out := []service.Listed{{State: refused, Done: true, CleanupErr: errors.New("refused222: leaving its worktree and local branch in place: reasons")}}
+		if calls == 1 {
+			// The removal happens on the first listing only; after it there is nothing left.
+			out = append(out, service.Listed{State: landed, Done: true, Cleaned: []string{"removed worktree /cache/worktrees/landed2222", "deleted local branch hoist/app-production/landed2222"}})
+		}
+		return out, nil
+	}}
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, svcWithInFlight(inFlight), Promotion{}, nil, apprestart.Funcs{})
+	var m tea.Model = root
+	listCmd := rootSessionInit(t, root)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if got := m.(Model).activity.Len(); got != 0 {
+		t.Fatalf("fixture precondition: activity log should start empty, has %d", got)
+	}
+	m, _ = m.Update(listCmd())
+	m, _ = m.Update(listCmd())
+	m, _ = m.Update(listCmd())
+	if calls != 3 {
+		t.Fatalf("listed %d times, want 3", calls)
+	}
+
+	var removed, left int
+	for _, e := range m.(Model).activity.Entries() {
+		switch {
+		case strings.Contains(e.Text, "landed2222") && strings.Contains(e.Text, "removed its worktree and local branch"):
+			removed++
+			if !strings.Contains(e.Detail, "removed worktree /cache/worktrees/landed2222") || !strings.Contains(e.Detail, "deleted local branch hoist/app-production/landed2222") {
+				t.Errorf("the entry's detail does not name what was removed: %q", e.Detail)
+			}
+		case strings.Contains(e.Text, "refused222") && strings.Contains(e.Text, "left in place"):
+			left++
+			if !strings.Contains(e.Detail, "reasons") {
+				t.Errorf("the refusal entry's detail does not carry the reason: %q", e.Detail)
+			}
+		}
+	}
+	if removed != 1 {
+		t.Errorf("%d activity entries for the removal, want exactly 1", removed)
+	}
+	if left != 1 {
+		t.Errorf("%d activity entries for the refusal across three listings, want exactly 1", left)
+	}
+}
+
 func TestInFlightListingReachesTheMatrixAndResumeOpensTheFlightScreen(t *testing.T) {
 	listed := 0
 	resumed := ""
