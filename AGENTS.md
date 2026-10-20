@@ -1325,13 +1325,17 @@ test lives** (if one exists).
    change, so any plan mixing a moved ref with an already-current file failed its own check.
    Every fixture had exactly one edit, never a no-op beside a real one. Rule: a check on what a
    commit changes derives its expected set from the edits that change something
-   (`changedFiles`, edits that are not `NoOp`); a check on content at a revision
+   (`changedFiles`: `Raw != New.String()`, which is what `ApplyBytes` writes — not `NoOp`,
+   which compares parsed references, so a `docker-pullable://` target is a `NoOp` that Apply
+   still rewrites; found in review); a check on content at a revision
    (`ExpectedBlobs`) still covers every planned file. A fixture for a set comparison carries
    members of each kind the set is filtered on. Regression tests, in
    `internal/engine/steps_git_test.go`: `TestCommittedStepAcceptsAlreadyCurrentFileInPlan`
-   (fails without the fix with the production message) and
+   (fails without the fix with the production message),
    `TestCommittedStepObserveBlocksOnMissingChangedFile` (a changed file absent from HEAD's
-   commit still refuses, and the already-current file is not what it names).
+   commit still refuses, and the already-current file is not what it names), and
+   `TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference` (fails with `NoOp` as the
+   predicate).
 
 ## 10. Maintaining This Document
 

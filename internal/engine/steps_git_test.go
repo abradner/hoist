@@ -521,8 +521,20 @@ func runHostOut(t *testing.T, dir string, args ...string) string {
 // one of those files changes.
 func newFixtureWithCurrentFile(t *testing.T) fixture {
 	t.Helper()
+	return newFixtureWithWorker(t, "")
+}
+
+// newFixtureWithWorker is newFixtureWithCurrentFile with app-production's worker image written
+// behind prodPrefix (e.g. "docker-pullable://"), which image.Parse strips: the edit is then a
+// NoOp by reference, yet Apply rewrites the scalar without the prefix.
+func newFixtureWithWorker(t *testing.T, prodPrefix string) fixture {
+	t.Helper()
 	fx := newFixture(t)
 	worker := func(env string) string {
+		prefix := ""
+		if env == "app-production" {
+			prefix = prodPrefix
+		}
 		return "" +
 			"apiVersion: apps/v1\n" +
 			"kind: Deployment\n" +
@@ -534,7 +546,7 @@ func newFixtureWithCurrentFile(t *testing.T) fixture {
 			"    spec:\n" +
 			"      containers:\n" +
 			"        - name: worker\n" +
-			"          image: ghcr.io/example/worker:v3@sha256:" + strings.Repeat("3", 64) + "\n"
+			"          image: " + prefix + "ghcr.io/example/worker:v3@sha256:" + strings.Repeat("3", 64) + "\n"
 	}
 	for _, env := range []string{"app-staging", "app-production"} {
 		p := filepath.Join(fx.cloneDir, "cluster/apps", env, "app", "worker.yaml")
@@ -637,5 +649,35 @@ func TestCommittedStepObserveBlocksOnMissingChangedFile(t *testing.T) {
 	}
 	if resumed.CommitSHA != "" {
 		t.Fatalf("CommitSHA must not be set when Blocked, got %q", resumed.CommitSHA)
+	}
+}
+
+// TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference covers the one case where
+// gitops.Edit.NoOp and "the bytes change" disagree: a target scalar written as
+// "docker-pullable://<ref>" parses to the planned reference, so the edit is a NoOp, but Apply
+// rewrites it without the prefix. The commit then changes that file, and the path check must
+// expect it rather than call it extra.
+func TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference(t *testing.T) {
+	fx := newFixtureWithWorker(t, "docker-pullable://")
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	step := CommittedStep{Git: g}
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("a prefix rewrite changes the file and must pass the path check, got: %v", err)
+	}
+	changed := strings.Fields(runHostOut(t, wt, "diff", "--name-only", s.CommitSHA+"^", s.CommitSHA))
+	if len(changed) != 2 {
+		t.Fatalf("commit should change both the moved ref's file and the prefixed one, got %v", changed)
+	}
+	obs, err := step.Observe(ctx(), newState(fx, wt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a resumed Observe must accept the same commit, got %+v", obs)
 	}
 }

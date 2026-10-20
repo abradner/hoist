@@ -121,7 +121,7 @@ func (c CommittedStep) Observe(ctx context.Context, s *PromotionState) (Observat
 // process re-discovering an old commit nor the process that just made a new one can silently
 // let extra changes ride along into what gets pushed.
 //
-// The files the plan changes are those with at least one edit that is not a no-op
+// The files the plan changes are those with at least one edit whose bytes change
 // (changedFiles) — not every key of s.ExpectedBlobs, which also holds a file whose every
 // occurrence is already current: its expected blob is its blob at the base, git commits no
 // change to it, and counting it here reported it "missing" from a correct commit and refused
@@ -153,12 +153,15 @@ func (c CommittedStep) verifyExactChangedPaths(ctx context.Context, s *Promotion
 	return extra, missing, nil
 }
 
-// changedFiles is the set of files edits change: those with at least one edit that is not a
-// no-op (gitops.Edit.NoOp). A file whose edits are all no-ops keeps its bytes exactly.
+// changedFiles is the set of files edits change: those with at least one edit whose scalar
+// bytes change. gitops.ApplyBytes always writes e.New.String() over e.Raw, so that is the
+// byte predicate — not gitops.Edit.NoOp, which compares parsed references: a target written
+// as "docker-pullable://<ref>" parses to the same reference as New (NoOp), yet Apply rewrites
+// it without the prefix and the file changes.
 func changedFiles(edits []gitops.Edit) map[string]bool {
 	out := map[string]bool{}
 	for _, e := range edits {
-		if !e.NoOp() {
+		if e.Raw != e.New.String() {
 			out[e.File] = true
 		}
 	}
