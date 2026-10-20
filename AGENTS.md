@@ -1314,6 +1314,25 @@ test lives** (if one exists).
    `TestALandedCleanedPromotionDoesNotRedoItselfWhenOneLookupFails`,
    `TestAPromotionThatLandedWithoutItsStateFileSayingSoDoesNotRedoItself`.
 
+18. **"Every file the plan touches" and "every file the commit changes" are two sets.** What
+   happened: `hoist promote` into a production env refused with `missing=[…]` naming two files
+   the dry run had itself listed as "Already current"; nothing was pushed, and the identical
+   four-ref change was made by hand. Root cause: a plan's `Edits` include per-occurrence no-ops
+   (`gitops.Edit.NoOp`, the target already carries the reference), so `ExpectedBlobs` holds an
+   entry for a file whose every occurrence is a no-op — its expected blob is its blob at the
+   base — and `CommittedStep.verifyExactChangedPaths` compared the commit's changed paths
+   against every key of that map. Git never commits a change to a file whose bytes did not
+   change, so any plan mixing a moved ref with an already-current file failed its own check.
+   Every fixture had exactly one edit, never a no-op beside a real one. Rule: a check on what a
+   commit changes derives its expected set from the edits that change something
+   (`changedFiles`, edits that are not `NoOp`); a check on content at a revision
+   (`ExpectedBlobs`) still covers every planned file. A fixture for a set comparison carries
+   members of each kind the set is filtered on. Regression tests, in
+   `internal/engine/steps_git_test.go`: `TestCommittedStepAcceptsAlreadyCurrentFileInPlan`
+   (fails without the fix with the production message) and
+   `TestCommittedStepObserveBlocksOnMissingChangedFile` (a changed file absent from HEAD's
+   commit still refuses, and the already-current file is not what it names).
+
 ## 10. Maintaining This Document
 
 Meta-rules for editing this file — they exist because each was violated somewhere first:

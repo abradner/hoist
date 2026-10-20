@@ -115,20 +115,25 @@ func (c CommittedStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	return Observation{Satisfied: true, Detail: "HEAD " + sha + " already matches the planned edits"}, nil
 }
 
-// verifyExactChangedPaths confirms that sha's commit changes exactly the paths in
-// s.ExpectedBlobs relative to its parent — no more, no less. Called from both Observe's "HEAD
+// verifyExactChangedPaths confirms that sha's commit changes exactly the files the plan
+// changes relative to its parent — no more, no less. Called from both Observe's "HEAD
 // already matches" branch and from Act right after a fresh commit, so neither a resumed
 // process re-discovering an old commit nor the process that just made a new one can silently
 // let extra changes ride along into what gets pushed.
+//
+// The files the plan changes are those with at least one edit that is not a no-op
+// (changedFiles) — not every key of s.ExpectedBlobs, which also holds a file whose every
+// occurrence is already current: its expected blob is its blob at the base, git commits no
+// change to it, and counting it here reported it "missing" from a correct commit and refused
+// a production push (2026-10-19). Observe's blob comparison still checks every
+// ExpectedBlobs file at HEAD, so an already-current file that something else changed is
+// still caught there.
 func (c CommittedStep) verifyExactChangedPaths(ctx context.Context, s *PromotionState, sha string) (extra, missing []string, err error) {
 	changed, err := c.Git.DiffNameOnly(ctx, s.WorktreeDir, sha+"^", sha)
 	if err != nil {
 		return nil, nil, err
 	}
-	want := make(map[string]bool, len(s.ExpectedBlobs))
-	for p := range s.ExpectedBlobs {
-		want[p] = true
-	}
+	want := changedFiles(s.Edits)
 	got := make(map[string]bool, len(changed))
 	for _, p := range changed {
 		got[p] = true
@@ -146,6 +151,18 @@ func (c CommittedStep) verifyExactChangedPaths(ctx context.Context, s *Promotion
 	sort.Strings(extra)
 	sort.Strings(missing)
 	return extra, missing, nil
+}
+
+// changedFiles is the set of files edits change: those with at least one edit that is not a
+// no-op (gitops.Edit.NoOp). A file whose edits are all no-ops keeps its bytes exactly.
+func changedFiles(edits []gitops.Edit) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range edits {
+		if !e.NoOp() {
+			out[e.File] = true
+		}
+	}
+	return out
 }
 
 // Act implements Step.
