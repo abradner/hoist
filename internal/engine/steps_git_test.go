@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -498,4 +499,185 @@ func (b *blipGit) Push(ctx context.Context, worktreeDir, remote, branch string) 
 		return errors.New("simulated network blip: connection reset")
 	}
 	return b.Git.Push(ctx, worktreeDir, remote, branch)
+}
+
+// runHostOut is runHost returning stdout.
+func runHostOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
+}
+
+// newFixtureWithCurrentFile extends newFixture's origin with a second manifest in the same
+// family, worker.yaml, whose image app-production already runs at exactly the reference
+// app-staging declares. BuildPlan then carries one real edit (deployment.yaml) and one
+// per-occurrence no-op (worker.yaml) — the shape `hoist plan` prints as "Already current" next
+// to the refs it moves. The control property: the two edits are in different files, and only
+// one of those files changes.
+func newFixtureWithCurrentFile(t *testing.T) fixture {
+	t.Helper()
+	return newFixtureWithWorker(t, "")
+}
+
+// newFixtureWithWorker is newFixtureWithCurrentFile with app-production's worker image written
+// behind prodPrefix (e.g. "docker-pullable://"), which image.Parse strips: the edit is then a
+// NoOp by reference, yet Apply rewrites the scalar without the prefix.
+func newFixtureWithWorker(t *testing.T, prodPrefix string) fixture {
+	t.Helper()
+	fx := newFixture(t)
+	worker := func(env string) string {
+		prefix := ""
+		if env == "app-production" {
+			prefix = prodPrefix
+		}
+		return "" +
+			"apiVersion: apps/v1\n" +
+			"kind: Deployment\n" +
+			"metadata:\n" +
+			"  name: worker\n" +
+			"  namespace: " + env + "\n" +
+			"spec:\n" +
+			"  template:\n" +
+			"    spec:\n" +
+			"      containers:\n" +
+			"        - name: worker\n" +
+			"          image: " + prefix + "ghcr.io/example/worker:v3@sha256:" + strings.Repeat("3", 64) + "\n"
+	}
+	for _, env := range []string{"app-staging", "app-production"} {
+		p := filepath.Join(fx.cloneDir, "cluster/apps", env, "app", "worker.yaml")
+		if err := os.WriteFile(p, []byte(worker(env)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runHost(t, fx.cloneDir, "add", ".")
+	runHost(t, fx.cloneDir, "commit", "-q", "-m", "add an already-current worker")
+	runHost(t, fx.cloneDir, "push", "-q", "origin", "main")
+
+	repo, err := gitops.Discover(fx.cloneDir, "cluster/apps")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	plan, err := gitops.BuildPlan(repo, "app-staging", "app-production", []string{"ghcr.io/example/"}, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	var moved, noop []string
+	for _, e := range plan.Edits {
+		if e.NoOp() {
+			noop = append(noop, e.File)
+		} else {
+			moved = append(moved, e.File)
+		}
+	}
+	if len(moved) != 1 || len(noop) != 1 || moved[0] == noop[0] {
+		t.Fatalf("fixture plan should have one moved edit and one no-op in different files, got moved=%v noop=%v", moved, noop)
+	}
+	fx.plan = plan
+	return fx
+}
+
+// TestCommittedStepAcceptsAlreadyCurrentFileInPlan reproduces the 2026-10-19 refusal: a plan
+// that moves one ref and lists another file as already current committed the moved ref, then
+// reported the already-current file "missing" from its own commit and refused to push. A file
+// whose every occurrence is a no-op never changes, so it can never be in the commit; the path
+// check must expect only the files whose content the plan changes.
+func TestCommittedStepAcceptsAlreadyCurrentFileInPlan(t *testing.T) {
+	fx := newFixtureWithCurrentFile(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	step := CommittedStep{Git: g}
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("a plan with an already-current file must commit and pass the path check, got: %v", err)
+	}
+	if s.CommitSHA == "" {
+		t.Fatal("Act did not set CommitSHA")
+	}
+	changed := strings.Fields(runHostOut(t, wt, "diff", "--name-only", s.CommitSHA+"^", s.CommitSHA))
+	if len(changed) != 1 || changed[0] != "cluster/apps/app-production/app/deployment.yaml" {
+		t.Fatalf("commit should change only the moved ref's file, got %v", changed)
+	}
+
+	resumed := newState(fx, wt)
+	obs, err := step.Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a resumed Observe must accept the same commit, got %+v", obs)
+	}
+}
+
+// TestCommittedStepObserveBlocksOnMissingChangedFile keeps the check strict in the other
+// direction: a file the plan really changes, absent from HEAD's own commit, still refuses —
+// even though its content at HEAD is right (an earlier commit made it, and HEAD is something
+// else entirely). The already-current file beside it must not be what is named.
+func TestCommittedStepObserveBlocksOnMissingChangedFile(t *testing.T) {
+	fx := newFixtureWithCurrentFile(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := gitops.Apply(wt, s.Edits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, wt, append([]string{"add", "--"}, changed...)...)
+	runHost(t, wt, "commit", "-q", "-m", "simulated: the planned edit, one commit too early")
+	runHost(t, wt, "commit", "-q", "--allow-empty", "-m", "simulated: HEAD is something else")
+
+	resumed := newState(fx, wt)
+	obs, err := (CommittedStep{Git: g}).Observe(ctx(), resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied {
+		t.Fatalf("HEAD's commit does not change the planned file; must not be satisfied, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, "missing=[cluster/apps/app-production/app/deployment.yaml]") {
+		t.Fatalf("expected Blocked naming exactly the changed file as missing, got %+v", obs)
+	}
+	if resumed.CommitSHA != "" {
+		t.Fatalf("CommitSHA must not be set when Blocked, got %q", resumed.CommitSHA)
+	}
+}
+
+// TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference covers the one case where
+// gitops.Edit.NoOp and "the bytes change" disagree: a target scalar written as
+// "docker-pullable://<ref>" parses to the planned reference, so the edit is a NoOp, but Apply
+// rewrites it without the prefix. The commit then changes that file, and the path check must
+// expect it rather than call it extra.
+func TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference(t *testing.T) {
+	fx := newFixtureWithWorker(t, "docker-pullable://")
+	wt := filepath.Join(t.TempDir(), "wt")
+	s := newState(fx, wt)
+	g := git.Exec{}
+	if err := (BranchedStep{Git: g}).Act(ctx(), s); err != nil {
+		t.Fatal(err)
+	}
+	step := CommittedStep{Git: g}
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("a prefix rewrite changes the file and must pass the path check, got: %v", err)
+	}
+	changed := strings.Fields(runHostOut(t, wt, "diff", "--name-only", s.CommitSHA+"^", s.CommitSHA))
+	if len(changed) != 2 {
+		t.Fatalf("commit should change both the moved ref's file and the prefixed one, got %v", changed)
+	}
+	obs, err := step.Observe(ctx(), newState(fx, wt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("a resumed Observe must accept the same commit, got %+v", obs)
+	}
 }
