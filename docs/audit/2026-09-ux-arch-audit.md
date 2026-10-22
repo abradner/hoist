@@ -1,4 +1,8 @@
-# UX, feedback-wiring and architecture audit (2026-09)
+# UX, feedback-wiring and architecture audit (2026-09, refreshed 2026-10)
+
+Refreshed at `79c9280` (main after #258) on 2026-10-22: the next section is the current ledger,
+the new findings, the issue triage and the next arc's trains. The original audit follows it
+unchanged.
 
 Audited at `9a15feb` (main after #182). Three read-only scouts, one per axis: **UX**
 (navigation, keys, visual design), **FB** (feedback wiring: does the screen find out what the
@@ -6,6 +10,235 @@ work did), **AR** (architecture). This doc condenses them. Finding IDs are stabl
 cite them, so they are never renumbered. A closed finding is marked, not deleted.
 
 Paths are relative to the repo root. Line numbers are at `9a15feb`.
+
+## Refresh 2026-10-22 (at `79c9280`)
+
+This section is the current state. Everything below "Original audit (2026-09, at `9a15feb`)"
+is the snapshot the five trains were planned from; it is kept unchanged so its IDs stay
+citable, and its line numbers are those of `9a15feb`, not of today.
+
+### What landed since the audit
+
+| Range | What | PRs |
+|---|---|---|
+| T0–T4 trains (`9a15feb..0fa1fdb`) | Service layer, session controller, `scope`, keys registry, redesigned screens, docs pass | #185–#236 |
+| CLI progress and scan speed-up | Narrated drives, shared in-flight scan, `ci.ignore`, history change-log, stray-positional refusal | #238, #239, #240, #241, #244 |
+| Cleanup stack | Landed promotions no longer need their worktree; removal at landing and abandon; `hoist gc` | #250, #251, #252, #255 |
+| Since the stack | Post-commit path check expects only changed files; CLI `--`/root-flag swallow refusals | #257, #258 |
+
+The refresh re-verified every finding in the original audit against HEAD and walked the TUI,
+the guide and the mockups again. Six read-only diggers ran on a cheaper model, one per axis:
+
+- UX re-verify
+- FB and AR re-verify
+- Factoring and smells
+- A UX walk against `docs/guide.md` and `docs/tui`
+- Two issue-triage batches
+
+Synthesis re-read the cited lines for every High finding and every new finding this section
+marks ✓. One digger claim did not survive: `watchInterval` cannot return 0, because a missing
+config still runs `Normalize` (`internal/config/config.go:255`). It is not listed.
+
+*Method note:* the repo's `quality-audit-refresh` skill expects a tranche-and-ledger doc and its
+workflow script. This doc has neither: it is a by-axis audit. So the refresh ran the same
+re-verify step by axis, through individual agents.
+
+### Ledger: original findings at HEAD
+
+| Axis | Fixed | Partial | Still open |
+|---|---|---|---|
+| UX (33) | 23 | 8 | 2 |
+| FB (21) | 20 | 1 | 0 |
+| AR (13) | 5 | 7 | 1 |
+
+**Fixed:**
+
+- UX-H1–H11, plus UX-M3, M5–M9, M13, M16 and UX-L1–L3: #191, #205–#207, #217, #219,
+  #220, #223–#227, #231.
+- FB-H1–H3, FB-M1–M8 and FB-L1–L8, L10: #198, #205–#213, #220, #224, #225. FB-M1 also closes
+  #184.
+- AR-H1–H3, AR-M1 and AR-L3: #190, #192, #193, #195–#198, #230.
+
+The "Train" column of the original tables is history. The open remainder is below; each item is
+assigned to a train in [Next arc](#next-arc-trains-t5t11).
+
+| ID | Status | What remains (file:line at HEAD) | Train |
+|---|---|---|---|
+| UX-H12 | partial | `esc back` now survives, but the left status is still cut to a fragment (`blocked: no c…` in `flight-ci-none-120x40`; `keys/footer.go:35-47` drops the status only under 8 cells) | T8d |
+| UX-M1 | partial | The flight step list keeps its own glyphs (`flight/rows.go:23-29`). `⟳` remains in the compact pane (`matrix/inflight.go:262`) and `✔` in restart (`restart/model.go:450`) | T8b |
+| UX-M2 | partial | The row detail still says to run `hoist resume … --override-ci-none` (`engine/steps_review.go:231`) above "press shift+c" | T9 |
+| UX-M4 | partial | Times are relative now, but the history column still reads `acted`, `already satisfied: …`, `waiting: …` | T8b |
+| UX-M10 | partial | Columns are content-sized (`maxCellWidth=44`). At 120×40 about 50 columns sit empty, and the mockup's detail column is not built | T8a |
+| UX-M11 | open | `pinned`/`external` print in every cell (`matrix/model.go:994-1002`) | T8a |
+| UX-M12 | partial | In yaml mode the plan header says "d back to impact" while the footer says "d yaml" (`plan/model.go:1269`, `:1321`) | T8c |
+| UX-M14 | open | The in-flight pane says `deploy → <target>` with no image or tag (`matrix/inflight.go:286`) ✓ | T8a |
+| UX-M15 | partial | Notice and Warn are still one amber (`ui/styles.go:58`, `:61`) | T8d |
+| UX-M17 | partial | The bare `!` marker remains (`plan-80x24.txt:7`) | T8c |
+| UX-M18 | partial | The tag picker's "no commit history … so …" line is cut at 80 columns (`tags/model.go:1458`) | T8c |
+| Terminology | partial | Five refresh verbs, "environments" vs "envs", and `resolving…` in cells | T8d |
+| FB-L9 | partial | Unread `plan.StartMsg.Outcome/Source/Target` and `deploy.StartMsg.Target/Image`. Comments still name `flight.DriveFunc` | T7 |
+| AR-M2 | partial | Three walks remain (`engine.go:162`, `:297`, `:421`), plus seven list constructors (`lists.go`). Observe still mutates state, and `StateDir()` is process-global (`state.go:163`) | T9 (StateDir), rest ticketed |
+| AR-M3 | partial | The controller is extracted, but `app.go` grew from 1310 to 1656 lines. `Update` alone is 433 lines (`app.go:468-901`) | T7 |
+| AR-M4 | partial | "Straight to production, skipping staging" is a screen-only string (`plan/rows.go:437`), so `hoist plan` and the PR body never carry it. This also violates §4.5's own rule for warnings | T10 |
+| AR-M5 | partial | Kube-context fallbacks are down from 7 to 2. Five settings structs overlap (`selection`, `effective`, `resolveFlags`, `service.Settings`, `service.ResolveOptions`) | T6 |
+| AR-M6 | partial | cmd/hoist has 11 package-level seams, assigned 38 times in tests (`deps.go:20` claims "about 108"). `t.Parallel` is used 0 times ✓. Git test helpers are copied across 4 packages, and the §9-entry-8 gitconfig across 5 | T6 (seams), T11 (fixtures) |
+| AR-M7 | partial | `planFn` runs synchronously inside `Update` for up to 120s (`app.go:627`, `:1396`) ✓. Matrix reads use deadline-only `scope.Timeout`, so they are not cancelled on pop | T7 |
+| AR-L1 | open | The big files still grow: tags 1595, plan 1556, matrix 1329, controller 1174 lines. `huh.NewConfirm` is copied at 7 sites, `dialogWidth` ×5, `plural` ×6 and short-sha ×9 (some 7 characters, some 12) | T7 |
+| AR-L2 | partial | After the #234 diet, about 207 review-history comment lines remain in 63 non-test files | T11 |
+
+### New findings at HEAD
+
+✓ means synthesis re-read the cited lines. The rest are a digger's reading, with its file:line;
+the digger reports are kept with the planning lane's notes, not in this repo. A finding is a
+claim (AGENTS.md §8): each train re-reads its items at its own base before fixing them.
+
+**Safety and correctness**
+
+| ID | Sev | Where | Problem | Train |
+|---|---|---|---|---|
+| AR-H4 ✓ | H | `cmd/hoist/main.go:682-684`, `app.go:1358`, `restart/model.go:329` | A flags-only TUI run passes a zero `EnvsConfig`, so every env reads as non-production and `shift+r` → `enter` restarts a production env with no confirm. The CLI fails closed in the same situation (`cmd/hoist/restart.go:157-171`). One gate, two answers (§4.5, §8 layered checks) | T5 |
+| FB-H4 ✓ | M | `app.go:1317`, `cmd/hoist/main.go:736-742` | A confirmed `q` quit calls `StopAll()` before `main` reads `InFlightIDs()`, so no `hoist resume <id>` lines print. The comment claims both quit paths print them (principle 1) | T5 |
+| UX-H13 ✓ | M | `matrix/model.go:721`, `app.go:524-552` | With the action menu open, `q` quits (or asks), `l` pushes the activity log over the menu, and `?` shows the matrix help. `CapturesText` ignores `menuOpen` | T5 |
+| CS-1 | M | `pkg/gitops/plan.go:77-96` | A `--promotable` that matches no source image reports "already current" and exits 0. That is a false success (#237 item 2) | T5 |
+| CS-2 | M | `internal/service/fresh.go:283-316` | Direct mode with an unticked repo rebuilds the freshness plan over every promotable repo. It then reports the unticked repo's occurrences as unseen, or refuses (#201 item 6). Read from code only: the first PR writes the failing test | T5 |
+| CS-3 | M | `cmd/hoist/history.go:183-210`, `main.go:188`, `:216-224` | The history adaptor memoises errors for the whole session and calls `newForge` directly, bypassing `svc.ForgeFor`. A `gh` login fixed mid-session never recovers history or live-age. `gitTagsFn` swallows the forge error | T6 |
+| CS-4 | L | `cmd/hoist/gc.go:44-53` | `gc` prints errors without redaction, unlike every other command (§4.10) | T6 |
+| CS-5 | L | `engine/claim.go:158-190`, `state.go:326-350`, `registry/cache.go:206-235` | Three atomic-write idioms, none of which calls `Sync`. The claim comment says "durably written" | T9 |
+
+**Factoring**
+
+| ID | Sev | Where | Problem | Train |
+|---|---|---|---|---|
+| AR-H5 ✓ | H | `cmd/hoist/wiring.go:140`, `:187`, `history.go:40-285`, `main.go:131-224` | Five use cases are still closures in `cmd/hoist`: watch, restart, history, tags and drift (§4.8 says so). `runWatch` and `runRestart` re-derive the same reads with direct clients | T6 |
+| AR-M8 | M | `cmd/hoist/promote.go:264-327` vs `service/policy.go:61-92` | Direct-mode preflight runs the same four checks twice, with different wording (#201 item 5) | T6 |
+| AR-M9 | M | `cmd/hoist/watch.go:171`, `internal/restart/restart.go:54`, `engine/steps_converge.go:453` | Workload derivation exists three times | T6 (two copies), T9 (the engine copy) |
+| AR-M10 | M | `internal/app/tags`, `internal/app/matrix` | Four process-wide generation counters remain beside `scope`. tags is a small migration; matrix is medium, because the root routes `DriftMsg` by name | T7 |
+| AR-M11 | M | `deploy/model.go:31,74-75` | The deploy screen imports the plan screen for `RenderDiff` and the Mode constants | T7 |
+| AR-M12 | M | `internal/copycheck` | Nothing enforces "no `context.Background()` in internal/app" (`scope.go:126` says a grep does) or the screen import rules. Only watch has an import test | T7 |
+| AR-L4 | L | `flight/model.go:25-40`, `wiring.go:29-38`, `wiring.go:66` | Dead plumbing: `PollDurations` CI/Argo/Rollout, `NewAttached`'s `_ = poll`, and the Windows browser branch (goreleaser builds only darwin and linux) | T6, T7 |
+| AR-L5 | L | `matrix/model.go:656`, `:664` | The resume chooser branch is unreachable since the pane cursor replaced it | T7 |
+| AR-L6 | L | `cmd/hoist/*` | 36 hand-rolled `Fprintf(stderr, "hoist X: …")` sites, about 27 of them with manual `redact.Strings` | T6 |
+
+**TUI UX** (from the walk; issue numbers in the walk report are ranks by operator pain)
+
+| ID | Sev | Where | Problem | Train |
+|---|---|---|---|---|
+| UX-H14 ✓ | H | `flight/summary.go:116-123`, `matrix/inflight.go:262` | A healthy wait for approval reads "blocked on approval", in the same amber as a real block | T8b |
+| UX-H15 | H | `matrix/inflight.go:151-155`, `:203-212` | A promotion that is only listed (after a crash, not driven here) looks like a driven one. Nothing merges until `tab enter` | T8a |
+| UX-H16 ✓ | H | `flight/model.go:593-598`, `service/promotions.go:511` | Abandoning a landed-but-stuck promotion is refused only after the confirm, and there is no way to clear it | T8b + D5 |
+| UX-H17 | H | `flight/model.go:1060`, golden `flight-ci-none-80x24` | At 80 columns a blocked promotion's footer drops `shift+x abandon` and `r`. "Leaving keeps it running" survives only at 120 | T8b |
+| UX-H18 | H | `app.go:149-155`, `service/policy.go:64` | A missing config is invisible on the matrix. The cursor starts on an unmarked production column, and promote fails at the end with "no github configured" | T8a |
+| UX-M19 | M | `matrix/model.go:1110-1137`, `:297-305` | "Cluster unreachable" shows only for the cursor column. Stale drift is kept after a failed refresh | T8a |
+| UX-M20 | M | `plan/model.go:1302-1363` | The plan's error state advertises dead keys and suppresses notices | T8c |
+| UX-M21 | M | `app.go` `requestMatrixRefresh` | `r` on the matrix does not relist the in-flight pane. After approving on GitHub it stays stale for up to 30s | T8a |
+| UX-M22 | M | `session/controller.go:230`, `service/errors.go:54` | Start refusals use internal voice ("session: …") and give CLI instructions inside the TUI | T8b |
+| UX-M23 | M | `flight/model.go:800-829`, golden `flight-done-80x24` | Finished steps lose their evidence (PR, commit, CI). The done screen has no result block, unlike mockup `v2-flight-done` | T8b |
+| UX-M24 | M | `matrix/menu.go:36-52`, `model.go:618` | Disabled menu items are silent no-ops | T8a |
+| UX-M25 | M | `flight/model.go:1029` | Blocked guidance is generic ("resolve the conflict, then press r") for every kind of block | T8b |
+| UX-M26 | M | goldens `plan-80x24:3`, `deploy-commits-80x24:4`, `config-nofile-80x24:1` | Key summaries are truncated, with no way to read the rest | T8d |
+| UX-M27 | M | `tags/mockup_test.go:117` | The registry-denied remedy (`read:packages`, `GHCR_TOKEN`) exists only in a test fixture, never in the app | T8c |
+| UX-M28 | M | watch screen | The watch screen cannot say why a rollout is stuck: no pods, no events. Digests hard-wrap mid-token | T8d |
+| UX-L4 | L | goldens | Ragged history and activity columns. The 120-column matrix shows the production warning twice. The menu footer ignores the menu. A dead `↑/↓ commits` hint. `app-\nstaging` hard-wraps. The frame never pads short content. The help overlay shows the caps note on read-only screens. Mixed units on watch. `l: activity (1)`. Two stacked rules at 80 columns (ux-reverify N1–N17) | T8 |
+| UX-L5 | L | `internal/ui/keys/registry.go` | Divergences from the approved keymap: the tag picker has no `o` and no `pgup`/`pgdn`. The reader's `l` has no row. The restart footer lacks `r`. `ctrl+d`/`ctrl+u` are bound but documented nowhere | T8d |
+| UX-L6 | L | fixtures | The deploy and restart goldens used as guide pictures come from fixtures without production config (`shift+d` offered on production, a `production` badge on staging). `testdata/golden/plan.txt` is orphaned and shows retired keys | T8f |
+
+**Docs drift:** the guide disagrees with the build in 11 places and has no section for the watch,
+config or activity screens, the dialogs, `window too small`, or the first run. The walk report
+lists them with line numbers. `ui/frame.go:10` and AGENTS §4.8 say the footer is always the last
+line, but with an activity entry it is second-to-last (`app.go:1237-1260`).
+
+### Open issues: triage at `79c9280`
+
+#168, #245, #248 and #254 are excluded because lanes are fixing them tonight. #245, #248 and
+#254 have since landed in #258.
+
+| Issue | Verdict | Train / action |
+|---|---|---|
+| #260 caps lock + r opens restart (Alacritty) | `Binding.Matches` rejects `ModCapsLock` without shift (`keys/keys.go:108`), so the cause is probably the terminal (not granted, or no caps bit). **Diagnose first:** log `KeyboardEnhancementsMsg` and the raw `Key.Mod` behind a debug env var. Then fix the code, or narrow §9.13 and the guide's claim to the terminals it holds for | T8e |
+| #256 cleanup review notes | Item 1 (`engine/direct.go:190`, an `IsAncestor` error is read as "not landed"): quick fix. Item 2 (`pkg/git/git.go:402`, the absent-path branch reaches the force helper): quick fix | T9, T5 |
+| #249 cleanup leaves no activity entry | Quick fix | T8b |
+| #247 repo-view cache for an unconfigured clone | Quick fix, needs a stated rule (remove when no configured clone hashes to it) | T10 |
+| #246 TUI counterpart for gc | Design: recommend CLI-only. Record it in the parity row and close | D4 |
+| #243 history/CI deferred findings | H1 and H2 are quick fixes in the engine. H3 is stale, by design. H4 is a quick fix (`remergeInFlight` on `ChangeProgress`). C1–C4: recommend close, since each limit is already stated. C5 (commit statuses not paged, `pkg/forge/github/github.go:317`) is a quick fix | T9, T8a, T5 |
+| #237 promote refuses a no-op path | Item 1 fixed by #257. Item 3 fixed by #180. Item 2 (promotable matches nothing yet reports "already current") is still real | CS-1 in T5, then close |
+| #235 "AGENTS.md invariant N" comments | Still real: 79 lines in 34 non-test files (113 lines including tests) | T11 |
+| #216 T2 deferred findings | Items 1, 4, 5 and 7 stale. Item 6 (`ChangeRefused` is dropped by an empty case, `app.go:972`) is a quick fix. Items 2, 3 and 8: recommend leave | T8b, close remainder |
+| #204 concurrent same-id starts | Needs design. More urgent now that worktrees are removed at landing | D2, T9 |
+| #201 T1 deferred findings | Items 1, 2 and 7 stale. Item 4 fixed by #241. Items 3, 5, 6, 8, 9 and 11 are quick fixes. Item 10: leave | T6, T5, T9 |
+| #184 boot-time repo in the start path | **Fixed** by #197 and #211 (`service/start.go:80-86`) ✓ | close |
+| #173 envs.pairs unused by the CLI | Still real ✓. `--to` alone takes `SourcesOf(to)` when unambiguous; `--from` alone takes `Pairs[from]` | T6 |
+| #172 registry env source hardcoded to ghcr.io | Small feature. Add an explicit `registries[].env: VAR` with no default | T10 |
+| #171 restart only targets Deployments | Small feature. The issue understates it: `RolledOutStep`'s `groupEditsByWorkload` silently ignores StatefulSet and DaemonSet edits, a principle-1 gap. That half goes to the #168 lane or T9 | T10 (restart), T9 (rollout) |
+| #170 kustomize/Helm/CRD image fields | Large feature. Start with the kustomize `images:` transformer if ever | backlog |
+| #169 merge-gate doc can't see Codex's verdict | Docs quick fix in `docs/pr-review-machinery.md:233-292`; sync to the keel template too | T11 |
+| #161 override rebuild leaves a new row unticked | Still real (`plan/model.go:623`) | T5 |
+| #153 refs/-qualified `--base` | Code moved to `service/fresh.go:64`. Quick fix: refuse a `refs/` prefix up front | T5 |
+| #126 Homebrew tap | Needs operator steps (a tap repo and a token) | backlog, operator |
+| #107 GitLab history adaptor | Large. There is no GitLab adaptor at all | backlog |
+| #106 first-run wizard | Large. Builds on UX-H18's banner | backlog |
+| #90 hoist cannot approve its own PRs | Design: recommend documenting it as is (option 3), and splitting the 405-merge wedge into its own issue | D1, T11 |
+| #74 tag picker compares tag strings | Still real. The design is in the issue | T8c |
+| #53 Argo refresh anchor is a local clock | Design: recommend decline. The cost is bounded and it never yields a false satisfied | D4 |
+| #41 A→B→A re-apply reads as done | Core bug still live ✓: the merged branch of `MergedStep.Observe` never compares the PR's head with `CommitSHA` (`steps_review.go:452`); only `landedGuard` does (`landed_guard.go:120`) | D3, T9 |
+| #24 warn when the target is newer | Cheap version: a `WarnTargetNewer` for timestamped tags | T10 |
+| #7 M7 umbrella | Items 1, 3, 4 and 5 are done. Item 2 ("skipping staging" as a real warning) = AR-M4 | split 7.2, close |
+
+**Proposed closures** (for Alex; this lane edits no issue):
+
+- Close now: #184.
+- Close after the residual is split into its own issue: #7 (item 2), #237 (item 2).
+- Close on the decision: #246, #53, and #243 items C1–C4.
+- Close the bucket issues #201, #216, #243 and #256 once their remaining items are moved into
+  the train PRs that fix them.
+
+### Next arc: trains T5–T11
+
+Starting state: the #168 lane has merged and v0.2.0 is tagged. Effort is in agent-hours of
+build time, review rounds excluded.
+
+| Train | Scope | Closes | Footprint | After | Risk | Effort |
+|---|---|---|---|---|---|---|
+| **T5** safety quick fixes | One small PR each: AR-H4 (the TUI restart gate fails closed with no config); FB-H4 (record the ids before `StopAll`); UX-H13 (menu `q`/`l`/`?`); CS-1; CS-2 (failing test first); #256.2; #243.C5; #153; #161 | AR-H4, FB-H4, UX-H13, #161, #153, #237.2, #201.6, #256.2, #243.C5 | `internal/app/app.go`, `internal/app/matrix/model.go`, `internal/app/plan/model.go`, `internal/service/fresh.go`, `pkg/gitops/plan.go`, `pkg/git/git.go`, `pkg/forge/github/github.go` | — | Low | 8 |
+| **T6** service owns the rest | `service/{watch,restart,history,tags,drift}.go`, with method signatures matching today's screen func types so `internal/app` does not change; `runWatch`/`runRestart` call them; history goes through `ForgeFor`/`RegistryFor` (CS-3); one workload derivation in `pkg/gitops` (`Family.Workloads`); one direct preflight (AR-M8); fewer settings structs (AR-M5); `fail()` and one bounded-context helper (CS-4, AR-L6); smaller seams (AR-M6); dead PollDurations and Windows branch; F5 fallback notice (#201.11); #201.3; #173; AGENTS §4.8 bullet | AR-H5, AR-M5, AR-M8, AR-M9 (2 of 3), CS-3, CS-4, AR-L6, #173, #201.3/.5/.11 | `cmd/hoist/*` except the parse functions, `internal/service/*` except `fresh.go`/`start.go`, `internal/restart`, `pkg/gitops` (a new `family.go`), `internal/parity`, AGENTS §4.8 | — (parallel with T5 and T9) | Medium: wide in cmd/hoist; behaviour pinned by the existing CLI tests | 16 |
+| **T7** TUI factoring | Pure refactor, goldens byte-identical: split `app.Update` (keys / navigation / session events); `ui.ConfirmDialog` for the 7 `huh.Confirm` copies; shared helpers in `internal/ui`; tags and matrix onto `scope`; deploy stops importing plan; split tags/plan/matrix/controller files by concern; copycheck tests for `context.Background()` and screen imports; `planFn` off the `Update` path; dead `StartMsg` fields and the chooser branch. Last PR: an `app.Deps` struct, which touches `main.go`'s composition root | AR-M3, AR-M7, AR-M10, AR-M11, AR-M12, AR-L1, AR-L4 (flight), AR-L5, FB-L9 | `internal/app/**`, `internal/ui/**`, `internal/copycheck`; last PR also `cmd/hoist/main.go` `runTUI` | T5; last PR after T6 | Medium: large moves. The golden suite is the gate | 14 |
+| **T8** TUI UX | Sub-stacks: **8a** matrix and pane; **8b** flight and activity; **8c** plan, deploy and tag picker; **8d** chrome, palette, copy and watch; **8e** #260 diagnose; **8f** guide and mockup sync. 8d goes first (shared `internal/ui`), then 8a, 8b and 8c in parallel, 8f last | UX-H12, UX-H14–H18, UX-M1, M4, M10–M12, M14, M15, M17–M28, UX-L4–L6, terminology, #74, #249, #260, #216.6, #243.H4 | 8a `internal/app/matrix`, 8b `internal/app/{flight,activity}` and `session` copy, 8c `internal/app/{plan,deploy,tags}`, 8d `internal/ui`, `internal/app/{watch,restart,config}`, 8f `docs/guide.md`, `docs/tui`; all regenerate goldens | T7 | Medium: visible behaviour. Approve D5 before 8a and 8b | 24 |
+| **T9** engine semantics | #41 phase 1 (a merged PR whose head is not this run's commit is Blocked, not done); #256.1; #243.H1/H2; UX-M2's string; CS-5 (fsync or narrow the comment); the rollout half of #171 and the engine copy of the workload derivation; `StateDir` injected. Then #204 per D2 (touches `service/start.go`) | #41 (phase 1), #204, #256.1, #243.H1/H2, UX-M2, CS-5, AR-M2 (StateDir), #171 (rollout), #201.8/.9 | `internal/engine/*`; #204 also `internal/service/start.go`, `inflight.go` | #168 merged; #204 after T6 | High: landing semantics, §4.1. Independent review and a mutant for each fix | 17 |
+| **T10** features and warnings | #24 `WarnTargetNewer`; AR-M4 / #7.2 "skipping staging" as a `gitops.Warning` (pkg and service first, the plan screen switch after 8c); the restart half of #171 (StatefulSet and DaemonSet); #172 `registries[].env`; #247 | AR-M4, #24, #7.2, #171 (restart), #172, #247 | `pkg/gitops/plan.go`, `internal/service/policy.go`, `internal/restart`, `pkg/rollout`, `internal/app/restart`, `pkg/registry`, `internal/config`, `internal/service/gc.go` | T5 (`plan.go`), T6 (`internal/restart`), 8c (plan screen) | Low–medium | 12 |
+| **T11** docs, comments, test infra | #235 sweep; AR-L2 review-narration diet; stale comments (`resume.go:151`, `deps.go:20`); #169; #90 docs (D1); `internal/gittest` shared git fixtures with the no-background gitconfig; a `t.Parallel` pilot in `pkg/` | #235, #169, #90 (docs), AR-L2, AR-M6 (fixtures) | Comments across ~60 files, `*_test.go` across packages, `docs/` | Everything else merged | Low, but wide: it must run alone | 8 |
+
+**Total:** about 99 agent-hours of build, before review.
+
+**Parallel waves:**
+
+1. **Wave 1:** T5 ∥ T6 ∥ T9 (#204 waits for T6). These footprints are disjoint. T5 touches
+   `service/fresh.go`, which T6 does not, and T9 owns `start.go`.
+2. **Wave 2:** T7 (after T5), with T10's pkg/service parts alongside it.
+3. **Wave 3:** T8, starting with 8d, then 8a, 8b and 8c in parallel. T10's plan-screen switch
+   follows 8c.
+4. **Wave 4:** T11, alone.
+
+**Collisions that cannot be designed away:**
+
+- `internal/app/app.go` is in T5, T7 and T8. They run in sequence.
+- `cmd/hoist/main.go` `runTUI` is in T6 and in T7's last PR. That PR waits for T6.
+- `internal/service/start.go` is in T9 (#204, #201.8/.9) only. T6 does not touch it.
+- Goldens are regenerated by T5's plan PR, then T8. T7 must leave them byte-identical, which is
+  the check that it is a pure refactor.
+
+### Decisions for Alex
+
+| # | Question | Recommendation | Refs |
+|---|---|---|---|
+| D1 | Can hoist approve its own PRs? | No. Document it as is: README, R-001 and one §4.5 sentence say four eyes need a second person or `approval: auto`. Split the 405-merge wedge into its own issue | #90, `README.md:165`, `docs/repo-map.md:161` |
+| D2 | Same-id concurrent starts | Keep `DeriveID` unchanged. Refuse a start whose mode differs from the existing state with that id, and hold an advisory flock for the life of the drive (released if the process dies) | #204, `engine/claim.go`, `service/start.go` |
+| D3 | A→B→A re-apply | Phase 1 only: `MergedStep.Observe` returns Blocked, with a plain sentence, when the merged PR's head is known and differs from this run's commit. Defer a generation in the id | #41, `steps_review.go:452`, `landed_guard.go:120` |
+| D4 | Accept these as stated limits and close them | Yes: `gc` stays CLI-only (#246); the Argo anchor is a local clock (#53); the `ci.settle`/`ci.ignore` limits (#243 C1–C4) | #246, #53, #243 |
+| D5 | A landed-but-stuck promotion has no exit | `shift+x` on a landed promotion offers **archive** instead of abandon: it moves the state file to `archive/`, touches nothing remote, and the dialog says so before the confirm. Decide after #168, which removes the commonest cause (superseded) | UX-H16, `service/promotions.go:511`, R-011 |
+
+The rest of T8 implements the v2 mockups and keymap that T0 already approved, so it needs no new
+decision.
+
+# Original audit (2026-09, at `9a15feb`)
 
 ## Summary: root causes
 
