@@ -66,7 +66,8 @@ type Git interface {
 	// cleanup uses, so that a file written into the worktree after the caller's own check is
 	// not silently deleted — the check and the removal are then git's one operation, not two
 	// of ours. A worktree whose directory is already gone has nothing in it to lose and is
-	// deregistered as RemoveWorktree does.
+	// deregistered without deleting anything (deregisterStaleWorktree), so a directory that
+	// appears at the path meanwhile is left alone.
 	RemoveCleanWorktree(ctx context.Context, cloneDir, worktreeDir string) error
 	// DeleteLocalBranchAt deletes cloneDir's local branch only if it still points at tip — the
 	// commit the caller checked — and is not checked out in any worktree, reporting whether
@@ -404,9 +405,26 @@ func (e Exec) RemoveCleanWorktree(ctx context.Context, cloneDir, worktreeDir str
 		return err
 	}
 	if _, err := os.Lstat(worktreeDir); os.IsNotExist(err) {
-		return e.RemoveWorktree(ctx, cloneDir, worktreeDir)
+		return e.deregisterStaleWorktree(ctx, cloneDir, worktreeDir)
 	}
 	_, err := e.run(ctx, cloneDir, "worktree", "remove", worktreeDir)
+	return err
+}
+
+// deregisterStaleWorktree drops git's record of a worktree whose directory is gone, and deletes
+// nothing itself. Whether there is anything to drop is read from git's registry (`git worktree
+// list`), never from the wording of an error, so it does not depend on the locale git runs in. A
+// path git never registered is nothing to do and no removal is asked of git at all; a registered
+// one gets a plain `git worktree remove` (no --force, no os.RemoveAll), which deregisters it when
+// its directory is missing and refuses it when it holds modified or untracked files. A directory
+// that appeared at the path after the caller's Lstat is therefore never removed unless git itself
+// calls it a clean worktree (#256 item 2).
+func (e Exec) deregisterStaleWorktree(ctx context.Context, cloneDir, worktreeDir string) error {
+	_, registered, err := e.WorktreeBranch(ctx, cloneDir, worktreeDir)
+	if err != nil || !registered {
+		return err
+	}
+	_, err = e.run(ctx, cloneDir, "worktree", "remove", worktreeDir)
 	return err
 }
 

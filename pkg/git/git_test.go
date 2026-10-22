@@ -1131,6 +1131,108 @@ func TestRemoveCleanWorktreeRefusesWhatGitCallsDirty(t *testing.T) {
 	}
 }
 
+// TestDeregisterStaleWorktreeDeletesNothing is #256 item 2. RemoveCleanWorktree's absent-path
+// branch used to call the force removal, which ends in os.RemoveAll, so a directory that
+// appeared at the path between its Lstat and that call (another hoist starting the same
+// promotion id) was deleted despite the method's non-force contract. The attacker is that
+// directory: an unregistered path holding a file. Control: a registered worktree whose
+// directory is gone is deregistered.
+func TestDeregisterStaleWorktreeDeletesNothing(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	var g Exec
+	appeared := filepath.Join(t.TempDir(), "appeared")
+	if err := os.MkdirAll(appeared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(appeared, "someone-elses-work.txt")
+	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.deregisterStaleWorktree(ctx(), cloneDir, appeared); err != nil {
+		t.Fatalf("an unregistered path has nothing to deregister, and that is not an error: %v", err)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("deregistering a stale entry must not delete the directory that now sits there: %v", err)
+	}
+
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := g.Worktree(ctx(), cloneDir, gone, "hoist/app-production/stale", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.deregisterStaleWorktree(ctx(), cloneDir, gone); err != nil {
+		t.Fatalf("control: a stale registration is dropped: %v", err)
+	}
+	if _, registered, err := g.WorktreeBranch(ctx(), cloneDir, gone); err != nil || registered {
+		t.Fatalf("control: still registered: %v %v", registered, err)
+	}
+}
+
+// TestRemoveCleanWorktreeLeavesADirectoryThatAppearsAfterTheCheck drives the production entry
+// point through the race #256 item 2 describes (Codex asked for this on the fix). RemoveCleanWorktree
+// sees no directory, then another hoist creates one at the path before git runs; Exec.Bin is a
+// wrapper that creates it the moment the first worktree call arrives, which is exactly after
+// the Lstat and before any removal. Reverting the call in RemoveCleanWorktree's absent branch to
+// RemoveWorktree makes this fail: its trailing os.RemoveAll deletes the file.
+func TestRemoveCleanWorktreeLeavesADirectoryThatAppearsAfterTheCheck(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	appeared := filepath.Join(t.TempDir(), "appeared")
+	wrapper := filepath.Join(t.TempDir(), "git-racer")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = worktree ]; then\n" +
+		"  mkdir -p \"$RACE_DIR\" && echo precious > \"$RACE_DIR/work.txt\"\n" +
+		"fi\n" +
+		"exec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RACE_DIR", appeared)
+
+	g := Exec{Bin: wrapper}
+	if _, err := os.Lstat(appeared); !os.IsNotExist(err) {
+		t.Fatalf("setup: %s should not exist yet: %v", appeared, err)
+	}
+	if err := g.RemoveCleanWorktree(ctx(), cloneDir, appeared); err != nil {
+		t.Fatalf("an unregistered path has nothing to deregister: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(appeared, "work.txt"))
+	if err != nil || string(data) != "precious\n" {
+		t.Fatalf("the directory that appeared after the check must survive: %v %q", err, data)
+	}
+}
+
+// TestRemoveCleanWorktreeDoesNotDependOnGitsErrorWording is Codex's round-2 finding: the absent,
+// unregistered case was recognised by matching git's English diagnostic, so under a translated
+// git the cleanup errored on every pass instead of treating a missing worktree as nothing to
+// do. The wrapper stands in for a localized git: `worktree remove` fails with a message that
+// matches nothing English. The answer must come from git's registry, so remove is never asked.
+func TestRemoveCleanWorktreeDoesNotDependOnGitsErrorWording(t *testing.T) {
+	cloneDir, _ := newTestRepo(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	wrapper := filepath.Join(t.TempDir(), "git-localized")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then\n" +
+		"  echo 'fatal: kein Arbeitsverzeichnis' >&2; exit 128\n" +
+		"fi\n" +
+		"exec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "never-registered")
+	if err := (Exec{Bin: wrapper}).RemoveCleanWorktree(ctx(), cloneDir, missing); err != nil {
+		t.Fatalf("an absent, unregistered worktree is nothing to do under any locale: %v", err)
+	}
+}
+
 // TestDeleteLocalBranchAtOnlyDeletesTheCommitThatWasChecked: the branch goes only if it is still
 // where the caller saw it, and never while a worktree has it checked out.
 func TestDeleteLocalBranchAtOnlyDeletesTheCommitThatWasChecked(t *testing.T) {
