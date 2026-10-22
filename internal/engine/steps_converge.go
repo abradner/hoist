@@ -441,6 +441,19 @@ type deploymentWant struct {
 	Container string
 	Init      bool
 	New       string
+	// Occ is the occurrence the want came from (file, document, YAML path), the key
+	// RolledOutStep matches a per-occurrence landed verdict back to it by.
+	Occ editKey
+}
+
+// editKey identifies one Edit's occurrence across a promotion's whole edit set.
+type editKey struct {
+	file string
+	occKey
+}
+
+func keyOf(e gitops.Edit) editKey {
+	return editKey{file: e.File, occKey: occKey{doc: e.Doc, path: e.Path}}
 }
 
 // jobLikeRef is one Job or CronJob a promotion's edits touched — report-only (invariant 4).
@@ -460,6 +473,7 @@ func groupEditsByWorkload(edits []gitops.Edit) (deployments map[string][]deploym
 				Container: e.Container,
 				Init:      strings.Contains(e.Path, "initContainers"),
 				New:       e.New.String(),
+				Occ:       keyOf(e),
 			})
 		case "Job", "CronJob":
 			ref := jobLikeRef{Name: e.Name, Kind: e.Kind}
@@ -485,19 +499,34 @@ type containerKey struct {
 // missing from the live spec entirely counts as a mismatch too (it means the Deployment's own
 // shape has drifted from what the plan assumed, not that the promotion is done).
 func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []string {
+	var out []string
+	for _, m := range mismatchedWants(ds, wants) {
+		out = append(out, m.why)
+	}
+	return out
+}
+
+// mismatch is one wanted occurrence whose live image does not match, and why.
+type mismatch struct {
+	want deploymentWant
+	why  string
+}
+
+// mismatchedWants is imageMismatches keeping which want each line is about.
+func mismatchedWants(ds rollout.DeploymentStatus, wants []deploymentWant) []mismatch {
 	current := make(map[containerKey]string, len(ds.Images))
 	for _, img := range ds.Images {
 		current[containerKey{img.Name, img.Init}] = img.Image
 	}
-	var out []string
+	var out []mismatch
 	for _, w := range wants {
 		got, ok := current[containerKey{w.Container, w.Init}]
 		if !ok {
-			out = append(out, fmt.Sprintf("%s: container not found in the live spec", w.Container))
+			out = append(out, mismatch{w, fmt.Sprintf("%s: container not found in the live spec", w.Container)})
 			continue
 		}
 		if got != w.New {
-			out = append(out, fmt.Sprintf("%s: still %s, want %s", w.Container, got, w.New))
+			out = append(out, mismatch{w, fmt.Sprintf("%s: still %s, want %s", w.Container, got, w.New)})
 		}
 	}
 	return out
@@ -519,7 +548,19 @@ func imageMismatches(ds rollout.DeploymentStatus, wants []deploymentWant) []stri
 // before this Observe gets to it — or transient) becomes a report line and the loop continues,
 // rather than a hard error that would gate the whole promotion on a status this step's own
 // contract says it never gates on.
-type RolledOutStep struct{ Rollout rollout.Rollout }
+//
+// An occurrence a later change has superseded is exempt (#168, AGENTS.md §4.1): once the base
+// declares the same image repo at a different reference, the cluster converges on that, and
+// this promotion's own Edit.New is a value no container will carry again — so gating on it would
+// keep a finished promotion live forever. The exemption is per occurrence (supersededAtBase),
+// never one verdict for the whole promotion: an occurrence still carrying this promotion's
+// reference keeps gating, whatever happened to its neighbours. A Deployment whose every
+// occurrence is superseded is not gated at all — its rollout, and its rollout's deadline, are
+// the later change's.
+type RolledOutStep struct {
+	Rollout rollout.Rollout
+	Git     git.Git
+}
 
 // Name implements Step.
 func (RolledOutStep) Name() StepName { return StepRolledOut }
@@ -537,17 +578,49 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	}
 	sort.Strings(names)
 
-	var blocked, waiting, done []string
+	statuses := make(map[string]rollout.DeploymentStatus, len(names))
+	var mismatched []deploymentWant
 	for _, name := range names {
 		ds, err := r.Rollout.Deployment(ctx, s.TargetEnv, name)
 		if err != nil {
 			if errors.Is(err, rollout.ErrNotFound) {
-				blocked = append(blocked, fmt.Sprintf("Deployment %s/%s not found", s.TargetEnv, name))
 				continue
 			}
 			return Observation{}, fmt.Errorf("checking rollout of Deployment %s/%s: %w", s.TargetEnv, name, err)
 		}
-		mismatches := imageMismatches(ds, deployments[name])
+		statuses[name] = ds
+		for _, m := range mismatchedWants(ds, deployments[name]) {
+			mismatched = append(mismatched, m.want)
+		}
+	}
+	superseded, err := r.supersededAtBase(ctx, s, mismatched)
+	if err != nil {
+		return Observation{}, err
+	}
+
+	var blocked, waiting, done, replaced []string
+	var anyExempt bool
+	for _, name := range names {
+		ds, ok := statuses[name]
+		if !ok {
+			blocked = append(blocked, fmt.Sprintf("Deployment %s/%s not found", s.TargetEnv, name))
+			continue
+		}
+		var mismatches, exempt []string
+		for _, m := range mismatchedWants(ds, deployments[name]) {
+			if why, ok := superseded[m.want.Occ]; ok {
+				exempt = append(exempt, why)
+				continue
+			}
+			mismatches = append(mismatches, m.why)
+		}
+		anyExempt = anyExempt || len(exempt) > 0
+		if len(exempt) == len(deployments[name]) {
+			// Every occurrence in this Deployment was superseded: what it is rolling out now is
+			// the later change, not this promotion.
+			replaced = append(replaced, fmt.Sprintf("%s: superseded (%s)", name, strings.Join(exempt, "; ")))
+			continue
+		}
 		switch {
 		case ds.DeadlineExceeded:
 			blocked = append(blocked, fmt.Sprintf("%s/%s: %s", s.TargetEnv, name, ds.Detail))
@@ -555,6 +628,8 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 			waiting = append(waiting, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
 		case !ds.Complete:
 			waiting = append(waiting, fmt.Sprintf("%s: %s", name, ds.Detail))
+		case len(exempt) > 0:
+			done = append(done, fmt.Sprintf("%s: %s; superseded (%s)", name, ds.Detail, strings.Join(exempt, "; ")))
 		default:
 			done = append(done, name+": "+ds.Detail)
 		}
@@ -584,7 +659,66 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		return Observation{Waiting: true, Detail: strings.Join(append(waiting, jobReports...), "; ")}, nil
 	}
 	sort.Strings(done)
-	return Observation{Satisfied: true, Detail: strings.Join(append(done, jobReports...), "; ")}, nil
+	lines := append(done, jobReports...)
+	if anyExempt {
+		// Lead with it: the CLI prints this as "done (<detail>)", and a promotion that finished
+		// by being replaced must not read as one whose own images rolled out.
+		sort.Strings(replaced)
+		lines = append(append([]string{"superseded by a later change to the same image repo"}, replaced...), lines...)
+	}
+	return Observation{Satisfied: true, Detail: strings.Join(lines, "; ")}, nil
+}
+
+// supersededAtBase judges each of wants at the base's current tip and returns the ones a later
+// change superseded, each with what the base declares there. It asks only when there is
+// something to ask about: wants is the occurrences whose live image does not match, so an
+// ordinary rollout — whose live spec carries this promotion's reference as soon as Argo has
+// synced it — pays no fetch.
+//
+// The revision judged is the tip FetchBranch returns, never LandedSHA(): on the PR path that is
+// the merge commit, the one revision at which this promotion's edits are necessarily intact
+// (#168, from #167's review). And an occurrence counts as superseded only when LandedSHA() is in
+// that tip's history (AGENTS.md §4.1): a differing reference at a base that does not contain
+// this promotion's landing is no evidence it ever landed. Without a Git or a clone nothing is
+// judged, and every mismatch gates as before.
+func (r RolledOutStep) supersededAtBase(ctx context.Context, s *PromotionState, wants []deploymentWant) (map[editKey]string, error) {
+	if len(wants) == 0 || r.Git == nil || s.CloneDir == "" {
+		return nil, nil
+	}
+	tip, ok, err := r.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	isAncestor, err := r.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), tip)
+	if err != nil || !isAncestor {
+		// An unresolvable landing (a rewritten base) is no exemption, and not worth failing the
+		// whole observation over: the mismatch gates, and the next poll asks again.
+		return nil, nil
+	}
+	asked := make(map[editKey]bool, len(wants))
+	for _, w := range wants {
+		asked[w.Occ] = true
+	}
+	var edits []gitops.Edit
+	for _, e := range s.Edits {
+		if asked[keyOf(e)] {
+			edits = append(edits, e)
+		}
+	}
+	verdicts, err := observeOccurrences(ctx, r.Git, s.CloneDir, tip, edits)
+	if err != nil {
+		return nil, err
+	}
+	out := map[editKey]string{}
+	for _, v := range verdicts {
+		if v.verdict == landedSuperseded {
+			out[keyOf(v.edit)] = fmt.Sprintf("%s, this promotion planned %s", v.detail, v.edit.New)
+		}
+	}
+	return out, nil
 }
 
 // Act implements Step: nothing to do. The rollout is the kubelet/Deployment controller acting

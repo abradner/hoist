@@ -38,7 +38,13 @@ type world struct {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	fx := newFixture(t)
+	return newWorldWith(t, newFixture(t))
+}
+
+// newWorldWith is newWorld over a fixture the caller built (newFixtureWith), for a scenario
+// that needs a family with more than one occurrence.
+func newWorldWith(t *testing.T, fx fixture) *world {
+	t.Helper()
 	f := &mergeSimulatingForge{Fake: &forge.Fake{}, t: t, cloneDir: fx.cloneDir, base: "main"}
 	return &world{t: t, fx: fx, g: git.Exec{}, forge: f, argo: &argo.Fake{}, ro: &rollout.Fake{}}
 }

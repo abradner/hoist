@@ -46,6 +46,29 @@ func runHost(t *testing.T, dir string, args ...string) {
 // own signing configuration (AGENTS.md §9 gotcha on hermetic tests).
 func newFixtureOrigin(t *testing.T) (originDir string) {
 	t.Helper()
+	return newFixtureOriginWith(t, oneDeployment)
+}
+
+// oneDeployment is newFixtureOrigin's manifest: one Deployment "app" with one container.
+func oneDeployment(env, ref string) string {
+	return "" +
+		"apiVersion: apps/v1\n" +
+		"kind: Deployment\n" +
+		"metadata:\n" +
+		"  name: app\n" +
+		"  namespace: " + env + "\n" +
+		"spec:\n" +
+		"  template:\n" +
+		"    spec:\n" +
+		"      containers:\n" +
+		"        - name: app\n" +
+		"          image: " + ref + "\n"
+}
+
+// newFixtureOriginWith is newFixtureOrigin with the family's one manifest file built by
+// deployment, so a test can give the family more than one occurrence of the promoted image repo.
+func newFixtureOriginWith(t *testing.T, deployment func(env, ref string) string) (originDir string) {
+	t.Helper()
 	home := t.TempDir()
 	gitconfig := filepath.Join(home, ".gitconfig")
 	const cfg = "[user]\n\tname = Test\n\temail = test@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n" + noBackgroundGitConfig
@@ -86,20 +109,6 @@ func newFixtureOrigin(t *testing.T) (originDir string) {
 			"    server: https://kubernetes.default.svc\n" +
 			"    namespace: " + env + "\n"
 	}
-	deployment := func(env, ref string) string {
-		return "" +
-			"apiVersion: apps/v1\n" +
-			"kind: Deployment\n" +
-			"metadata:\n" +
-			"  name: app\n" +
-			"  namespace: " + env + "\n" +
-			"spec:\n" +
-			"  template:\n" +
-			"    spec:\n" +
-			"      containers:\n" +
-			"        - name: app\n" +
-			"          image: " + ref + "\n"
-	}
 	digestOld := "sha256:" + strings.Repeat("0", 64)
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	write("cluster/apps/app-staging-app.yaml", wrapper("app-staging", "app"))
@@ -126,7 +135,14 @@ type fixture struct {
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	origin := newFixtureOrigin(t)
+	return newFixtureWith(t, oneDeployment, 1)
+}
+
+// newFixtureWith is newFixture over newFixtureOriginWith(deployment), checking the plan has
+// exactly wantEdits real edits.
+func newFixtureWith(t *testing.T, deployment func(env, ref string) string, wantEdits int) fixture {
+	t.Helper()
+	origin := newFixtureOriginWith(t, deployment)
 	clone := filepath.Join(t.TempDir(), "clone")
 	runHost(t, "", "clone", "-q", origin, clone)
 
@@ -138,8 +154,13 @@ func newFixture(t *testing.T) fixture {
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if len(plan.Edits) != 1 || plan.Edits[0].NoOp() {
-		t.Fatalf("fixture plan should have exactly one real edit, got %+v", plan.Edits)
+	if len(plan.Edits) != wantEdits {
+		t.Fatalf("fixture plan should have exactly %d edit(s), got %+v", wantEdits, plan.Edits)
+	}
+	for _, e := range plan.Edits {
+		if e.NoOp() {
+			t.Fatalf("fixture plan should have only real edits, got a no-op: %+v", e)
+		}
 	}
 	return fixture{cloneDir: clone, originDir: origin, plan: plan}
 }
