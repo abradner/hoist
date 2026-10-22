@@ -381,6 +381,90 @@ func TestChecksFoldsInCommitStatuses(t *testing.T) {
 	}
 }
 
+// statusServer answers GET .../status the way GitHub does: the combined status's statuses array
+// is paginated by page/per_page, per_page defaulting to 30, and total_count counts every status.
+func statusServer(total int, failAt int) func(*http.Request) (int, string) {
+	items := make([]string, total)
+	for i := range items {
+		state := "success"
+		if i == failAt {
+			state = "failure"
+		}
+		items[i] = fmt.Sprintf(`{"context": "ci/status-%d", "state": %q}`, i, state)
+	}
+	return func(r *http.Request) (int, string) {
+		page, perPage := 1, 30
+		if v, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil {
+			page = v
+		}
+		if v, err := strconv.Atoi(r.URL.Query().Get("per_page")); err == nil {
+			perPage = v
+		}
+		return 200, fmt.Sprintf(`{"total_count": %d, "statuses": [%s]}`, total, strings.Join(paginate(items, page, perPage), ","))
+	}
+}
+
+// TestChecksPaginatesCommitStatuses is #243 C5: the combined-status endpoint pages its statuses
+// (30 by default), and Checks read only the first page, so a failing or pending context past the
+// 30th was invisible and CI could read green. A failure at index 120 of 130 must be named.
+func TestChecksPaginatesCommitStatuses(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": []}`),
+		"GET /repos/example/gitops/commits/deadbeef/status":     statusServer(130, 120),
+	})
+	sum, err := c.Checks(context.Background(), "deadbeef", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Total != 130 {
+		t.Fatalf("Total = %d, want 130 — later pages of statuses were never fetched", sum.Total)
+	}
+	if sum.Failure != 1 || len(sum.FailedNames) != 1 || sum.FailedNames[0] != "ci/status-120" {
+		t.Fatalf("CheckSummary = %+v, want the status past the first page named as failed", sum)
+	}
+}
+
+// TestChecksMoreStatusesThanTheBoundFailsClosed: past maxCheckRunPages*100 statuses the result
+// would be truncated, so Checks refuses rather than report a possibly-green rollup.
+func TestChecksMoreStatusesThanTheBoundFailsClosed(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": []}`),
+		"GET /repos/example/gitops/commits/deadbeef/status":     statusServer(maxCheckRunPages*100+5, -1),
+	})
+	if _, err := c.Checks(context.Background(), "deadbeef", nil); err == nil {
+		t.Fatal("a commit with more statuses than the page bound must be refused, not reported truncated")
+	}
+}
+
+// TestChecksRefusesStatusPagesFromDifferentSnapshots is Codex's round-2 finding on the paging fix:
+// a context published between two page requests shifts the page boundary, so page 2 repeats an
+// item from page 1 and omits the new one, and the duplicate alone could make the collected count
+// reach the newer total_count. The scan is only trusted when every page reports the same
+// total_count; otherwise it fails closed, and the CI step asks again on its next poll.
+func TestChecksRefusesStatusPagesFromDifferentSnapshots(t *testing.T) {
+	page := func(from, to int, total int) string {
+		items := make([]string, 0, to-from)
+		for i := from; i < to; i++ {
+			items = append(items, fmt.Sprintf(`{"context": "ci/status-%d", "state": "success"}`, i))
+		}
+		return fmt.Sprintf(`{"total_count": %d, "statuses": [%s]}`, total, strings.Join(items, ","))
+	}
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"GET /repos/example/gitops/commits/deadbeef/check-runs": static(200, `{"check_runs": []}`),
+		"GET /repos/example/gitops/commits/deadbeef/status": func(r *http.Request) (int, string) {
+			if r.URL.Query().Get("page") == "2" {
+				// A failing context landed meanwhile: page 2 starts one item early (a repeat of
+				// item 99) and the total has grown to 102.
+				return 200, page(99, 100, 102)
+			}
+			return 200, page(0, 100, 101)
+		},
+	})
+	if _, err := c.Checks(context.Background(), "deadbeef", nil); err == nil {
+		t.Fatal("pages describing different snapshots were folded into one rollup")
+	}
+}
+
 // TestChecksCommitStatusFailureIsNamed confirms a failing (or errored) commit status is folded
 // into Failure and FailedNames exactly like a failed check-run, never silently dropped.
 func TestChecksCommitStatusFailureIsNamed(t *testing.T) {

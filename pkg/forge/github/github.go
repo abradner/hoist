@@ -238,7 +238,9 @@ type commitStatus struct {
 }
 
 type combinedStatusResponse struct {
-	Statuses []commitStatus `json:"statuses"`
+	// TotalCount is every status GitHub holds for the commit, whatever page this response is.
+	TotalCount int            `json:"total_count"`
+	Statuses   []commitStatus `json:"statuses"`
 }
 
 // maxCheckRunPages bounds Checks' pagination: 10 pages of 100 (1000 check runs) is far beyond
@@ -313,13 +315,39 @@ func (c *Client) Checks(ctx context.Context, sha string, ignore []string) (forge
 	// not just whichever one this adaptor happened to query first (Known bug classes:
 	// "querying check-runs alone, so a status-only or mixed CI reports green/none when the
 	// repository's real gate is still pending or failing").
-	var combined combinedStatusResponse
-	statusPath := fmt.Sprintf("repos/%s/%s/commits/%s/status", c.owner, c.repo, sha)
-	if err := c.rest.DoWithContext(ctx, http.MethodGet, statusPath, nil, &combined); err != nil {
-		return forge.CheckSummary{}, translateErr("listing commit statuses", err)
+	// The statuses array is paginated like check-runs (30 a page unless asked for 100), so one
+	// request sees the first page only: a pending or failing context past it would read green
+	// (#243 C5). Paged to the same bound, and a result that would be cut short is an error.
+	var statuses []commitStatus
+	var firstTotal int
+	for page := 1; ; page++ {
+		var combined combinedStatusResponse
+		statusPath := fmt.Sprintf("repos/%s/%s/commits/%s/status?per_page=100&page=%d", c.owner, c.repo, sha, page)
+		if err := c.rest.DoWithContext(ctx, http.MethodGet, statusPath, nil, &combined); err != nil {
+			return forge.CheckSummary{}, translateErr("listing commit statuses", err)
+		}
+		if page == 1 {
+			firstTotal = combined.TotalCount
+		} else if combined.TotalCount != firstTotal {
+			// A status was published between two page requests: the page boundary moved, so a
+			// page can repeat an item and omit the new one, and the duplicate would still count.
+			// Not one snapshot, so not a rollup to gate on; the CI step asks again next poll.
+			return forge.CheckSummary{}, fmt.Errorf("github: checking statuses for %s: the status list changed while it was being read (total_count %d, then %d); try again", sha, firstTotal, combined.TotalCount)
+		}
+		statuses = append(statuses, combined.Statuses...)
+		complete := len(combined.Statuses) < 100 || (combined.TotalCount > 0 && len(statuses) >= combined.TotalCount)
+		if complete {
+			break
+		}
+		if page == maxCheckRunPages {
+			return forge.CheckSummary{}, fmt.Errorf(
+				"github: checking statuses for %s: more than %d commit statuses (the %d-page bound at 100 per page) — refusing to report a possibly truncated result rather than silently hide a pending or failed status past the bound",
+				sha, maxCheckRunPages*100, maxCheckRunPages,
+			)
+		}
 	}
 
-	checks := make([]forge.Check, 0, len(runs)+len(combined.Statuses))
+	checks := make([]forge.Check, 0, len(runs)+len(statuses))
 	for _, r := range runs {
 		name := r.Name
 		if name == "" {
@@ -336,7 +364,7 @@ func (c *Client) Checks(ctx context.Context, sha string, ignore []string) (forge
 		}
 		checks = append(checks, forge.Check{Name: name, State: st})
 	}
-	for _, status := range combined.Statuses {
+	for _, status := range statuses {
 		name := status.Context
 		if name == "" {
 			name = "(unnamed status)"
