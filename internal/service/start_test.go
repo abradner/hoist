@@ -11,6 +11,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
@@ -266,6 +267,40 @@ func TestStartPromotionDirectNoOpRefusesUnseenOriginOccurrence(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "app2") {
 		t.Fatalf("error should name the missing occurrence's file (app2), got: %v", err)
+	}
+}
+
+// TestFreshnessRefusesAQualifiedBaseInPlainWords is #153: a base written as a ref path
+// (refs/tags/v1, refs/heads/main) that resolves to nothing used to be reported with the base
+// qualified a second time (refs/heads/refs/tags/v1, "has no local branch ..."). The refusal now
+// says a base is a branch name. It never refuses what git resolves: a branch literally named
+// refs/tags/v1 (legal, it is refs/heads/refs/tags/v1) still passes, and so does a branch merely
+// named refs/release. Reverting the helper's call sites makes the first loop fail.
+func TestFreshnessRefusesAQualifiedBaseInPlainWords(t *testing.T) {
+	fx := newInflightFixture(t)
+	for _, base := range []string{"refs/tags/v1", "refs/heads/main", "refs/remotes/origin/main"} {
+		err := checkCloneCurrentForBase(context.Background(), git.Exec{}, fx.clone, base, nil)
+		if err == nil {
+			t.Fatalf("base %q accepted although no such branch exists", base)
+		}
+		if !strings.Contains(err.Error(), "must be a branch name") {
+			t.Errorf("base %q: error %q should say a base must be a branch name", base, err)
+		}
+	}
+	if err := checkCloneCurrentForBase(context.Background(), git.Exec{}, fx.clone, "main", nil); err != nil {
+		t.Fatalf("control: the plain branch name should pass: %v", err)
+	}
+
+	// Branches whose legal names look like ref paths exist locally AND on origin: git resolves
+	// them, so they must keep passing (refusing them would change what is possible, not just
+	// the message).
+	for _, name := range []string{"refs/tags/v1", "refs/heads/x", "refs/release"} {
+		runGitHost(t, fx.clone, "branch", name, "main")
+		runGitHost(t, fx.clone, "push", "-q", "origin", name+":refs/heads/"+name)
+		runGitHost(t, fx.clone, "fetch", "-q", "origin")
+		if err := checkCloneCurrentForBase(context.Background(), git.Exec{}, fx.clone, name, nil); err != nil {
+			t.Errorf("a branch literally named %q exists on both sides and was refused: %v", name, err)
+		}
 	}
 }
 

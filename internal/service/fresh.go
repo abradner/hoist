@@ -27,6 +27,23 @@ type freshInputs struct {
 	reasons map[string]string
 }
 
+// refPathBaseError is the plain-words refusal for a --base written as a full ref path
+// (refs/heads/main, refs/tags/v1, refs/remotes/...), or nil for anything else (#153). It is used
+// only where checkCloneCurrentForBase has already found the base unresolvable, never to refuse up
+// front: git accepts a branch whose name literally starts with one of these namespaces (a branch
+// `refs/tags/v1` is `refs/heads/refs/tags/v1`), the fetch resolves it, and refusing it would
+// change what is possible rather than only the message (AGENTS.md section 8, layered checks).
+// The ordinary refusals qualify the base as refs/heads/<base> and would otherwise talk about a
+// ref nobody wrote.
+func refPathBaseError(base string) error {
+	for _, ns := range []string{"refs/heads/", "refs/tags/", "refs/remotes/"} {
+		if strings.HasPrefix(base, ns) {
+			return fmt.Errorf("--base %q must be a branch name (for example \"main\"), not a ref path", base)
+		}
+	}
+	return nil
+}
+
 // checkCloneCurrentForBase confirms, for every distinct file the plan's edits reference, that
 // planning against the clone's (cloneDir's) on-disk content — exactly what gitops.Discover and
 // BuildPlan already read, above, to build this plan — still matches what a brand-new
@@ -92,6 +109,9 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 	// onOrigin is FetchBranch's own answer from the remote, not the remote-tracking ref, which
 	// is a cached belief that outlives a branch deleted on origin.
 	if !onOrigin {
+		if err := refPathBaseError(base); err != nil && !localOK && !originOK {
+			return err
+		}
 		if originOK {
 			return fmt.Errorf("origin no longer has a branch %q (a stale %s remains in %s) — check the --base name, or prune with `git fetch --prune origin`, and re-run", base, originRef, cloneDir)
 		}
@@ -101,6 +121,9 @@ func checkCloneCurrentForBase(ctx context.Context, g git.Git, cloneDir, base str
 		return fmt.Errorf("origin has no branch %q, only %s does — push it, or check the --base name, and re-run", base, cloneDir)
 	}
 	if !localOK {
+		if err := refPathBaseError(base); err != nil {
+			return err
+		}
 		return fmt.Errorf("%s has no local branch %q, only %s — check out or fetch it locally (`git branch %s %s`) and re-run", cloneDir, base, originRef, base, originRef)
 	}
 	// targetRef is exactly what pkg/git.Exec.Worktree's own resolveBase would build a brand-new
