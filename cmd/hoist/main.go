@@ -123,15 +123,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return failf(stderr, "hoist", exitUsage, "%s", msg)
 	}
 	if fs.NArg() == 0 {
-		eff, err := selectRepo(cfg, sel)
+		set, err := selectRepo(cfg, sel)
 		if err != nil {
 			return fail(stderr, "hoist", exitFailure, err)
 		}
-		if eff.repo == "" {
+		if set.RepoDir == "" {
 			fs.Usage()
 			return exitUsage
 		}
-		return tuiRunner(eff, cfg, stdout, stderr)
+		rf := sel.resolve
+		rf.kubeContext = "" // the root's --kube-context is Settings.KubeContext, not a resolve flag
+		return tuiRunner(set, rf, stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
@@ -314,7 +316,7 @@ type selection struct {
 }
 
 // kubeOverride is the root --kube-context when it was given, else "" — the operator's
-// explicit choice as distinct from a repo's configured default (see effective.kubeOverride).
+// explicit choice as distinct from a repo's configured default (see selectRepo).
 func (s selection) kubeOverride() string {
 	if s.given["kube-context"] {
 		return s.kubeContext
@@ -325,88 +327,68 @@ func (s selection) kubeOverride() string {
 // defaultBase is what --base means when nobody gives it, on every face.
 const defaultBase = "main"
 
-// effective is what the config file and the flags agree the run is about. cfg is the
-// selected repos[] entry, nil when the run is on flags alone. base is never empty;
-// kubeContext is the flag when given, else the selected repo's kube.context, else "" (the
-// kubeconfig's current context, resolved by whoever opens the cluster); kubeOverride is the
-// flag alone — "" unless --kube-context was given — for the one consumer that must tell an
-// operator's override from the selected repo's own default (svc.List/svc.Resume, whose
-// promotions may belong to another repo with another context). A subcommand copies its own
-// --base/--kube-context into selection before selectRepo, so both fields hold that
-// subcommand's answer, not only the root's. resolve carries the digest-resolution flags
-// (#132) the same way — the flags as given, "" meaning "the config decides", exactly what
-// service.NewResolveOptions takes as its own trailing string arguments.
-type effective struct {
-	repo, appsRoot    string
-	promotable        []string
-	base, kubeContext string
-	kubeOverride      string
-	resolve           resolveFlags
-	cfg               *config.RepoConfig
+// configSettings is the part of service.Settings that comes from the config file alone — the
+// file itself and the poll, deadline and retention knobs — and so is the same whichever repo, if
+// any, a command selects.
+func configSettings(cfg *config.Config) service.Settings {
+	set := service.Settings{Config: cfg}
+	if cfg != nil {
+		set.Poll = pollIntervals(cfg.Poll)
+		set.Deadline = time.Duration(cfg.Poll.Deadline)
+		set.Retain = time.Duration(cfg.State.Retain)
+	}
+	return set
 }
 
-// selectRepo applies the precedence: a flag given on the command line wins; otherwise the
-// selected repo's config value; otherwise the flag's M1 default. The repo is selected by
-// --repo (a repos[] name or path) or, with no --repo, as the only configured repo. A
-// --repo that matches no entry is a plain checkout path and takes the flag defaults, so
-// the config file never changes what an explicit command line means.
-func selectRepo(cfg *config.Config, sel selection) (effective, error) {
-	eff := effective{repo: sel.repo, appsRoot: sel.appsRoot, promotable: splitList(sel.promotable), base: sel.base, kubeContext: sel.kubeContext, resolve: sel.resolve}
-	eff.resolve.kubeContext = ""
-	if eff.base == "" {
-		eff.base = defaultBase
+// selectRepo applies the precedence and returns the service.Settings the run is about: a flag
+// given on the command line wins; otherwise the selected repo's config value; otherwise the
+// flag's M1 default. The repo is selected by --repo (a repos[] name or path) or, with no --repo,
+// as the only configured repo. A --repo that matches no entry is a plain checkout path and takes
+// the flag defaults, so the config file never changes what an explicit command line means.
+//
+// Settings.Repo is the selected repos[] entry, nil when the run is on flags alone. Base is never
+// empty; KubeContext is the flag when given, else the selected repo's kube.context, else "" (the
+// kubeconfig's current context, resolved by whoever opens the cluster); KubeOverride is the flag
+// alone — "" unless --kube-context was given — for the one consumer that must tell an operator's
+// override from the selected repo's own default (svc.List/svc.Resume, whose promotions may belong
+// to another repo with another context). A subcommand copies its own --base/--kube-context into
+// selection before selectRepo, so both fields hold that subcommand's answer, not only the
+// root's. The digest-resolution flags (#132) are not here: they are handed to NewResolveOptions
+// as given, "" meaning "the config decides", by the commands that resolve.
+func selectRepo(cfg *config.Config, sel selection) (service.Settings, error) {
+	set := configSettings(cfg)
+	set.RepoDir, set.AppsRoot, set.Promotable, set.Base, set.KubeContext = sel.repo, sel.appsRoot, splitList(sel.promotable), sel.base, sel.kubeContext
+	if set.Base == "" {
+		set.Base = defaultBase
 	}
 	if sel.given["kube-context"] {
-		eff.kubeOverride = sel.kubeContext
+		set.KubeOverride = sel.kubeContext
 	}
 	if len(cfg.Repos) == 0 {
-		return eff, nil
+		return set, nil
 	}
 	rc, err := cfg.Repo(sel.repo)
 	if errors.Is(err, config.ErrUnknownRepo) && sel.given["repo"] {
-		return eff, nil
+		return set, nil
 	}
 	if err != nil {
-		return effective{}, err
+		return service.Settings{}, err
 	}
 	if rc.Dir == "" {
-		return effective{}, fmt.Errorf("%s: %s.path is required to open %s; add it or pass --repo <path>", cfg.File, rc.Key, rc.Name)
+		return service.Settings{}, fmt.Errorf("%s: %s.path is required to open %s; add it or pass --repo <path>", cfg.File, rc.Key, rc.Name)
 	}
-	eff.repo = rc.Dir
-	eff.cfg = &rc
+	set.RepoDir = rc.Dir
+	set.Repo = &rc
 	if !sel.given["apps-root"] {
-		eff.appsRoot = rc.AppsRoot
+		set.AppsRoot = rc.AppsRoot
 	}
 	if !sel.given["promotable"] && rc.Promotable != nil {
-		eff.promotable = rc.Promotable
+		set.Promotable = rc.Promotable
 	}
 	if !sel.given["kube-context"] {
-		eff.kubeContext = rc.Kube.Context
+		set.KubeContext = rc.Kube.Context
 	}
-	return eff, nil
-}
-
-// settingsFor builds the service.Settings a command's own Service is constructed from, out of
-// the same effective flag/config precedence selectRepo already computed — the one place
-// cmd/hoist reads eff into the shape internal/service takes, so a command never re-derives its
-// own copy of the kube-context/promotable/poll precedence eff already settled.
-func settingsFor(cfg *config.Config, eff effective) service.Settings {
-	s := service.Settings{
-		RepoDir:      eff.repo,
-		AppsRoot:     eff.appsRoot,
-		Base:         eff.base,
-		Promotable:   eff.promotable,
-		KubeContext:  eff.kubeContext,
-		KubeOverride: eff.kubeOverride,
-		Repo:         eff.cfg,
-		Config:       cfg,
-	}
-	if cfg != nil {
-		s.Poll = pollIntervals(cfg.Poll)
-		s.Deadline = time.Duration(cfg.Poll.Deadline)
-		s.Retain = time.Duration(cfg.State.Retain)
-	}
-	return s
+	return set, nil
 }
 
 func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
@@ -434,31 +416,30 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	}
 	sel.repo, sel.appsRoot, sel.promotable, sel.kubeContext, sel.resolve = *repo, *appsRoot, *promotable, rf.kubeContext, rf
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
-	eff, err := selectRepo(cfg, sel)
+	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
-	if eff.repo == "" || *from == "" || *to == "" {
+	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
 		fs.Usage()
 		return exitUsage
 	}
-	prefixes := eff.promotable
+	prefixes := set.Promotable
 	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
 	// default" only when the flag was not given at all.
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
 		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
 	}
-	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
+	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitUsage, err)
 	}
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(set.RepoDir, set.AppsRoot)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
-	set := settingsFor(cfg, eff)
 	set.Resolve = opts
 	svc := service.New(set, serviceDeps())
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
@@ -475,8 +456,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	}
 	plan, rep := pc.Plan, pc.Resolution
 	var configured []string
-	if eff.cfg != nil {
-		configured = eff.cfg.Promotable
+	if set.Repo != nil {
+		configured = set.Repo.Promotable
 	}
 	if err := printPlan(stdout, r, &plan, prefixes, configured, rep); err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
@@ -484,8 +465,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	// The id promote would give this exact plan (issue #15): it needs the forge repo name,
 	// which is config, so a flags-only run — no repos[].github to hash — prints none rather
 	// than an id derived from a checkout directory name that would drift.
-	if eff.cfg != nil && eff.cfg.GitHub != "" {
-		id := engine.DeriveID(eff.cfg.GitHub, plan)
+	if set.Repo != nil && set.Repo.GitHub != "" {
+		id := engine.DeriveID(set.Repo.GitHub, plan)
 		if service.AnyRealEdit(plan.Edits) {
 			fmt.Fprintf(stdout, "\nPromotion id: %s (branch %s)\n", id, engine.BranchName(plan.TargetEnv, id))
 		} else {
@@ -648,27 +629,27 @@ var tuiRunner = runTUI
 
 // runTUI discovers the repo and runs the matrix (and, from it, the plan) screen until the
 // user quits. cfg is the whole loaded config file (service.NewResolveOptions needs it to find the
-// matching registries[] entry); eff.cfg is the selected repo's own entry, nil on flags
+// matching registries[] entry); set.Repo is the selected repo's own entry, nil on flags
 // alone — the plan screen then runs in "digest sources: none" mode with default resolution
 // options and an empty envs config, matching what M1 offered before this milestone.
-func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
+func runTUI(set service.Settings, rf resolveFlags, stdout, stderr io.Writer) int {
+	cfg := set.Config
 	// The root --digest-sources/--registry-auth/--cluster-secret/--op-ref (#132) are resolved
 	// once, here, before the Service exists at all: the plan screen resolves with them, and the
 	// credential-chain overrides reach the tag picker's and the history's registry clients too
 	// (svc.RegistryFor). A malformed one is refused here, before the screen opens, exactly as
 	// `hoist plan` refuses it.
-	regOpts, err := service.NewResolveOptions(cfg, eff.cfg, eff.resolve.digestSources, eff.resolve.registryAuth, eff.resolve.clusterSecret, eff.resolve.opRef, eff.kubeContext)
+	regOpts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, set.KubeContext)
 	if err != nil {
 		return fail(stderr, "hoist", exitUsage, err)
 	}
-	set := settingsFor(cfg, eff)
 	set.Resolve = regOpts
 	svc := service.New(set, serviceDeps())
 
 	// The repo view is a cached worktree at origin/<base> (internal/service's repo.go),
-	// fetched fresh here and on every F5 — never eff.repo's own working tree directly, and
+	// fetched fresh here and on every F5 — never set.RepoDir's own working tree directly, and
 	// never the operator's own checkout touched to get it (AGENTS.md §4.6). Falls back to
-	// eff.repo itself (today's exact pre-#PR7 behavior — a pure local disk read, no network
+	// set.RepoDir itself (today's exact pre-#PR7 behavior — a pure local disk read, no network
 	// needed) when origin can't be reached at all: browsing the matrix must stay possible
 	// offline, warn-don't-block (principle 5) rather than a new hard requirement a read-only
 	// screen never had before.
@@ -677,12 +658,12 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		return fail(stderr, "hoist", exitFailure, err)
 	}
 	if view.Fallback != nil {
-		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, view.Fallback, eff.repo)
+		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", set.Base, view.Fallback, set.RepoDir)
 	}
 	r := view.Repo
 	var envs config.EnvsConfig
-	if eff.cfg != nil {
-		envs = eff.cfg.Envs
+	if set.Repo != nil {
+		envs = set.Repo.Envs
 	}
 	// The root --kube-context (#105), already reconciled with the repo's kube.context by
 	// selectRepo, reaches every cluster-touching adaptor the TUI builds — the same value a
@@ -707,12 +688,12 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, "hoist", exitFailure, err)
 	}
-	root := app.New(r, eff.promotable, envs, svc.Plan, svc, promo, tagsFn, restartFn).
+	root := app.New(r, set.Promotable, envs, svc.Plan, svc, promo, tagsFn, restartFn).
 		WithConfigView(cfg.File, cfg.Found, configText)
-	if eff.cfg != nil {
+	if set.Repo != nil {
 		// Only a selected repo entry makes envs.production an answer rather than an omission
 		// (AR-H4): without it the restart screen asks for the production confirm on every env,
-		// as the CLI's checkProductionRestart does.
+		// as the CLI's Settings.CheckRestartConfirmed does.
 		root = root.WithEnvsFromConfig()
 	}
 	root = root.
@@ -720,7 +701,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithDrift(svc.RunningImages).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(svc)).
-		WithRun(eff.base, eff.kubeContext)
+		WithRun(set.Base, set.KubeContext)
 	final, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run()
 	if err != nil {
 		return fail(stderr, "hoist", exitFailure, err)

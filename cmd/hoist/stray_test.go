@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/service"
 )
 
 // A command that takes no positional argument refuses any leftover one. flag.Parse stops at the
@@ -313,7 +314,7 @@ func TestRootRefusesASubcommandTakenAsAFlagValue(t *testing.T) {
 	var ran bool
 	orig := tuiRunner
 	t.Cleanup(func() { tuiRunner = orig })
-	tuiRunner = func(effective, *config.Config, io.Writer, io.Writer) int { ran = true; return 0 }
+	tuiRunner = func(service.Settings, resolveFlags, io.Writer, io.Writer) int { ran = true; return 0 }
 	// --config would otherwise be loaded first and fail with exit 1 on the missing file, so
 	// the refusal has to come before the load: a command line hoist did not understand reads
 	// nothing.
@@ -343,14 +344,14 @@ func TestRootRefusesASubcommandTakenAsAFlagValue(t *testing.T) {
 // The refusals above only mean something beside the command lines that must still work.
 func TestRootStillAcceptsASubcommandNameThatIsReallyAValue(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
-	var got effective
+	var got service.Settings
 	orig := tuiRunner
 	t.Cleanup(func() { tuiRunner = orig })
-	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int { got = eff; return 42 }
+	tuiRunner = func(set service.Settings, _ resolveFlags, _, _ io.Writer) int { got = set; return 42 }
 
 	// The spelling the message offers: a context genuinely called promotions.
-	if code := run([]string{"--repo", fixture, "--kube-context=promotions"}, io.Discard, io.Discard); code != 42 || got.kubeContext != "promotions" {
-		t.Errorf("--kube-context=promotions: exit %d, kubeContext %q; want the runner's 42 and promotions", code, got.kubeContext)
+	if code := run([]string{"--repo", fixture, "--kube-context=promotions"}, io.Discard, io.Discard); code != 42 || got.KubeContext != "promotions" {
+		t.Errorf("--kube-context=promotions: exit %d, kubeContext %q; want the runner's 42 and promotions", code, got.KubeContext)
 	}
 	// A command follows, so the value was not swallowing it.
 	var out, errOut bytes.Buffer

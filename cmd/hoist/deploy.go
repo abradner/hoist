@@ -54,11 +54,11 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	}
 	sel.repo, sel.appsRoot, sel.promotable, sel.base, sel.kubeContext = *repo, *appsRoot, *promotable, *base, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
-	eff, err := selectRepo(cfg, sel)
+	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
-	if eff.repo == "" || *env == "" || *img == "" {
+	if set.RepoDir == "" || *env == "" || *img == "" {
 		fmt.Fprintln(stderr, "hoist deploy: --repo, --env and --image are required")
 		fs.Usage()
 		return exitUsage
@@ -79,16 +79,15 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// refuses a read-only command for a reason that cannot apply to it — and `hoist plan
 	// --dry-run`, the same operation for a promotion, has never demanded one.
 	if *direct || !*dryRun {
-		if code := checkDirectPreflight("hoist deploy", settingsFor(cfg, eff), *direct, *confirmDirect, *env, stderr); code != 0 {
+		if code := checkDirectPreflight("hoist deploy", set, *direct, *confirmDirect, *env, stderr); code != 0 {
 			return code
 		}
 	}
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(set.RepoDir, set.AppsRoot)
 	if err != nil {
 		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
-	set := settingsFor(cfg, eff)
 	set.KubeContext = *kubeContext
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
@@ -110,10 +109,10 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		// narrowed by --promotable does not call the operator's other first-party repos
 		// third-party in its Untouched section (issue #65).
 		var configured []string
-		if eff.cfg != nil {
-			configured = eff.cfg.Promotable
+		if set.Repo != nil {
+			configured = set.Repo.Promotable
 		}
-		if err := printPlan(stdout, r, &plan, eff.promotable, configured, nil); err != nil {
+		if err := printPlan(stdout, r, &plan, set.Promotable, configured, nil); err != nil {
 			return fail(stderr, "hoist deploy", exitFailure, err)
 		}
 		return 0

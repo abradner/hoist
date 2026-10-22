@@ -8,8 +8,7 @@ import (
 )
 
 // Settings is what one invocation resolved from flags and the config file, once, at the
-// boundary — cmd/hoist's own settingsFor builds it from the effective flag/config precedence
-// selectRepo already computes; the TUI shares the exact same struct rather than rebuilding an
+// boundary — cmd/hoist's selectRepo builds it from the flag/config precedence; the TUI shares the exact same struct rather than rebuilding an
 // equivalent one, which is what let the two faces' kube-context fallback drift into five
 // separate copies.
 type Settings struct {
@@ -22,7 +21,7 @@ type Settings struct {
 	// context). Every cluster-touching call for THIS run reads this field directly — never
 	// re-derives it from Repo.Kube.Context itself, which is what collapses cmd/hoist's five
 	// duplicate fallbacks (resolution.go, deploy.go, restart.go, history.go, main.go) into
-	// the one place selectRepo already computes it (settingsFor, cmd/hoist).
+	// the one place that computes it (selectRepo, cmd/hoist).
 	KubeContext string
 	// KubeOverride is the flag alone, never a config fallback — what `hoist promotions`/
 	// `hoist resume --env` and the TUI's in-flight pane use to observe a promotion against a
@@ -60,7 +59,7 @@ func (s Settings) ProductionEnvs() []string {
 // KubeContextFor is the one precedence a caller applies when it holds some OTHER RepoConfig
 // than the currently selected one (an in-flight promotion for a different repos[] entry): the
 // operator's own --kube-context override wins outright, exactly as it does for the selected
-// repo in settingsFor; otherwise that repo's own configured context.
+// repo in selectRepo; otherwise that repo's own configured context.
 func (s Settings) KubeContextFor(rc config.RepoConfig) string {
 	return KubeContextFor(rc, s.KubeOverride)
 }

@@ -38,16 +38,16 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	}
 	sel.repo, sel.appsRoot, sel.kubeContext = *repo, *appsRoot, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
-	eff, err := selectRepo(cfg, sel)
+	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist watch", exitFailure, err)
 	}
-	if eff.repo == "" && *app == "" {
+	if set.RepoDir == "" && *app == "" {
 		fmt.Fprintln(stderr, "hoist watch: --repo and --app are required")
 		fs.Usage()
 		return exitUsage
 	}
-	if eff.repo == "" {
+	if set.RepoDir == "" {
 		fmt.Fprintln(stderr, "hoist watch: --repo is required (no configured repo to default to)")
 		fs.Usage()
 		return exitUsage
@@ -58,11 +58,11 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 		return exitUsage
 	}
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(set.RepoDir, set.AppsRoot)
 	if err != nil {
 		return fail(stderr, "hoist watch", exitFailure, err)
 	}
-	w, err := service.New(settingsFor(cfg, eff), serviceDeps()).OpenWatchApp(r, *app)
+	w, err := service.New(set, serviceDeps()).OpenWatchApp(r, *app)
 	if err != nil {
 		return fail(stderr, "hoist watch", exitFailure, err)
 	}

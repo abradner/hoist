@@ -11,6 +11,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/registry"
@@ -369,8 +370,8 @@ func TestNoCommandWithRepoDispatchesToTUI(t *testing.T) {
 		promotable     []string
 		calls          int
 	}
-	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int {
-		got.repo, got.appsRoot, got.promotable = eff.repo, eff.appsRoot, eff.promotable
+	tuiRunner = func(set service.Settings, _ resolveFlags, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = set.RepoDir, set.AppsRoot, set.Promotable
 		got.calls++
 		return 42
 	}
@@ -397,8 +398,8 @@ func TestNoCommandWithRepoDispatchesToTUI(t *testing.T) {
 
 func TestRunTUIFailsBeforeStartingOnBadRepo(t *testing.T) {
 	var errOut bytes.Buffer
-	eff := effective{repo: t.TempDir(), appsRoot: "", promotable: []string{"ghcr.io/"}}
-	if code := runTUI(eff, &config.Config{}, io.Discard, &errOut); code != exitFailure {
+	set := service.Settings{RepoDir: t.TempDir(), Promotable: []string{"ghcr.io/"}, Config: &config.Config{}}
+	if code := runTUI(set, resolveFlags{}, io.Discard, &errOut); code != exitFailure {
 		t.Fatalf("exit %d, want %d", code, exitFailure)
 	}
 	if s := errOut.String(); !strings.HasPrefix(s, "hoist: ") || !strings.Contains(s, "apps root cluster/apps") {
@@ -447,8 +448,8 @@ func captureTUI(t *testing.T) *struct {
 		repo, appsRoot string
 		promotable     []string
 	}{}
-	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int {
-		got.repo, got.appsRoot, got.promotable = eff.repo, eff.appsRoot, eff.promotable
+	tuiRunner = func(set service.Settings, _ resolveFlags, _, _ io.Writer) int {
+		got.repo, got.appsRoot, got.promotable = set.RepoDir, set.AppsRoot, set.Promotable
 		return 42
 	}
 	return got
