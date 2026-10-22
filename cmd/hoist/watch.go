@@ -1,21 +1,16 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"path"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // runWatch is `hoist watch --app <name>`: a read-only snapshot (or, without --once, a poll
@@ -67,48 +62,21 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	if err != nil {
 		return fail(stderr, "hoist watch", exitFailure, err)
 	}
-	var target *gitops.ArgoApp
-	for i := range r.Apps {
-		if r.Apps[i].Name == *app {
-			target = &r.Apps[i]
-			break
-		}
-	}
-	if target == nil {
-		var names []string
-		for _, a := range r.Apps {
-			names = append(names, a.Name)
-		}
-		sort.Strings(names)
-		return failf(stderr, "hoist watch", exitFailure, "no Application %q found under %s (known: %s)", *app, eff.appsRoot, strings.Join(names, ", "))
-	}
-	fam := r.Envs[target.Namespace].Families[path.Base(target.SourcePath)]
-
-	argoNamespace := argoNamespaceOf(eff.cfg)
-	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo).
-	ctxName := eff.kubeContext
-
-	a, usedCtx, err := newArgo(ctxName)
+	w, err := service.New(settingsFor(cfg, eff), serviceDeps()).OpenWatchApp(r, *app)
 	if err != nil {
 		return fail(stderr, "hoist watch", exitFailure, err)
 	}
-	ro, _, err := newRollout(ctxName)
-	if err != nil {
-		return fail(stderr, "hoist watch", exitFailure, err)
-	}
-
-	deployments, jobLikes := familyWorkloads(fam)
-	fmt.Fprintf(stdout, "hoist watch: %s (namespace %s, kube context %s)\n", target.Name, target.Namespace, usedCtx)
+	fmt.Fprintf(stdout, "hoist watch: %s (namespace %s, kube context %s)\n", w.App, w.Namespace, w.KubeContext)
 
 	ctx, stop := commandContext(0)
 	defer stop()
 
 	renderOnce := func() int {
-		snap, err := watchAppSnapshot(ctx, a, ro, argo.Application{Namespace: argoNamespace, Name: target.Name}, target.Namespace, deployments, jobLikes)
+		snap, err := w.Read(ctx)
 		if err != nil {
 			return fail(stderr, "hoist watch", exitFailure, err)
 		}
-		fmt.Fprint(stdout, snap)
+		fmt.Fprint(stdout, formatWatchSnapshot(snap))
 		return 0
 	}
 	if code := renderOnce(); code != 0 {
@@ -118,7 +86,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 		return 0
 	}
 
-	ticker := time.NewTicker(watchInterval(cfg.Poll))
+	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -130,52 +98,9 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	}
 }
 
-// watchInterval is the poll cadence both faces of watch share: the smaller of poll.argo and
-// poll.rollout, since one loop refreshes both an Argo status and a Deployment/Job status on
-// every tick — never a constant either face invents on its own (invariant 5). There is no
-// dedicated "watch" poll knob in internal/config; reusing the tighter of the two existing
-// ones means neither reading ever goes stale by more than its own configured cadence already
-// promises elsewhere. The TUI's watch screen (buildWatchFunc, wiring.go) polls at this same
-// value, so the two faces cannot drift apart on cadence.
-func watchInterval(poll config.PollConfig) time.Duration {
-	interval := time.Duration(poll.Argo)
-	if r := time.Duration(poll.Rollout); r < interval {
-		interval = r
-	}
-	return interval
-}
-
-// argoNamespaceOf is where the Application custom resources live for a configured repo
-// (RepoConfig.Kube.ArgoNamespace), or the default when running from flags alone.
-func argoNamespaceOf(rc *config.RepoConfig) string {
-	if rc == nil {
-		return config.DefaultArgoNamespace
-	}
-	return rc.Kube.ArgoNamespace
-}
-
-// familyWorkloads splits the family's declared workloads (gitops.Family.Workloads, the one
-// derivation) into the kinds `hoist watch` can read: the Deployment names, and the Job and
-// CronJob (kind, name) pairs, ordered kind then name.
-func familyWorkloads(fam *gitops.Family) (deployments []string, jobLikes []jobLikeName) {
-	deployments = fam.Named("Deployment")
-	for _, w := range fam.Workloads() {
-		if w.Kind == "Job" || w.Kind == "CronJob" {
-			jobLikes = append(jobLikes, jobLikeName{Name: w.Name, Kind: w.Kind})
-		}
-	}
-	return deployments, jobLikes
-}
-
-type jobLikeName struct{ Name, Kind string }
-
-// watchAppSnapshot renders one read-only snapshot for the CLI: readWatchSnapshot's values,
-// one line for the Application and one per workload.
-func watchAppSnapshot(ctx context.Context, a argo.Argo, ro rollout.Rollout, app argo.Application, namespace string, deployments []string, jobLikes []jobLikeName) (string, error) {
-	snap, err := readWatchSnapshot(ctx, a, ro, app, namespace, deployments, jobLikes)
-	if err != nil {
-		return "", err
-	}
+// formatWatchSnapshot renders one read for the CLI: one line for the Application and one per
+// workload.
+func formatWatchSnapshot(snap service.WatchSnapshot) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  sync=%s health=%s revision=%s operation=%s reconciled=%s\n",
 		orNone(snap.SyncStatus), orNone(snap.HealthStatus), orNone(snap.Revision), orNone(snap.OperationPhase), formatTime(snap.ReconciledAt))
@@ -186,48 +111,7 @@ func watchAppSnapshot(ctx context.Context, a argo.Argo, ro rollout.Rollout, app 
 		}
 		fmt.Fprintln(&b)
 	}
-	return b.String(), nil
-}
-
-// readWatchSnapshot is the one read both faces of watch make: a.Get's current Argo status,
-// then ro.Deployment/ro.JobLike for every workload the family declares, flattened into the
-// watch screen's plain Snapshot (internal/app/watch carries no cluster types of its own). It
-// calls Argo.Get and Rollout.Deployment/JobLike only — never Argo.Refresh — which is the whole
-// of watch's read-only guarantee (see runWatch's own doc comment); TestWatchNeverCallsRefresh
-// and TestBuildWatchFuncNeverCallsRefresh each pin it from their own face.
-func readWatchSnapshot(ctx context.Context, a argo.Argo, ro rollout.Rollout, app argo.Application, namespace string, deployments []string, jobLikes []jobLikeName) (watch.Snapshot, error) {
-	st, err := a.Get(ctx, app)
-	if err != nil {
-		return watch.Snapshot{}, fmt.Errorf("reading Argo Application %s: %w", app, err)
-	}
-	snap := watch.Snapshot{
-		App: app.Name, Namespace: namespace,
-		SyncStatus: st.SyncStatus, HealthStatus: st.HealthStatus, Revision: st.SyncRevision,
-		OperationPhase: st.OperationPhase, ReconciledAt: st.ReconciledAt,
-	}
-	for _, name := range deployments {
-		ds, err := ro.Deployment(ctx, namespace, name)
-		if err != nil {
-			return watch.Snapshot{}, fmt.Errorf("reading Deployment %s/%s: %w", namespace, name, err)
-		}
-		w := watch.Workload{Kind: "Deployment", Name: name, Replicas: ds.Replicas, Complete: ds.Complete, DeadlineExceeded: ds.DeadlineExceeded, Detail: ds.Detail}
-		for _, img := range ds.Images {
-			kind := "container"
-			if img.Init {
-				kind = "initContainer"
-			}
-			w.Images = append(w.Images, fmt.Sprintf("%s %s=%s", kind, img.Name, img.Image))
-		}
-		snap.Workloads = append(snap.Workloads, w)
-	}
-	for _, jl := range jobLikes {
-		js, err := ro.JobLike(ctx, namespace, jl.Name, jl.Kind)
-		if err != nil {
-			return watch.Snapshot{}, fmt.Errorf("reading %s %s/%s: %w", jl.Kind, namespace, jl.Name, err)
-		}
-		snap.Workloads = append(snap.Workloads, watch.Workload{Kind: jl.Kind, Name: jl.Name, Detail: js.Detail})
-	}
-	return snap, nil
+	return b.String()
 }
 
 func orNone(s string) string {
