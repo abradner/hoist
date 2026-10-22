@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -285,5 +286,52 @@ func TestRolledOutFetchFailureIsNotAnExemption(t *testing.T) {
 	obs, err := RolledOutStep{Rollout: w.ro, Git: w.g}.Observe(context.Background(), &broken)
 	if err == nil && obs.Satisfied {
 		t.Fatalf("a failed read of the base must not exempt anything, got %+v", obs)
+	}
+}
+
+// TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence is the same granularity rule in
+// ArgoSyncedStep: an Application counts as superseded — and skips its Synced/Healthy check —
+// only when every occurrence this promotion changed in it is superseded. With the worker
+// superseded and the app Deployment still carrying this promotion's reference, the
+// Application's health is still this promotion's business. The control supersedes both, and
+// the Application is then exempt as before (#182).
+func TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		supersede []int
+		satisfied bool
+	}{
+		{"one of two superseded", []int{1}, false},
+		{"both superseded (control)", []int{0, 1}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorldWith(t, newFixtureWith(t, appAndWorker, 2))
+			s := w.promote()
+			w.merge(s)
+			s.EditApps = map[string]string{}
+			for _, e := range s.Edits {
+				s.EditApps[e.File] = testApp
+			}
+			for _, nth := range tc.supersede {
+				supersedeNth(t, w.fx, nth, supersededRef)
+			}
+			tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+			if err != nil || !ok {
+				t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+			}
+			a := &argo.Fake{}
+			a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+				argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing"})
+			obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if obs.Satisfied != tc.satisfied {
+				t.Fatalf("Satisfied = %v, want %v: %+v", obs.Satisfied, tc.satisfied, obs)
+			}
+			if !tc.satisfied && !obs.Waiting {
+				t.Errorf("an Application still carrying this promotion's change and Progressing should be Waiting, got %+v", obs)
+			}
+		})
 	}
 }

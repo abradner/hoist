@@ -310,7 +310,9 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 
 // revisionCarries reports whether the revision Argo says it synced to actually carries this
 // promotion's change, and a parenthetical for the Waiting detail when it does not. superseded
-// is true only for the landedSuperseded verdict — carries is true for both landedIntact and
+// is true only for the landedSuperseded verdict, and only when no occurrence of this promotion's
+// in the Application is still intact — an Application with one superseded occurrence and one
+// intact one is still health-gated — carries is true for both landedIntact and
 // landedSuperseded (the original "carried" meaning, unchanged), but the caller needs to tell
 // them apart: a superseded app's live containers legitimately run a LATER, unrelated change,
 // so comparing them against this promotion's own stale Edit.New (rolloutCause, below) would be
@@ -364,6 +366,21 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 	case landedIntact:
 		return true, false, "", nil
 	case landedSuperseded:
+		// observeLanded calls the set superseded when any occurrence is, so ask per occurrence
+		// before exempting this Application from its health check: one occurrence of this
+		// promotion's that is still intact here makes the Application's health this
+		// promotion's business again (#168; the same rule RolledOutStep applies per
+		// Deployment). A no-op occurrence counts too: that is the conservative direction, and
+		// health converges, so at worst it waits for the later change to turn Healthy.
+		occs, oerr := observeOccurrences(ctx, a.Git, s.CloneDir, rev, edits)
+		if oerr != nil {
+			return false, false, "", oerr
+		}
+		for _, o := range occs {
+			if o.verdict == landedIntact {
+				return true, false, "", nil
+			}
+		}
 		return true, true, "", nil
 	default:
 		return false, false, " (" + detail + ")", nil

@@ -214,10 +214,10 @@ image repo" (the CLI's `done (…)` line), and the flight screen reads "done · 
 which, like every `Phase`, is an index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it: one
 superseded occurrence would retire the gate on every other edit in the same block, which is what
 reverted the first attempt at this (#167's review, §9 entry 19). It asks only when some live
-image mismatches, so an ordinary rollout pays no fetch. *Interim, stated not enforced:*
-`ArgoSyncedStep` still takes one verdict per Application (`observeLanded` over that
-Application's edits), so an Application with one superseded and one intact occurrence skips its
-Synced/Healthy check; `RolledOutStep` still gates the intact one's rollout.
+image mismatches, so an ordinary rollout pays no fetch. `ArgoSyncedStep` applies the same rule
+per Application: it skips an Application's Synced/Healthy check only when no occurrence of the
+promotion's in that Application is still intact at the revision Argo synced, so an Application
+with one superseded occurrence and one intact one stays health-gated.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
