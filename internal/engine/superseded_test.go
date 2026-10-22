@@ -429,18 +429,20 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 		then func(t *testing.T, w *world, s *PromotionState)
 		// exempt: the Application needs nothing from the step, whatever its health.
 		exempt bool
+		// why is what the Waiting detail must name when the supersede no longer holds.
+		why string
 	}{
-		{"base still superseded (control)", func(*testing.T, *world, *PromotionState) {}, true},
-		{"an unrelated commit after the supersede (control)", func(t *testing.T, w *world, _ *PromotionState) { unrelated(t, w.fx) }, true},
+		{"base still superseded (control)", func(*testing.T, *world, *PromotionState) {}, true, ""},
+		{"an unrelated commit after the supersede (control)", func(t *testing.T, w *world, _ *PromotionState) { unrelated(t, w.fx) }, true, ""},
 		{"a third deploy of the same image repo (control)", func(t *testing.T, w *world, _ *PromotionState) {
 			supersedeNth(t, w.fx, 0, "ghcr.io/example/app:v4@sha256:"+strings.Repeat("4", 64))
-		}, true},
+		}, true, ""},
 		{"base reverted to the original", func(t *testing.T, w *world, s *PromotionState) {
 			supersedeNth(t, w.fx, 0, s.Edits[0].Ref.String())
-		}, false},
+		}, false, "no longer supersedes"},
 		{"base back on this promotion's reference", func(t *testing.T, w *world, s *PromotionState) {
 			supersedeNth(t, w.fx, 0, s.Edits[0].New.String())
-		}, false},
+		}, false, "no longer supersedes"},
 		{"base rewritten without this promotion's landing", func(t *testing.T, w *world, s *PromotionState) {
 			other := filepath.Join(t.TempDir(), "rewrite-clone")
 			runHost(t, "", "clone", "-q", w.fx.originDir, other)
@@ -455,10 +457,10 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 			}
 			runHost(t, other, "commit", "-q", "-a", "-m", "a deploy on a rewritten base")
 			runHost(t, other, "push", "-q", "--force", "origin", "main")
-		}, false},
+		}, false, "no longer contains"},
 		{"base branch gone", func(t *testing.T, w *world, s *PromotionState) {
 			runHost(t, w.fx.originDir, "update-ref", "-d", "refs/heads/"+s.Base)
-		}, false},
+		}, false, "has no branch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -491,8 +493,8 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 					t.Errorf("health=%s: still superseded at the base tip, so exempt; want Satisfied, got %+v", health, obs)
 				case !tc.exempt && health == argo.HealthStatusDegraded && obs.Blocked == "":
 					t.Errorf("health=%s: no longer superseded at the base tip; want the Degraded Block, got %+v", health, obs)
-				case !tc.exempt && health == argo.HealthStatusHealthy && obs.Satisfied:
-					t.Errorf("health=%s: Argo has not synced what the base now says; must not be satisfied, got %+v", health, obs)
+				case !tc.exempt && health == argo.HealthStatusHealthy && (!obs.Waiting || !strings.Contains(obs.Detail, tc.why)):
+					t.Errorf("health=%s: Argo has not synced what the base now says; want Waiting naming %q, got %+v", health, tc.why, obs)
 				}
 			}
 		})

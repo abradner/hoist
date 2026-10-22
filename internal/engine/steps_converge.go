@@ -243,7 +243,8 @@ func (ArgoSyncedStep) Name() StepName { return StepArgoSynced }
 // regardless of what its own revision currently reads, since a promotion has no business
 // declaring itself synced-and-rolled-out while the app it just changed is unhealthy. The one
 // exception is an Application whose every occurrence of this promotion's a later change
-// superseded (revisionCarries): its health is the later change's, and it is skipped first.
+// superseded, at the revision Argo synced and still at the base tip (revisionCarries): its
+// health is the later change's, and it is skipped first.
 func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	if s.LandedSHA() == "" {
 		return Observation{Satisfied: false}, nil
@@ -320,9 +321,11 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 // promotion's change, and a parenthetical for the Waiting detail when it does not. superseded
 // is true only for the landedSuperseded verdict, and only when no occurrence of this promotion's
 // in the Application is still intact — an Application with one superseded occurrence and one
-// intact one is still health-gated — carries is true for both landedIntact and
-// landedSuperseded (the original "carried" meaning, unchanged), but the caller needs to tell
-// them apart: a superseded app's live containers legitimately run a LATER, unrelated change,
+// intact one is still health-gated — and only when the base tip still supersedes it too.
+// carries is true for landedIntact and for a landedSuperseded rev the base tip still agrees
+// with (or that is health-gated by an intact occurrence); a superseding rev the base has since
+// undone is NOT carried, since Argo has not synced what the base now says. The caller needs to
+// tell carried-and-superseded apart from carried: a superseded app's live containers legitimately run a LATER, unrelated change,
 // so comparing them against this promotion's own stale Edit.New (rolloutCause, below) would be
 // meaningless at best and a wrong Block at worst — a bug found against an earlier
 // version of this split.
@@ -337,7 +340,8 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //     enough here, for exactly the reason DirectPushedStep.Observe documents: a revert commit
 //     never removes the reverted commit from history, so this stays true forever even after
 //     every byte has been undone. observeLanded reads what rev actually declares, and only
-//     landedIntact or landedSuperseded count as carried.
+//     landedIntact or landedSuperseded count as carried — a superseding rev only while the
+//     base tip still supersedes this promotion (see the landedSuperseded case below).
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
