@@ -231,12 +231,14 @@ func discoverAtFreshBase(ctx context.Context, g git.Git, cloneDir, base string) 
 	return snap, cleanup, nil
 }
 
-// occurrencePositionKey identifies an occurrence by WHERE it is, never by its current value —
-// the same physical scalar discovered from two different snapshots (cloneDir's disk, origin's
-// fresh tree) shares this key even when the two disagree on content, which is exactly the case
-// checkCloneCurrentForBase already handles separately. Moved unchanged from cmd/hoist/promote.go.
+// occurrencePositionKey identifies an occurrence by WHERE it is and WHICH image repo lives
+// there, never by its current tag or digest — the same physical scalar discovered from two
+// different snapshots (cloneDir's disk, origin's fresh tree) shares this key even when the two
+// disagree on the reference, which is exactly the case checkCloneCurrentForBase already handles
+// separately. The repo is part of the identity: origin putting a promoted repo's image where the
+// local disk holds a different image is a new occurrence, not a known one at a known position.
 func occurrencePositionKey(o gitops.Occurrence) string {
-	return fmt.Sprintf("%s#%d:%d", o.File, o.Line, o.Col)
+	return fmt.Sprintf("%s#%d:%d %s", o.File, o.Line, o.Col, o.Ref.Repo)
 }
 
 // deployRefOf recovers the single image reference a deploy plan writes. Exact, not a guess:
@@ -290,7 +292,7 @@ func freshDigestsFor(pl gitops.Plan, fresh *freshInputs) (map[string]image.Ref, 
 // tree, branching on pl.IsDeploy() itself rather than taking a caller-supplied closure — a second
 // copy of that branch (one per caller) is exactly the kind of drift AGENTS.md §8's "layered
 // checks" section warns about.
-func (s *Service) checkFreshBase(ctx context.Context, g git.Git, pl gitops.Plan, fresh *freshInputs) error {
+func (s *Service) checkFreshBase(ctx context.Context, g git.Git, pl gitops.Plan, local *gitops.Repo, fresh *freshInputs) error {
 	snap, cleanup, err := discoverAtFreshBase(ctx, g, s.settings.RepoDir, s.settings.Base)
 	if err != nil {
 		return err
@@ -316,6 +318,25 @@ func (s *Service) checkFreshBase(ctx context.Context, g git.Git, pl gitops.Plan,
 	known := make(map[string]bool, len(pl.Edits))
 	for _, e := range pl.Edits {
 		known[occurrencePositionKey(e.Occurrence)] = true
+	}
+	// The rebuild above covers every promotable repo, but pl may promote fewer: the TUI narrows
+	// a plan to the ticked rows (filterTicked). An unticked repo's occurrences are absent from pl
+	// by choice, not because the checkout has not seen them (CS-2, #201 item 6), so the positions
+	// the LOCAL checkout would itself have promoted count as known too: plan the same promotion
+	// against the local repo and take its edits. Local target occurrences alone would not do. A
+	// repo only the target holds locally, which origin has since added to the source, has a
+	// target occurrence the stale plan never covered, and calling it known would let direct mode
+	// push the old edits and silently skip it. What stays unknown, and is refused, is a position
+	// the local disk lacks altogether, one it holds with a different image repo, and a repo the
+	// local plan would not have promoted. A local plan that cannot be built adds nothing (a
+	// deploy plan is one repo and has no unticked remainder).
+	if local != nil && !pl.IsDeploy() {
+		digests, reasons := freshDigestsFor(pl, fresh)
+		if localPlan, err := gitops.BuildPlanWith(local, pl.SourceEnv, pl.TargetEnv, s.settings.Promotable, digests, reasons); err == nil {
+			for _, e := range localPlan.Edits {
+				known[occurrencePositionKey(e.Occurrence)] = true
+			}
+		}
 	}
 	var missing []string
 	for _, e := range freshPlan.Edits {

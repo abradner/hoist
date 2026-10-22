@@ -269,6 +269,170 @@ func TestStartPromotionDirectNoOpRefusesUnseenOriginOccurrence(t *testing.T) {
 	}
 }
 
+// TestStartPromotionDirectRefusesAnOriginImageThatTookAnotherImagesPlace is the independent
+// review's finding on CS-2: treating every position the local checkout reads as "known" let
+// origin put a promoted repo's image exactly where the local disk holds a DIFFERENT image (a
+// third-party swapped for a first-party one, or a container inserted above an existing one), and
+// the check passed with an unpromoted occurrence left on origin. Known means the same position
+// AND the same image repo. Control: TestStartPromotionDirectWithAnUntickedRepo... (unticked
+// repo at its own position stays accepted).
+func TestStartPromotionDirectRefusesAnOriginImageThatTookAnotherImagesPlace(t *testing.T) {
+	fx := newInflightFixture(t)
+	wrap := "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: cache-app-production\n  namespace: argocd\n" +
+		"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/app-production/cache\n" +
+		"  destination:\n    server: https://kubernetes.default.svc\n    namespace: app-production\n"
+	dep := func(ref string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: cache\nspec:\n  template:\n    spec:\n      containers:\n        - name: cache\n          image: " + ref + "\n"
+	}
+	put := func(root, rel, content string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(fx.clone, "cluster/apps/app-production-cache.yaml", wrap)
+	put(fx.clone, "cluster/apps/app-production/cache/deployment.yaml", dep("docker.io/library/redis:7"))
+	runGitHost(t, fx.clone, "add", ".")
+	runGitHost(t, fx.clone, "commit", "-q", "-m", "add a third-party cache")
+	runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+
+	origin := strings.TrimSpace(outGitHost(t, fx.clone, "remote", "get-url", "origin"))
+	second := filepath.Join(t.TempDir(), "second-clone")
+	runGitHost(t, "", "clone", "-q", origin, second)
+	put(second, "cluster/apps/app-production/cache/deployment.yaml", dep("ghcr.io/example/app:v1@sha256:"+strings.Repeat("5", 64)))
+	runGitHost(t, second, "add", ".")
+	runGitHost(t, second, "commit", "-q", "-m", "swap the cache for a first-party image, straight to origin")
+	runGitHost(t, second, "push", "-q", "origin", "main")
+
+	pl, repo := mustPlan(t, fx)
+	_, err := fx.svc.StartPromotion(context.Background(), StartRequest{
+		Plan: pl,
+		Repo: repo,
+		Mode: Mode{Direct: true, Confirmed: true},
+	}, Hooks{})
+	if err == nil {
+		t.Fatal("origin holds an unpromoted occurrence of the promoted repo at a position the local disk reads as another image, and the promotion was accepted")
+	}
+	if !strings.Contains(err.Error(), "cache/deployment.yaml") {
+		t.Fatalf("the refusal should name the file, got: %v", err)
+	}
+}
+
+// TestStartPromotionDirectRefusesARepoOriginAddedToTheSource is Codex's round-2 finding on the
+// CS-2 fix. An unfiltered CLI plan from a clone whose source env lacks image repo B (B only in
+// the target) is stale once origin adds B to the source in another file: the fresh plan then
+// has an edit for B's target occurrence, and counting every local target occurrence as known
+// let it pass, so direct mode pushed the old edits and silently skipped B. A repo is only
+// unticked-by-choice when the LOCAL checkout would itself have promoted it.
+func TestStartPromotionDirectRefusesARepoOriginAddedToTheSource(t *testing.T) {
+	fx := newInflightFixture(t)
+	put := func(root, rel, content string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrap := func(env string) string {
+		return "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: late-" + env + "\n  namespace: argocd\n" +
+			"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/" + env + "/late\n" +
+			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
+	}
+	dep := func(ref string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: late\nspec:\n  template:\n    spec:\n      containers:\n        - name: late\n          image: " + ref + "\n"
+	}
+	// B exists only in the target, in the clone and on origin.
+	put(fx.clone, "cluster/apps/app-production-late.yaml", wrap("app-production"))
+	put(fx.clone, "cluster/apps/app-production/late/deployment.yaml", dep("ghcr.io/example/late:v1@sha256:"+strings.Repeat("3", 64)))
+	runGitHost(t, fx.clone, "add", ".")
+	runGitHost(t, fx.clone, "commit", "-q", "-m", "late exists only in production")
+	runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+
+	pl, repo := mustPlan(t, fx) // built now, from a clone whose source env has no B
+
+	origin := strings.TrimSpace(outGitHost(t, fx.clone, "remote", "get-url", "origin"))
+	second := filepath.Join(t.TempDir(), "second-clone")
+	runGitHost(t, "", "clone", "-q", origin, second)
+	put(second, "cluster/apps/app-staging-late.yaml", wrap("app-staging"))
+	put(second, "cluster/apps/app-staging/late/deployment.yaml", dep("ghcr.io/example/late:v2@sha256:"+strings.Repeat("4", 64)))
+	runGitHost(t, second, "add", ".")
+	runGitHost(t, second, "commit", "-q", "-m", "origin adds late to staging, straight to origin")
+	runGitHost(t, second, "push", "-q", "origin", "main")
+
+	_, err := fx.svc.StartPromotion(context.Background(), StartRequest{
+		Plan: pl,
+		Repo: repo,
+		Mode: Mode{Direct: true, Confirmed: true},
+	}, Hooks{})
+	if err == nil {
+		t.Fatal("origin made a repo promotable that the stale plan has no edit for, and the promotion was accepted: it would silently skip that repo")
+	}
+	if !strings.Contains(err.Error(), "late/deployment.yaml") {
+		t.Fatalf("the refusal should name the skipped occurrence's file, got: %v", err)
+	}
+}
+
+// TestStartPromotionDirectWithAnUntickedRepoIsNotRefusedForItsOccurrences is CS-2 (#201 item 6).
+// The TUI narrows the plan to the ticked repos (filterTicked) before StartPromotion, and
+// checkFreshBase then rebuilt the fresh plan over EVERY promotable repo and called the unticked
+// one's occurrences "not seen by your checkout" — refusing a legitimate direct promotion whose
+// clone is exactly current. Attacker/control pair: the unticked repo's occurrences are in the
+// local clone AND on origin, so the refusal can only be the rebuild's scope; the control in
+// TestStartPromotionDirectNoOpRefusesUnseenOriginOccurrence shows a genuinely unseen occurrence
+// of a ticked repo is still refused.
+func TestStartPromotionDirectWithAnUntickedRepoIsNotRefusedForItsOccurrences(t *testing.T) {
+	fx := newInflightFixture(t)
+	for _, env := range []string{"app-staging", "app-production"} {
+		tag := map[string]string{"app-staging": "v2", "app-production": "v1"}[env]
+		dir := filepath.Join(fx.clone, "cluster/apps", env, "other")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dep := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: other\nspec:\n  template:\n    spec:\n      containers:\n        - name: other\n          image: ghcr.io/example/other:" + tag + "@sha256:" + strings.Repeat("7", 64) + "\n"
+		wrap := "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: other-" + env + "\n  namespace: argocd\n" +
+			"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/" + env + "/other\n" +
+			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "deployment.yaml"), []byte(dep), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fx.clone, "cluster/apps", env+"-other.yaml"), []byte(wrap), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitHost(t, fx.clone, "add", ".")
+	runGitHost(t, fx.clone, "commit", "-q", "-m", "add a second image repo to both envs")
+	runGitHost(t, fx.clone, "push", "-q", "origin", "main")
+
+	pl, repo := mustPlan(t, fx)
+	var ticked []gitops.Edit
+	var sawOther bool
+	for _, e := range pl.Edits {
+		if e.Ref.Repo == "ghcr.io/example/other" {
+			sawOther = true
+			continue
+		}
+		ticked = append(ticked, e)
+	}
+	if !sawOther || len(ticked) == 0 {
+		t.Fatalf("setup: want edits for both repos, got other=%v ticked=%d", sawOther, len(ticked))
+	}
+	pl.Edits = ticked // what filterTicked does to an unticked row
+
+	_, err := fx.svc.StartPromotion(context.Background(), StartRequest{
+		Plan: pl,
+		Repo: repo,
+		Mode: Mode{Direct: true, Confirmed: true},
+	}, Hooks{})
+	if err != nil {
+		t.Fatalf("a direct promotion of the ticked repo alone was refused: %v", err)
+	}
+}
+
 // TestStartPromotionRefusesOriginModeWithNoOriginView is PR #202's own review-found gap closed
 // structurally (AGENTS.md §10 meta-rule 5): once this Service has read origin via
 // LoadRepo(RepoFromOrigin) (TUI boot or F5), a nil StartRequest.View — or one whose FromOrigin is
@@ -410,5 +574,26 @@ func TestStartPromotionCarriesCISettleAndKeepsItOnRestart(t *testing.T) {
 	fx.svc.settings.Repo.CI.Settle = &z
 	if got := start().CISettle; got != 45*time.Second {
 		t.Fatalf("after restart with a changed config state.CISettle = %s, want the prior 45s", got)
+	}
+}
+
+// TestKnownRepoPrefersTheFrozenViewOverTheCurrentOne is Codex's finding on the CS-2 PR: the TUI
+// passes a frozen RepoView and no explicit Repo, and the known-occurrence set was read from the
+// service's CURRENT view, which an F5 can replace between the freshness check and the fresh-base
+// check. Order: explicit repo, then the request's frozen view, then the current view.
+func TestKnownRepoPrefersTheFrozenViewOverTheCurrentOne(t *testing.T) {
+	explicit, frozen, current := &gitops.Repo{}, &gitops.Repo{}, &gitops.Repo{}
+	cur := RepoView{Repo: current}
+	if got := knownRepo(explicit, &RepoView{Repo: frozen}, cur); got != explicit {
+		t.Error("an explicit repo must win")
+	}
+	if got := knownRepo(nil, &RepoView{Repo: frozen}, cur); got != frozen {
+		t.Error("without an explicit repo the request's frozen view must win over the service's current one")
+	}
+	if got := knownRepo(nil, nil, cur); got != current {
+		t.Error("with neither, the current view is the only answer")
+	}
+	if got := knownRepo(nil, &RepoView{}, cur); got != current {
+		t.Error("a frozen view carrying no repo falls through to the current one")
 	}
 }

@@ -99,6 +99,22 @@ type StartRequest struct {
 	Fresh *freshInputs
 }
 
+// knownRepo is the repo checkFreshBase treats as what the operator's checkout already knows: the
+// caller's explicit repo, else the repo of the view the plan was frozen against, and only without
+// either the service's current one. The current view can have moved on since the plan was built
+// (an F5 landing after the freshness check passed); reading it here would count an occurrence the
+// stale plan never saw as known, and direct mode would push the old ones and silently leave the
+// new one unchanged.
+func knownRepo(explicit *gitops.Repo, frozen *RepoView, current RepoView) *gitops.Repo {
+	if explicit != nil {
+		return explicit
+	}
+	if frozen != nil && frozen.Repo != nil {
+		return frozen.Repo
+	}
+	return current.Repo
+}
+
 // newState builds this promotion's PromotionState, merging forward from any existing state file
 // for the same id exactly as cmd/hoist/promote.go's buildPromotionForConfirm did: the state file
 // is an index of what to look at, never evidence of what happened (AGENTS.md §4.1) — every
@@ -243,7 +259,7 @@ func (s *Service) StartPromotion(ctx context.Context, req StartRequest, h Hooks)
 	// either face.
 	if req.Mode.Direct {
 		h.report("checking origin/" + s.settings.Base + " for occurrences your checkout hasn't seen")
-		if err := s.checkFreshBase(ctx, g, p, req.Fresh); err != nil {
+		if err := s.checkFreshBase(ctx, g, p, knownRepo(req.Repo, view, s.Repo()), req.Fresh); err != nil {
 			return nil, err
 		}
 	}
