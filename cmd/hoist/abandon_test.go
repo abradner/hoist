@@ -97,7 +97,7 @@ func TestAbandonRefusesALandedPromotion(t *testing.T) {
 func TestAbandonClosesPRAndDeletesBranchAndState(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to PR-opened: %v", err)
 	}
 	if s.PR == nil {
@@ -127,7 +127,7 @@ func TestAbandonClosesPRAndDeletesBranchAndState(t *testing.T) {
 	if !pr.Closed {
 		t.Errorf("PR #%d should be closed after abandon: %+v", pr.Number, pr)
 	}
-	if _, exists, err := newGit.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Branch); err != nil || exists {
+	if _, exists, err := adaptors.Git().LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Branch); err != nil || exists {
 		t.Errorf("branch %s should be gone from origin after abandon: exists=%v err=%v", s.Branch, exists, err)
 	}
 	if st, err := engine.LoadState(statePath); err != nil || st != nil {
@@ -176,7 +176,7 @@ func TestAbandonDirectModeNeverTouchesGitAndDeletesState(t *testing.T) {
 func TestRunAbandonRequiresConfirmationMatchingID(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to PR-opened: %v", err)
 	}
 	statePath, err := engine.StatePath(s.ID)
@@ -247,7 +247,7 @@ func TestReorderConfirmAbandonFirst(t *testing.T) {
 func TestAbandonRefusesAMergedPromotionEvenWithBranchStillPresent(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.CoreSteps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.CoreSteps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to merged: %v", err)
 	}
 	if s.MergeSHA == "" {
@@ -263,7 +263,7 @@ func TestAbandonRefusesAMergedPromotionEvenWithBranchStillPresent(t *testing.T) 
 
 	originURL := strings.TrimSpace(outGitHost(t, clone, "remote", "get-url", "origin"))
 	runGitHost(t, originURL, "update-ref", "refs/heads/"+s.Branch, "refs/heads/main")
-	if _, exists, err := newGit.LsRemoteBranch(context.Background(), clone, "origin", s.Branch); err != nil || !exists {
+	if _, exists, err := adaptors.Git().LsRemoteBranch(context.Background(), clone, "origin", s.Branch); err != nil || !exists {
 		t.Fatalf("fixture precondition: branch %s should still be on origin: exists=%v err=%v", s.Branch, exists, err)
 	}
 
@@ -303,7 +303,7 @@ func (branchDeleteFailingGit) DeleteRemoteBranch(context.Context, string, string
 func TestAbandonRetryAfterBranchDeleteFailureDoesNotRecloseThePR(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to PR-opened: %v", err)
 	}
 	statePath, err := engine.StatePath(s.ID)
@@ -318,9 +318,9 @@ func TestAbandonRetryAfterBranchDeleteFailureDoesNotRecloseThePR(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prevGit := newGit
-	newGit = branchDeleteFailingGit{Git: prevGit}
-	t.Cleanup(func() { newGit = prevGit })
+	prevGit := adaptors.Git()
+	adaptors.Git = func() git.Git { return branchDeleteFailingGit{Git: prevGit} }
+	t.Cleanup(func() { adaptors.Git = func() git.Git { return prevGit } })
 
 	if _, err := abandonPromotion(context.Background(), cfg, s.ID); err == nil || !strings.Contains(err.Error(), "deleting branch") {
 		t.Fatalf("first abandonPromotion = %v, want a branch-delete failure", err)
@@ -336,7 +336,7 @@ func TestAbandonRetryAfterBranchDeleteFailureDoesNotRecloseThePR(t *testing.T) {
 		}
 	}
 
-	newGit = prevGit // the branch-delete succeeds this time
+	adaptors.Git = func() git.Git { return prevGit } // the branch-delete succeeds this time
 	if _, err := abandonPromotion(context.Background(), cfg, s.ID); err != nil {
 		t.Fatalf("second abandonPromotion: %v", err)
 	}

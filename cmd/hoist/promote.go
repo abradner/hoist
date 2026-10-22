@@ -11,19 +11,8 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/forge"
-	"github.com/abradner/hoist/pkg/forge/github"
-	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
-)
-
-// newGit and newForge are variables so tests substitute fakes/local fixtures: no test in this
-// repo points promote at a real GitHub repo or lets it touch a checkout other than a fixture
-// it created itself.
-var (
-	newGit   git.Git = git.Exec{}
-	newForge         = func(ownerRepo string) (forge.Forge, error) { return github.New(ownerRepo) }
 )
 
 // runPromote is `hoist promote`: builds the same gitops.Plan `hoist plan --dry-run` would

@@ -14,7 +14,7 @@ import (
 
 // newWatchFixture writes a minimal GitOps repo (no git needed: gitops.Discover reads plain
 // files) with one family "app" in "app-production", a Deployment and a Job, plus a config file
-// naming it, and points newArgo/newRollout at fakes for the duration of the test — never a
+// naming it, and points adaptors.Argo/adaptors.Rollout at fakes for the duration of the test — never a
 // real cluster or Argo CD instance, per the hard constraints.
 func newWatchFixture(t *testing.T) (cfgPath string, fakeArgo *argo.Fake, fakeRollout *rollout.Fake) {
 	t.Helper()
@@ -45,10 +45,10 @@ func newWatchFixture(t *testing.T) (cfgPath string, fakeArgo *argo.Fake, fakeRol
 
 	fakeArgo = &argo.Fake{}
 	fakeRollout = &rollout.Fake{}
-	prevArgo, prevRollout := newArgo, newRollout
-	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
-	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
-	t.Cleanup(func() { newArgo, newRollout = prevArgo, prevRollout })
+	prevArgo, prevRollout := adaptors.Argo, adaptors.Rollout
+	adaptors.Argo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	adaptors.Rollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
+	t.Cleanup(func() { adaptors.Argo, adaptors.Rollout = prevArgo, prevRollout })
 	return cfgPath, fakeArgo, fakeRollout
 }
 

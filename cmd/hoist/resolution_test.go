@@ -28,10 +28,10 @@ const (
 // were asked for.
 func installFakes(t *testing.T, cluster *k8s.Fake, reg *registry.Fake) (contexts *[]string, authCfgs *[]registry.AuthConfig) {
 	t.Helper()
-	origC, origR := newCluster, newRegistry
-	t.Cleanup(func() { newCluster, newRegistry = origC, origR })
+	origC, origR := adaptors.Cluster, adaptors.Registry
+	t.Cleanup(func() { adaptors.Cluster, adaptors.Registry = origC, origR })
 	contexts, authCfgs = &[]string{}, &[]registry.AuthConfig{}
-	newCluster = func(ctx string) (k8s.Cluster, string, error) {
+	adaptors.Cluster = func(ctx string) (k8s.Cluster, string, error) {
 		*contexts = append(*contexts, ctx)
 		if cluster == nil {
 			return nil, "", errors.New("k8s: kube context \"" + ctx + "\" is not in the kubeconfig")
@@ -42,7 +42,7 @@ func installFakes(t *testing.T, cluster *k8s.Fake, reg *registry.Fake) (contexts
 		}
 		return cluster, name, nil
 	}
-	newRegistry = func(cfg registry.AuthConfig) (registry.Registry, error) {
+	adaptors.Registry = func(cfg registry.AuthConfig) (registry.Registry, error) {
 		*authCfgs = append(*authCfgs, cfg)
 		return reg, nil
 	}

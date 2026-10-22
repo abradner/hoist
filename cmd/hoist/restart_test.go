@@ -14,7 +14,7 @@ import (
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
-// restartFake wires newRollout to a fake holding the named Deployments in app-production, and
+// restartFake wires adaptors.Rollout to a fake holding the named Deployments in app-production, and
 // returns it so a test can read what was called.
 func restartFake(t *testing.T, sts ...rollout.DeploymentStatus) *rollout.Fake {
 	t.Helper()
@@ -22,9 +22,9 @@ func restartFake(t *testing.T, sts ...rollout.DeploymentStatus) *rollout.Fake {
 	for _, st := range sts {
 		f.SetDeployment(st.Namespace, st.Name, st)
 	}
-	prev := newRollout
-	newRollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
-	t.Cleanup(func() { newRollout = prev })
+	prev := adaptors.Rollout
+	adaptors.Rollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
+	t.Cleanup(func() { adaptors.Rollout = prev })
 	return f
 }
 

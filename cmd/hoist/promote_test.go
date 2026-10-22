@@ -83,7 +83,7 @@ func (m *mergeSimulatingForge) MergePR(ctx context.Context, prNumber int, expect
 
 // newPromoteFixture builds a local bare "origin" and a clone of it shaped like a minimal
 // GitOps repo (one family, "app", older in app-production than app-staging) plus a config
-// file naming it, and points package-level newGit/newForge at a real local git and a fake
+// file naming it, and points the package-level adaptors (Git, Forge) at a real local git and a fake
 // forge for the duration of the test — never a real GitHub repo, per the hard constraints.
 func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake) {
 	t.Helper()
@@ -214,12 +214,12 @@ func newPromoteFixture(t *testing.T) (configPath, cloneDir string, f *forge.Fake
 		},
 	}
 
-	prevGit, prevForge, prevArgo, prevRollout := newGit, newForge, newArgo, newRollout
-	newGit = git.Exec{}
-	newForge = func(string) (forge.Forge, error) { return wrappedForge, nil }
-	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
-	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
-	t.Cleanup(func() { newGit, newForge, newArgo, newRollout = prevGit, prevForge, prevArgo, prevRollout })
+	saved := adaptors
+	t.Cleanup(func() { adaptors = saved })
+	adaptors.Git = func() git.Git { return git.Exec{} }
+	adaptors.Forge = func(string) (forge.Forge, error) { return wrappedForge, nil }
+	adaptors.Argo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	adaptors.Rollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
 
 	return cfgPath, clone, fakeForge
 }
@@ -344,7 +344,7 @@ func TestPromoteRefusesConflictAcquiredAfterTheFirstScan(t *testing.T) {
 		Approvers:     []string{"alice"},
 		CINone:        "green",
 	}
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), other, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), other, nil); err != nil {
 		t.Fatalf("driving the other promotion to PROpened: %v", err)
 	}
 	if err := engine.SaveState(statePath, other); err != nil {
@@ -1093,7 +1093,7 @@ func TestPromoteRedactsRegisteredSecretInDriverError(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	const secret = "sekrit-finding-b-cli-token-value"
 	redact.Register(secret)
-	newGit = secretLeakGit{Git: git.Exec{}, secret: secret}
+	adaptors.Git = func() git.Git { return secretLeakGit{Git: git.Exec{}, secret: secret} }
 
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
 	var out, errOut bytes.Buffer
@@ -1274,7 +1274,7 @@ func TestPromoteBaseClassificationIgnoresATagNamedLikeTheBranch(t *testing.T) {
 	}
 }
 
-// bodyCapturingForge wraps whatever newForge already builds (in
+// bodyCapturingForge wraps whatever adaptors.Forge already builds (in
 // TestPromoteCarriesResolutionWarningsIntoThePRBody below, newPromoteFixture's
 // mergeSimulatingForge) and records the body of every PR it opens. forge.Fake's own body
 // storage is unexported (package forge; these tests are package main), so this is the seam:
@@ -1309,9 +1309,9 @@ func TestPromoteCarriesResolutionWarningsIntoThePRBody(t *testing.T) {
 	cluster := &k8s.Fake{Images: map[string][]k8s.RunningImage{"app-staging": {
 		{Pod: "app-1", Container: "app", Ref: image.Ref{Repo: "ghcr.io/example/app", Digest: runningDigest}},
 	}}}
-	prevCluster := newCluster
-	newCluster = func(string) (k8s.Cluster, string, error) { return cluster, "test-context", nil }
-	t.Cleanup(func() { newCluster = prevCluster })
+	prevCluster := adaptors.Cluster
+	adaptors.Cluster = func(string) (k8s.Cluster, string, error) { return cluster, "test-context", nil }
+	t.Cleanup(func() { adaptors.Cluster = prevCluster })
 
 	// Resolution now picks runningDigest (pods win) rather than newPromoteFixture's own
 	// digestNew, so the fixture's rollout fake — which reports app-production as live at
@@ -1325,20 +1325,20 @@ func TestPromoteCarriesResolutionWarningsIntoThePRBody(t *testing.T) {
 		Images:    []rollout.ContainerImage{{Name: "app", Image: "ghcr.io/example/app:v2@" + runningDigest}},
 		Complete:  true,
 	})
-	prevRollout := newRollout
-	newRollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
-	t.Cleanup(func() { newRollout = prevRollout })
+	prevRollout := adaptors.Rollout
+	adaptors.Rollout = func(string) (rollout.Rollout, string, error) { return fakeRollout, "test-context", nil }
+	t.Cleanup(func() { adaptors.Rollout = prevRollout })
 
 	var body string
-	prevForge := newForge
-	newForge = func(ownerRepo string) (forge.Forge, error) {
+	prevForge := adaptors.Forge
+	adaptors.Forge = func(ownerRepo string) (forge.Forge, error) {
 		f, err := prevForge(ownerRepo)
 		if err != nil {
 			return f, err
 		}
 		return &bodyCapturingForge{Forge: f, body: &body}, nil
 	}
-	t.Cleanup(func() { newForge = prevForge })
+	t.Cleanup(func() { adaptors.Forge = prevForge })
 
 	var out, errOut bytes.Buffer
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}

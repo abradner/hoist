@@ -368,10 +368,10 @@ func TestResumeRebuildsArgoAppsForALegacyStateFile(t *testing.T) {
 			})
 		},
 	}
-	prevForge, prevArgo := newForge, newArgo
-	newForge = func(string) (forge.Forge, error) { return wrapped, nil }
-	newArgo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
-	t.Cleanup(func() { newForge, newArgo = prevForge, prevArgo })
+	prevForge, prevArgo := adaptors.Forge, adaptors.Argo
+	adaptors.Forge = func(string) (forge.Forge, error) { return wrapped, nil }
+	adaptors.Argo = func(string) (argo.Argo, string, error) { return fakeArgo, "test-context", nil }
+	t.Cleanup(func() { adaptors.Forge, adaptors.Argo = prevForge, prevArgo })
 
 	args := []string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}
 	var out, errOut bytes.Buffer

@@ -6,24 +6,8 @@ import (
 	"strings"
 
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/argo"
-	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/registry"
 	"github.com/abradner/hoist/pkg/resolve"
-	"github.com/abradner/hoist/pkg/rollout"
-)
-
-// The adaptor constructors are variables so tests substitute fakes: no test points a client at
-// a cluster, a registry, Argo CD or a Deployment (AGENTS.md hard constraints — never a real
-// cluster or Argo CD instance). serviceDeps() (cmd/hoist/deps.go) wraps each in a closure that
-// reads it at call time, so a test reassigning one mid-test still reaches every Service built
-// before or after the swap.
-var (
-	newCluster  = k8s.NewCluster
-	newRegistry = func(cfg registry.AuthConfig) (registry.Registry, error) { return registry.New(cfg) }
-	newArgo     = argo.NewFromKubeconfig
-	newRollout  = rollout.NewFromKubeconfig
 )
 
 // resolveFlags are the plan flags that shape digest resolution, as given ("" = not given).

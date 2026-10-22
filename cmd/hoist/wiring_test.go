@@ -299,7 +299,7 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 		Approvers:     []string{"alice"},
 		CINone:        "green",
 	}
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), other, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), other, nil); err != nil {
 		t.Fatalf("driving the other promotion to PROpened: %v", err)
 	}
 	if err := engine.SaveState(statePath, other); err != nil {
@@ -570,7 +570,7 @@ func mustStatePath(t *testing.T, id string) string {
 }
 
 // An already-current plan says so from the TUI even when the forge could not be built: the
-// CLI's promote and deploy both check the all-no-op fast path before newForge, and the TUI
+// CLI's promote and deploy both check the all-no-op fast path before adaptors.Forge, and the TUI
 // must not disagree with them about when a GitHub login is needed (issue #55).
 func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	cfgPath, clone, _ := newPromoteFixture(t)
@@ -593,9 +593,9 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	forgeErr := errors.New("gh: not logged in")
-	prevForge := newForge
-	newForge = func(string) (forge.Forge, error) { return nil, forgeErr }
-	t.Cleanup(func() { newForge = prevForge })
+	prevForge := adaptors.Forge
+	adaptors.Forge = func(string) (forge.Forge, error) { return nil, forgeErr }
+	t.Cleanup(func() { adaptors.Forge = prevForge })
 	_, _, err = startForTest(context.Background(), svc, plan, startOpts{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already current") {
 		t.Fatalf("err = %v, want the already-current refusal ahead of the forge error", err)
