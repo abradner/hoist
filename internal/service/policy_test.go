@@ -85,3 +85,44 @@ func TestPreflightGateRefusesProductionAndUnconfirmed(t *testing.T) {
 		t.Errorf("a PR into production is not refused by the direct gate: %v", err)
 	}
 }
+
+func pairSettings(pairs map[string]string) service.Settings {
+	return service.Settings{Repo: &config.RepoConfig{Envs: config.EnvsConfig{Pairs: pairs}}}
+}
+
+// TestPairEnvs: one end given and the config pairs the other — filled in; ambiguous, unpaired or
+// unconfigured — refused with the flag to give; both or neither — returned as they are.
+func TestPairEnvs(t *testing.T) {
+	one := pairSettings(map[string]string{"stg": "prod"})
+	many := pairSettings(map[string]string{"stg": "prod", "canary": "prod"})
+	for _, tc := range []struct {
+		name         string
+		set          service.Settings
+		from, to     string
+		wantF, wantT string
+		wantErr      string
+	}{
+		{"both given", one, "a", "b", "a", "b", ""},
+		{"neither given", one, "", "", "", "", ""},
+		{"to alone", one, "", "prod", "stg", "prod", ""},
+		{"from alone", one, "stg", "", "stg", "prod", ""},
+		{"to with no source", one, "", "stg", "", "", "no envs.pairs entry promotes into stg; name the source with --from"},
+		{"from with no target", one, "prod", "", "", "", "no envs.pairs entry says where prod promotes to; name the target with --to"},
+		{"to with several sources", many, "", "prod", "", "", "several envs.pairs entries promote into prod (canary, stg); name the source with --from"},
+		{"from, and no pair at all", pairSettings(nil), "stg", "", "", "", "no envs.pairs entry says where stg promotes to; name the target with --to"},
+		{"to, no configured repo", service.Settings{}, "", "prod", "", "", "no configured repo, so envs.pairs is unknown; name the source with --from"},
+		{"from, no configured repo", service.Settings{}, "stg", "", "", "", "no configured repo, so envs.pairs is unknown; name the target with --to"},
+	} {
+		f, to, err := tc.set.PairEnvs(tc.from, tc.to)
+		if tc.wantErr != "" {
+			var usage *service.UsageError
+			if !errors.As(err, &usage) || usage.Msg != tc.wantErr {
+				t.Errorf("%s: err = %v, want a UsageError saying %q", tc.name, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || f != tc.wantF || to != tc.wantT {
+			t.Errorf("%s: got (%q, %q, %v), want (%q, %q)", tc.name, f, to, err, tc.wantF, tc.wantT)
+		}
+	}
+}

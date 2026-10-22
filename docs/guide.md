@@ -155,6 +155,12 @@ hoist plan    --from app-staging --to app-production --dry-run
 hoist promote --from app-staging --to app-production
 ```
 
+With `envs.pairs` configured, one end is enough: `hoist promote --to app-production` takes the
+source from the pair that promotes into it, and `--from app-staging` alone takes the target. It
+says on stderr which pair it used. If the config cannot decide — nothing promotes into that env,
+several envs do, or there is no config file — the command refuses and names the flag to give; with
+neither flag it still asks for both.
+
 **What the CLI prints while it works.** `promote`, `deploy` and `resume` say what they are doing
 on stderr, one line as each phase starts and one as each write finishes; stdout stays the final
 summary, so a script reading it sees what it always did:

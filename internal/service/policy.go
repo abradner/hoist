@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
@@ -104,4 +105,47 @@ func (s Settings) PreflightGate(target string, m Mode) error {
 		return &engine.BlockedError{Step: engine.StepDirectGate, Reason: obs.Blocked}
 	}
 	return nil
+}
+
+// PairEnvs fills in whichever of from and to the operator left out from envs.pairs (source env ->
+// target env), so `hoist plan` and `hoist promote` can be told one end of a promotion the config
+// already pairs (#173) — the matrix's `p` has always done this. With both given, or neither, it
+// returns them as they are: neither names no promotion at all (a config with several pairs does
+// not say which is meant), and the caller refuses it as it always did.
+//
+// Given only to, the source is the one env envs.pairs promotes into it; given only from, the
+// target is the one it pairs from names. Anything short of exactly one is a *UsageError that says
+// what the config could not decide and which flag to give, so a defaulting that is ambiguous is
+// refused, never guessed (principle 5 warns, but a wrong source env reads the wrong digests).
+func (s Settings) PairEnvs(from, to string) (string, string, error) {
+	if (from == "") == (to == "") {
+		return from, to, nil
+	}
+	if s.Repo == nil {
+		flag := "--from"
+		if to == "" {
+			flag = "--to"
+		}
+		what := "source"
+		if to == "" {
+			what = "target"
+		}
+		return "", "", &UsageError{Msg: fmt.Sprintf("no configured repo, so envs.pairs is unknown; name the %s with %s", what, flag)}
+	}
+	envs := s.Repo.Envs
+	if to == "" {
+		target, ok := envs.Pairs[from]
+		if !ok || target == "" {
+			return "", "", &UsageError{Msg: fmt.Sprintf("no envs.pairs entry says where %s promotes to; name the target with --to", from)}
+		}
+		return from, target, nil
+	}
+	switch sources := envs.SourcesOf(to); len(sources) {
+	case 0:
+		return "", "", &UsageError{Msg: fmt.Sprintf("no envs.pairs entry promotes into %s; name the source with --from", to)}
+	case 1:
+		return sources[0], to, nil
+	default:
+		return "", "", &UsageError{Msg: fmt.Sprintf("several envs.pairs entries promote into %s (%s); name the source with --from", to, strings.Join(sources, ", "))}
+	}
 }
