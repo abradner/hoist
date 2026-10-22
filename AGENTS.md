@@ -1413,6 +1413,29 @@ test lives** (if one exists).
    `TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip` (Argo's synced revision lagging a base that
    undid the supersede, with an unrelated commit and a third deploy as the controls).
 
+21. **A "clean" removal that falls through to a force helper is not clean on the branch nobody
+   looks at.** What happened: `RemoveCleanWorktree` promises git's own non-force removal, so a file
+   written into a worktree after the caller's check survives. Its branch for a path that `Lstat`
+   found absent called `RemoveWorktree` to drop a stale registration, and that helper treats a path
+   git never registered as removable and ends in `os.RemoveAll`. A directory created at the path
+   between the `Lstat` and the call (another hoist starting the same promotion id) was deleted
+   despite the contract (#256 item 2, found in review of the cleanup followup). Root cause: the
+   non-force guarantee was written for the common branch, and the rare one reused a helper
+   whose contract was the opposite; the first fix's test called the new helper directly, so
+   putting the old call back left the suite green (Codex found that too). Rule: a method that
+   promises not to delete what it did not check never reaches, on any branch, a helper that
+   deletes unconditionally; and a regression test for a race drives the public entry point through
+   a seam that makes the race happen (`Exec.Bin` pointing at a wrapper that creates the
+   directory when the removal call arrives), never only the helper the fix introduced. Regression
+   tests, in `pkg/git/git_test.go`: `TestRemoveCleanWorktreeLeavesADirectoryThatAppearsAfterTheCheck`
+   (fails with the absent branch reverted to `RemoveWorktree` — verified by mutant) and
+   `TestDeregisterStaleWorktreeDeletesNothing` for the helper itself. Addendum, from the second
+   review round: the first version recognised "git never registered this path" by matching git's
+   English error text, which a translated git does not print, so cleanup would have failed on every
+   pass. Whether there is a registration to drop is read from `git worktree list`, never from error
+   wording (`TestRemoveCleanWorktreeDoesNotDependOnGitsErrorWording`). (Numbered 21: entry 20 is
+   taken by the service-layer stack, which lands after this one.)
+
 ## 10. Maintaining This Document
 
 Meta-rules for editing this file — they exist because each was violated somewhere first:
