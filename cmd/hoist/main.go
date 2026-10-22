@@ -22,17 +22,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abradner/hoist/internal/app"
-	"github.com/abradner/hoist/internal/app/matrix"
-	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
-	"github.com/abradner/hoist/pkg/k8s"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/registry"
 )
 
 // version is overwritten at build time by -ldflags "-X main.version=…" (goreleaser sets it to
@@ -691,37 +686,23 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	// The root --kube-context (#105), already reconciled with the repo's kube.context by
 	// selectRepo, reaches every cluster-touching adaptor the TUI builds — the same value a
-	// subcommand's own flag would carry. The drift column (buildDriftFunc) asks the pods
+	// subcommand's own flag would carry. The drift column (svc.RunningImages) asks the pods
 	// alone and takes none of the digest-resolution overrides above.
 
-	// git.Exec{} and the forge adaptor are pure, stateless clients. f/forgeErr here are for
-	// buildHistoryFuncs below (svc's own StartPromotion/List/Resume build and memoize their own
-	// forge client through serviceDeps' Forge closure instead, never this one) — built once and
-	// reused for every history lookup in this TUI session, mirroring newGit/newForge's own
-	// package-level reuse across a single runPromote call. newForge is called even when eff.cfg
-	// is nil or has no GitHub configured (github.New("") fails fast on the owner/name parse
-	// alone, before ever touching gh's own auth or the network) so buildHistoryFuncs always has
-	// a forge value to close over; its own eff.cfg check runs first and reports the
-	// missing-config case before this error would ever matter.
-	githubRepo := ""
-	if eff.cfg != nil {
-		githubRepo = eff.cfg.GitHub
-	}
-	f, forgeErr := newForge(githubRepo)
 	promo := app.Promotion{
 		Poll:       buildPollDurations(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
-	tagsFn := buildTagsFunc(eff.cfg, svc)
-	// buildRestartFuncs/buildWatchFunc/buildHistoryFuncs below read the Argo/rollout clients and
-	// the current repo through svc itself, per call, rather than a client or a repo captured
-	// once here at boot: svc.Argo/svc.Rollout memoize only a success, so a
-	// cluster unreachable this instant is retried on the next w/R/F5 rather than wedged for the
-	// rest of the session, and svc.Repo() always answers with whatever LoadRepo/RefreshRepo most
-	// recently stored, so a family an F5 refresh just added is visible immediately.
+	tagsFn := buildTagsFunc(svc)
+	// Every adaptor below reads its clients and the current repo through svc, per call, rather
+	// than a client or a repo captured once here at boot: svc memoizes only a success, so a
+	// cluster or forge unreachable this instant is retried on the next w/R/F5/picker rather than
+	// wedged for the rest of the session, and svc.Repo() always answers with whatever
+	// LoadRepo/RefreshRepo most recently stored, so a family an F5 refresh just added is visible
+	// immediately.
 	restartFn := buildRestartFuncs(svc)
-	historyFn := buildHistoryFuncs(eff.cfg, f, forgeErr, eff.base, svc)
+	historyFn := buildHistoryFuncs(svc)
 	configText, err := configViewText(cfg)
 	if err != nil {
 		return fail(stderr, "hoist", exitFailure, err)
@@ -736,7 +717,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	}
 	root = root.
 		WithHistory(historyFn).
-		WithDrift(buildDriftFunc(eff.kubeContext)).
+		WithDrift(svc.RunningImages).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
 		WithWatch(buildWatchFunc(svc)).
 		WithRun(eff.base, eff.kubeContext)
@@ -764,123 +745,4 @@ func configViewText(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("config view: %w", err)
 	}
 	return string(out), nil
-}
-
-// buildDriftFunc is the matrix's cluster question: the raw pod observations for one env
-// (the env is the namespace, AGENTS.md §1), straight from pkg/k8s, keyed by canonical
-// image repo with every distinct running reference kept — never the planning resolver,
-// which picks one digest per repo and would collapse a partial rollout, and which grafts
-// the manifest's tag onto the digest it picked (#122). Pods only, whatever digest_sources
-// the config orders for planning: a manifest or registry answer is not "what the cluster
-// runs". Each running reference carries the pod's digest and, when the pod reported the
-// image it was started from, that image's tag — so a bare manifest tag is compared with
-// what the pod pulled, not with a tag the resolver assumed. The cluster is opened per
-// call, so an unreachable one is one env's "cluster not asked" sentence, never a reason
-// the TUI fails to open. This is the adapter §4.8 reserves for cmd/hoist: the matrix
-// takes the function, never pkg/k8s.
-func buildDriftFunc(kubeContext string) matrix.DriftFunc {
-	return func(ctx context.Context, env string) (map[string][]image.Ref, error) {
-		cluster, _, err := newCluster(kubeContext)
-		if err != nil {
-			return nil, err
-		}
-		imgs, err := cluster.RunningImages(ctx, env)
-		if err != nil {
-			return nil, err
-		}
-		return runningRefs(imgs), nil
-	}
-}
-
-// runningRefs groups pod observations by canonical image repo, one entry per distinct
-// (digest, tag) the namespace runs. The tag comes from the pod's reported image when its
-// repo is the same one as the imageID's; a pod that reported none, or a different repo (a
-// mirror pulled under another name), contributes its digest alone.
-func runningRefs(imgs []k8s.RunningImage) map[string][]image.Ref {
-	out := map[string][]image.Ref{}
-	seen := map[string]bool{}
-	for _, ri := range imgs {
-		ref := ri.Ref
-		ref.Tag = ""
-		if ri.Image.Tag != "" && image.Canonical(ri.Image.Repo) == image.Canonical(ri.Ref.Repo) {
-			ref.Tag = ri.Image.Tag
-		}
-		key := image.Canonical(ref.Repo)
-		if id := key + "\n" + ref.String(); !seen[id] {
-			seen[id] = true
-			out[key] = append(out[key], ref)
-		}
-	}
-	return out
-}
-
-// buildTagsFunc adapts svc.RegistryFor's own per-repo credential scoping (F4), plus (when
-// RepoConfig.Apps maps the requested image repo) a pkg/forge/github.Client for that app repo,
-// into a tags.BuildFunc the TUI's tag picker calls per image repo — never importing registry/
-// forge/config policy itself (AGENTS.md §4.8). M6's tag picker has no gitops.Repo occurrence to
-// scope credentials by (it is "a direct caller that skips resolve", per resolve.go's own
-// multiRegistry doc comment) — svc.RegistryFor picks the one registries[] entry (if any)
-// covering imageRepo the identical way Plan's own resolution does.
-func buildTagsFunc(rc *config.RepoConfig, svc *service.Service) tags.BuildFunc {
-	return func(imageRepo string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
-		reg, err := svc.RegistryFor(imageRepo)
-		if err != nil {
-			failedRegTags := func(context.Context) ([]string, error) { return nil, err }
-			return false, failedRegTags, nil, nil
-		}
-
-		appRepo, mapped := "", false
-		if rc != nil {
-			appRepo, mapped = rc.Apps[imageRepo]
-		}
-		var fc forge.Forge
-		if mapped {
-			fc, err = newForge(appRepo)
-			if err != nil {
-				// Degrade to Created-based ordering (AGENTS.md principle 5) rather than
-				// failing the whole picker over a forge the operator may not have configured
-				// `gh` access to yet.
-				mapped = false
-			}
-		}
-
-		// #PR8: the single blocking listFn this used to be is now two independent calls, so
-		// the picker can render regTagsFn's own fast answer without waiting on gitTagsFn's
-		// slow N+1 crawl (pkg/forge.Forge.Tags' own doc comment) — internal/app/tags.Model's
-		// Init fires both as separate tea.Cmds (regTagsCmd/gitTagsCmd) and backfills the
-		// ordering whenever gitTagsFn actually answers, in whichever order the two land.
-		regTagsFn := func(ctx context.Context) ([]string, error) {
-			return reg.Tags(ctx, imageRepo)
-		}
-		// nil when this repo was never mapped at all — tags.Model.gitTagsCmd treats a nil
-		// GitTagsFunc as "nothing to eventually ask", never a call that runs and reports
-		// mapped=false (that shape is for a config mapping that fails at RUNTIME, below, not
-		// for a repo with no mapping in the config to begin with).
-		var gitTagsFn tags.GitTagsFunc
-		if mapped {
-			// mapped is this call's own observed answer (GitTagsFunc's doc comment) — closed
-			// over as the value fc was actually built with: the caller (internal/app/tags.Model.onGitTagsLoaded)
-			// trusts THIS return, every call, over whatever BuildFunc's own static mapped
-			// result said when the picker was opened.
-			gitTagsFn = func(ctx context.Context) ([]forge.GitTag, bool, error) {
-				gitTags, err := fc.Tags(ctx)
-				if err != nil {
-					// Degrade, not fail (AGENTS.md principle 5): the registry tags alone
-					// (regTagsFn's own answer, already rendered by the time this can ever
-					// return) are still a usable picker without invariant 3's own preferred
-					// ordering.
-					return nil, false, nil
-				}
-				return gitTags, true, nil
-			}
-		}
-		metaFn := func(ctx context.Context, tag string) (registry.ImageMeta, error) {
-			ref, err := image.Parse(imageRepo + ":" + tag)
-			if err != nil {
-				return registry.ImageMeta{}, err
-			}
-			return reg.Config(ctx, ref)
-		}
-		return mapped, regTagsFn, gitTagsFn, metaFn
-	}
 }

@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/app/flight"
+	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/matrix"
 	apprestart "github.com/abradner/hoist/internal/app/restart"
+	"github.com/abradner/hoist/internal/app/tags"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
@@ -164,6 +166,45 @@ func buildRestartFuncs(svc *service.Service) apprestart.Funcs {
 		Do:       svc.RestartDo,
 		Observe:  svc.RestartObserve,
 		Interval: svc.RestartInterval(),
+	}
+}
+
+// buildHistoryFuncs hands the history use case to the screens as the plain function values they
+// take (service/history.go): the tag picker and both confirm screens share one service, so one
+// migrate.Cache. A zero Funcs is "no history available" — a flags-only run has no repos[].apps to
+// map — and a repo with an empty repos[].apps keeps the live age, which blames the gitops repo and
+// needs no mapping.
+func buildHistoryFuncs(svc *service.Service) history.Funcs {
+	rc := svc.Settings().Repo
+	if rc == nil {
+		return history.Funcs{}
+	}
+	if len(rc.Apps) == 0 {
+		return history.Funcs{Mapped: func(string) bool { return false }, LiveAge: svc.LiveAge}
+	}
+	return history.Funcs{
+		Mapped:   svc.HistoryMapped,
+		Revision: svc.HistoryRevision,
+		Delta:    svc.HistoryDelta,
+		LiveAge:  svc.LiveAge,
+	}
+}
+
+// buildTagsFunc adapts service.TagSource to the tag picker's BuildFunc, called once per image repo
+// the picker opens. A registry that cannot be built reports the real error from the registry list
+// and offers no git tags or metadata; an unmapped repo, or one whose forge cannot be built, has
+// no git tags and the picker orders by the registry's own creation dates (principle 5).
+func buildTagsFunc(svc *service.Service) tags.BuildFunc {
+	return func(imageRepo string) (bool, tags.RegTagsFunc, tags.GitTagsFunc, tags.MetaFunc) {
+		src := svc.OpenTagSource(imageRepo)
+		if src.Err() != nil {
+			return false, src.RegistryTags, nil, nil
+		}
+		var gitTags tags.GitTagsFunc
+		if src.HasGitTags() {
+			gitTags = src.GitTags
+		}
+		return src.Mapped, src.RegistryTags, gitTags, src.Meta
 	}
 }
 

@@ -42,7 +42,7 @@ func TestDriftFuncAsksPodsOnlyWhateverTheConfigSays(t *testing.T) {
 
 	fake := &k8s.Fake{}
 	contexts, authCfgs = installFakes(t, fake, &registry.Fake{})
-	if _, err := buildDriftFunc("my-cluster")(context.Background(), "app-staging"); err != nil {
+	if _, err := service.New(service.Settings{KubeContext: "my-cluster"}, serviceDeps()).RunningImages(context.Background(), "app-staging"); err != nil {
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff([]string{"my-cluster"}, *contexts); diff != "" || len(*authCfgs) != 0 {
@@ -67,7 +67,7 @@ func TestDriftFuncKeepsEveryRunningBuild(t *testing.T) {
 		{Pod: "api-1", Container: "api", Ref: image.Ref{Repo: "ghcr.io/example/api", Digest: digestB}, Image: image.Ref{Repo: "mirror.invalid/api", Tag: "v9"}},
 	}}}
 	installFakes(t, fake, &registry.Fake{})
-	got, err := buildDriftFunc("")(context.Background(), "app-staging")
+	got, err := service.New(service.Settings{}, serviceDeps()).RunningImages(context.Background(), "app-staging")
 	if err != nil {
 		t.Fatal(err)
 	}

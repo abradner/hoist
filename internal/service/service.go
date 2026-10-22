@@ -35,6 +35,8 @@ type Service struct {
 	cleanupMu   sync.Mutex
 	cleanupKept map[string]keptCleanup
 
+	hist history
+
 	view RepoView
 	// refreshMu serializes LoadRepo(RepoFromOrigin) against itself, WITHIN this one process:
 	// it removes and recreates one fixed cached worktree (repoViewDir, keyed only by the clone
