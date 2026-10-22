@@ -1430,6 +1430,26 @@ test lives** (if one exists).
    `TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip` (Argo's synced revision lagging a base that
    undid the supersede, with an unrelated commit and a third deploy as the controls).
 
+20. **A second application of a precedence rule undoes the first, and "empty" is not "not given".**
+   What happened: `selectRepo` decides flag > `repos[].kube.context` > the kubeconfig's current
+   context, once. `runDeploy` copied its `--kube-context` into the selection so that happened, then
+   assigned the flag's value over `Settings.KubeContext` again by hand. The flag's default is the
+   root's flag, usually `""`, so the repo's configured context was lost and a deploy's Argo refresh
+   and rollout watch went to whatever the kubeconfig's current context was; every other command was
+   right and the flag help promised the right thing. The same stack's first draft of #173 (fill in
+   the missing `--from`/`--to` from `envs.pairs`) tested "missing" with `*to == ""`, so
+   `--to "$UNSET"` was quietly planned into the paired env instead of refused. Both were found by
+   an independent read, not a test. Root cause: a layer re-asserted at the call site "to be safe"
+   after the one place that owns the rule had already applied it; and a value standing in for the
+   question whether the flag was given. Rule: a precedence is applied in one function
+   (`selectRepo` for the repo, apps root, promotable prefixes, base and kube context;
+   `service.NewResolveOptions` for the digest-resolution flags), and a command never assigns a
+   `Settings` field it received from there. Whether a flag was given is `sel.given[name]`
+   (set by `fs.Visit`), never `value == ""` (see also entry 16). Regression tests, in
+   `cmd/hoist`: `TestDeployUsesTheReposKubeContext` (fails with the override line restored: `a
+   deploy asked for "argo:"`), `TestDeployKubeContextFlagStillWins`, and
+   `TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs` (fails with the value check restored).
+
 21. **A "clean" removal that falls through to a force helper is not clean on the branch nobody
    looks at.** What happened: `RemoveCleanWorktree` promises git's own non-force removal, so a file
    written into a worktree after the caller's check survives. Its branch for a path that `Lstat`
