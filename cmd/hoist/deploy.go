@@ -79,7 +79,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// refuses a read-only command for a reason that cannot apply to it — and `hoist plan
 	// --dry-run`, the same operation for a promotion, has never demanded one.
 	if *direct || !*dryRun {
-		if code := checkDirectPreflight("hoist deploy", eff, *direct, *confirmDirect, *env, stderr); code != 0 {
+		if code := checkDirectPreflight("hoist deploy", settingsFor(cfg, eff), *direct, *confirmDirect, *env, stderr); code != 0 {
 			return code
 		}
 	}
