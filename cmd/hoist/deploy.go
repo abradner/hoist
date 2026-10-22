@@ -88,7 +88,6 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	if err != nil {
 		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
-	set.KubeContext = *kubeContext
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
