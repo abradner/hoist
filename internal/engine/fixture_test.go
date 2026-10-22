@@ -39,17 +39,8 @@ func runHost(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// newFixtureOrigin creates a bare "origin" holding one commit: an Argo GitOps repo shaped
-// like testdata/repo, with a single family "app" whose image is older in app-production than
-// in app-staging, so BuildPlan(app-staging, app-production) always has exactly one edit to
-// make. HOME and the global git config are isolated so no test here can reach the developer's
-// own signing configuration (AGENTS.md §9 gotcha on hermetic tests).
-func newFixtureOrigin(t *testing.T) (originDir string) {
-	t.Helper()
-	return newFixtureOriginWith(t, oneDeployment)
-}
-
-// oneDeployment is newFixtureOrigin's manifest: one Deployment "app" with one container.
+// oneDeployment is newFixture's manifest: one Deployment "app" with one container, so
+// BuildPlan(app-staging, app-production) has exactly one edit to make.
 func oneDeployment(env, ref string) string {
 	return "" +
 		"apiVersion: apps/v1\n" +
@@ -65,8 +56,12 @@ func oneDeployment(env, ref string) string {
 		"          image: " + ref + "\n"
 }
 
-// newFixtureOriginWith is newFixtureOrigin with the family's one manifest file built by
-// deployment, so a test can give the family more than one occurrence of the promoted image repo.
+// newFixtureOriginWith creates a bare "origin" holding one commit: an Argo GitOps repo shaped
+// like testdata/repo, with a single family "app" whose image is older in app-production than
+// in app-staging, its one manifest file built by deployment (oneDeployment for newFixture, or
+// one with several occurrences of the promoted image repo). HOME and the global git config are
+// isolated so no test here can reach the developer's own signing configuration (AGENTS.md §9
+// gotcha on hermetic tests).
 func newFixtureOriginWith(t *testing.T, deployment func(env, ref string) string) (originDir string) {
 	t.Helper()
 	home := t.TempDir()

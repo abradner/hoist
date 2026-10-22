@@ -676,13 +676,14 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		return Observation{Waiting: true, Detail: strings.Join(append(waiting, jobReports...), "; ")}, nil
 	}
 	sort.Strings(done)
-	lines := append(done, jobReports...)
+	var lines []string
 	if anyExempt {
 		// Lead with it: the CLI prints this as "done (<detail>)", and a promotion that finished
 		// by being replaced must not read as one whose own images rolled out.
 		sort.Strings(replaced)
-		lines = append(append([]string{"superseded by a later change to the same image repo"}, replaced...), lines...)
+		lines = append(append(lines, "superseded by a later change to the same image repo"), replaced...)
 	}
+	lines = append(append(lines, done...), jobReports...)
 	return Observation{Satisfied: true, Superseded: anyExempt, Detail: strings.Join(lines, "; ")}, nil
 }
 
