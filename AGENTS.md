@@ -223,11 +223,14 @@ live image mismatches, so an ordinary rollout pays no fetch — but a mismatch t
 (drift, an admission webhook rewriting images) costs one fetch of the base per rollout poll
 until the deadline. `ArgoSyncedStep` applies the same rule per Application, and asks it before
 the Degraded and Failed-operation Blocks: it skips an Application — health, operation phase and
-all — only when no occurrence of the promotion's in that Application is still intact at the
-revision Argo synced and the supersede still holds at the base tip it fetched (Argo's revision
-can lag a base that has since put the image back), so a later deploy's failed rollout (which Argo reports as Degraded) does
-not Block a promotion it replaced, while an Application with one superseded occurrence and one
-intact one stays health-gated.
+all — only when every occurrence of the promotion's in that Application is superseded at the
+revision Argo synced and again at the base tip it fetched, with this promotion's landing in that
+tip's history. So a later deploy's failed rollout (which Argo reports as Degraded) does not Block
+a promotion it replaced, and an Application with one superseded occurrence and one intact one
+stays health-gated. Argo's revision can lag the base: when the base has since undone the
+supersede (the image put back, a rewrite, the branch gone), the stale revision is treated as not
+carrying this promotion — the step waits for Argo to sync the tip, still Blocking first on
+Degraded or a failed operation.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
@@ -1401,9 +1404,10 @@ test lives** (if one exists).
    `TestRolledOutDoesNotExemptARevertedPromotion`,
    `TestRolledOutDoesNotExemptWhenTheLandingIsNotInTheBase` (fails without the ancestry check) and
    `TestRolledOutFetchFailureIsReportedNotJudged` (fails if the fetch error is swallowed); and for
-   the same rule per Application, `TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence`
+   the same rule per Application, `TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence`,
    `TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth` and
-   `TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip` (Argo's synced revision lagging the base).
+   `TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip` (Argo's synced revision lagging a base that
+   undid the supersede, with an unrelated commit and a third deploy as the controls).
 
 ## 10. Maintaining This Document
 

@@ -404,19 +404,61 @@ func TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth(t *
 
 // TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip (Codex, #263): Argo reports the revision it
 // last synced, which can lag the base. When that revision superseded this promotion but the
-// base has since moved on — the image put back to what this promotion edited away from, or to
-// this promotion's own reference — Argo's stale revision is no evidence the promotion is still
-// replaced, and the Application must keep its health gate. The control leaves the base at the
-// superseding revision Argo synced.
+// base has since moved on in a way that undoes the supersede — the image put back to what this
+// promotion edited away from, or to this promotion's own reference, or a base rewritten without
+// this promotion's landing, or gone — Argo's stale revision is no evidence the promotion is
+// still replaced. The Application then keeps its Degraded gate, and a Healthy one is not
+// "synced and healthy" either: Argo has not synced what the base now says, so the step waits.
+//
+// The controls are the movements that do not undo it, which in a live repo are the common
+// case: an unrelated commit after the supersede, and a third deploy of the same image repo.
+// Both keep the Application exempt, Degraded or not.
 func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
+	unrelated := func(t *testing.T, fx fixture) {
+		other := filepath.Join(t.TempDir(), "unrelated-clone")
+		runHost(t, "", "clone", "-q", fx.originDir, other)
+		if err := os.WriteFile(filepath.Join(other, "README.md"), []byte("unrelated\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runHost(t, other, "add", "README.md")
+		runHost(t, other, "commit", "-q", "-m", "an unrelated change")
+		runHost(t, other, "push", "-q", "origin", "main")
+	}
 	for _, tc := range []struct {
-		name    string
-		then    func(s *PromotionState) string // the reference the base moves to after Argo synced; "" leaves it
-		blocked bool
+		name string
+		then func(t *testing.T, w *world, s *PromotionState)
+		// exempt: the Application needs nothing from the step, whatever its health.
+		exempt bool
 	}{
-		{"base still superseded (control)", func(*PromotionState) string { return "" }, false},
-		{"base reverted to the original", func(s *PromotionState) string { return s.Edits[0].Ref.String() }, true},
-		{"base back on this promotion's reference", func(s *PromotionState) string { return s.Edits[0].New.String() }, true},
+		{"base still superseded (control)", func(*testing.T, *world, *PromotionState) {}, true},
+		{"an unrelated commit after the supersede (control)", func(t *testing.T, w *world, _ *PromotionState) { unrelated(t, w.fx) }, true},
+		{"a third deploy of the same image repo (control)", func(t *testing.T, w *world, _ *PromotionState) {
+			supersedeNth(t, w.fx, 0, "ghcr.io/example/app:v4@sha256:"+strings.Repeat("4", 64))
+		}, true},
+		{"base reverted to the original", func(t *testing.T, w *world, s *PromotionState) {
+			supersedeNth(t, w.fx, 0, s.Edits[0].Ref.String())
+		}, false},
+		{"base back on this promotion's reference", func(t *testing.T, w *world, s *PromotionState) {
+			supersedeNth(t, w.fx, 0, s.Edits[0].New.String())
+		}, false},
+		{"base rewritten without this promotion's landing", func(t *testing.T, w *world, s *PromotionState) {
+			other := filepath.Join(t.TempDir(), "rewrite-clone")
+			runHost(t, "", "clone", "-q", w.fx.originDir, other)
+			runHost(t, other, "reset", "-q", "--hard", s.MergeSHA+"^")
+			p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(strings.Replace(string(b), s.Edits[0].Ref.String(), "ghcr.io/example/app:v5@sha256:"+strings.Repeat("5", 64), 1)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runHost(t, other, "commit", "-q", "-a", "-m", "a deploy on a rewritten base")
+			runHost(t, other, "push", "-q", "--force", "origin", "main")
+		}, false},
+		{"base branch gone", func(t *testing.T, w *world, s *PromotionState) {
+			runHost(t, w.fx.originDir, "update-ref", "-d", "refs/heads/"+s.Base)
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -431,18 +473,27 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 			if err != nil || !ok {
 				t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
 			}
-			if ref := tc.then(s); ref != "" {
-				supersedeNth(t, w.fx, 0, ref)
-			}
-			a := &argo.Fake{}
-			a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
-				argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: synced, HealthStatus: argo.HealthStatusDegraded})
-			obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
-			if err != nil {
-				t.Fatalf("Observe: %v", err)
-			}
-			if (obs.Blocked != "") != tc.blocked {
-				t.Fatalf("Blocked = %q, want blocked=%v (%+v)", obs.Blocked, tc.blocked, obs)
+			// The clone has the revision Argo synced, as it would from an earlier poll; without
+			// it, a base that no longer descends from it leaves it unresolvable here, and the
+			// step never reaches the tip check this test is about.
+			runHost(t, s.CloneDir, "fetch", "-q", "origin")
+			tc.then(t, w, s)
+			for _, health := range []string{argo.HealthStatusDegraded, argo.HealthStatusHealthy} {
+				a := &argo.Fake{}
+				a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+					argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: synced, HealthStatus: health})
+				obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+				if err != nil {
+					t.Fatalf("health=%s: Observe: %v", health, err)
+				}
+				switch {
+				case tc.exempt && !obs.Satisfied:
+					t.Errorf("health=%s: still superseded at the base tip, so exempt; want Satisfied, got %+v", health, obs)
+				case !tc.exempt && health == argo.HealthStatusDegraded && obs.Blocked == "":
+					t.Errorf("health=%s: no longer superseded at the base tip; want the Degraded Block, got %+v", health, obs)
+				case !tc.exempt && health == argo.HealthStatusHealthy && obs.Satisfied:
+					t.Errorf("health=%s: Argo has not synced what the base now says; must not be satisfied, got %+v", health, obs)
+				}
 			}
 		})
 	}

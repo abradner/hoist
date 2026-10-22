@@ -383,28 +383,39 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		//     the Application's health this promotion's business again — the rule RolledOutStep
 		//     applies per Deployment. A no-op occurrence counts too: that is the conservative
 		//     direction, and health converges, so at worst it waits for the later change.
-		//   - The supersede still holds at the base tip just fetched. Argo reports the revision
-		//     it last synced, which can lag the base: once the base has moved on — the image
-		//     put back, or a revert — a stale superseding revision is no evidence this
-		//     promotion is still replaced (Codex, #263).
+		//   - The supersede still holds at the base tip just fetched, and that tip still has
+		//     this promotion's landing in its history. Argo reports the revision it last
+		//     synced, which can lag the base: once the base has moved on in a way that undoes
+		//     the supersede — the image put back, a rewrite, the branch gone — a stale
+		//     superseding revision is no evidence this promotion is still replaced (Codex,
+		//     #263). Argo has then not synced what the base says, so rev does not stand for
+		//     this promotion: not carried, which waits for Argo to catch up and still meets the
+		//     Degraded and Failed-operation Blocks first.
 		//
-		// Either one failing leaves the Application carried and health-gated, never "not
-		// carried": rev does carry this promotion's landing.
-		replaced, rerr := a.replacedAt(ctx, s, rev, edits, blobs)
+		// The first failing leaves the Application carried and health-gated: rev carries this
+		// promotion's landing, and one of its occurrences is this promotion's still.
+		replaced, rerr := a.replacedAt(ctx, s, rev, edits)
 		if rerr != nil || !replaced {
 			return true, false, "", rerr
 		}
-		if base.tip != rev {
-			if !base.ok {
-				return true, false, "", nil
-			}
-			atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), base.tip)
-			if terr != nil || !atTip {
-				return true, false, "", nil
-			}
-			if replaced, rerr = a.replacedAt(ctx, s, base.tip, edits, blobs); rerr != nil || !replaced {
-				return true, false, "", rerr
-			}
+		if base.tip == rev {
+			return true, true, "", nil
+		}
+		stale := func(why string) (bool, bool, string, error) {
+			return false, false, fmt.Sprintf(" (Argo synced %s, which superseded this promotion, but %s)", rev, why), nil
+		}
+		if !base.ok {
+			return stale("origin has no branch " + s.Base + " now")
+		}
+		atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), base.tip)
+		if terr != nil || !atTip {
+			return stale(fmt.Sprintf("%s's tip %s no longer contains this promotion's landing", s.Base, base.tip))
+		}
+		if replaced, rerr = a.replacedAt(ctx, s, base.tip, edits); rerr != nil {
+			return false, false, "", rerr
+		}
+		if !replaced {
+			return stale(fmt.Sprintf("%s's tip %s no longer supersedes it", s.Base, base.tip))
 		}
 		return true, true, "", nil
 	default:
@@ -419,19 +430,16 @@ type baseFetch struct {
 	ok   bool
 }
 
-// replacedAt reports whether every occurrence of edits is superseded at rev — observeLanded's
-// set verdict is superseded, and no single occurrence is still intact.
-func (a ArgoSyncedStep) replacedAt(ctx context.Context, s *PromotionState, rev string, edits []gitops.Edit, blobs map[string]string) (bool, error) {
-	verdict, _, err := observeLanded(ctx, a.Git, s.CloneDir, rev, edits, blobs)
-	if err != nil || verdict != landedSuperseded {
-		return false, err
-	}
+// replacedAt reports whether every occurrence of edits is superseded at rev. That is the
+// whole of it: every occurrence superseded already rules out intact blobs, a revert and a gone
+// subject, so observeLanded's set verdict need not be asked again.
+func (a ArgoSyncedStep) replacedAt(ctx context.Context, s *PromotionState, rev string, edits []gitops.Edit) (bool, error) {
 	occs, err := observeOccurrences(ctx, a.Git, s.CloneDir, rev, edits)
-	if err != nil {
+	if err != nil || len(occs) == 0 {
 		return false, err
 	}
 	for _, o := range occs {
-		if o.verdict == landedIntact {
+		if o.verdict != landedSuperseded {
 			return false, nil
 		}
 	}
