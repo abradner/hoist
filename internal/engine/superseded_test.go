@@ -401,3 +401,49 @@ func TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth(t *
 		})
 	}
 }
+
+// TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip (Codex, #263): Argo reports the revision it
+// last synced, which can lag the base. When that revision superseded this promotion but the
+// base has since moved on — the image put back to what this promotion edited away from, or to
+// this promotion's own reference — Argo's stale revision is no evidence the promotion is still
+// replaced, and the Application must keep its health gate. The control leaves the base at the
+// superseding revision Argo synced.
+func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		then    func(s *PromotionState) string // the reference the base moves to after Argo synced; "" leaves it
+		blocked bool
+	}{
+		{"base still superseded (control)", func(*PromotionState) string { return "" }, false},
+		{"base reverted to the original", func(s *PromotionState) string { return s.Edits[0].Ref.String() }, true},
+		{"base back on this promotion's reference", func(s *PromotionState) string { return s.Edits[0].New.String() }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			s := w.promote()
+			w.merge(s)
+			s.EditApps = map[string]string{}
+			for _, e := range s.Edits {
+				s.EditApps[e.File] = testApp
+			}
+			w.supersede(supersededRef)
+			synced, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+			if err != nil || !ok {
+				t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+			}
+			if ref := tc.then(s); ref != "" {
+				supersedeNth(t, w.fx, 0, ref)
+			}
+			a := &argo.Fake{}
+			a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+				argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: synced, HealthStatus: argo.HealthStatusDegraded})
+			obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if (obs.Blocked != "") != tc.blocked {
+				t.Fatalf("Blocked = %q, want blocked=%v (%+v)", obs.Blocked, tc.blocked, obs)
+			}
+		})
+	}
+}

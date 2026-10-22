@@ -224,7 +224,8 @@ live image mismatches, so an ordinary rollout pays no fetch — but a mismatch t
 until the deadline. `ArgoSyncedStep` applies the same rule per Application, and asks it before
 the Degraded and Failed-operation Blocks: it skips an Application — health, operation phase and
 all — only when no occurrence of the promotion's in that Application is still intact at the
-revision Argo synced, so a later deploy's failed rollout (which Argo reports as Degraded) does
+revision Argo synced and the supersede still holds at the base tip it fetched (Argo's revision
+can lag a base that has since put the image back), so a later deploy's failed rollout (which Argo reports as Degraded) does
 not Block a promotion it replaced, while an Application with one superseded occurrence and one
 intact one stays health-gated.
 
@@ -1401,7 +1402,8 @@ test lives** (if one exists).
    `TestRolledOutDoesNotExemptWhenTheLandingIsNotInTheBase` (fails without the ancestry check) and
    `TestRolledOutFetchFailureIsReportedNotJudged` (fails if the fetch error is swallowed); and for
    the same rule per Application, `TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence`
-   and `TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth`.
+   `TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth` and
+   `TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip` (Argo's synced revision lagging the base).
 
 ## 10. Maintaining This Document
 

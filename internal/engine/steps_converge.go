@@ -252,10 +252,10 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 	if len(apps) == 0 {
 		return Observation{Satisfied: true, Detail: "no Argo Application in this promotion's plan"}, nil
 	}
-	// fetched keeps the base fetch to at most one per Observe rather than one per Application:
+	// base keeps the base fetch to at most one per Observe rather than one per Application:
 	// every app in a promotion is on the same base, and this method is called on every poll
 	// tick (poll.argo, seconds apart) for the whole convergence window.
-	var fetched bool
+	var base baseFetch
 	var notSynced []string
 	for _, app := range apps {
 		st, err := a.Argo.Get(ctx, app)
@@ -265,7 +265,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			}
 			return Observation{}, fmt.Errorf("reading Argo Application %s: %w", app, err)
 		}
-		carries, superseded, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &fetched)
+		carries, superseded, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &base)
 		if err != nil {
 			return Observation{}, err
 		}
@@ -341,7 +341,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
-func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, fetched *bool) (carries, superseded bool, why string, err error) {
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, base *baseFetch) (carries, superseded bool, why string, err error) {
 	if rev == s.LandedSHA() {
 		return true, false, "", nil
 	}
@@ -350,12 +350,13 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 	}
 	// The revision Argo reports is one this clone may never have seen: fetch the base before
 	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
-	// Observe, not once per Application — see fetched's own declaration.
-	if !*fetched {
-		if _, _, ferr := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base); ferr != nil {
+	// Observe, not once per Application — see base's own declaration.
+	if !base.done {
+		tip, ok, ferr := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
+		if ferr != nil {
 			return false, false, "", ferr
 		}
-		*fetched = true
+		*base = baseFetch{done: true, tip: tip, ok: ok}
 	}
 	isAncestor, aerr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
 	if aerr != nil || !isAncestor {
@@ -374,25 +375,67 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 	case landedIntact:
 		return true, false, "", nil
 	case landedSuperseded:
-		// observeLanded calls the set superseded when any occurrence is, so ask per occurrence
-		// before exempting this Application from its health check: one occurrence of this
-		// promotion's that is still intact here makes the Application's health this
-		// promotion's business again (#168; the same rule RolledOutStep applies per
-		// Deployment). A no-op occurrence counts too: that is the conservative direction, and
-		// health converges, so at worst it waits for the later change to turn Healthy.
-		occs, oerr := observeOccurrences(ctx, a.Git, s.CloneDir, rev, edits)
-		if oerr != nil {
-			return false, false, "", oerr
+		// Exempting this Application from its health check takes two more things than
+		// observeLanded's set verdict (#168):
+		//
+		//   - No occurrence of this promotion's in it is still intact at rev. observeLanded
+		//     calls the set superseded when any occurrence is, and one intact occurrence makes
+		//     the Application's health this promotion's business again — the rule RolledOutStep
+		//     applies per Deployment. A no-op occurrence counts too: that is the conservative
+		//     direction, and health converges, so at worst it waits for the later change.
+		//   - The supersede still holds at the base tip just fetched. Argo reports the revision
+		//     it last synced, which can lag the base: once the base has moved on — the image
+		//     put back, or a revert — a stale superseding revision is no evidence this
+		//     promotion is still replaced (Codex, #263).
+		//
+		// Either one failing leaves the Application carried and health-gated, never "not
+		// carried": rev does carry this promotion's landing.
+		replaced, rerr := a.replacedAt(ctx, s, rev, edits, blobs)
+		if rerr != nil || !replaced {
+			return true, false, "", rerr
 		}
-		for _, o := range occs {
-			if o.verdict == landedIntact {
+		if base.tip != rev {
+			if !base.ok {
 				return true, false, "", nil
+			}
+			atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), base.tip)
+			if terr != nil || !atTip {
+				return true, false, "", nil
+			}
+			if replaced, rerr = a.replacedAt(ctx, s, base.tip, edits, blobs); rerr != nil || !replaced {
+				return true, false, "", rerr
 			}
 		}
 		return true, true, "", nil
 	default:
 		return false, false, " (" + detail + ")", nil
 	}
+}
+
+// baseFetch is ArgoSyncedStep.Observe's one fetch of the base per Observe, and what it returned.
+type baseFetch struct {
+	done bool
+	tip  string
+	ok   bool
+}
+
+// replacedAt reports whether every occurrence of edits is superseded at rev — observeLanded's
+// set verdict is superseded, and no single occurrence is still intact.
+func (a ArgoSyncedStep) replacedAt(ctx context.Context, s *PromotionState, rev string, edits []gitops.Edit, blobs map[string]string) (bool, error) {
+	verdict, _, err := observeLanded(ctx, a.Git, s.CloneDir, rev, edits, blobs)
+	if err != nil || verdict != landedSuperseded {
+		return false, err
+	}
+	occs, err := observeOccurrences(ctx, a.Git, s.CloneDir, rev, edits)
+	if err != nil {
+		return false, err
+	}
+	for _, o := range occs {
+		if o.verdict == landedIntact {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // rolloutCause borrows RolledOutStep's own per-Deployment read (this file, below) to name what
