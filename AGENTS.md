@@ -230,7 +230,11 @@ a promotion it replaced, and an Application with one superseded occurrence and o
 stays health-gated. Argo's revision can lag the base: when the base has since undone the
 supersede (the image put back, a rewrite, the branch gone), the stale revision is treated as not
 carrying this promotion — the step waits for Argo to sync the tip, still Blocking first on
-Degraded or a failed operation.
+Degraded or a failed operation. *Stated, not enforced:* all of this reaches `ArgoSyncedStep` on the
+PR path only. On the direct path a supersede moves `PushedSHA`, and so `LandedSHA()`, to the
+superseding tip; once Argo syncs it, `revisionCarries` takes its `rev == LandedSHA()` shortcut
+and the Application stays health-gated by the later deploy, so that deploy's Degraded health
+still Blocks a direct promotion it replaced (#291).
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
