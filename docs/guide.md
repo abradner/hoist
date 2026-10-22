@@ -561,11 +561,13 @@ touched — `--repo`/`--archived` only change what's *listed*, never what gets a
 
 A promotion a later deploy replaced counts as done. Where the base branch now declares the same
 image repo at a different reference than this promotion wrote, and the promotion's own landed
-commit is still in the base branch's history, that image is no longer the promotion's to wait
-for. (If the base was rewritten so that the promotion's commit is gone, a different reference
-there is not evidence the promotion ever landed, and it keeps waiting.) It is judged image by
-image, so in a promotion that changed two Deployments and had only one replaced by a later
-deploy, the other still has to roll out. Once nothing is left, `hoist promotions` shows it as
+commit is still in the base branch's history, that image's rollout no longer has to finish for
+the promotion to finish. (If the base was rewritten so that the promotion's commit is gone, a
+different reference there is not evidence the promotion ever landed, and it is not treated as
+superseded.) It is judged image by image, so in a promotion that changed two Deployments and had
+only one replaced by a later deploy, the other still has to roll out — and while the two share
+an Argo Application, that Application's sync and health still count, whichever image they come
+from. Once nothing is left, `hoist promotions` shows it as
 `done (superseded by a later change to the same image repo; …)`, naming what the base declares
 now, the flight screen reads `done · superseded`, and it is archived like any other finished
 promotion. A cluster running something other than this promotion's reference while the base
