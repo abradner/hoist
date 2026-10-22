@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
+	"github.com/abradner/hoist/pkg/k8s"
+	"github.com/abradner/hoist/pkg/resolve"
 )
 
 // mustDiscover is gitops.Discover over root/cluster/apps, failing the test on error — used to
@@ -124,5 +127,38 @@ func TestPlanCLIControlUnaffectedByFailClosedCheck(t *testing.T) {
 	}
 	if pc.View.Repo != r || pc.View.FromOrigin {
 		t.Errorf("PlannedChange.View = %+v, want {Repo: r, FromOrigin: false} — the CLI's own clone-mode shape", pc.View)
+	}
+}
+
+// TestPlanNamesTheBadPrefixesBeforeAskingTheCluster is Codex's finding on the CS-1 PR: with
+// digest source "pods" in the order, resolveImages built the Kubernetes client even when the
+// promotable prefixes matched nothing, so on a machine with no kubeconfig a mistyped prefix
+// reported a kubeconfig error instead of the prefixes. Nothing to resolve means no external
+// dependency is touched. Control: with prefixes that do match, the same cluster failure is still
+// what the operator sees (an unreachable cluster fails the whole plan, AGENTS.md section 4.10).
+func TestPlanNamesTheBadPrefixesBeforeAskingTheCluster(t *testing.T) {
+	root := planFixtureRepo(t)
+	noCluster := errors.New("no kubeconfig in this environment")
+	newSvc := func(prefix string) *Service {
+		return New(Settings{
+			RepoDir:    root,
+			AppsRoot:   "cluster/apps",
+			Base:       "main",
+			Promotable: []string{prefix},
+			Resolve:    ResolveOptions{Order: []resolve.Source{resolve.SourcePods}},
+		}, Deps{
+			Git:     func() git.Git { return git.Exec{} },
+			Cluster: func(string) (k8s.Cluster, string, error) { return nil, "", noCluster },
+		})
+	}
+	r := mustDiscover(t, root)
+	req := PlanRequest{Repo: r, Source: "app-staging", Target: "app-production"}
+
+	_, err := newSvc("ghcr.io/nobody/").Plan(context.Background(), req)
+	if err == nil || errors.Is(err, noCluster) || !strings.Contains(err.Error(), "ghcr.io/nobody/") {
+		t.Fatalf("a prefix matching nothing should be named in the error, got: %v", err)
+	}
+	if _, err := newSvc("ghcr.io/example/").Plan(context.Background(), req); !errors.Is(err, noCluster) {
+		t.Fatalf("control: matching prefixes with an unreachable cluster should still fail on the cluster, got: %v", err)
 	}
 }

@@ -339,6 +339,26 @@ func TestBuildPlanArgumentErrors(t *testing.T) {
 	}
 }
 
+// CS-1 (#237 item 2): a --promotable list that matches none of the source env's images used to
+// plan nothing, and every face then said "already current" and exited 0 — a false success for
+// what is almost always a typo or a prefix that excludes everything. It is an error that names
+// the prefixes and the env. The control is the fixture's real prefix, which plans edits.
+func TestBuildPlanRefusesPromotableThatMatchesNothing(t *testing.T) {
+	r := discoverFixture(t)
+	_, err := BuildPlan(r, "app-staging", "app-production", []string{"ghcr.io/nobody/"}, nil)
+	if err == nil {
+		t.Fatal("a promotable list matching no source image planned successfully (reported as already current)")
+	}
+	for _, want := range []string{"ghcr.io/nobody/", "app-staging", "match none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if p, err := BuildPlan(r, "app-staging", "app-production", promotable, nil); err != nil || len(p.Edits) == 0 {
+		t.Fatalf("control: the fixture's own prefixes should plan edits: %v, %d edits", err, len(p.Edits))
+	}
+}
+
 func TestEditNoOp(t *testing.T) {
 	r := twoEnvRepo(t,
 		deployment("api", "api", "ghcr.io/example/api:v1@"+digestA),

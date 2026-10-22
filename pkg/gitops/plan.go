@@ -92,6 +92,12 @@ func BuildPlanWith(r *Repo, src, dst string, promotable []string, digests map[st
 		bySrc[o.Ref.Repo] = append(bySrc[o.Ref.Repo], o)
 	}
 	sort.Strings(repos)
+	if len(repos) == 0 && len(srcOcc) > 0 {
+		// Nothing planned because nothing was asked for is not "already current": every face
+		// prints that and exits 0, a false success for a prefix that excludes everything (#237).
+		return Plan{}, fmt.Errorf("the promotable prefixes %s (--promotable or repos[].promotable) match none of the %d image references in %s; check the prefixes",
+			strings.Join(promotable, ", "), len(srcOcc), src)
+	}
 
 	plan := Plan{SourceEnv: src, TargetEnv: dst, GeneratedAt: time.Now()}
 	planned := map[string]bool{}

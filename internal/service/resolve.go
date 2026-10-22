@@ -299,6 +299,13 @@ func (s *Service) resolveImages(ctx context.Context, r *gitops.Repo, from string
 		}
 	}
 
+	// Nothing promotable in the source env means nothing to resolve: touching the cluster or a
+	// registry would only let their errors hide the plan's own, which names the prefixes that
+	// matched nothing (gitops.BuildPlanWith).
+	if len(occ) == 0 {
+		return rep, nil
+	}
+
 	// The registries[] entry per repo, by longest matching prefix — nil for a repo no entry
 	// covers. Several repos may map to the same entry (or to nil).
 	entryFor := map[string]*config.RegistryConfig{}
