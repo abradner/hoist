@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,10 @@ const (
 	exitReadOnlyWrite = 3
 )
 
+// subcommandNames is every command run dispatches on; TestSubcommandNamesAreRunsSwitch holds it
+// to the switch. The root flag check consults it to tell a value from a swallowed command (#245).
+var subcommandNames = []string{"plan", "promote", "deploy", "restart", "promotions", "resume", "abandon", "gc", "watch", "config"}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -104,6 +109,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *showVersion {
 		fmt.Fprintln(stdout, versionString())
 		return 0
+	}
+	// What follows the root flags is the subcommand. When there is none, and a value-taking flag
+	// was given a command's name as its value, the command was swallowed (#245).
+	if fs.NArg() == 0 {
+		if name, value, swallowed := subcommandTakenAsValue(fs, args); swallowed {
+			fmt.Fprintf(stderr, "hoist: --%s takes a value, and %q is also a command. Read as the value of --%[1]s there is no command, which opens the matrix; read as the command, --%[1]s has no value; nothing was run. For a value genuinely called %[2]q write --%[1]s=%[2]s; to run the command, give --%[1]s its value first.\n", name, value)
+			return exitUsage
+		}
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -197,6 +210,23 @@ func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
 // Boolean flags take no separate value, a lone "-" is an ordinary value, and "--" or the first
 // non-flag argument ends the flags, exactly as in the flag package.
 func flagTakenAsValue(fs *flag.FlagSet, args []string) (name, value string, swallowed bool) {
+	return separatedValue(fs, args, func(v string) bool { return len(v) > 1 && v[0] == '-' })
+}
+
+// subcommandTakenAsValue is the same walk over the root args, reporting the first value-taking
+// flag whose separate value is a subcommand's name. The caller asks it only when no command was
+// left over, so the name is not followed by one: it was taken as a value in place of the
+// command. "=" is the way to say a value really is called that (#245).
+func subcommandTakenAsValue(fs *flag.FlagSet, args []string) (name, value string, swallowed bool) {
+	return separatedValue(fs, args, func(v string) bool { return slices.Contains(subcommandNames, v) })
+}
+
+// separatedValue is the one walk of args the way flag.Parse takes them, shared by the two
+// checks above so they cannot disagree about where a value is: it returns the first value-taking
+// flag whose value, given as the next argument, satisfies bad. A flag with "=", a boolean flag,
+// an unknown flag, a missing value, "--" and the first non-flag argument are all left to
+// flag.Parse.
+func separatedValue(fs *flag.FlagSet, args []string, bad func(value string) bool) (name, value string, found bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if len(a) < 2 || a[0] != '-' || a == "--" {
@@ -216,10 +246,10 @@ func flagTakenAsValue(fs *flag.FlagSet, args []string) (name, value string, swal
 		if i+1 >= len(args) {
 			return "", "", false // flag.Parse reports the missing value
 		}
-		if v := args[i+1]; len(v) > 1 && v[0] == '-' {
-			return n, v, true
-		}
 		i++
+		if bad(args[i]) {
+			return n, args[i], true
+		}
 	}
 	return "", "", false
 }

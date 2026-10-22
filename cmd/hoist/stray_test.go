@@ -298,3 +298,151 @@ func TestParseWithIDDoesNotSetAFlagTypedAfterTheDelimiter(t *testing.T) {
 		}
 	}
 }
+
+// A value-taking flag before the subcommand takes the next argument as its value, so
+// `hoist --kube-context promotions` is a context called "promotions" and no command: the matrix
+// opened against a cluster context nobody has, where the operator asked for a listing (#245).
+// The root flag set is the one flag set parseFlagsOnly does not cover, because what it leaves
+// over is the subcommand rather than a stray.
+
+// rootValueFlags is every value-taking root flag; TestRootValueFlagListIsComplete holds it to
+// the flag set itself.
+var rootValueFlags = []string{"config", "repo", "apps-root", "promotable", "base", "kube-context", "digest-sources", "registry-auth", "cluster-secret", "op-ref"}
+
+func TestRootRefusesASubcommandTakenAsAFlagValue(t *testing.T) {
+	var ran bool
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	tuiRunner = func(effective, *config.Config, io.Writer, io.Writer) int { ran = true; return 0 }
+	// --config would otherwise be loaded first and fail with exit 1 on the missing file, so
+	// the refusal has to come before the load: a command line hoist did not understand reads
+	// nothing.
+	for _, name := range rootValueFlags {
+		for _, cmd := range subcommandNames {
+			var out, errOut bytes.Buffer
+			got := run([]string{"--" + name, cmd}, &out, &errOut)
+			if got != exitUsage {
+				t.Errorf("--%s %s: exit %d, want %d; stderr: %s", name, cmd, got, exitUsage, errOut.String())
+				continue
+			}
+			for _, want := range []string{"--" + name, `"` + cmd + `"`, "command", "--" + name + "=" + cmd, "nothing was run"} {
+				if !strings.Contains(errOut.String(), want) {
+					t.Errorf("--%s %s: stderr lacks %q:\n%s", name, cmd, want, errOut.String())
+				}
+			}
+			if out.Len() != 0 {
+				t.Errorf("--%s %s: nothing ran, so nothing belongs on stdout:\n%s", name, cmd, out.String())
+			}
+		}
+	}
+	if ran {
+		t.Error("the matrix was opened for a command line that was refused")
+	}
+}
+
+// The refusals above only mean something beside the command lines that must still work.
+func TestRootStillAcceptsASubcommandNameThatIsReallyAValue(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
+	var got effective
+	orig := tuiRunner
+	t.Cleanup(func() { tuiRunner = orig })
+	tuiRunner = func(eff effective, _ *config.Config, _, _ io.Writer) int { got = eff; return 42 }
+
+	// The spelling the message offers: a context genuinely called promotions.
+	if code := run([]string{"--repo", fixture, "--kube-context=promotions"}, io.Discard, io.Discard); code != 42 || got.kubeContext != "promotions" {
+		t.Errorf("--kube-context=promotions: exit %d, kubeContext %q; want the runner's 42 and promotions", code, got.kubeContext)
+	}
+	// A command follows, so the value was not swallowing it.
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--repo", fixture, "--kube-context", "promotions", "promotions"}, &out, &errOut); code != 0 {
+		t.Errorf("--kube-context promotions promotions: exit %d, want 0; stderr: %s", code, errOut.String())
+	}
+	if code := run([]string{"--repo", fixture, "--kube-context", "some-ctx", "promotions"}, io.Discard, io.Discard); code != 0 {
+		t.Errorf("--kube-context some-ctx promotions: exit %d, want 0", code)
+	}
+}
+
+// A boolean flag takes no separate value, so a command name after one is not swallowed. The
+// root's only boolean, --version, returns before the check, so this drives the walk itself.
+func TestSubcommandTakenAsValueSkipsBooleans(t *testing.T) {
+	fs := flag.NewFlagSet("hoist test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.String("kube-context", "", "")
+	fs.Bool("verbose", false, "")
+	for _, tc := range []struct {
+		args []string
+		name string
+	}{
+		{[]string{"--verbose", "promotions"}, ""}, // the boolean takes no value, so promotions is not one
+		{[]string{"--verbose", "--kube-context", "promotions"}, "kube-context"},
+		{[]string{"--kube-context=promotions"}, ""},
+		{[]string{"--kube-context", "ctx"}, ""},
+	} {
+		if name, _, got := subcommandTakenAsValue(fs, tc.args); name != tc.name || got != (tc.name != "") {
+			t.Errorf("%v: got (%q, %v), want %q", tc.args, name, got, tc.name)
+		}
+	}
+}
+
+// TestRootValueFlagListIsComplete reads the root flag set the only way a test outside run can:
+// through its own -h output, where a flag that takes a value is printed with its type.
+func TestRootValueFlagListIsComplete(t *testing.T) {
+	var errOut bytes.Buffer
+	run([]string{"-h"}, io.Discard, &errOut)
+	var found []string
+	for _, line := range strings.Split(errOut.String(), "\n") {
+		if !strings.HasPrefix(line, "  -") {
+			continue
+		}
+		if f := strings.Fields(line); len(f) == 2 { // "-name type"; a boolean has no type word
+			found = append(found, strings.TrimPrefix(f[0], "-"))
+		}
+	}
+	sort.Strings(found)
+	want := append([]string(nil), rootValueFlags...)
+	sort.Strings(want)
+	if strings.Join(found, " ") != strings.Join(want, " ") {
+		t.Errorf("root value-taking flags are %v, but this test covers %v", found, want)
+	}
+}
+
+// TestSubcommandNamesAreRunsSwitch keeps the list the refusal consults from drifting from the
+// dispatch it describes: a command added to one and not the other would be swallowed in silence
+// by exactly the hole this closes.
+func TestSubcommandNamesAreRunsSwitch(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "run" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			sw, ok := n.(*ast.SwitchStmt)
+			if !ok {
+				return true
+			}
+			if id, ok := sw.Tag.(*ast.Ident); !ok || id.Name != "cmd" { // switch cmd := fs.Arg(0); cmd
+				return true
+			}
+			for _, s := range sw.Body.List {
+				for _, e := range s.(*ast.CaseClause).List {
+					cases = append(cases, strings.Trim(e.(*ast.BasicLit).Value, `"`))
+				}
+			}
+			return false
+		})
+	}
+	sort.Strings(cases)
+	if len(cases) < 5 {
+		t.Fatalf("found only %v in run's command switch; the search is broken", cases)
+	}
+	want := append([]string(nil), subcommandNames...)
+	sort.Strings(want)
+	if strings.Join(cases, " ") != strings.Join(want, " ") {
+		t.Errorf("run dispatches %v but subcommandNames is %v", cases, want)
+	}
+}

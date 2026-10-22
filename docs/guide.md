@@ -63,7 +63,9 @@ and the kube context in use — the flag's, else the repo's `kube.context` — b
 goes for `--digest-sources`, `--registry-auth`, `--cluster-secret` and `--op-ref`: given before
 the command they are what the plan screen resolves with and what the tag picker and the commit
 history authenticate to the registry with, exactly as on `plan` or `promote`; the drift column
-always asks the pods alone.
+always asks the pods alone. A flag before the command takes the next word as its value, so
+`hoist --kube-context promotions` is refused (exit 2) rather than read as a context called
+`promotions`; for a value that really is a command's name, write `--kube-context=promotions`.
 
 ```
 ╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
