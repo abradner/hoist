@@ -18,9 +18,13 @@ import (
 // --confirm-abandon=<id>" (name the promotion, then confirm it) would otherwise leave
 // --confirm-abandon completely unparsed, silently falling back to its empty default and always
 // refusing. `--confirm-abandon=<id> abandon <id>` already worked; this makes the other order
-// work identically rather than documenting a trap.
+// work identically rather than documenting a trap. A "--" ends the flags, so a
+// --confirm-abandon typed after one is a positional and stays where it is (#254).
 func reorderConfirmAbandonFirst(args []string) []string {
 	for i, a := range args {
+		if a == "--" {
+			break
+		}
 		if strings.HasPrefix(a, "--confirm-abandon=") {
 			out := make([]string, 0, len(args))
 			out = append(out, a)
@@ -45,6 +49,10 @@ func reorderConfirmAbandonFirst(args []string) []string {
 // unparsed and silently ignored; this parses what follows the id as well. A second positional
 // is refused rather than dropped, for the same reason: an argument hoist did not act on should
 // not look accepted. id is "" when none was given.
+//
+// A "--" ends the flags, and everything after it is positional — the id included. When the
+// first parse consumed one, what follows the id is therefore a second positional to refuse, not
+// something to parse again: `resume -- <id> --override-ci-none` must not set the override (#254).
 func parseWithID(fs *flag.FlagSet, args []string) (id string, err error) {
 	refuse := func(err error) (string, error) {
 		fs.Usage()
@@ -67,11 +75,18 @@ func parseWithID(fs *flag.FlagSet, args []string) (id string, err error) {
 		return "", nil
 	}
 	id = fs.Arg(0)
-	if err := parse(fs.Args()[1:]); err != nil {
-		return "", err
+	// flag.Parse drops a "--" it consumed from fs.Args(), so it is the argument just before
+	// them. A flag's value cannot be it: flagTakenAsValue refuses a value that starts with a dash.
+	delimited := len(args) > fs.NArg() && args[len(args)-fs.NArg()-1] == "--"
+	rest := fs.Args()[1:]
+	if !delimited {
+		if err := parse(rest); err != nil {
+			return "", err
+		}
+		rest = fs.Args()
 	}
-	if fs.NArg() > 0 {
-		return refuse(fmt.Errorf("unexpected argument %q after %s", fs.Arg(0), id))
+	if len(rest) > 0 {
+		return refuse(fmt.Errorf("unexpected argument %q after %s", rest[0], id))
 	}
 	return id, nil
 }

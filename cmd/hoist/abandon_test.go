@@ -224,6 +224,8 @@ func TestReorderConfirmAbandonFirst(t *testing.T) {
 		{"id first, --confirm-abandon=", []string{"id", "--confirm-abandon=x"}, []string{"--confirm-abandon=x", "id"}},
 		{"id first, space-separated value", []string{"id", "--confirm-abandon", "x"}, []string{"--confirm-abandon", "x", "id"}},
 		{"no confirm flag at all", []string{"id"}, []string{"id"}},
+		{"confirm flag after --, left where it is (#254)", []string{"--", "id", "--confirm-abandon=x"}, []string{"--", "id", "--confirm-abandon=x"}},
+		{"confirm flag before --, still moved first", []string{"id", "--confirm-abandon=x", "--"}, []string{"--confirm-abandon=x", "id", "--"}},
 	}
 	for _, tc := range cases {
 		got := reorderConfirmAbandonFirst(tc.in)
