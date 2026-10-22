@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/app/session"
+	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
@@ -601,5 +602,16 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	}
 	if errors.Is(err, forgeErr) {
 		t.Errorf("the forge error reached the operator for a plan that never needed the forge: %v", err)
+	}
+}
+
+// flightPoll hands the app root the two poll values it reads: Deadline bounds a promotion being
+// built, and Approval is the in-flight listing's cadence (session.Config.ListEvery, which falls
+// back to 30s on zero — so dropping Approval would ignore a configured poll.approval with no
+// symptom but a slower listing).
+func TestFlightPollCarriesApprovalAndDeadline(t *testing.T) {
+	got := flightPoll(config.PollConfig{Approval: config.Duration(45 * time.Second), Deadline: config.Duration(3 * time.Hour)})
+	if got.Approval != 45*time.Second || got.Deadline != 3*time.Hour {
+		t.Errorf("flightPoll = %+v, want Approval 45s and Deadline 3h", got)
 	}
 }

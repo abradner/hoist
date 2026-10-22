@@ -410,8 +410,9 @@ Conventions every screen follows, each codified after a PR needed one and found 
   drift) are given *method values* of the service (`svc.RestartRead`, `svc.HistoryDelta`,
   `svc.RunningImages`, …) or a thin mapping onto the screen's own value types
   (`buildWatchFunc`, `buildTagsFunc`) — no use-case logic lives in `cmd/hoist/wiring.go`. A
-  command prints a refusal with `fail`/`failf` (`cmd/hoist/cmdutil.go`), which redacts the whole
-  line (§4.10), and runs under `commandContext`. A screen may import `internal/service` for its
+  command prints a refusal or failure with `fail`/`failf` (`cmd/hoist/cmdutil.go`), which redacts
+  the whole line (§4.10) — the TUI's origin-fallback warning and the unknown-command line are the
+  two stderr prints that do not yet — and runs under `commandContext`. A screen may import `internal/service` for its
   plain value types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) and
   `internal/config` for `config.EnvsConfig` (several screens render production/pairs directly) —
   but never `internal/app`, and never `registry`/`resolve` *policy*.
@@ -1443,7 +1444,8 @@ test lives** (if one exists).
    after the one place that owns the rule had already applied it; and a value standing in for the
    question whether the flag was given. Rule: a precedence is applied in one function
    (`selectRepo` for the repo, apps root, promotable prefixes, base and kube context;
-   `service.NewResolveOptions` for the digest-resolution flags), and a command never assigns a
+   `service.NewResolveOptions` for the digest-resolution flags — which still re-applies the
+   kube-context override by value, https://github.com/abradner/hoist/issues/295), and a command never assigns a
    `Settings` field it received from there. Whether a flag was given is `sel.given[name]`
    (set by `fs.Visit`), never `value == ""` (see also entry 16). Regression tests, in
    `cmd/hoist`: `TestDeployUsesTheReposKubeContext` (fails with the override line restored: `a

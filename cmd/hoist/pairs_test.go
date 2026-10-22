@@ -86,18 +86,24 @@ func TestPlanRefusesWhenEnvsPairsCannotFillTheOtherEnvIn(t *testing.T) {
 // is the case the "given" check exists for; the omitted flag beside it is the positive control.
 func TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs(t *testing.T) {
 	cfg := pairsConfig(t)
-	for _, args := range [][]string{
-		{"--from", "app-staging", "--to", ""},
-		{"--from", "", "--to", "app-production"},
-		{"--to", ""},
-	} {
-		code, out, errOut := run3(t, append([]string{"--config", cfg, "--digest-sources", "none", "plan", "--dry-run"}, args...)...)
-		if code != exitUsage || !strings.Contains(errOut, "hoist plan: --repo, --from and --to are required") || strings.Contains(errOut, "envs.pairs promotes") || out != "" {
-			t.Errorf("%q: exit %d, stdout %q, stderr %.200q; want the plain refusal and nothing planned", args, code, out, errOut)
+	for _, cmd := range []string{"plan", "promote"} {
+		for _, args := range [][]string{
+			{"--from", "app-staging", "--to", ""},
+			{"--from", "", "--to", "app-production"},
+			{"--to", ""},
+		} {
+			full := append([]string{"--config", cfg, "--digest-sources", "none", cmd}, args...)
+			if cmd == "plan" {
+				full = append(full, "--dry-run")
+			}
+			code, out, errOut := run3(t, full...)
+			if code != exitUsage || !strings.Contains(errOut, "hoist "+cmd+": --repo, --from and --to are required") || strings.Contains(errOut, "envs.pairs promotes") || out != "" {
+				t.Errorf("%s %q: exit %d, stdout %q, stderr %.200q; want the plain refusal and nothing planned or started", cmd, args, code, out, errOut)
+			}
 		}
 	}
 	if code, _, errOut := run3(t, "--config", cfg, "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 {
-		t.Errorf("positive control: the same command with the flag omitted rather than empty failed: exit %d: %.200s", code, errOut)
+		t.Errorf("positive control: the same plan with the flag omitted rather than empty failed: exit %d: %.200s", code, errOut)
 	}
 }
 
