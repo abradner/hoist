@@ -107,6 +107,9 @@ func Label(name engine.StepName) string {
 type Row struct {
 	Step  engine.StepName
 	Glyph string
+	// Superseded mirrors the step's Observation.Superseded: done, because a later change
+	// replaced what this promotion wrote (#168).
+	Superseded bool
 	// Active is true for exactly the one row DeriveRows considers "current" — the step
 	// Status stopped at (Blocked, Waiting, or plainly not yet Satisfied). Never true when
 	// done is true: every row is Done then.
@@ -171,7 +174,7 @@ func deriveRow(name engine.StepName, byStep map[engine.StepName]engine.StepStatu
 	case st.Waiting:
 		return Row{Step: name, Glyph: GlyphWaiting, Active: true, Detail: st.Detail}
 	case st.Satisfied:
-		return Row{Step: name, Glyph: GlyphDone, Detail: st.Detail}
+		return Row{Step: name, Glyph: GlyphDone, Detail: st.Detail, Superseded: st.Superseded}
 	default:
 		// Not satisfied, not waiting, not blocked: Drive has not yet acted on this step
 		// (or is about to) — the active row.
@@ -180,18 +183,31 @@ func deriveRow(name engine.StepName, byStep map[engine.StepName]engine.StepStatu
 }
 
 func doneRows(order []engine.StepName, statuses []engine.StepStatus) []Row {
-	var finalDetail string
+	var final engine.Observation
 	if len(statuses) > 0 {
-		finalDetail = statuses[len(statuses)-1].Detail
+		final = statuses[len(statuses)-1].Observation
 	}
 	rows := make([]Row, len(order))
 	for i, name := range order {
 		rows[i] = Row{Step: name, Glyph: GlyphDone}
 	}
 	if n := len(rows); n > 0 {
-		rows[n-1].Detail = finalDetail
+		rows[n-1].Detail = final.Detail
+		rows[n-1].Superseded = final.Superseded
 	}
 	return rows
+}
+
+// DoneWord is how a done promotion names its state: "done", or "done · superseded" when a
+// step was satisfied because a later change replaced what this promotion wrote (#168) — so a
+// promotion that finished that way never reads as one whose own images rolled out.
+func DoneWord(rows []Row) string {
+	for _, r := range rows {
+		if r.Superseded {
+			return "done · superseded"
+		}
+	}
+	return "done"
 }
 
 // ActiveStep is the row DeriveRows marked Active, if any — "" when every row is done or

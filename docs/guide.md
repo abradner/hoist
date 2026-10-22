@@ -565,7 +565,8 @@ promotion's to wait for; it is judged image by image, so in a promotion that cha
 Deployments and had only one replaced by a later deploy, the other still has to roll out. Once
 nothing is left, `hoist promotions` shows it as
 `done (superseded by a later change to the same image repo; …)`, naming what the base declares
-now, and archives it like any other finished promotion. A cluster running something the base does *not*
+now, the flight screen reads `done · superseded`, and it is archived like any other finished
+promotion. A cluster running something the base does *not*
 declare is drift, not a later deploy, and the promotion keeps waiting at the rollout.
 
 **What is cleaned up, and when.** A promotion's worktree

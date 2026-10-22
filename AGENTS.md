@@ -205,10 +205,13 @@ at the base tip `FetchBranch` returns, never at `LandedSHA()`, which on the PR p
 commit where the edits were necessarily intact, and only when `LandedSHA()` is in that tip's
 history. An intact, reverted or gone occurrence, or a container missing from the live spec, still
 gates; a Deployment whose every occurrence is superseded is not gated on its rollout or its
-deadline, since those are the later change's. The step is then Satisfied, and its detail leads
-with "superseded by a later change to the same image repo", so the CLI's `done (…)` line says how
-the promotion finished; the recorded `Phase` reads `rolled-out`, which, like every `Phase`, is an
-index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it: one
+deadline, since those are the later change's. The step is then Satisfied with
+`Observation.Superseded` set, a typed qualifier rather than a new terminal kind — so `Status`,
+`Landed`, archiving and cleanup treat it as done unchanged — and every surface that names the
+outcome says how it finished: the detail leads with "superseded by a later change to the same
+image repo" (the CLI's `done (…)` line), and the flight screen reads "done · superseded"
+(`flight.DoneWord`), never "done" alone (principle 1). The recorded `Phase` reads `rolled-out`,
+which, like every `Phase`, is an index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it: one
 superseded occurrence would retire the gate on every other edit in the same block, which is what
 reverted the first attempt at this (#167's review, §9 entry 19). It asks only when some live
 image mismatches, so an ordinary rollout pays no fetch. *Interim, stated not enforced:*

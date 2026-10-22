@@ -666,7 +666,7 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		sort.Strings(replaced)
 		lines = append(append([]string{"superseded by a later change to the same image repo"}, replaced...), lines...)
 	}
-	return Observation{Satisfied: true, Detail: strings.Join(lines, "; ")}, nil
+	return Observation{Satisfied: true, Superseded: anyExempt, Detail: strings.Join(lines, "; ")}, nil
 }
 
 // supersededAtBase judges each of wants at the base's current tip and returns the ones a later

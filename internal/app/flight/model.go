@@ -750,7 +750,7 @@ func (m Model) stateWord() string {
 	case m.building:
 		return "starting"
 	case m.done:
-		return "done"
+		return DoneWord(m.rows)
 	case m.stopped:
 		if _, blocked := BlockedStep(m.rows); blocked {
 			return "blocked"
@@ -911,7 +911,7 @@ func (m Model) actionSection() string {
 	approvalWaiting := hasActive && approvalStep == engine.StepApproved && !m.stopped && text != ""
 	switch {
 	case m.done:
-		return m.styles.Good.Render("done")
+		return m.styles.Good.Render(DoneWord(m.rows))
 	case m.stopped:
 		if _, blocked := BlockedStep(m.rows); blocked {
 			// The reason itself is never repeated here (TestReasonOnceNamesShiftC): it is
@@ -1016,6 +1016,9 @@ func (m Model) notes() string {
 
 func (m Model) statusLeft() string {
 	if m.done {
+		if DoneWord(m.rows) != "done" {
+			return "promotion complete · superseded"
+		}
 		return "promotion complete"
 	}
 	if m.stopped {

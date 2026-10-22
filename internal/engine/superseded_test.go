@@ -112,8 +112,8 @@ func TestScenarioPRPathSupersededPromotionGoesTerminal(t *testing.T) {
 		t.Fatalf("setup: MergeSHA moved from %s to %s; the test must judge the revision production code leaves", mergeSHA, s.MergeSHA)
 	}
 	obs := w.rolledOutObservation(s)
-	if !obs.Satisfied || !strings.Contains(obs.Detail, "superseded") || !strings.Contains(obs.Detail, supersededRef) {
-		t.Errorf("RolledOutStep should be satisfied and name the later reference that superseded it, got %+v", obs)
+	if !obs.Satisfied || !obs.Superseded || !strings.Contains(obs.Detail, "superseded") || !strings.Contains(obs.Detail, supersededRef) {
+		t.Errorf("RolledOutStep should be satisfied, typed Superseded, and name the later reference that superseded it, got %+v", obs)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestScenarioDirectPathSupersededPromotionGoesTerminal(t *testing.T) {
 	if err := Drive(context.Background(), w.directSteps(), s, nil); err != nil {
 		t.Fatalf("a superseded direct promotion must reach a full terminal pass, got: %v", err)
 	}
-	if obs := w.rolledOutObservation(s); !obs.Satisfied || !strings.Contains(obs.Detail, "superseded") {
-		t.Errorf("RolledOutStep should be satisfied and say superseded, got %+v", obs)
+	if obs := w.rolledOutObservation(s); !obs.Satisfied || !obs.Superseded || !strings.Contains(obs.Detail, "superseded") {
+		t.Errorf("RolledOutStep should be satisfied, typed Superseded, and say superseded, got %+v", obs)
 	}
 }
 
@@ -206,10 +206,22 @@ func TestRolledOutKeepsWaitingOnAnIntactOccurrenceBesideASupersededOne(t *testin
 		if !obs.Satisfied {
 			t.Fatalf("app rolled out and worker was superseded; want Satisfied, got %+v", obs)
 		}
-		if !strings.Contains(obs.Detail, "worker") || !strings.Contains(obs.Detail, "superseded") {
-			t.Errorf("Detail should say the worker was superseded, got %q", obs.Detail)
+		if !obs.Superseded || !strings.Contains(obs.Detail, "worker") || !strings.Contains(obs.Detail, "superseded") {
+			t.Errorf("the observation should be typed Superseded and say the worker was, got %+v", obs)
 		}
 	})
+}
+
+// TestRolledOutIntactRolloutIsNotSuperseded is the control for Observation.Superseded: a
+// promotion whose own images rolled out is done, and must not read as replaced.
+func TestRolledOutIntactRolloutIsNotSuperseded(t *testing.T) {
+	w := newWorld(t)
+	s := w.promote()
+	w.merge(s)
+	w.ro = satisfiedRollout(s.TargetEnv, s.Edits)
+	if obs := w.rolledOutObservation(s); !obs.Satisfied || obs.Superseded || strings.Contains(obs.Detail, "superseded") {
+		t.Errorf("an intact, rolled-out promotion is done and not superseded, got %+v", obs)
+	}
 }
 
 // TestRolledOutDoesNotExemptARevertedPromotion is the control for the exemption: a revert puts

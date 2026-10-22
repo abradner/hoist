@@ -45,11 +45,17 @@ const (
 //     itself.
 //   - Detail: a short human-readable note for History and CLI output; never a substitute for
 //     Satisfied/Waiting/Blocked in code that branches on the result.
+//   - Superseded: qualifies Satisfied — the step's goal holds because a later change replaced
+//     what this promotion wrote, not because this promotion's own change took effect (#168).
+//     Set only by RolledOutStep, for an occurrence a later deploy of the same image repo
+//     superseded at the base; a renderer says "superseded" rather than "done" alone, so a
+//     finished promotion never reads as one whose own images rolled out (principle 1).
 type Observation struct {
-	Satisfied bool
-	Waiting   bool
-	Detail    string
-	Blocked   string
+	Satisfied  bool
+	Waiting    bool
+	Detail     string
+	Blocked    string
+	Superseded bool
 }
 
 // Step is one stage of a promotion. Observe must have no side effects beyond querying the
