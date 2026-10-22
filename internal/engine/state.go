@@ -153,8 +153,8 @@ type PromotionState struct {
 	// ArgoSyncedStep.revisionCarries used to call observeLanded over the whole
 	// promotion and apply that one verdict to every Application in the loop, so one Application
 	// superseded by a later deploy silently skipped the health check on every OTHER Application
-	// in the same block — the same class of bug AGENTS.md §4.1's #168 interim-state note
-	// already names for RolledOutStep, found independently in ArgoSyncedStep too).
+	// in the same block — the same class of bug #168 found in RolledOutStep, which now asks
+	// per occurrence instead, AGENTS.md §4.1 and §9 entry 19).
 	EditApps map[string]string
 }
 

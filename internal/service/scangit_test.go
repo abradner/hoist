@@ -503,7 +503,9 @@ func TestScanOverDirectAndPRPromotionsAsksOriginOnce(t *testing.T) {
 // is the price of not deleting anything on a snapshot's say-so, and it must be a one-off: the
 // listing that cleans pays it, and the next listing over the same promotions is exactly the
 // scan's own cost again (one fetch, two listings, no per-branch ls-remote). Covers the two
-// shapes that pile up: finished, and landed but never satisfied at rolled-out (#168).
+// shapes that pile up: finished, and landed but never satisfied at rolled-out — here the cluster
+// runs something the base does not declare, which stays non-terminal; a promotion a later deploy
+// superseded at the base goes terminal instead (#168, TestListArchivesAPromotionALaterDeploySuperseded).
 func TestListPaysForCleanupOncePerPromotion(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -811,10 +813,12 @@ func TestScanDoesNotCallAPromotionFinishedOnAStaleSnapshot(t *testing.T) {
 	}
 }
 
-// TestListSharesOriginAcrossPromotionsThatNeverGoTerminal covers the states that actually pile
-// up: merged, branch deleted, but never satisfied at rolled-out (#168). They are not finished,
-// so their verdict has to come from the shared snapshot too, or the listing's cost grows with
-// them exactly as before.
+// TestListSharesOriginAcrossPromotionsThatNeverGoTerminal covers the states that pile up:
+// merged, branch deleted, but never satisfied at rolled-out. Before #168 every superseded
+// promotion was one; now it is a cluster running something its base does not declare (the shape
+// built here — the base still has this promotion's reference). They are not finished, so their
+// verdict has to come from the shared snapshot too, and RolledOutStep's own read of the base for
+// a mismatched image must come from it as well, or the listing's cost grows with them.
 func TestListSharesOriginAcrossPromotionsThatNeverGoTerminal(t *testing.T) {
 	fx := newInflightFixture(t)
 	s := finishedPromotion(t, fx)

@@ -69,6 +69,11 @@ func TestSummarizeOtherShapes(t *testing.T) {
 	if done.Verdict() != "done" || strings.Contains(done.StepStrip(), "·") {
 		t.Errorf("done = %q / %q", done.Verdict(), done.StepStrip())
 	}
+	// Done by being superseded (#168): still done, and says how.
+	superseded := Summarize(st, true, []engine.StepStatus{{Step: engine.StepRolledOut, Observation: engine.Observation{Satisfied: true, Superseded: true, Detail: "superseded by a later change to the same image repo"}}}, nil)
+	if superseded.Verdict() != "done · superseded" {
+		t.Errorf("superseded = %q", superseded.Verdict())
+	}
 	// Direct: the direct step order, no PR step at all.
 	st.Direct = true
 	direct := Summarize(st, false, []engine.StepStatus{sat(engine.StepDirectGate), sat(engine.StepBranched), {Step: engine.StepCommitted}}, nil)

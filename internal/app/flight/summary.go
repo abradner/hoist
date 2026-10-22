@@ -105,13 +105,14 @@ func (s Summary) StepStrip() string {
 
 // Verdict is the one phrase that survives every width (docs/tui/mockups.html: "degrade by
 // dropping evidence, never the verdict"): "done", "blocked on approval", "waiting on CI",
-// "blocked: <reason>" for a real conflict, or "cannot re-observe" when Err is set.
+// "blocked: <reason>" for a real conflict, or "cannot re-observe" when Err is set; "done ·
+// superseded" for a promotion a later change replaced (DoneWord).
 func (s Summary) Verdict() string {
 	switch {
 	case s.Err != "":
 		return "cannot re-observe"
 	case s.Done:
-		return "done"
+		return DoneWord(s.Rows)
 	}
 	for _, r := range s.Rows {
 		if !r.Active {

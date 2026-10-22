@@ -1,0 +1,24 @@
+╭─ hoist · promotion · done · superseded ──────────────────────────────────────╮
+│abcd1234   app-staging → app-production                     started 4 days ago│
+├──────────────────────────────────────────────────────────────────────────────┤
+│✓ branch                                                                      │
+│✓ commit                                                                      │
+│✓ push                                                                        │
+│✓ PR                                                                          │
+│✓ CI                                                                          │
+│✓ approval                                                                    │
+│✓ merge                                                                       │
+│✓ argo refresh                                                                │
+│✓ argo sync                                                                   │
+│✓ rollout                                                                     │
+│    superseded by a later change to the same image repo; app: superseded      │
+│    (deployment.yaml declares ghcr.io/example/app:v3 at                       │
+│    spec.template.spec.containers[0].image)                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│done · superseded                                                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│history                                                                       │
+│4 days ago  branch        acted                                               │
+│…                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+promotion complete · superseded  esc back · o open PR · w watch · l log · ? help

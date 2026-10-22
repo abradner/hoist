@@ -64,6 +64,27 @@ func TestFlightGolden(t *testing.T) {
 	// golden-vs-mockup diff (T3-06's own review gate) has a same-size comparison to make.
 	uitest.Golden(t, "flight-done", doneSnap().SetSize(80, 16).View(), 80, 16)
 
+	// Done because a later deploy superseded it (#168): the title, the action line and the
+	// status bar all say so, never "done" alone.
+	supersededSnap := func() Model {
+		s := fixtureState()
+		s.PR = &forge.PR{Number: 103, URL: "https://forge.example.invalid/pr/103"}
+		snap := stepping(s, true, []engine.StepStatus{st(engine.StepRolledOut, engine.Observation{
+			Satisfied: true, Superseded: true,
+			Detail: "superseded by a later change to the same image repo; app: superseded (deployment.yaml declares ghcr.io/example/app:v3 at spec.template.spec.containers[0].image)",
+		})})
+		snap.Busy = false
+		return NewAttached(snap, PollDurations{}).WithNow(now).SetStyles(ui.NewStyles(true))
+	}
+	sv := supersededSnap().SetSize(80, 24).View()
+	for _, want := range []string{"done · superseded", "superseded by a later change"} {
+		if !contains(sv, want) {
+			t.Errorf("a superseded promotion's flight screen must say %q:\n%s", want, sv)
+		}
+	}
+	uitest.Golden(t, "flight-superseded", sv, 80, 24)
+	uitest.Golden(t, "flight-superseded", supersededSnap().SetSize(120, 40).View(), 120, 40)
+
 	s := fixtureState()
 	s.Direct, s.SourceEnv = true, ""
 	directSnap := stepping(s, false, []engine.StepStatus{

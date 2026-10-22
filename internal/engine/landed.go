@@ -78,66 +78,17 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, edits []gito
 	if intact {
 		return landedIntact, "", nil
 	}
-	byFile := map[string][]gitops.Edit{}
-	for _, e := range edits {
-		byFile[e.File] = append(byFile[e.File], e)
+	occs, err := observeOccurrences(ctx, g, dir, rev, edits)
+	if err != nil {
+		return landedGone, "", err
 	}
-	files := make([]string, 0, len(byFile))
-	for f := range byFile {
-		files = append(files, f)
-	}
-	sort.Strings(files)
-
 	var superseded []string
-	for _, f := range files {
-		content, ok, err := g.CatFile(ctx, dir, rev, f)
-		if err != nil {
-			return landedGone, "", err
-		}
-		if !ok {
-			return landedGone, fmt.Sprintf("%s is not present at %s", f, rev), nil
-		}
-		// Scan the manifest as discovery does and index by (document, YAML path), so each Edit
-		// is judged at the occurrence it actually recorded. Searching the file's bytes instead
-		// cannot do that: a file with two occurrences of one image repo — a Deployment and its
-		// worker, the ordinary shape — satisfies a whole-file predicate on the strength of
-		// either one, so an occurrence repointed elsewhere reads as unchanged, and a false
-		// landedIntact here silently retires findInFlight's one-in-flight-per-env invariant
-		// (#167).
-		//
-		// A file that no longer parses, or whose recorded occurrence is gone from it, is
-		// landedGone: a promotion cannot claim to have landed at a revision where it cannot
-		// find the scalar it wrote.
-		found, err := gitops.OccurrencesIn(f, content)
-		if err != nil {
-			return landedGone, fmt.Sprintf("%s does not parse at %s: %v", f, rev, err), nil
-		}
-		declared := make(map[occKey]string, len(found))
-		for _, o := range found {
-			declared[occKey{doc: o.Doc, path: o.Path}] = o.Ref.String()
-		}
-		for _, e := range byFile[f] {
-			now, present := declared[occKey{doc: e.Doc, path: e.Path}]
-			switch {
-			case !present:
-				return landedGone, fmt.Sprintf(
-					"%s no longer declares an image at %s (document %d)", f, e.Path, e.Doc,
-				), nil
-			case now == e.New.String():
-				// This occurrence carries exactly what was planned. Some other occurrence is
-				// what made the blob check fail; keep looking.
-			case !e.NoOp() && now == e.Ref.String():
-				return landedReverted, fmt.Sprintf(
-					"%s declares %s at %s — the reference this promotion edited away from",
-					f, now, e.Path,
-				), nil
-			case repoOf(now) == e.New.Repo:
-				superseded = append(superseded, fmt.Sprintf("%s declares %s at %s", f, now, e.Path))
-			default:
-				return landedGone, fmt.Sprintf(
-					"%s declares %s at %s — not %s at all", f, now, e.Path, e.New.Repo,
-				), nil
-			}
+	for _, o := range occs {
+		switch o.verdict {
+		case landedReverted, landedGone:
+			return o.verdict, o.detail, nil
+		case landedSuperseded:
+			superseded = append(superseded, o.detail)
 		}
 	}
 	if len(superseded) == 0 {
@@ -152,6 +103,102 @@ func observeLanded(ctx context.Context, g git.Git, dir, rev string, edits []gito
 		"superseded by a later change to the same image repo: %s (this promotion planned %s)",
 		strings.Join(superseded, "; "), plannedRefs(edits),
 	), nil
+}
+
+// occurrenceVerdict is what one revision says about one Edit: the per-occurrence half of
+// observeLanded, which aggregates these into a verdict for a whole set of edits.
+type occurrenceVerdict struct {
+	edit    gitops.Edit
+	verdict landedVerdict
+	// detail names what rev declares at this occurrence when that is not the plan; empty for
+	// landedIntact.
+	detail string
+}
+
+// observeOccurrences judges each edit at rev on its own, at the document index and YAML path
+// the Edit recorded (AGENTS.md §4.1), and returns one verdict per edit — files in sorted order,
+// edits within a file in the order given, so the first non-intact entry is the same one
+// observeLanded has always reported.
+//
+// A caller that gates per-occurrence work needs this rather than observeLanded's aggregate
+// (#168): observeLanded reports landedSuperseded for a set in which ANY occurrence is
+// superseded and the rest intact, so a step that exempted everything on that answer would stop
+// gating the intact occurrences too — including one whose rollout has not happened yet.
+//
+// The checks per occurrence are ordered exactly as observeLanded's doc comment explains: the
+// planned reference, then the reference edited away from (a no-op edit is exempt, since the two
+// are the same string), then the same image repo at some other reference.
+func observeOccurrences(ctx context.Context, g git.Git, dir, rev string, edits []gitops.Edit) ([]occurrenceVerdict, error) {
+	byFile := map[string][]gitops.Edit{}
+	for _, e := range edits {
+		byFile[e.File] = append(byFile[e.File], e)
+	}
+	files := make([]string, 0, len(byFile))
+	for f := range byFile {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+
+	out := make([]occurrenceVerdict, 0, len(edits))
+	for _, f := range files {
+		// gone marks every edit in f with the same reason, for a file this revision cannot
+		// answer for at all.
+		gone := func(detail string) {
+			for _, e := range byFile[f] {
+				out = append(out, occurrenceVerdict{edit: e, verdict: landedGone, detail: detail})
+			}
+		}
+		content, ok, err := g.CatFile(ctx, dir, rev, f)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			gone(fmt.Sprintf("%s is not present at %s", f, rev))
+			continue
+		}
+		// Scan the manifest as discovery does and index by (document, YAML path), so each Edit
+		// is judged at the occurrence it actually recorded. Searching the file's bytes instead
+		// cannot do that: a file with two occurrences of one image repo — a Deployment and its
+		// worker, the ordinary shape — satisfies a whole-file predicate on the strength of
+		// either one, so an occurrence repointed elsewhere reads as unchanged, and a false
+		// landedIntact here silently retires findInFlight's one-in-flight-per-env invariant
+		// (#167).
+		//
+		// A file that no longer parses, or whose recorded occurrence is gone from it, is
+		// landedGone: a promotion cannot claim to have landed at a revision where it cannot
+		// find the scalar it wrote.
+		found, err := gitops.OccurrencesIn(f, content)
+		if err != nil {
+			gone(fmt.Sprintf("%s does not parse at %s: %v", f, rev, err))
+			continue
+		}
+		declared := make(map[occKey]string, len(found))
+		for _, o := range found {
+			declared[occKey{doc: o.Doc, path: o.Path}] = o.Ref.String()
+		}
+		for _, e := range byFile[f] {
+			now, present := declared[occKey{doc: e.Doc, path: e.Path}]
+			v := occurrenceVerdict{edit: e}
+			switch {
+			case !present:
+				v.verdict = landedGone
+				v.detail = fmt.Sprintf("%s no longer declares an image at %s (document %d)", f, e.Path, e.Doc)
+			case now == e.New.String():
+				v.verdict = landedIntact
+			case !e.NoOp() && now == e.Ref.String():
+				v.verdict = landedReverted
+				v.detail = fmt.Sprintf("%s declares %s at %s — the reference this promotion edited away from", f, now, e.Path)
+			case repoOf(now) == e.New.Repo:
+				v.verdict = landedSuperseded
+				v.detail = fmt.Sprintf("%s declares %s at %s", f, now, e.Path)
+			default:
+				v.verdict = landedGone
+				v.detail = fmt.Sprintf("%s declares %s at %s — not %s at all", f, now, e.Path, e.New.Repo)
+			}
+			out = append(out, v)
+		}
+	}
+	return out, nil
 }
 
 // occKey identifies one occurrence within one file the way Occurrence itself does: the document

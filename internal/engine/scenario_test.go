@@ -176,54 +176,6 @@ func TestScenarioResumeAfterKillIsIdempotentDirectPath(t *testing.T) {
 	}
 }
 
-// TestScenarioSupersededPromotionNeverReachesRolledOutTerminal is the one case the plan expects
-// to fail and says to let it: RolledOutStep still compares live containers against this
-// promotion's own Edit.New (internal/engine's own package doc comment, "interim state, stated
-// not enforced (#168)") — a promotion superseded by a later deploy will never see that image
-// again, so while stillInFlight (findInFlight's own read) correctly retires it on the direct
-// path (TestScenarioDirectPathSupersededRetiresInFlight above), the FULL pipeline including
-// convergence never goes terminal for it.
-//
-// Deliberately does NOT use w.rollsOut here: rollsOut builds its rollout.Fake from s.Edits —
-// this promotion's OWN planned image — which by construction always satisfies RolledOutStep
-// regardless of any supersede, so it could never exercise #168 at all (a mutation-review finding
-// against an earlier version of this test, which used rollsOut and therefore silently passed
-// even unskipped). The live cluster here instead genuinely runs what superseded it — exactly
-// what a real cluster reports once the later deploy's own rollout completed — so RolledOutStep's
-// own image comparison against this promotion's stale Edit.New can never match.
-//
-// Skipped naming #168; #168's own PR deletes this skip once RolledOutStep's gate moves to the
-// per-occurrence landed verdict the package doc comment describes as the fix.
-func TestScenarioSupersededPromotionNeverReachesRolledOutTerminal(t *testing.T) {
-	t.Skip("known gap, #168: RolledOutStep still gates on this promotion's own Edit.New, which a superseded promotion never sees again")
-
-	w := newWorld(t)
-	s := w.promote()
-	w.merge(s)
-	supersededRef := "ghcr.io/example/app:v3@sha256:" + strings.Repeat("2", 64)
-	w.supersede(supersededRef)
-	w.argoSyncs(s)
-
-	deployments, _ := groupEditsByWorkload(s.Edits)
-	ro := &rollout.Fake{}
-	for name, wants := range deployments {
-		imgs := make([]rollout.ContainerImage, len(wants))
-		for i, want := range wants {
-			imgs[i] = rollout.ContainerImage{Name: want.Container, Init: want.Init, Image: supersededRef}
-		}
-		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
-			Namespace: s.TargetEnv, Name: name, Images: imgs,
-			Complete: true, Detail: "rolled out the later, superseding deploy",
-		})
-	}
-	w.ro = ro
-	w.drive(s, w.prSteps())
-
-	if err := Drive(context.Background(), w.prSteps(), s, nil); err != nil {
-		t.Fatalf("#168 fixed: a superseded promotion now reaches a full terminal pass, got: %v", err)
-	}
-}
-
 // TestScenarioArgoSyncedRolloutCauseComposesWithARealDrive closes a gap an aggregate
 // cross-stack review found: the harness's own argoSyncs verb always reports Synced+Healthy in
 // one shot, so nothing here had ever driven a full sequence through ArgoSyncedStep's own

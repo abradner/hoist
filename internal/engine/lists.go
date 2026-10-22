@@ -91,7 +91,7 @@ func AllSteps(g git.Git, f forge.Forge, a argo.Argo, ro rollout.Rollout, onWaiti
 // caller with no clone at all, which costs that caller the ancestry check — see
 // ArgoSyncedStep.Git.
 func ConvergeSteps(g git.Git, a argo.Argo, ro rollout.Rollout) []Step {
-	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}, RolledOutStep{Rollout: ro}}
+	return []Step{ArgoRefreshedStep{Argo: a}, ArgoSyncedStep{Argo: a, Git: g, Rollout: ro}, RolledOutStep{Rollout: ro, Git: g}}
 }
 
 // DirectSteps returns the steps a direct-mode promotion drives: the production/confirmation

@@ -476,7 +476,7 @@ func TestDrivingAPromotionToDoneCleansUpAfterItself(t *testing.T) {
 // TestSteppingAPromotionCleansUpAtLandingNotAtDone is the TUI's shape of the same thing: a drive
 // stepped one poll at a time (session.Controller) removes the worktree on the tick that shows
 // the promotion landed, while it is still waiting on the rollout — which is what makes the
-// cleanup independent of a rollout that never completes (#168).
+// cleanup independent of a rollout that may never complete (a cluster that drifted from the base).
 func TestSteppingAPromotionCleansUpAtLandingNotAtDone(t *testing.T) {
 	fx := newInflightFixture(t)
 	s := buildPROpenedPromotionsState(t, fx)
