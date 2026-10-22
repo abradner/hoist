@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
@@ -75,13 +73,11 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// --digest-sources/--registry-auth (#132's followup: promote had silently fallen back
 	// to the config's chain).
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
-		fmt.Fprintf(stderr, "hoist promote: %s\n", msg)
-		return exitUsage
+		return failf(stderr, "hoist promote", exitUsage, "%s", msg)
 	}
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist promote", exitFailure, err)
 	}
 	if eff.repo == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist promote: --repo, --from and --to are required")
@@ -94,28 +90,20 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitUsage
+		return fail(stderr, "hoist promote", exitUsage, err)
 	}
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist promote", exitFailure, err)
 	}
 	set := settingsFor(cfg, eff)
 	set.Resolve = opts
 	svc := service.New(set, serviceDeps())
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist promote", exitFailure, err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
-	}
 
 	// Plan prepends resolve.Warnings itself now (service.Plan's own doc comment) — runPlan and
 	// the TUI plan screen go through the identical call, so a pods/manifest digest disagreement
@@ -131,8 +119,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests, Progress: n.progress})
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promote: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist promote", exitFailure, err)
 	}
 	plan := pc.Plan
 
@@ -177,8 +164,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 	}
 	var usage *service.UsageError
 	if errors.As(err, &usage) {
-		fmt.Fprintf(stderr, "%s: %s\n", cmdName, usage.Msg)
-		return exitUsage, true
+		return failf(stderr, cmdName, exitUsage, "%s", usage.Msg), true
 	}
 	fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))
 	return exitFailure, true

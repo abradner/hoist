@@ -1,13 +1,10 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
@@ -28,18 +25,6 @@ func promotionsSettings(cfg *config.Config, kubeOverride string) service.Setting
 		set.Retain = time.Duration(cfg.State.Retain)
 	}
 	return set
-}
-
-// boundedCommandContext gives runPromotions/runResume/runAbandon the same interruptible,
-// deadline-bounded context: talking to a real
-// forge/git/cluster (AGENTS.md §4.3) must never hang the command forever on one bad candidate.
-func boundedCommandContext(deadline time.Duration) (context.Context, context.CancelFunc) {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	if deadline <= 0 {
-		return ctx, stop
-	}
-	ctx, cancel := context.WithTimeout(ctx, deadline)
-	return ctx, func() { cancel(); stop() }
 }
 
 // runPromotions is `hoist promotions`: lists every promotion state file under
@@ -71,7 +56,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	set := promotionsSettings(cfg, *kubeContext)
 	svc := service.New(set, serviceDeps())
 
-	ctx, stop := boundedCommandContext(set.Deadline)
+	ctx, stop := commandContext(set.Deadline)
 	defer stop()
 
 	n := newNarrator(stderr, *quiet)
@@ -83,8 +68,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	// Everything after the re-observation is this command's own output.
 	n.idle()
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist promotions: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist promotions", exitFailure, err)
 	}
 	if len(listed) == 0 && !*archived {
 		if *repoFilter != "" {
@@ -132,8 +116,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	if *archived {
 		arch, err := svc.ListArchived(*repoFilter)
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist promotions: listing archived promotions: %v\n", err)
-			return exitFailure
+			return failf(stderr, "hoist promotions", exitFailure, "listing archived promotions: %v", err)
 		}
 		for _, s := range arch {
 			if archivedThisRun[s.ID] {
@@ -172,7 +155,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 
 	set := promotionsSettings(cfg, *kubeContext)
 	svc := service.New(set, serviceDeps())
-	ctx, stop := boundedCommandContext(set.Deadline)
+	ctx, stop := commandContext(set.Deadline)
 	defer stop()
 
 	n := newNarrator(stderr, *quiet)
@@ -191,11 +174,9 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		if err != nil {
 			var ambiguous *service.AmbiguousError
 			if errors.As(err, &ambiguous) {
-				fmt.Fprintf(stderr, "hoist resume: %v\n", ambiguous)
-				return exitUsage
+				return fail(stderr, "hoist resume", exitUsage, ambiguous)
 			}
-			fmt.Fprintf(stderr, "hoist resume: %v\n", err)
-			return exitFailure
+			return fail(stderr, "hoist resume", exitFailure, err)
 		}
 		id = st.ID
 		n.idle()
@@ -217,8 +198,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// comment).
 	d, err := svc.Resume(ctx, id, service.ResumeOpts{OverrideCINone: *overrideCINone, Hooks: n.hooks(onWaiting)})
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist resume: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist resume", exitFailure, err)
 	}
 	err = d.Run(ctx, n.runHooks())
 	s := d.State()

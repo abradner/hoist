@@ -135,7 +135,7 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 		rep.Removed = append(rep.Removed, fmt.Sprintf("%s registry cache entry %s (unused for over %d days)", verb, p, int(registryCacheMaxAge.Hours()/24)))
 	}
 	if err != nil {
-		rep.Failed = append(rep.Failed, "could not prune the registry cache: "+err.Error())
+		rep.Failed = append(rep.Failed, "could not prune the registry cache: "+redact.Strings(err.Error()))
 	}
 	return rep, nil
 }
