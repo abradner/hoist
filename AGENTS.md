@@ -522,8 +522,9 @@ A command that takes no positional argument — `plan`, `promote`, `deploy`, `re
 same way a flag given as the next argument of a value-taking flag (`--confirm-direct
 --dry-run`). `flag.Parse` would otherwise drop the flags after a stray word, or lose the
 swallowed one, in silence (§9 entry 16). `resume` and `abandon` take an id and parse through
-`parseWithID`, which makes the same two refusals on either side of it. *Interim, stated not
-enforced:* the root flag set (flags before the subcommand) is not checked for a swallowed flag.
+`parseWithID`, which makes the same two refusals on either side of it; after a `--` every
+argument is positional, so what follows the id is refused rather than parsed again (#254).
+*Interim, stated not enforced:* the root flag set (flags before the subcommand) is not checked for a swallowed flag.
 
 ### CLI commands
 
@@ -1272,7 +1273,9 @@ test lives** (if one exists).
    argument, and a flag taken as another flag's value, by name before the command does
    anything; one that takes an id parses both sides of it. No subcommand calls `flag.Parse`
    directly — `TestOnlyTheParsersCallFlagParse` holds an allowlist of the three functions that
-   may: the root, `parseFlagsOnly`, and `parseWithID` for `resume` and `abandon`. And a flag that guards a write
+   may: the root, `parseFlagsOnly`, and `parseWithID` for `resume` and `abandon`. A `--` ends the
+   flags for `parseWithID` too: what follows the id after one is refused, not reparsed (#254).
+   And a flag that guards a write
    gets a test in which something goes wrong on the command line before it. (Numbered 16:
    entries 14 and 15 are taken by changes in flight when this was written.) Regression tests:
    `cmd/hoist/stray_test.go`, one per command — the deploy and restart cases assert that

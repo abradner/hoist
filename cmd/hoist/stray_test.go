@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -242,6 +243,58 @@ func TestOnlyTheParsersCallFlagParse(t *testing.T) {
 	for _, c := range callers {
 		if _, ok := allowed[c]; !ok {
 			t.Errorf("%s calls fs.Parse directly; parse its command line through parseFlagsOnly (or a parser that takes an id)", c)
+		}
+	}
+}
+
+// `--` ends option parsing: every argument after it is a positional, the id included, so a flag
+// typed after the id on that side of the delimiter is a second positional to refuse — not a flag
+// to honour. parseWithID used to reparse what followed the id whatever had come before it, so
+// `resume -- <id> --override-ci-none` set the override the caller had just said was not a flag
+// (#254).
+
+func TestResumeRefusesAFlagAfterTheDelimiter(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
+	var out, errOut bytes.Buffer
+	got := runResume([]string{"--", "some-id", "--override-ci-none"}, &config.Config{}, selection{given: map[string]bool{}}, &out, &errOut)
+	if got != exitUsage || !strings.Contains(errOut.String(), `unexpected argument "--override-ci-none" after some-id`) {
+		t.Fatalf("exit %d, want %d naming the argument; stderr: %s", got, exitUsage, errOut.String())
+	}
+}
+
+func TestAbandonRefusesAFlagAfterTheDelimiter(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "xdg-state"))
+	var out, errOut bytes.Buffer
+	got := runAbandon([]string{"--", "some-id", "--confirm-abandon=some-id"}, &config.Config{}, &out, &errOut)
+	if got != exitUsage || !strings.Contains(errOut.String(), `unexpected argument "--confirm-abandon=some-id" after some-id`) {
+		t.Fatalf("exit %d, want %d naming the argument; stderr: %s", got, exitUsage, errOut.String())
+	}
+}
+
+func TestParseWithIDDoesNotSetAFlagTypedAfterTheDelimiter(t *testing.T) {
+	newFS := func() (*flag.FlagSet, *bool) {
+		fs := flag.NewFlagSet("hoist test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		return fs, fs.Bool("override", false, "")
+	}
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantID  string
+		wantSet bool
+		wantErr bool
+	}{
+		{"after the id, no delimiter (control: still honoured)", []string{"id", "--override"}, "id", true, false},
+		{"before the id, no delimiter (control)", []string{"--override", "id"}, "id", true, false},
+		{"flag before the delimiter, id after", []string{"--override", "--", "id"}, "id", true, false},
+		{"flag after the delimiter and the id", []string{"--", "id", "--override"}, "", false, true},
+		{"flag after a delimiter that follows the id", []string{"id", "--", "--override"}, "", false, true},
+		{"delimiter alone", []string{"--"}, "", false, false},
+	} {
+		fs, override := newFS()
+		id, err := parseWithID(fs, tc.args)
+		if id != tc.wantID || *override != tc.wantSet || (err != nil) != tc.wantErr {
+			t.Errorf("%s: parseWithID(%v) = (%q, %v), override=%v; want (%q, err=%v), override=%v", tc.name, tc.args, id, err, *override, tc.wantID, tc.wantErr, tc.wantSet)
 		}
 	}
 }
