@@ -83,6 +83,7 @@ func TestFlightGolden(t *testing.T) {
 		}
 	}
 	uitest.Golden(t, "flight-superseded", sv, 80, 24)
+	uitest.Golden(t, "flight-superseded", supersededSnap().SetSize(120, 40).View(), 120, 40)
 
 	s := fixtureState()
 	s.Direct, s.SourceEnv = true, ""

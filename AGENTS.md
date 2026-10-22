@@ -203,21 +203,30 @@ compares live containers against `Edit.New`, which a superseded occurrence will 
 again, so it exempts exactly the occurrences that `observeOccurrences` calls superseded — judged
 at the base tip `FetchBranch` returns, never at `LandedSHA()`, which on the PR path is the merge
 commit where the edits were necessarily intact, and only when `LandedSHA()` is in that tip's
-history. An intact, reverted or gone occurrence, or a container missing from the live spec, still
-gates; a Deployment whose every occurrence is superseded is not gated on its rollout or its
-deadline, since those are the later change's. The step is then Satisfied with
+history. (On the direct path that ancestry check adds nothing: `DirectPushedStep` records the
+tip it last judged as `PushedSHA`, and its own `IsAncestor(CommitSHA, …)` earlier in the same
+walk is the real evidence.) An intact, reverted or gone occurrence still gates, and so does a
+container missing from the live spec unless its occurrence is superseded at the tip (a later
+change may have renamed it); a Deployment whose every occurrence is superseded is not gated on
+its rollout or its deadline, since those are the later change's. The step is then Satisfied with
 `Observation.Superseded` set, a typed qualifier rather than a new terminal kind — so `Status`,
-`Landed`, archiving and cleanup treat it as done unchanged — and every surface that names the
-outcome says how it finished: the detail leads with "superseded by a later change to the same
-image repo" (the CLI's `done (…)` line), and the flight screen reads "done · superseded"
-(`flight.DoneWord`), never "done" alone (principle 1). The recorded `Phase` reads `rolled-out`,
-which, like every `Phase`, is an index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it: one
-superseded occurrence would retire the gate on every other edit in the same block, which is what
-reverted the first attempt at this (#167's review, §9 entry 19). It asks only when some live
-image mismatches, so an ordinary rollout pays no fetch. `ArgoSyncedStep` applies the same rule
-per Application: it skips an Application's Synced/Healthy check only when no occurrence of the
-promotion's in that Application is still intact at the revision Argo synced, so an Application
-with one superseded occurrence and one intact one stays health-gated.
+`Landed`, archiving and cleanup treat it as done unchanged — and the surfaces that show a
+promotion's outcome say how it finished: its detail leads with "superseded by a later change to
+the same image repo", which `hoist promotions` prints as `done (…)`, and the flight screen reads
+"done · superseded" (`flight.DoneWord`), never "done" alone (principle 1). *Stated, not
+enforced:* the summary `hoist promote`/`deploy`/`resume` print when a drive finishes does not
+say superseded yet (#262). The recorded `Phase` reads `rolled-out`, which, like every `Phase`,
+is an index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it:
+one superseded occurrence would retire the gate on every other edit in the same block, which is
+what reverted the first attempt at this (#167's review, §9 entry 19). It asks only when some
+live image mismatches, so an ordinary rollout pays no fetch — but a mismatch that never resolves
+(drift, an admission webhook rewriting images) costs one fetch of the base per rollout poll
+until the deadline. `ArgoSyncedStep` applies the same rule per Application, and asks it before
+the Degraded and Failed-operation Blocks: it skips an Application — health, operation phase and
+all — only when no occurrence of the promotion's in that Application is still intact at the
+revision Argo synced, so a later deploy's failed rollout (which Argo reports as Degraded) does
+not Block a promotion it replaced, while an Application with one superseded occurrence and one
+intact one stays health-gated.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
@@ -1390,7 +1399,9 @@ test lives** (if one exists).
    `TestRolledOutSupersededDeploymentDoesNotBlockOnTheLaterRollout`, and the controls
    `TestRolledOutDoesNotExemptARevertedPromotion`,
    `TestRolledOutDoesNotExemptWhenTheLandingIsNotInTheBase` (fails without the ancestry check) and
-   `TestRolledOutFetchFailureIsNotAnExemption`.
+   `TestRolledOutFetchFailureIsReportedNotJudged` (fails if the fetch error is swallowed); and for
+   the same rule per Application, `TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence`
+   and `TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth`.
 
 ## 10. Maintaining This Document
 

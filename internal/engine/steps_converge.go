@@ -241,7 +241,9 @@ func (ArgoSyncedStep) Name() StepName { return StepArgoSynced }
 // Observe implements Step. Health Degraded, or an operation phase of Failed/Error, Blocks
 // immediately for that Application — never waits out the deadline first (invariant 3) —
 // regardless of what its own revision currently reads, since a promotion has no business
-// declaring itself synced-and-rolled-out while the app it just changed is unhealthy.
+// declaring itself synced-and-rolled-out while the app it just changed is unhealthy. The one
+// exception is an Application whose every occurrence of this promotion's a later change
+// superseded (revisionCarries): its health is the later change's, and it is skipped first.
 func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	if s.LandedSHA() == "" {
 		return Observation{Satisfied: false}, nil
@@ -263,20 +265,11 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			}
 			return Observation{}, fmt.Errorf("reading Argo Application %s: %w", app, err)
 		}
-		if st.HealthStatus == argo.HealthStatusDegraded {
-			return Observation{Blocked: fmt.Sprintf("%s health is Degraded (sync=%s revision=%s)", app, st.SyncStatus, st.SyncRevision)}, nil
-		}
-		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
-			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
-		}
 		carries, superseded, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &fetched)
 		if err != nil {
 			return Observation{}, err
 		}
-		switch {
-		case !carries:
-			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s%s", app.Name, orNone(st.SyncRevision), s.LandedSHA(), why))
-		case superseded:
+		if superseded {
 			// This app's synced revision landed and was replaced by a later, legitimate
 			// change (AGENTS.md §4.1: superseded is satisfied, not reverted) — the live
 			// containers now legitimately run someone else's later change, not this
@@ -284,7 +277,22 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			// thing against imageMismatches (reporting "image not yet
 			// live" for an image this promotion never expects to see live again) and, worse,
 			// could Block an already-finished promotion on an unrelated later deploy's own
-			// failed rollout. This app needs nothing further from this step.
+			// failed rollout. The same goes for the Application's own health and operation
+			// phase, which is why this is asked before them: Argo reports a Deployment past
+			// its progress deadline as Degraded, so a later deploy whose rollout failed would
+			// otherwise Block a promotion that finished before it (#168). This app needs
+			// nothing further from this step.
+			continue
+		}
+		if st.HealthStatus == argo.HealthStatusDegraded {
+			return Observation{Blocked: fmt.Sprintf("%s health is Degraded (sync=%s revision=%s)", app, st.SyncStatus, st.SyncRevision)}, nil
+		}
+		if st.OperationPhase == argo.OperationFailed || st.OperationPhase == argo.OperationError {
+			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
+		}
+		switch {
+		case !carries:
+			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s%s", app.Name, orNone(st.SyncRevision), s.LandedSHA(), why))
 		case st.SyncStatus != argo.SyncStatusSynced || st.HealthStatus != argo.HealthStatusHealthy:
 			msg := fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus))
 			// Naming a cause only makes sense once Argo itself agrees the sync landed — a
@@ -678,8 +686,8 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	sort.Strings(done)
 	var lines []string
 	if anyExempt {
-		// Lead with it: the CLI prints this as "done (<detail>)", and a promotion that finished
-		// by being replaced must not read as one whose own images rolled out.
+		// Lead with it: `hoist promotions` prints this as "done (<detail>)", and a promotion
+		// that finished by being replaced must not read as one whose own images rolled out.
 		sort.Strings(replaced)
 		lines = append(append(lines, "superseded by a later change to the same image repo"), replaced...)
 	}

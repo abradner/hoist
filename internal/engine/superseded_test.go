@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/pkg/argo"
+	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -271,21 +273,32 @@ func TestRolledOutDoesNotExemptWhenTheLandingIsNotInTheBase(t *testing.T) {
 	}
 }
 
-// TestRolledOutFetchFailureIsNotAnExemption: when the base cannot be read, nothing can be judged
-// superseded, and the step must not report finished on the strength of a read that failed.
-func TestRolledOutFetchFailureIsNotAnExemption(t *testing.T) {
+// failingFetch is a git.Git whose FetchBranch always fails, every other call real.
+type failingFetch struct{ git.Git }
+
+func (failingFetch) FetchBranch(context.Context, string, string, string) (string, bool, error) {
+	return "", false, errors.New("fetch failed")
+}
+
+// TestRolledOutFetchFailureIsReportedNotJudged: when the base cannot be fetched, nothing can be
+// judged superseded at it — not from the clone's stale remote-tracking ref either, which here
+// already holds the superseding commit. The failure is returned (RolledOutStep is retryable,
+// so the poll asks again), never swallowed into an exemption or a quiet wait.
+func TestRolledOutFetchFailureIsReportedNotJudged(t *testing.T) {
 	w := newWorld(t)
 	s := w.promote()
 	w.merge(s)
 	w.supersede(supersededRef)
+	runHost(t, s.CloneDir, "fetch", "-q", "origin") // the stale ref a fallback could misuse
 
 	w.ro = &rollout.Fake{}
 	live(w.ro, s.TargetEnv, "app", supersededRef, true, false)
-	broken := *s
-	broken.CloneDir = filepath.Join(t.TempDir(), "no-such-clone")
-	obs, err := RolledOutStep{Rollout: w.ro, Git: w.g}.Observe(context.Background(), &broken)
-	if err == nil && obs.Satisfied {
-		t.Fatalf("a failed read of the base must not exempt anything, got %+v", obs)
+	obs, err := RolledOutStep{Rollout: w.ro, Git: failingFetch{w.g}}.Observe(context.Background(), s)
+	if err == nil {
+		t.Fatalf("a failed fetch of the base must be reported, got %+v", obs)
+	}
+	if obs.Satisfied {
+		t.Fatalf("a failed fetch must not exempt anything, got %+v", obs)
 	}
 }
 
@@ -331,6 +344,59 @@ func TestArgoSyncedHealthGatesAnApplicationWithAnIntactOccurrence(t *testing.T) 
 			}
 			if !tc.satisfied && !obs.Waiting {
 				t.Errorf("an Application still carrying this promotion's change and Progressing should be Waiting, got %+v", obs)
+			}
+		})
+	}
+}
+
+// TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth: Argo CD's own health
+// check reports a Deployment past its progress deadline as Degraded, so a later deploy whose
+// rollout failed makes the Application Degraded. When every occurrence this promotion changed
+// in that Application is superseded, that failure is the later deploy's, and a finished
+// promotion must not be Blocked at argo-synced on it — the step-level twin of
+// TestRolledOutSupersededDeploymentDoesNotBlockOnTheLaterRollout, which RolledOutStep alone
+// could not show. The control keeps one occurrence intact: the Application's Degraded health is
+// then this promotion's too, and Blocks as it always has.
+func TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		supersede []int
+		blocked   bool
+	}{
+		{"every occurrence superseded", []int{0, 1}, false},
+		{"one occurrence still intact (control)", []int{1}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorldWith(t, newFixtureWith(t, appAndWorker, 2))
+			s := w.promote()
+			w.merge(s)
+			s.EditApps = map[string]string{}
+			for _, e := range s.Edits {
+				s.EditApps[e.File] = testApp
+			}
+			for _, nth := range tc.supersede {
+				supersedeNth(t, w.fx, nth, supersededRef)
+			}
+			tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+			if err != nil || !ok {
+				t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+			}
+			for _, st := range []argo.Status{
+				{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: argo.HealthStatusDegraded},
+				{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing", OperationPhase: argo.OperationFailed},
+			} {
+				a := &argo.Fake{}
+				a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp}, st)
+				obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+				if err != nil {
+					t.Fatalf("Observe: %v", err)
+				}
+				if (obs.Blocked != "") != tc.blocked {
+					t.Errorf("health=%s phase=%s: Blocked = %q, want blocked=%v", st.HealthStatus, st.OperationPhase, obs.Blocked, tc.blocked)
+				}
+				if !tc.blocked && !obs.Satisfied {
+					t.Errorf("health=%s phase=%s: a superseded Application needs nothing from this step, got %+v", st.HealthStatus, st.OperationPhase, obs)
+				}
 			}
 		})
 	}

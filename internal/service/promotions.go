@@ -309,7 +309,7 @@ func (s *Service) List(ctx context.Context, o ListOpts) ([]Listed, error) {
 		if engine.Landed(l.Statuses) {
 			// Landed, by a verdict this listing stands behind: nothing after the landing step
 			// reads the worktree or the local branch, so both go now rather than waiting for
-			// the rollout (which a superseded promotion never completes — #168). Here, not in
+			// the rollout (which may never complete: a cluster that drifted from the base). Here, not in
 			// listOne, for the same reason archiving is: listOne may run on a snapshot whose
 			// verdict is then thrown away, and may run twice. The cleanup asks origin itself,
 			// live and per promotion — once: after a removal nothing is left to ask about, and
