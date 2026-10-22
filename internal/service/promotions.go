@@ -241,8 +241,13 @@ type Listed struct {
 // ListOpts scopes and configures one List call: RepoFullName filters to one repo ("" lists
 // every configured repo's promotions, exactly like `hoist promotions` with no --repo), and
 // ArchiveDoneOlderThan is the retention window (state.retain) past which a Done promotion is
-// moved to the archive as part of this same call — 0 (or negative) disables archiving entirely,
-// matching `hoist promotions`' own "retain: 0 means never archive" reading of the config.
+// moved to the archive as part of this same call. 0 (or negative) disables archiving for this
+// call, and only for a caller that passes it directly: the session controller's ListOpts{} does,
+// so the matrix never archives. The config cannot express "never archive" — Normalize makes
+// state.retain 0 or unset mean config.DefaultStateRetain (30 days) and Validate rejects a
+// negative one — so `hoist promotions` always passes a positive window. This comment used to
+// say it matched `hoist promotions`' own "retain: 0 means never archive" reading of the config;
+// there is no such reading (#248).
 //
 // Progress, when set, hears one line before the re-observation starts, naming how many
 // promotions it covers — the listing prints nothing of its own until every one is observed.
