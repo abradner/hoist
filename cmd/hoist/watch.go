@@ -163,39 +163,16 @@ func argoNamespaceOf(rc *config.RepoConfig) string {
 	return rc.Kube.ArgoNamespace
 }
 
-// familyWorkloads lists the distinct Deployment names, and the distinct (kind, name) Job/
-// CronJob pairs, fam's own occurrences declare — the same Kind-based grouping RolledOutStep
-// uses (groupEditsByWorkload in internal/engine), applied to every occurrence discovery found
-// rather than only the ones a specific promotion's plan touched, since `hoist watch` has no
-// plan to consult.
+// familyWorkloads splits the family's declared workloads (gitops.Family.Workloads, the one
+// derivation) into the kinds `hoist watch` can read: the Deployment names, and the Job and
+// CronJob (kind, name) pairs, ordered kind then name.
 func familyWorkloads(fam *gitops.Family) (deployments []string, jobLikes []jobLikeName) {
-	if fam == nil {
-		return nil, nil
-	}
-	seenDeployment := map[string]bool{}
-	seenJobLike := map[jobLikeName]bool{}
-	for _, o := range fam.Occurrences {
-		switch o.Kind {
-		case "Deployment":
-			if !seenDeployment[o.Name] {
-				seenDeployment[o.Name] = true
-				deployments = append(deployments, o.Name)
-			}
-		case "Job", "CronJob":
-			ref := jobLikeName{Name: o.Name, Kind: o.Kind}
-			if !seenJobLike[ref] {
-				seenJobLike[ref] = true
-				jobLikes = append(jobLikes, ref)
-			}
+	deployments = fam.Named("Deployment")
+	for _, w := range fam.Workloads() {
+		if w.Kind == "Job" || w.Kind == "CronJob" {
+			jobLikes = append(jobLikes, jobLikeName{Name: w.Name, Kind: w.Kind})
 		}
 	}
-	sort.Strings(deployments)
-	sort.Slice(jobLikes, func(i, j int) bool {
-		if jobLikes[i].Kind != jobLikes[j].Kind {
-			return jobLikes[i].Kind < jobLikes[j].Kind
-		}
-		return jobLikes[i].Name < jobLikes[j].Name
-	})
 	return deployments, jobLikes
 }
 
