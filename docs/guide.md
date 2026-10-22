@@ -559,6 +559,15 @@ deletable JSON file, just out of the default listing. This never happens on age 
 has to be re-observed as done first, every time, so a genuinely stuck one (however old) is never
 touched — `--repo`/`--archived` only change what's *listed*, never what gets archived.
 
+A promotion a later deploy replaced counts as done. Where the base branch now declares the same
+image repo at a different reference than this promotion wrote, that image is no longer the
+promotion's to wait for; it is judged image by image, so in a promotion that changed two
+Deployments and had only one replaced by a later deploy, the other still has to roll out. Once
+nothing is left, `hoist promotions` shows it as
+`done (superseded by a later change to the same image repo; …)`, naming what the base declares
+now, and archives it like any other finished promotion. A cluster running something the base does *not*
+declare is drift, not a later deploy, and the promotion keeps waiting at the rollout.
+
 **What is cleaned up, and when.** A promotion's worktree
 (`$XDG_CACHE_HOME/hoist/worktrees/<id>`) and its local branch `hoist/<env>/<id>` in your clone
 are scratch space, and hoist removes both as soon as it observes the promotion *landed* — merged

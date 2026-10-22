@@ -133,9 +133,10 @@ a second PR on restart. The waiting on CI, approval, Argo and rollout (cadences 
 
 **Re-observing "did this land" is a three-way question, never two.** A step asking whether its own
 change is still in effect at a revision must sort that revision into *intact*, *superseded* or
-*reverted* — `engine.observeLanded` (`internal/engine/landed.go`) is the one place that judgement
-is made, and `DirectPushedStep` and `ArgoSyncedStep` both call it rather than each rolling their
-own. Neither of the two obvious single signals can do it: ancestry cannot see a revert (a revert
+*reverted* — `engine.observeOccurrences` (`internal/engine/landed.go`) is the one place that
+judgement is made, per occurrence, and `engine.observeLanded` aggregates it for the steps that ask
+about a set of edits at once; `DirectPushedStep`, `ArgoSyncedStep` and `RolledOutStep` all call
+one of the two rather than each rolling their own. Neither of the two obvious single signals can do it: ancestry cannot see a revert (a revert
 commit never removes the reverted commit from history, so "our commit is an ancestor" stays true
 forever), and blob equality cannot see a supersede (a later, legitimate deploy into the same env
 rewrites the very same image scalars, which by hash is identical to being reverted). Superseded is
@@ -197,14 +198,23 @@ the merge and the save), and a listing cleans up from its own observation withou
 merged PR counts as this run's landing only when the forge names this run's commit as its head;
 a forge that does not say is not agreement (#41).
 
-*Interim state, stated not enforced (#168):* the verdict reaches `DirectPushedStep` and
-`ArgoSyncedStep` only. `RolledOutStep` still compares live containers against `Edit.New`, which a
-superseded promotion will never see again — so such a promotion stops blocking its env (which is
-what #166 was about) but still shows as non-terminal at `rolled-out`. Closing that needs the
-verdict *per occurrence* rather than per promotion, and the current base tip rather than
-`LandedSHA()`, which on the PR path is the merge commit where the edits were necessarily intact.
-An aggregate verdict applied to the whole step over-satisfies it: one superseded occurrence would
-retire the gate on every other edit in the same block.
+**A superseded promotion is finished, occurrence by occurrence (#168).** `RolledOutStep`
+compares live containers against `Edit.New`, which a superseded occurrence will never carry
+again, so it exempts exactly the occurrences that `observeOccurrences` calls superseded — judged
+at the base tip `FetchBranch` returns, never at `LandedSHA()`, which on the PR path is the merge
+commit where the edits were necessarily intact, and only when `LandedSHA()` is in that tip's
+history. An intact, reverted or gone occurrence, or a container missing from the live spec, still
+gates; a Deployment whose every occurrence is superseded is not gated on its rollout or its
+deadline, since those are the later change's. The step is then Satisfied, and its detail leads
+with "superseded by a later change to the same image repo", so the CLI's `done (…)` line says how
+the promotion finished; the recorded `Phase` reads `rolled-out`, which, like every `Phase`, is an
+index, not a claim. An aggregate verdict applied to the whole step would over-satisfy it: one
+superseded occurrence would retire the gate on every other edit in the same block, which is what
+reverted the first attempt at this (#167's review, §9 entry 19). It asks only when some live
+image mismatches, so an ordinary rollout pays no fetch. *Interim, stated not enforced:*
+`ArgoSyncedStep` still takes one verdict per Application (`observeLanded` over that
+Application's edits), so an Application with one superseded and one intact occurrence skips its
+Synced/Healthy check; `RolledOutStep` still gates the intact one's rollout.
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
@@ -1350,6 +1360,34 @@ test lives** (if one exists).
    commit still refuses, and the already-current file is not what it names), and
    `TestCommittedStepAcceptsAPrefixRewriteThatIsNoOpByReference` (fails with `NoOp` as the
    predicate).
+
+19. **A verdict about a set cannot gate work done per member of it.** What happened: a
+   promotion superseded by a later deploy never went terminal — `RolledOutStep` compared the live
+   containers against its own `Edit.New`, which the cluster would never run again — and four
+   production state files sat at `argo-synced` indefinitely, each re-observed live by every
+   listing. The first fix (#167) asked `observeLanded` and reported the whole step satisfied on a
+   superseded answer, and drew two P1s in one review. One: `observeLanded` gives one verdict for
+   the whole set, superseded when *any* occurrence is, so a two-Deployment block with one
+   occurrence superseded and the other mid-rollout would have read rolled out. Two: it judged
+   `LandedSHA()`, which on the PR path is the merge commit — the one revision where the edits are
+   necessarily intact — and its own test hid that by assigning `MergeSHA` the later tip by hand.
+   Root cause: an aggregate answer is the right input for a question about the set ("did this
+   promotion land?") and the wrong one for a gate whose work is per member ("has each of these
+   rolled out?"); and a test that writes the field the bug lives in tests a state production
+   never reaches. Rule: a gate over several members asks for a verdict per member
+   (`observeOccurrences`) and exempts only the members the verdict covers; a revision judged for
+   "what does the base say now" comes from the call that read the base (`FetchBranch`'s return),
+   never a recorded sha; and a regression test reaches its state through the steps that write it
+   in production, asserting the recorded field is untouched. Regression tests, in
+   `internal/engine/superseded_test.go`:
+   `TestRolledOutKeepsWaitingOnAnIntactOccurrenceBesideASupersededOne` (fails with the exemption
+   widened to every mismatch once any occurrence is superseded),
+   `TestScenarioPRPathSupersededPromotionGoesTerminal` (fails judging `LandedSHA()`; asserts
+   `MergeSHA` is as the merge step wrote it), `TestScenarioDirectPathSupersededPromotionGoesTerminal`,
+   `TestRolledOutSupersededDeploymentDoesNotBlockOnTheLaterRollout`, and the controls
+   `TestRolledOutDoesNotExemptARevertedPromotion`,
+   `TestRolledOutDoesNotExemptWhenTheLandingIsNotInTheBase` (fails without the ancestry check) and
+   `TestRolledOutFetchFailureIsNotAnExemption`.
 
 ## 10. Maintaining This Document
 
