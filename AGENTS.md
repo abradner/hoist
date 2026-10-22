@@ -385,19 +385,36 @@ Conventions every screen follows, each codified after a PR needed one and found 
   when exactly one exists and leaving it for the plan screen to ask otherwise.
 - **`internal/service` is the one use-case layer both faces call; the root depends on the narrow
   `app.Service` interface, not `*service.Service` itself.** Supersedes an earlier version of this
-  bullet, which said `cmd/hoist` alone owned the CLI→TUI adapter (`buildResolveFunc`) and that a
-  screen never imports `config` — already false then (several screens import `internal/config` for
-  `EnvsConfig` directly) and fully replaced now that the logic has a real home. `internal/service` (`Plan`,
-  `StartPromotion`, `List`, `Resume`, `Abandon`, `RefreshRepo`, `Repo`) holds planning/starting/
-  listing/resuming/abandoning logic once, for both the CLI and the TUI; `internal/app.Service`
-  (`internal/app/service.go`) is the narrow, consumer-side interface `app.Model` depends on —
-  `*service.Service` satisfies it directly, and a test fakes it with a plain struct. `cmd/hoist`
-  still owns constructing the real `*service.Service` (`serviceDeps`, `settingsFor`) and still
-  adapts what has no service-layer home yet — history, tags, watch, restart, drift remain plain
-  function types built in `cmd/hoist/wiring.go` until they migrate too. A screen may import
-  `internal/service` for its plain value types (`service.Tick`, `service.PlanRequest`,
-  `service.PlannedChange`) and `internal/config` for `config.EnvsConfig` (several screens render
-  production/pairs directly) — but never `internal/app`, and never `registry`/`resolve` *policy*.
+  bullet, which said `cmd/hoist` alone owned the CLI→TUI adapter (`buildResolveFunc`), that a
+  screen never imports `config` (already false then: several screens import `internal/config` for
+  `EnvsConfig` directly), and — until the T6 train — that history, tags, watch, restart and drift
+  "remain plain function types built in `cmd/hoist/wiring.go` until they migrate". They have
+  migrated. `internal/service` holds every use case once, for both the CLI and the TUI:
+  planning, starting, listing, resuming and abandoning a promotion (`Plan`, `StartPromotion`,
+  `List`, `Resume`, `Abandon`), the repo view (`RefreshRepo`, `Repo`), and the read-side ones the
+  screens and their commands share — `OpenWatchApp`/`OpenWatchFamily` (watch), `RestartRead`/
+  `RestartDo`/`RestartObserve` (restart), `HistoryDelta`/`HistoryRevision`/`LiveAge` (commit
+  history), `OpenTagSource` (the tag picker) and `RunningImages` (the matrix's drift). Every
+  cluster or forge client a use case needs comes from the service (`ArgoNamed`, `RolloutNamed`,
+  `ForgeFor`, `RegistryFor`), none of which remembers a failure: a cluster or `gh` login that failed
+  when first asked is asked for again, never remembered as broken for the session. `internal/app.Service` (`internal/app/service.go`) is the narrow, consumer-side interface
+  `app.Model` depends on — `*service.Service` satisfies it directly, and a test fakes it with a
+  plain struct.
+
+  `cmd/hoist` is flags, rendering and wiring. `selectRepo` turns the flags and the config file
+  into one `service.Settings` (the flag-over-config precedence for the repo, apps root, promotable
+  prefixes, base and kube context is decided there; `service.NewResolveOptions` does the same for
+  the digest-resolution flags);
+  `serviceDeps` hands the service its real clients, through the one test seam `adaptors`; and the
+  TUI's function-typed screens (`internal/app/watch`, `restart`, `history`, `tags`, `matrix`'s
+  drift) are given *method values* of the service (`svc.RestartRead`, `svc.HistoryDelta`,
+  `svc.RunningImages`, …) or a thin mapping onto the screen's own value types
+  (`buildWatchFunc`, `buildTagsFunc`) — no use-case logic lives in `cmd/hoist/wiring.go`. A
+  command prints a refusal with `fail`/`failf` (`cmd/hoist/cmdutil.go`), which redacts the whole
+  line (§4.10), and runs under `commandContext`. A screen may import `internal/service` for its
+  plain value types (`service.Tick`, `service.PlanRequest`, `service.PlannedChange`) and
+  `internal/config` for `config.EnvsConfig` (several screens render production/pairs directly) —
+  but never `internal/app`, and never `registry`/`resolve` *policy*.
 - **A screen that shows launcher-owned text takes plain values, not a function.** When what a
   screen displays is a string the launcher already holds (the config screen's redacted text and
   path), the root takes it through `WithConfigView(path, found, text)` and the screen's `New(...)`
