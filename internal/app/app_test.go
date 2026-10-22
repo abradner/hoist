@@ -2396,7 +2396,7 @@ func TestRestartEscNotesRolloutContinues(t *testing.T) {
 	}
 	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) { return nil, nil }
 	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
-		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Millisecond})
+		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Millisecond}).WithEnvsFromConfig()
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 	tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
 	if cmd != nil {
@@ -2460,7 +2460,7 @@ func TestRestartEarlierStartedDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
-		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Minute})
+		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Minute}).WithEnvsFromConfig()
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
 
 	// R: the first restart screen instance, for the current column's env.
@@ -2503,6 +2503,61 @@ func TestRestartEarlierStartedDropped(t *testing.T) {
 	tm, _ = tm.Update(startedCmd2())
 	if v := plain(tm); strings.Contains(v, "not yet restarted") {
 		t.Fatalf("the second restart's own started answer should have moved it past confirm/starting:\n%s", v)
+	}
+}
+
+// TestRestartWithoutConfigAsksForTheProductionConfirm is AR-H4. A flags-only run (no config file,
+// or no entry for this repo) has no envs.production list, so every env reads as non-production by
+// omission; enter on the restart screen then restarted whatever env the cursor was on with no
+// confirmation at all. The CLI fails closed in the same situation (checkProductionRestart). The
+// attacker is an operator who never configured the repo and presses R, enter: Do must not run
+// until the second gesture. The control is the same keys with the envs known from a config that
+// lists no production env, which still restarts on enter.
+func TestRestartWithoutConfigAsksForTheProductionConfirm(t *testing.T) {
+	r, err := gitops.Discover(fixtureRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		p := restart.Plan{Env: env}
+		for _, n := range names {
+			p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+		}
+		return p, nil
+	}
+	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) { return nil, nil }
+	run := func(configured bool) (restarted bool, view string) {
+		do := func(context.Context, restart.Plan, time.Time) ([]string, error) {
+			restarted = true
+			return nil, nil
+		}
+		m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
+			apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Minute})
+		if configured {
+			m = m.WithEnvsFromConfig()
+		}
+		var tm tea.Model = m
+		tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
+		tm, cmd := press(t, tm, tea.KeyPressMsg{Code: 'R', Text: "R"})
+		tm, cmd = tm.Update(cmd())
+		tm, _ = tm.Update(cmd())
+		tm, cmd = press(t, tm, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if cmd != nil {
+			// One level only: a started restart's command IS the Do call, so running it is how
+			// Do gets called; a confirm dialog's is a tea.Batch, whose children cmd() does not
+			// run. Draining further would sit in the rollout poll's real tea.Tick.
+			tm, _ = tm.Update(cmd())
+		}
+		return restarted, plain(tm)
+	}
+
+	if started, v := run(false); started {
+		t.Errorf("enter restarted an env with no config to say it is not production:\n%s", v)
+	} else if !strings.Contains(v, "cannot tell whether") {
+		t.Errorf("the confirmation should say why it is asked:\n%s", v)
+	}
+	if started, v := run(true); !started {
+		t.Errorf("control: with the envs known and none production, enter should restart:\n%s", v)
 	}
 }
 
@@ -3597,7 +3652,7 @@ func TestHelpOverlayGoldens(t *testing.T) {
 		}
 		for _, size := range sizes {
 			var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
-				apprestart.Funcs{Read: read, Interval: time.Millisecond})
+				apprestart.Funcs{Read: read, Interval: time.Millisecond}).WithEnvsFromConfig()
 			tm, _ = tm.Update(tea.WindowSizeMsg{Width: max(size.w, 300), Height: size.h})
 			tm, cmd := tm.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
 			tm = drainTags(tm, cmd)

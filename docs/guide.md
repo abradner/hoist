@@ -418,7 +418,10 @@ Pressing `enter` on a production target overlays a confirmation dialog before an
 Every target is named first, with its replica count, strategy and last restart, and every reason
 the restart will not be graceful is a sentence. None of them blocks. A production env takes a
 second acknowledgement — a confirmation dialog on the screen, `--confirm-production=<env>` at the
-CLI — because nothing is committed and nothing reviews it. `esc` while a confirmed restart is
+CLI — because nothing is committed and nothing reviews it. With no config entry for the repo
+(a flags-only run) hoist cannot tell which envs are production, so every env takes that
+acknowledgement, worded "cannot tell whether it is production", and the header reads
+`production?`; the CLI's equivalent is `--confirm-production=<env>` too. `esc` while a confirmed restart is
 still starting or rolling still leaves the screen — it never blocks on it — but adds "rollout
 continues" to the activity log (`l`), since the restart itself is a live cluster operation this
 screen does not cancel.

@@ -165,6 +165,24 @@ func TestEnterRestartsAndFollowsTheRollout(t *testing.T) {
 	}
 }
 
+// AR-H4, screen half: an env nothing can vouch for (no config) gets the production gesture too,
+// in words that admit the doubt rather than claiming production. Real keys, as above.
+func TestUnknownProductionNeedsTheConfirmationAndSaysWhy(t *testing.T) {
+	f := &fakeFuncs{plan: onePlan(), progress: [][]restart.Progress{{{Name: "web", Done: true}}}}
+	m := ready(t, f, false).WithUnknownProduction()
+	if !strings.Contains(m.View(), "production?") {
+		t.Errorf("the header should flag the doubt:\n%s", m.View())
+	}
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.CapturesText() || f.restarts != 0 {
+		t.Fatalf("enter must open the confirmation and restart nothing (open=%v, restarts=%d)", m.CapturesText(), f.restarts)
+	}
+	m = drain(t, m, cmd)
+	if v := m.View(); !strings.Contains(v, "cannot tell whether it is production") || strings.Contains(v, "It is a production env") {
+		t.Errorf("the dialog should admit it does not know, not claim production:\n%s", v)
+	}
+}
+
 // Production takes a second, deliberate gesture — §4.5's PR-and-approval gate cannot apply to
 // something that commits nothing, so this stands in its place. Driven through real keys: the
 // bool huh writes to lives on a superseded Model copy, so setting it directly proves nothing.

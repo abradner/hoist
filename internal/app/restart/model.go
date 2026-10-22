@@ -123,6 +123,9 @@ type Model struct {
 	family     string
 	names      []string
 	production bool
+	// unknown is true when no config says whether env is production, so the screen treats it as
+	// production for the gate (AR-H4) and says why it is asking.
+	unknown bool
 
 	// scope is this instance's owned context plus its ID: a planMsg/startedMsg/progressMsg/
 	// tickMsg stamped by any other value is Foreign and dropped at the top of Update (AGENTS.md
@@ -204,6 +207,15 @@ func New(env, family string, names []string, production bool, funcs Funcs, style
 		m.refused = true
 		m.notice = "restart screen misconfigured: Do is set without Observe, so a restart here would have no way to tell whether it finished"
 	}
+	return m
+}
+
+// WithUnknownProduction marks the env as one nothing can vouch for: there is no config to say
+// it is not production, so enter asks for the same second gesture a production env gets, in
+// words that admit the doubt. It is the screen-level half of the CLI's fail-closed
+// checkProductionRestart.
+func (m Model) WithUnknownProduction() Model {
+	m.production, m.unknown = true, true
 	return m
 }
 
@@ -331,8 +343,12 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			// review and no approval comment to wait for; what stands in its place is having to
 			// say yes on purpose.
 			m.confirmV = false
+			why := "It is a production env."
+			if m.unknown {
+				why = "No config for this repo, so hoist cannot tell whether it is production."
+			}
 			m.confirm = huh.NewConfirm().
-				Title(fmt.Sprintf("Restart %s in %s? It is a production env.", ui.Plural(len(m.plan.Targets), "Deployment"), m.env))
+				Title(fmt.Sprintf("Restart %s in %s? %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env, why))
 			// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing:
 			// a Confirm used standalone rather than inside a huh.Form ignores every keypress.
 			m.confirm.WithKeyMap(keys.HuhKeyMap())
@@ -554,7 +570,11 @@ func (m Model) headerSection() string {
 	}
 	right := m.styles.Dim.Render(word)
 	if m.production {
-		right = m.styles.Production.Render("production") + "   " + right
+		label := "production"
+		if m.unknown {
+			label = "production?"
+		}
+		right = m.styles.Production.Render(label) + "   " + right
 	}
 	return ui.StatusBar(max(m.width-2, 1), left, right)
 }

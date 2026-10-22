@@ -155,6 +155,13 @@ type Model struct {
 	configFound bool
 	configText  string
 
+	// envsFromConfig is true only once cmd/hoist says m.envs came from a configured repo
+	// (WithEnvsFromConfig). Unset, m.envs is an empty EnvsConfig that says nothing about which
+	// envs are production, so the restart screen cannot tell and must ask (AR-H4; the CLI's
+	// checkProductionRestart fails closed in the same situation). The zero value is the
+	// closed one: a caller that forgets this gets a confirm it did not need, never a missing one.
+	envsFromConfig bool
+
 	// quitConfirming/quitConfirm/quitConfirmValue are q's own dialog, raised only when
 	// session.Controller.AnyRunning is true (leaving flight never cancels a
 	// drive, so quitting the whole program is the one gesture that still needs a confirm before
@@ -278,6 +285,14 @@ func (m Model) WithRefreshRepo(refresh matrix.RefreshRepoFunc) Model {
 // (the launch's --base/--kube-context, #105), so its title can say so.
 func (m Model) WithRun(base, kubeContext string) Model {
 	return m.withMatrix(func(ms matrix.Model) matrix.Model { return ms.WithRun(base, kubeContext) })
+}
+
+// WithEnvsFromConfig records that the envs passed to New came from the selected repo's config
+// entry, so an env absent from envs.production really is not production. A flags-only run
+// never calls it.
+func (m Model) WithEnvsFromConfig() Model {
+	m.envsFromConfig = true
+	return m
 }
 
 // WithConfigView supplies what C shows: the config file's path, whether it existed, and the
@@ -1355,7 +1370,13 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m.noteErr(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
 	}
-	rs := restartScreen{apprestart.New(target, family, names, m.envs.IsProduction(target), m.restartFn, m.styles)}
+	screen := apprestart.New(target, family, names, m.envs.IsProduction(target), m.restartFn, m.styles)
+	if !m.envsFromConfig {
+		// A flags-only run has no envs.production list, so IsProduction(target) is false by
+		// omission, not by knowledge (AR-H4).
+		screen = screen.WithUnknownProduction()
+	}
+	rs := restartScreen{screen}
 	m = m.push(rs)
 	return m, rs.Init()
 }
