@@ -671,7 +671,7 @@ func runTUI(set service.Settings, rf resolveFlags, stdout, stderr io.Writer) int
 	// alone and takes none of the digest-resolution overrides above.
 
 	promo := app.Promotion{
-		Poll:       buildPollDurations(cfg.Poll),
+		Poll:       flightPoll(cfg.Poll),
 		OpenURL:    browserOpener(time.Duration(cfg.Preferences.BrowserLaunchTimeout)),
 		OpenPRMode: cfg.Preferences.OpenPR,
 	}
