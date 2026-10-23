@@ -246,6 +246,33 @@ gh api --paginate repos/{owner}/{repo}/pulls/<n>/reviews \
        | "\((.user.login // "unknown")) \(.state) bodylen=\(.body|length)"'
 ```
 
+**A clean Codex verdict is not a review record.** When Codex finds nothing it posts an *issue
+comment* — `Codex Review: Didn't find any major issues…` followed by `**Reviewed commit:** <sha>` —
+and creates no review record at all, so the query above returns nothing for exactly the PRs with
+nothing wrong (#169: on #167 a poll waited 13 minutes on it with the verdict in plain sight). Look
+on the issue-comment surface too, matched on the head by the sha prefix Codex prints:
+
+```bash
+HEAD_SHA=$(gh pr view <n> --json headRefOid --jq '.headRefOid') \
+gh api --paginate repos/{owner}/{repo}/issues/<n>/comments \
+  --jq '.[] | select(.user.login | test("codex"; "i"))
+       | (.body | capture("Reviewed commit:\\*\\*\\s*`(?<sha>[0-9a-f]{7,40})`")?.sha) as $s
+       | select($s != null and ($ENV.HEAD_SHA | startswith($s)))
+       | "\(.user.login) issue-comment reviewed=\($s)"'
+```
+
+The gate is satisfied by a delivered verdict at the head on **either** surface. Keep the two answers
+apart: *a clean verdict at the head* (this query prints a row) and *no verdict at the head* (both
+queries print nothing) are different facts, and a check that returns "nothing at head" for both
+cannot tell a clean PR from an unreviewed one.
+
+**A record authored by the PR's author is never evidence of review.** Agent thread replies post
+under the operator's credentials, and the operator is usually the PR's author — so the bookkeeping
+records below are the PR author's own, and they sit at the current head while a real verdict may
+not (#169: four of them broke a poll early on a head no reviewer had seen). The body filter above
+catches today's shape; the rule that does not depend on shape is to drop every record whose
+`.user.login` is the PR's author (`gh pr view <n> --json author --jq .author.login`) before counting.
+
 **A review record is evidence, not proof — the output still has to be read.** Two artifact classes
 masquerade as reviews and both are filtered above, but neither filter is airtight:
 
@@ -282,8 +309,9 @@ Two limits worth knowing before you rely on the result:
   result as **"review of this head could not be established"** and disclose it. Never upgrade an
   absence into a pass.
 - A reviewer that only ever posts **issue comments** — §1 notes these exist, and they never create
-  review records at all — cannot satisfy this gate in either direction, because an issue comment
-  carries no commit binding. If a repo's roster is issue-comment-only, this check cannot be made to
+  review records at all — cannot satisfy this gate in either direction unless its comment names the
+  commit it read, as Codex's clean verdict does (above): an issue comment carries no commit binding
+  of its own. If a repo's roster is issue-comment-only and names no commit, this check cannot be made to
   pass mechanically: say so to the operator and let the merge decision rest on an explicit
   disclosure, rather than reading the permanent empty result as either a pass or a failure.
 
@@ -294,7 +322,7 @@ so without it a matching review on a later page reads as empty, and this check's
 where `jq` is installed). **The `// "unknown"` fallback** — `.user.login` is null for a deleted
 account, which otherwise errors the whole filter and takes the check down with it.
 
-Empty output means **review of this head could not be established** — not that it was definitely
+Empty output from both queries means **review of this head could not be established** — not that it was definitely
 never reviewed; §1's issue-comment-only reviewers and inline-only reviews both produce an empty
 result while a review exists. Report the limit, not a stronger claim than the evidence carries.
 Output alone is not sufficient either: check each row is a real
