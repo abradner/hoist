@@ -29,6 +29,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -213,9 +214,6 @@ type Model struct {
 
 	confirming    bool
 	confirmDirect *huh.Confirm
-	// confirmValue is huh's write target only; the answer is read from the widget
-	// (confirmAgreed) — see internal/app/tags for why the field itself never moves.
-	confirmValue bool
 
 	// overrides are the digests the operator has pinned by hand through the o dialog
 	// (#102), keyed by image repo; every rebuild of the plan hands them to resolveFn and
@@ -227,7 +225,7 @@ type Model struct {
 	overrideRepo  string
 	overrideErr   string
 	overrideInput *huh.Input
-	// overrideValue is huh's write target only, like confirmValue; the text is read back
+	// overrideValue is huh's write target only; the text is read back
 	// through GetValue (§9 entry 6).
 	overrideValue string
 
@@ -858,13 +856,7 @@ func (m Model) toggleDirect() (Model, tea.Cmd) {
 // real operator until M10, and its test had set the bound bool directly (#85's named trap;
 // internal/app/tags and internal/app/deploy had already been fixed the same way).
 func (m *Model) buildConfirm() {
-	m.confirmValue = false
-	m.confirmDirect = huh.NewConfirm().
-		Title("Switch to direct mode (commit straight to the default branch, no PR)?").
-		Value(&m.confirmValue)
-	m.confirmDirect.WithKeyMap(keys.HuhKeyMap())
-	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmDirect.WithWidth(ui.DialogWidth(m.width))
+	m.confirmDirect = confirm.New("Switch to direct mode (commit straight to the default branch, no PR)?", m.width)
 }
 
 func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
@@ -875,7 +867,7 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			m.confirming = false
-			// Read from the widget, never from confirmValue: Value(&m.confirmValue) captured a
+			// Read from the widget, never from a bound bool: Value(&field) captures a
 			// field on the Model copy that built the widget, which every Update since has
 			// superseded.
 			if m.confirmAgreed() {
@@ -966,8 +958,7 @@ func (m Model) confirmAgreed() bool {
 	if m.confirmDirect == nil {
 		return false
 	}
-	v, _ := m.confirmDirect.GetValue().(bool)
-	return v
+	return confirm.Agreed(m.confirmDirect)
 }
 
 func (m Model) recomputeDiff() Model {
