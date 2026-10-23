@@ -717,9 +717,11 @@ func (m Model) updateChooser(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 // CapturesText reports whether some dialog is open that takes letters as text — the image
 // chooser's "/" filter, or its own confirm dialogs — and the root's q-to-quit must not fire
-// over it.
+// over it. The action menu counts: it runs an item on a letter, so the root's q, l and ? must
+// reach the menu (which ignores them) rather than quit, push the log or open help over it
+// (UX-H13).
 func (m Model) CapturesText() bool {
-	return m.chooser != nil || m.confirmAbandon != nil
+	return m.chooser != nil || m.confirmAbandon != nil || m.menuOpen
 }
 
 func (m Model) currentImageRepos(env string) []string {

@@ -335,3 +335,41 @@ func TestQuitAsksWhileAbandonCallIsInFlight(t *testing.T) {
 		t.Fatalf("q did not open the quit confirm dialog while an Abandon call was in flight:\n%s", plain(rootModel))
 	}
 }
+
+// TestRootKeysDoNotActOverTheMatrixActionMenu is UX-H13. With the action menu open, q quit (or
+// asked), l pushed the activity log over the menu and ? showed the matrix help, because
+// matrix.CapturesText ignored menuOpen: the menu is a modal over the cell, and the root's
+// q/l/? intercepts defer to a screen that says it is mid-dialog. Attacker: an operator who
+// opens the menu and presses each key. Control: the same keys with the menu closed still act.
+func TestRootKeysDoNotActOverTheMatrixActionMenu(t *testing.T) {
+	open := func() tea.Model {
+		tm, _ := pressRoot(sized(t), "enter")
+		if !strings.Contains(plain(tm), "promote") {
+			t.Fatalf("setup: enter on the matrix did not open the action menu:\n%s", plain(tm))
+		}
+		return tm
+	}
+	for _, k := range []string{"q", "l", "?"} {
+		tm, cmd := pressRoot(open(), k)
+		if quits(cmd) {
+			t.Errorf("%s with the menu open quit", k)
+		}
+		got := tm.(Model)
+		if got.helpOpen || len(got.stack) != 1 || got.quitConfirming {
+			t.Errorf("%s with the menu open acted on the root (helpOpen=%v, stack=%d)", k, got.helpOpen, len(got.stack))
+		}
+		if !strings.Contains(plain(tm), "promote") {
+			t.Errorf("%s dismissed the menu:\n%s", k, plain(tm))
+		}
+	}
+	// Control: closed menu, the root still handles each.
+	if _, cmd := pressRoot(sized(t), "q"); !quits(cmd) {
+		t.Error("control: q on the bare matrix must still quit")
+	}
+	if tm, _ := pressRoot(sized(t), "?"); !tm.(Model).helpOpen {
+		t.Error("control: ? on the bare matrix must still open help")
+	}
+	if tm, _ := pressRoot(sized(t), "l"); len(tm.(Model).stack) != 2 {
+		t.Error("control: l on the bare matrix must still push the activity log")
+	}
+}
