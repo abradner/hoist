@@ -530,22 +530,18 @@ func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState, app
 		return "", false
 	}
 	all, _ := groupEditsByWorkload(edits)
-	deployments := make(map[string][]deploymentWant, len(all))
-	for name, wants := range all {
+	deployments := make(map[workloadRef][]deploymentWant, len(all))
+	for ref, wants := range all {
 		for _, w := range wants {
 			if !superseded[w.Occ] {
-				deployments[name] = append(deployments[name], w)
+				deployments[ref] = append(deployments[ref], w)
 			}
 		}
 	}
-	names := make([]string, 0, len(deployments))
-	for name := range deployments {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	var parts []string
-	for _, name := range names {
-		ds, err := a.Rollout.Deployment(ctx, s.TargetEnv, name)
+	for _, ref := range sortedWorkloads(deployments) {
+		name := ref.String()
+		ds, err := readWorkload(ctx, a.Rollout, s.TargetEnv, ref)
 		if err != nil {
 			if errors.Is(err, rollout.ErrNotFound) {
 				// The same signal RolledOutStep itself would Block on one step later (its
@@ -563,9 +559,9 @@ func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState, app
 			return "", false
 		}
 		if ds.DeadlineExceeded {
-			return fmt.Sprintf("%s/%s: %s", s.TargetEnv, name, ds.Detail), true
+			return fmt.Sprintf("%s/%s: %s", s.TargetEnv, ref.Name, ds.Detail), true
 		}
-		if mismatches := imageMismatches(ds, deployments[name]); len(mismatches) > 0 {
+		if mismatches := imageMismatches(ds, deployments[ref]); len(mismatches) > 0 {
 			parts = append(parts, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
 			continue
 		}
@@ -635,17 +631,52 @@ func keyOf(e gitops.Edit) editKey {
 // jobLikeRef is one Job or CronJob a promotion's edits touched — report-only (invariant 4).
 type jobLikeRef struct{ Name, Kind string }
 
-// groupEditsByWorkload partitions edits by Kind: Deployment edits, grouped by the Deployment's
-// own name (namespace is uniformly s.TargetEnv — see gitops.Env's doc comment: the destination
-// namespace a family's Application deploys into is exactly what TargetEnv already names); Job
-// and CronJob edits, deduplicated by (kind, name), report-only.
-func groupEditsByWorkload(edits []gitops.Edit) (deployments map[string][]deploymentWant, jobLikes []jobLikeRef) {
-	deployments = map[string][]deploymentWant{}
+// workloadRef is one rolled-out workload a promotion's edits touched: a Deployment, StatefulSet
+// or DaemonSet, each gated on its rollout (#171 added the last two, which discovery had always
+// recorded and RolledOutStep had silently skipped).
+type workloadRef struct{ Kind, Name string }
+
+// String is how a workload is named in a step's Detail: a Deployment by its bare name, as it
+// always has been, and the other kinds with theirs in front.
+func (w workloadRef) String() string {
+	if w.Kind == "Deployment" {
+		return w.Name
+	}
+	return w.Kind + " " + w.Name
+}
+
+// sortedWorkloads returns m's keys in a stable order, by String.
+func sortedWorkloads[V any](m map[workloadRef]V) []workloadRef {
+	refs := make([]workloadRef, 0, len(m))
+	for ref := range m {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].String() < refs[j].String() })
+	return refs
+}
+
+// readWorkload reads ref's rollout state through the Rollout method for its kind.
+func readWorkload(ctx context.Context, ro rollout.Rollout, namespace string, ref workloadRef) (rollout.DeploymentStatus, error) {
+	if ref.Kind == "Deployment" {
+		return ro.Deployment(ctx, namespace, ref.Name)
+	}
+	return ro.Workload(ctx, namespace, ref.Name, ref.Kind)
+}
+
+// groupEditsByWorkload partitions edits by Kind: Deployment, StatefulSet and DaemonSet edits,
+// grouped by the workload's kind and name (namespace is uniformly s.TargetEnv — see gitops.Env's
+// doc comment: the destination namespace a family's Application deploys into is exactly what
+// TargetEnv already names); Job and CronJob edits, deduplicated by (kind, name), report-only.
+// Any other kind is in neither: *interim, stated not enforced*, a workload kind hoist cannot read
+// a rollout for is not gated on.
+func groupEditsByWorkload(edits []gitops.Edit) (deployments map[workloadRef][]deploymentWant, jobLikes []jobLikeRef) {
+	deployments = map[workloadRef][]deploymentWant{}
 	seenJobLike := map[jobLikeRef]bool{}
 	for _, e := range edits {
 		switch e.Kind {
-		case "Deployment":
-			deployments[e.Name] = append(deployments[e.Name], deploymentWant{
+		case "Deployment", "StatefulSet", "DaemonSet":
+			ref := workloadRef{Kind: e.Kind, Name: e.Name}
+			deployments[ref] = append(deployments[ref], deploymentWant{
 				Container: e.Container,
 				Init:      strings.Contains(e.Path, "initContainers"),
 				New:       e.New.String(),
@@ -708,7 +739,8 @@ func mismatchedWants(ds rollout.DeploymentStatus, wants []deploymentWant) []mism
 	return out
 }
 
-// RolledOutStep is satisfied once every Deployment this promotion edited carries the new image
+// RolledOutStep is satisfied once every Deployment, StatefulSet and DaemonSet this promotion
+// edited (#171; "Deployment" below stands for all three) carries the new image
 // in every occurrence it wrote and its rollout is complete by kubectl's own definition
 // (invariant 4). A rollout that has exceeded its own progress deadline Blocks, the same
 // immediacy ArgoSyncedStep applies to Degraded health — retrying will not fix a deployment
@@ -748,24 +780,19 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 	}
 	deployments, jobLikes := groupEditsByWorkload(s.Edits)
 
-	var names []string
-	for name := range deployments {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	statuses := make(map[string]rollout.DeploymentStatus, len(names))
+	refs := sortedWorkloads(deployments)
+	statuses := make(map[workloadRef]rollout.DeploymentStatus, len(refs))
 	var mismatched []deploymentWant
-	for _, name := range names {
-		ds, err := r.Rollout.Deployment(ctx, s.TargetEnv, name)
+	for _, ref := range refs {
+		ds, err := readWorkload(ctx, r.Rollout, s.TargetEnv, ref)
 		if err != nil {
 			if errors.Is(err, rollout.ErrNotFound) {
 				continue
 			}
-			return Observation{}, fmt.Errorf("checking rollout of Deployment %s/%s: %w", s.TargetEnv, name, err)
+			return Observation{}, fmt.Errorf("checking rollout of %s %s/%s: %w", ref.Kind, s.TargetEnv, ref.Name, err)
 		}
-		statuses[name] = ds
-		for _, m := range mismatchedWants(ds, deployments[name]) {
+		statuses[ref] = ds
+		for _, m := range mismatchedWants(ds, deployments[ref]) {
 			mismatched = append(mismatched, m.want)
 		}
 	}
@@ -776,14 +803,15 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 
 	var blocked, waiting, done, replaced []string
 	var anyExempt bool
-	for _, name := range names {
-		ds, ok := statuses[name]
+	for _, ref := range refs {
+		name := ref.String()
+		ds, ok := statuses[ref]
 		if !ok {
-			blocked = append(blocked, fmt.Sprintf("Deployment %s/%s not found", s.TargetEnv, name))
+			blocked = append(blocked, fmt.Sprintf("%s %s/%s not found", ref.Kind, s.TargetEnv, ref.Name))
 			continue
 		}
 		var mismatches, exempt []string
-		for _, m := range mismatchedWants(ds, deployments[name]) {
+		for _, m := range mismatchedWants(ds, deployments[ref]) {
 			if why, ok := superseded[m.want.Occ]; ok {
 				exempt = append(exempt, why)
 				continue
@@ -791,7 +819,7 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 			mismatches = append(mismatches, m.why)
 		}
 		anyExempt = anyExempt || len(exempt) > 0
-		if len(exempt) == len(deployments[name]) {
+		if len(exempt) == len(deployments[ref]) {
 			// Every occurrence in this Deployment was superseded: what it is rolling out now is
 			// the later change, not this promotion.
 			replaced = append(replaced, fmt.Sprintf("%s: superseded (%s)", name, strings.Join(exempt, "; ")))
@@ -799,7 +827,7 @@ func (r RolledOutStep) Observe(ctx context.Context, s *PromotionState) (Observat
 		}
 		switch {
 		case ds.DeadlineExceeded:
-			blocked = append(blocked, fmt.Sprintf("%s/%s: %s", s.TargetEnv, name, ds.Detail))
+			blocked = append(blocked, fmt.Sprintf("%s/%s: %s", s.TargetEnv, ref.Name, ds.Detail))
 		case len(mismatches) > 0:
 			waiting = append(waiting, fmt.Sprintf("%s: image not yet live (%s)", name, strings.Join(mismatches, ", ")))
 		case !ds.Complete:

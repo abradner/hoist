@@ -164,10 +164,11 @@ func argoNamespaceOf(rc *config.RepoConfig) string {
 }
 
 // familyWorkloads lists the distinct Deployment names, and the distinct (kind, name) Job/
-// CronJob pairs, fam's own occurrences declare — the same Kind-based grouping RolledOutStep
-// uses (groupEditsByWorkload in internal/engine), applied to every occurrence discovery found
+// CronJob pairs, fam's own occurrences declare — the Kind-based grouping RolledOutStep uses
+// (groupEditsByWorkload in internal/engine), applied to every occurrence discovery found
 // rather than only the ones a specific promotion's plan touched, since `hoist watch` has no
-// plan to consult.
+// plan to consult. *Stated, not enforced:* RolledOutStep also gates StatefulSets and DaemonSets
+// since #171; this view does not show them yet.
 func familyWorkloads(fam *gitops.Family) (deployments []string, jobLikes []jobLikeName) {
 	if fam == nil {
 		return nil, nil

@@ -204,8 +204,8 @@ func TestScenarioArgoSyncedRolloutCauseComposesWithARealDrive(t *testing.T) {
 		for i, want := range wants {
 			imgs[i] = rollout.ContainerImage{Name: want.Container, Init: want.Init, Image: want.New}
 		}
-		w.ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
-			Namespace: s.TargetEnv, Name: name, Images: imgs,
+		w.ro.SetDeployment(s.TargetEnv, name.Name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name.Name, Images: imgs,
 			Complete: false, Detail: "1 of 2 updated replicas are available",
 		})
 	}

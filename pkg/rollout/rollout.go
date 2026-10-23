@@ -1,4 +1,4 @@
-// Package rollout reads Deployment rollout completeness, and reports current Job/CronJob
+// Package rollout reads Deployment, StatefulSet and DaemonSet rollout completeness, and reports current Job/CronJob
 // state, through the typed client-go clientset (k8s.io/api/apps/v1, k8s.io/api/batch/v1) — no
 // dynamic client needed, since these are stable, already-vendored Go types — following the same
 // client-go adaptor shape pkg/k8s established (cluster.go/kubeconfig.go/fake.go): a thin
@@ -28,6 +28,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -155,6 +156,11 @@ type JobLikeStatus struct {
 type Rollout interface {
 	// Deployment reads namespace/name's current images and rollout completeness.
 	Deployment(ctx context.Context, namespace, name string) (DeploymentStatus, error)
+	// Workload reads namespace/name's current images and rollout completeness for kind
+	// "StatefulSet" or "DaemonSet" (#171). The answer is a DeploymentStatus with Namespace,
+	// Name, Images, Complete and Detail set; neither kind has a progress deadline, so
+	// DeadlineExceeded is always false, and the restart fields are not read.
+	Workload(ctx context.Context, namespace, name, kind string) (DeploymentStatus, error)
 	// JobLike reads namespace/name's current state, for kind "Job" or "CronJob".
 	JobLike(ctx context.Context, namespace, name, kind string) (JobLikeStatus, error)
 	// Restart rolls namespace/name's pods without changing what it runs, by stamping the pod
@@ -415,6 +421,95 @@ func deploymentRolloutComplete(d *appsv1.Deployment) (complete, deadlineExceeded
 	default:
 		return true, false, fmt.Sprintf("deployment %q successfully rolled out", d.Name)
 	}
+}
+
+// Workload implements Rollout.
+func (c *client) Workload(ctx context.Context, namespace, name, kind string) (DeploymentStatus, error) {
+	if namespace == "" || name == "" {
+		return DeploymentStatus{}, fmt.Errorf("rollout: %s needs a namespace and a name", kind)
+	}
+	var (
+		tmpl corev1.PodTemplateSpec
+		err  error
+		st   = DeploymentStatus{Namespace: namespace, Name: name}
+	)
+	switch kind {
+	case "StatefulSet":
+		var ss *appsv1.StatefulSet
+		if ss, err = c.cs.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+			tmpl = ss.Spec.Template
+			st.Complete, st.Detail = statefulSetRolloutComplete(ss)
+		}
+	case "DaemonSet":
+		var ds *appsv1.DaemonSet
+		if ds, err = c.cs.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+			tmpl = ds.Spec.Template
+			st.Complete, st.Detail = daemonSetRolloutComplete(ds)
+		}
+	default:
+		return DeploymentStatus{}, fmt.Errorf("rollout: unsupported workload kind %q", kind)
+	}
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return DeploymentStatus{}, fmt.Errorf("reading %s %s/%s: %w", kind, namespace, name, ErrNotFound)
+		}
+		return DeploymentStatus{}, fmt.Errorf("reading %s %s/%s: %s", kind, namespace, name, c.describe(err))
+	}
+	for _, ctr := range tmpl.Spec.Containers {
+		st.Images = append(st.Images, ContainerImage{Name: ctr.Name, Image: ctr.Image})
+	}
+	for _, ctr := range tmpl.Spec.InitContainers {
+		st.Images = append(st.Images, ContainerImage{Name: ctr.Name, Init: true, Image: ctr.Image})
+	}
+	return st, nil
+}
+
+// statefulSetRolloutComplete is kubectl's StatefulSet rollout-status test, ported like
+// deploymentRolloutComplete. kubectl refuses outright for an OnDelete strategy; here it is
+// reported as not complete, with the reason, since pods under OnDelete only take the new spec
+// when something deletes them — a promotion's change is not live until then.
+func statefulSetRolloutComplete(ss *appsv1.StatefulSet) (bool, string) {
+	if ss.Spec.UpdateStrategy.Type != "" && ss.Spec.UpdateStrategy.Type != appsv1.RollingUpdateStatefulSetStrategyType {
+		return false, fmt.Sprintf("statefulset %q uses the %s update strategy: pods take the new spec only when deleted", ss.Name, ss.Spec.UpdateStrategy.Type)
+	}
+	if ss.Status.ObservedGeneration == 0 || ss.Generation > ss.Status.ObservedGeneration {
+		return false, "waiting for the statefulset spec update to be observed"
+	}
+	want := int32(1)
+	if ss.Spec.Replicas != nil {
+		want = *ss.Spec.Replicas
+	}
+	if ss.Status.ReadyReplicas < want {
+		return false, fmt.Sprintf("waiting for %d pods to be ready", want-ss.Status.ReadyReplicas)
+	}
+	if ru := ss.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil && *ru.Partition > 0 {
+		if ss.Status.UpdatedReplicas < want-*ru.Partition {
+			return false, fmt.Sprintf("waiting for partitioned roll out to finish: %d out of %d new pods have been updated", ss.Status.UpdatedReplicas, want-*ru.Partition)
+		}
+		return true, fmt.Sprintf("partitioned roll out complete: %d new pods have been updated", ss.Status.UpdatedReplicas)
+	}
+	if ss.Status.UpdateRevision != ss.Status.CurrentRevision {
+		return false, fmt.Sprintf("waiting for statefulset rolling update to complete %d pods at revision %s", ss.Status.UpdatedReplicas, ss.Status.UpdateRevision)
+	}
+	return true, fmt.Sprintf("statefulset %q rolling update complete: %d pods at revision %s", ss.Name, ss.Status.CurrentReplicas, ss.Status.CurrentRevision)
+}
+
+// daemonSetRolloutComplete is kubectl's DaemonSet rollout-status test, ported like
+// deploymentRolloutComplete, with OnDelete reported as statefulSetRolloutComplete reports it.
+func daemonSetRolloutComplete(ds *appsv1.DaemonSet) (bool, string) {
+	if ds.Spec.UpdateStrategy.Type != "" && ds.Spec.UpdateStrategy.Type != appsv1.RollingUpdateDaemonSetStrategyType {
+		return false, fmt.Sprintf("daemonset %q uses the %s update strategy: pods take the new spec only when deleted", ds.Name, ds.Spec.UpdateStrategy.Type)
+	}
+	if ds.Generation > ds.Status.ObservedGeneration {
+		return false, "waiting for the daemonset spec update to be observed"
+	}
+	if ds.Status.UpdatedNumberScheduled < ds.Status.DesiredNumberScheduled {
+		return false, fmt.Sprintf("waiting for daemon set %q rollout to finish: %d out of %d new pods have been updated", ds.Name, ds.Status.UpdatedNumberScheduled, ds.Status.DesiredNumberScheduled)
+	}
+	if ds.Status.NumberAvailable < ds.Status.DesiredNumberScheduled {
+		return false, fmt.Sprintf("waiting for daemon set %q rollout to finish: %d of %d updated pods are available", ds.Name, ds.Status.NumberAvailable, ds.Status.DesiredNumberScheduled)
+	}
+	return true, fmt.Sprintf("daemon set %q successfully rolled out", ds.Name)
 }
 
 // describe renders a client-go error without the API server or any response detail, mirroring
