@@ -21,6 +21,13 @@ import (
 // transport error with errors.Is.
 var ErrStaleHead = errors.New("forge: PR head does not match the expected sha")
 
+// ErrMergeRefused is returned (wrapped) by MergePR when the forge refuses the merge itself —
+// GitHub's HTTP 405: branch protection wants a review or a passing check, or the repository
+// does not allow a squash merge. Nothing about the PR changes by asking again; only someone on
+// the forge can satisfy it. Callers distinguish it from a transport error with errors.Is. The
+// forge's own free-form explanation is deliberately not carried (AGENTS.md §4.10, F5).
+var ErrMergeRefused = errors.New("forge: the forge refused the merge")
+
 // ErrUnknownRef is returned (wrapped) by Compare when base or head names nothing the forge
 // knows — a tag that was deleted, a sha only ever pushed to a fork, or a private repo the
 // token cannot see (a GitHub 404 is the same for all three). Callers distinguish it from a

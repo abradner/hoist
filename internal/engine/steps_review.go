@@ -38,6 +38,7 @@ package engine
 // the PR opened — and is not taken (issue #47, decided rather than deferred).
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -617,9 +618,19 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 			// actual, known mismatch is treated as impostor content.
 			fresh, ok, ferr := findOwnPR(ctx, m.Forge, s)
 			headOK := fresh.HeadSHA == "" || expected == "" || fresh.HeadSHA == expected
-			if ferr == nil && ok && fresh.Merged && fresh.Base == s.Base && headOK {
+			switch {
+			case ferr == nil && ok && fresh.Merged && fresh.Base == s.Base && headOK:
 				s.PR = &fresh
-			} else {
+			case errors.Is(err, forge.ErrMergeRefused) && ferr == nil && ok && !fresh.Merged:
+				// Only when the recovery read itself succeeded and says the PR is still unmerged
+				// (the forge answers an already-merged PR with the same refusal). A failed or
+				// contradictory recovery read keeps the plain error below, which names what
+				// happened, rather than a cause this step cannot know. A forge read that lags a
+				// real merge lands here too; r or resume re-observes and finds the merge.
+				return &ActBlockedError{Reason: fmt.Sprintf(
+					"the forge refused the merge of PR #%d (HTTP 405): branch protection on %s (a required review or check), the repository's merge settings, or the PR is not mergeable right now (a conflict, or the base moved) — resolve it on the forge, then press r or run hoist resume %s",
+					s.PR.Number, s.Base, s.ID)}
+			default:
 				return fmt.Errorf("merging PR #%d: %w", s.PR.Number, err)
 			}
 		} else {

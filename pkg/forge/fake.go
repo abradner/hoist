@@ -52,6 +52,9 @@ type Fake struct {
 	AllowedErr error
 	// MergeErr, when set, is returned by every call to MergePR regardless of head sha.
 	MergeErr error
+	// MergeRefused makes every MergePR call — an already-merged PR's included, as on GitHub —
+	// fail wrapping ErrMergeRefused, the 405 a branch-protection rule produces.
+	MergeRefused bool
 	// CloseErr, when set, is returned by every call to ClosePR.
 	CloseErr error
 
@@ -280,6 +283,9 @@ func (f *Fake) MergePR(_ context.Context, prNumber int, expectedHeadSHA string) 
 	f.Calls = append(f.Calls, fmt.Sprintf("MergePR %d", prNumber))
 	if f.MergeErr != nil {
 		return PR{}, f.MergeErr
+	}
+	if f.MergeRefused {
+		return PR{}, fmt.Errorf("forge: merging PR #%d: %w", prNumber, ErrMergeRefused)
 	}
 	for i := range f.prs {
 		if f.prs[i].Number != prNumber {
