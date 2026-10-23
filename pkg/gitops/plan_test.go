@@ -453,3 +453,64 @@ func TestBuildPlanWithReasonNamesTheOverrideSource(t *testing.T) {
 		t.Errorf("BuildPlanWith warning does not carry the caller's reason: %s", msg)
 	}
 }
+
+func targetNewerWarnings(p Plan) []Warning {
+	var out []Warning
+	for _, w := range p.Warnings {
+		if w.Code == WarnTargetNewer {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func TestBuildPlanWarnsWhenTargetRunsANewerTimestampBuild(t *testing.T) {
+	r := twoEnvRepo(t,
+		deployment("api", "api", "ghcr.io/example/api:v202610010000@"+digestA),
+		deployment("api", "api", "ghcr.io/example/api:v202610230000@"+digestC))
+	p, err := BuildPlan(r, "staging", "production", promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := targetNewerWarnings(p)
+	if len(ws) != 1 {
+		t.Fatalf("want one %s warning, got %+v", WarnTargetNewer, p.Warnings)
+	}
+	for _, want := range []string{"ghcr.io/example/api", "v202610230000", "v202610010000", "production"} {
+		if !strings.Contains(ws[0].Message, want) {
+			t.Errorf("message %q lacks %q", ws[0].Message, want)
+		}
+	}
+	if len(ws[0].Occurrences) != 1 || ws[0].Occurrences[0].Ref.Repo != "ghcr.io/example/api" {
+		t.Errorf("occurrences = %+v, want the target's occurrence of the repo", ws[0].Occurrences)
+	}
+	if len(p.Edits) != 1 {
+		t.Errorf("warn, don't block: the edit must still be planned, got %+v", p.Edits)
+	}
+}
+
+func TestBuildPlanTargetNewerIsSilentWhenNotProvablyNewer(t *testing.T) {
+	cases := []struct{ name, src, dst string }{
+		{"equal timestamps", "v202610010000", "v202610010000"},
+		{"target older (a normal promotion)", "v202610230000", "v202610010000"},
+		{"target is a branch tag", "v202610010000", "main"},
+		{"source is a branch tag", "main", "v202610230000"},
+		{"sha-shaped tags", "sha-aaaaaaa", "sha-bbbbbbb"},
+		{"timestamp with a suffix", "v202610010000", "v202610230000-hotfix"},
+		{"eleven digits", "v20261001000", "v20261023000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := twoEnvRepo(t,
+				deployment("api", "api", "ghcr.io/example/api:"+c.src+"@"+digestA),
+				deployment("api", "api", "ghcr.io/example/api:"+c.dst+"@"+digestC))
+			p, err := BuildPlan(r, "staging", "production", promotable, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ws := targetNewerWarnings(p); len(ws) != 0 {
+				t.Errorf("unexpected %s warning: %+v", WarnTargetNewer, ws)
+			}
+		})
+	}
+}
