@@ -435,12 +435,5 @@ func SourcesFor(r *gitops.Repo, target string) []string {
 // target is not production, or is exactly the configured pair, or source has no configured
 // pair to skip.
 func SkippedStaging(source, target string, envs config.EnvsConfig) (staging string, skip bool) {
-	if !envs.IsProduction(target) {
-		return "", false
-	}
-	staging, ok := envs.Pairs[source]
-	if !ok || staging == "" || staging == target {
-		return "", false
-	}
-	return staging, true
+	return service.SkippedStaging(source, target, envs)
 }

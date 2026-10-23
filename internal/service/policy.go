@@ -41,6 +41,43 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 	})
 }
 
+// SkippedStaging reports the configured pipeline predecessor of target's production env that a
+// promotion from source steps over: staging is the env envs.pairs sends source to, skip is true
+// when target is production but is not that configured pair. False when target is not
+// production, when it is exactly the configured pair, or when source has no pair to skip
+// (AGENTS.md §4.5). Moved from internal/app/plan unchanged; the plan screen's own sentence and
+// WarnSkippedStagingProduction read this one rule.
+func SkippedStaging(source, target string, envs config.EnvsConfig) (staging string, skip bool) {
+	if !envs.IsProduction(target) {
+		return "", false
+	}
+	staging, ok := envs.Pairs[source]
+	if !ok || staging == "" || staging == target {
+		return "", false
+	}
+	return staging, true
+}
+
+// WarnSkippedStagingProduction attaches gitops.WarnSkippedStaging to a promotion into a
+// production env from a source that is not its configured predecessor: "promoting straight to
+// production, skipping <staging>". Plan calls it for every promotion it builds, so the dry run,
+// the confirm screen and the PR body all carry it, as WarnDeployIntoProduction does for a deploy
+// (§4.5). It informs and never blocks (principle 5). A deploy has no source env, so it is a no-op
+// there.
+func WarnSkippedStagingProduction(pl *gitops.Plan, envs config.EnvsConfig) {
+	if pl == nil || pl.IsDeploy() {
+		return
+	}
+	staging, skip := SkippedStaging(pl.SourceEnv, pl.TargetEnv, envs)
+	if !skip {
+		return
+	}
+	pl.Warnings = append(pl.Warnings, gitops.Warning{
+		Code:    gitops.WarnSkippedStaging,
+		Message: fmt.Sprintf("promoting %s straight to production (%s), skipping %s: the configured pipeline sends %s to %s first", pl.SourceEnv, pl.TargetEnv, staging, pl.SourceEnv, staging),
+	})
+}
+
 // Preflight is StartPromotion's own early gate, called before any freshness check, claim or
 // state save, and the one place a start's prerequisites are stated: the CLI calls its two halves
 // (PreflightConfig, PreflightGate) around its own --confirm-direct match, so `hoist promote`,
