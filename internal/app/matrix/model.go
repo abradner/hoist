@@ -500,7 +500,7 @@ func (m Model) doOpenPR() (Model, tea.Cmd) {
 		url := withPR[0].PR.URL
 		return m, func() tea.Msg { return flight.OpenPRMsg{URL: url} }
 	default:
-		return m.openInFlightChooser(chooserOpenPR, withPR)
+		return m.openOpenPRChooser(withPR)
 	}
 }
 
@@ -652,21 +652,19 @@ func chooserKey(s flight.Summary) string {
 	return fmt.Sprintf("build:%d", s.Build)
 }
 
-func (m Model) openInFlightChooser(kind chooserKind, from []flight.Summary) (Model, tea.Cmd) {
+// openOpenPRChooser asks which of several in-flight promotions o meant. It is the only caller
+// of the in-flight chooser, so there is no other kind for it to be parameterised over.
+func (m Model) openOpenPRChooser(from []flight.Summary) (Model, tea.Cmd) {
 	opts := make([]huh.Option[string], 0, len(from))
 	for _, s := range from {
 		opts = append(opts, huh.NewOption(paneID(s)+"  "+pair(s)+"  "+s.Verdict(), chooserKey(s)))
 	}
-	title := "resume which promotion?"
-	if kind == chooserOpenPR {
-		title = "open which promotion's PR?"
-	}
-	sel := huh.NewSelect[string]().Title(title).Options(opts...)
+	sel := huh.NewSelect[string]().Title("open which promotion's PR?").Options(opts...)
 	sel.WithKeyMap(keys.HuhKeyMap())
 	sel.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
 	m.chooser = sel
 	m.chooserTarget = ""
-	m.chooserKind = kind
+	m.chooserKind = chooserOpenPR
 	return m, tea.Batch(sel.Init(), sel.Focus())
 }
 
