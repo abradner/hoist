@@ -402,6 +402,61 @@ func TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth(t *
 	}
 }
 
+// TestArgoSyncedDirectPathDoesNotBlockASupersededPromotionOnTheLaterDeploysHealth (#291) is the
+// direct-path twin of TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth.
+// On the direct path a supersede moves PushedSHA, and so LandedSHA(), to the superseding tip
+// (DirectPushedStep records the revision that carries the content), so once Argo syncs that tip
+// the revision equals LandedSHA() — and must still be judged, not taken as this promotion's
+// own. The control is the unsuperseded direct push: its own revision Degraded still Blocks.
+func TestArgoSyncedDirectPathDoesNotBlockASupersededPromotionOnTheLaterDeploysHealth(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		supersede bool
+	}{
+		{"superseded by a later deploy", true},
+		{"not superseded (control)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			s := w.directDeploy()
+			if s.PushedSHA == "" || s.PushedSHA != s.CommitSHA {
+				t.Fatalf("setup: the direct push should have recorded its own commit, got PushedSHA=%q CommitSHA=%q", s.PushedSHA, s.CommitSHA)
+			}
+			if tc.supersede {
+				w.supersede(supersededRef)
+				// Re-observe the push the way every later walk does: this is what moves PushedSHA.
+				if obs, err := (DirectPushedStep{Git: w.g}).Observe(context.Background(), s); err != nil || !obs.Satisfied {
+					t.Fatalf("setup: DirectPushedStep should be satisfied by the supersede: %+v, %v", obs, err)
+				}
+			}
+			tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+			if err != nil || !ok {
+				t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+			}
+			if s.LandedSHA() != tip {
+				t.Fatalf("setup: LandedSHA() should be the tip production leaves it at, got %s, tip %s", s.LandedSHA(), tip)
+			}
+			for _, st := range []argo.Status{
+				{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: argo.HealthStatusDegraded},
+				{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: "Progressing", OperationPhase: argo.OperationFailed},
+			} {
+				a := &argo.Fake{}
+				a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp}, st)
+				obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+				if err != nil {
+					t.Fatalf("Observe: %v", err)
+				}
+				if tc.supersede && !obs.Satisfied {
+					t.Errorf("health=%s phase=%s: the later deploy's health is not this promotion's; want Satisfied, got %+v", st.HealthStatus, st.OperationPhase, obs)
+				}
+				if !tc.supersede && obs.Blocked == "" {
+					t.Errorf("health=%s phase=%s: this promotion's own revision is unhealthy; want Blocked, got %+v", st.HealthStatus, st.OperationPhase, obs)
+				}
+			}
+		})
+	}
+}
+
 // ancestryFailsAt is a git.Git whose IsAncestor fails for one descendant, every other call real.
 type ancestryFailsAt struct {
 	git.Git

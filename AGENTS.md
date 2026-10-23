@@ -239,11 +239,10 @@ supersede (the image put back, a rewrite, the branch gone), the stale revision n
 for this promotion, and nor do its health and operation phase — they are the later deploy's, and
 reverting a deploy that broke is the likeliest way a supersede is undone — so the step waits for
 Argo to sync the tip without the Degraded and Failed-operation Blocks, and judges the tip,
-health gates included, once Argo has synced it (#265). *Stated, not enforced:* all of this reaches `ArgoSyncedStep` on the
-PR path only. On the direct path a supersede moves `PushedSHA`, and so `LandedSHA()`, to the
-superseding tip; once Argo syncs it, `revisionCarries` takes its `rev == LandedSHA()` shortcut
-and the Application stays health-gated by the later deploy, so that deploy's Degraded health
-still Blocks a direct promotion it replaced (#291).
+health gates included, once Argo has synced it (#265). All of this holds on the direct path
+too: there a supersede moves `PushedSHA`, and so `LandedSHA()`, to the superseding tip, so
+`revisionCarries` takes its `rev == LandedSHA()` shortcut only while `PushedSHA` is still the
+promotion's own commit, and otherwise judges that revision like any other descendant (#291).
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 

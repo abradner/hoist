@@ -366,8 +366,9 @@ const (
 //
 // Three cases, in order:
 //
-//  1. rev IS LandedSHA() — the exact match, unchanged, and still the common one during the
-//     window before anything else lands on the base.
+//  1. rev IS LandedSHA(), and LandedSHA() is this promotion's own commit — the exact match,
+//     unchanged, and still the common one during the window before anything else lands on the
+//     base. A direct promotion's LandedSHA() that a supersede moved is judged as case 3.
 //  2. LandedSHA() is not an ancestor of rev — Argo has not caught up (or has synced to a
 //     revision this promotion is not part of at all). Not carried.
 //  3. LandedSHA() is an ancestor of rev — the base advanced past us. Ancestry alone is NOT
@@ -380,7 +381,13 @@ const (
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
 func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, base *baseFetch) (carries carriage, why string, err error) {
-	if rev == s.LandedSHA() {
+	// The shortcut holds only where LandedSHA() is this promotion's own commit, at which its
+	// edits are intact by construction: the merge commit on the PR path, and on the direct path
+	// the pushed commit while PushedSHA is still it. A supersede moves a direct promotion's
+	// PushedSHA to the superseding tip (DirectPushedStep records the revision that carries the
+	// content), and that revision has to be judged like any other descendant, or the later
+	// deploy's health would gate the promotion it replaced (#291).
+	if rev == s.LandedSHA() && (!s.Direct || s.PushedSHA == s.CommitSHA) {
 		return revCarried, "", nil
 	}
 	if a.Git == nil || rev == "" || s.CloneDir == "" {

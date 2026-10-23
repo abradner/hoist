@@ -565,9 +565,8 @@ touched — `--repo`/`--archived` only change what's *listed*, never what gets a
 A promotion a later deploy replaced counts as done. Where the base branch now declares the same
 image repo at a different reference than this promotion wrote, and the promotion's own landed
 commit is still in the base branch's history, then once Argo has synced the later change that
-image's rollout no longer has to finish for the promotion to finish. (For a `--direct` promotion
-this holds at the rollout step but not yet at Argo sync, where the later deploy's health still
-counts — #291.) (If the base was rewritten so that the promotion's commit is gone, a
+image's rollout no longer has to finish for the promotion to finish, and its health no longer
+counts at the Argo sync step, for a `--direct` promotion as for a PR. (If the base was rewritten so that the promotion's commit is gone, a
 different reference there is not evidence the promotion ever landed, and it is not treated as
 superseded.) It is judged image by image, so in a promotion that changed two Deployments and had
 only one replaced by a later deploy, the other still has to roll out — and while the two share
