@@ -752,7 +752,14 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	root := app.New(r, eff.promotable, envs, svc.Plan, svc, promo, tagsFn, restartFn).
-		WithConfigView(cfg.File, cfg.Found, configText).
+		WithConfigView(cfg.File, cfg.Found, configText)
+	if eff.cfg != nil {
+		// Only a selected repo entry makes envs.production an answer rather than an omission
+		// (AR-H4): without it the restart screen asks for the production confirm on every env,
+		// as the CLI's checkProductionRestart does.
+		root = root.WithEnvsFromConfig()
+	}
+	root = root.
 		WithHistory(historyFn).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
