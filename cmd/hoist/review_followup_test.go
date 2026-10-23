@@ -92,6 +92,9 @@ func TestRestartProductionIsRefusedBeforeAnyClusterWork(t *testing.T) {
 		if got := run(args, &out, &errOut); got != exitUsage {
 			t.Fatalf("%v: exit %d, want %d; stderr: %s", extra, got, exitUsage, errOut.String())
 		}
+		if !strings.Contains(errOut.String(), "--confirm-production=app-production") {
+			t.Errorf("%v: refused for some other reason than the missing acknowledgement:\n%s", extra, errOut.String())
+		}
 		if asked != 0 || out.Len() != 0 {
 			t.Errorf("%v: refused only after %d rollout client request(s) and stdout %q", extra, asked, out.String())
 		}
@@ -160,9 +163,33 @@ func TestGCRedactsItsStdoutLines(t *testing.T) {
 	if err := (git.Exec{}).Worktree(context.Background(), clone, dir, engine.BranchName("app-staging", id), "main"); err != nil {
 		t.Fatal(err)
 	}
+	// A second orphan with an uncommitted file is kept, and the line saying so names its directory.
+	const dirtyID = "orphan4444"
+	dirty, err := engine.WorktreeDir(dirtyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (git.Exec{}).Worktree(context.Background(), clone, dirty, engine.BranchName("app-staging", dirtyID), "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirty, "uncommitted.txt"), []byte("work in progress"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var out, errOut bytes.Buffer
 	if got := run([]string{"--config", cfgPath, "gc", "--dry-run"}, &out, &errOut); got != 0 {
 		t.Fatalf("gc --dry-run: exit %d; stderr: %s", got, errOut.String())
+	}
+	var kept int
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "kept") || strings.Contains(line, "not clean") || strings.Contains(line, dirtyID) {
+			kept++
+			if strings.Contains(line, secret) {
+				t.Errorf("a Kept line carries the registered value:\n%s", line)
+			}
+		}
+	}
+	if kept == 0 {
+		t.Fatalf("no Kept line for the dirty orphan (positive control):\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "would remove worktree") {
 		t.Fatalf("the sweep did not find the orphan (positive control):\n%s", out.String())

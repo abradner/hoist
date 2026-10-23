@@ -26,7 +26,7 @@ func TestCheckRestartConfirmed(t *testing.T) {
 		{"production, none given", configured, "app-production", "", "app-production is a production env; restarting it requires --confirm-production=app-production as well"},
 		{"production, wrong env repeated", configured, "app-production", "app-staging", `--confirm-production="app-staging" does not match --env "app-production"; repeat the exact env to acknowledge`},
 		{"production, acknowledged", configured, "app-production", "app-production", ""},
-		{"no config, none given", service.Settings{}, "app-production", "", "no configured repo, so hoist cannot tell whether app-production is production; pass --confirm-production=app-production to restart it anyway"},
+		{"no config, none given", service.Settings{}, "app-production", "", "no repos[] entry is selected, so hoist cannot tell whether app-production is production; pass --confirm-production=app-production to restart it anyway"},
 		{"no config, acknowledged", service.Settings{}, "app-production", "app-production", ""},
 	} {
 		err := tc.set.CheckRestartConfirmed(tc.env, tc.confirm)

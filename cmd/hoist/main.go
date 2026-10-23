@@ -424,12 +424,13 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
 		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
 	}
+	pairNote := ""
 	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
-		f, t, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
+		f, t, note, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
 		if !ok {
 			return code
 		}
-		*from, *to = f, t
+		*from, *to, pairNote = f, t, note
 	}
 	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
@@ -454,6 +455,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	// Signal/deadline-aware, exactly like runPromote/runDeploy's own ctx (promote.go's own
 	// comment on this same call): resolution can talk to the cluster and the registry, so ^C
 	// or the poll deadline must be able to interrupt it here too, not just the write path.
+	fmt.Fprint(stderr, pairNote)
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})

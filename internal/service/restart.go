@@ -59,7 +59,7 @@ func (s *Service) RestartInterval() time.Duration {
 // one keystroke or one line of shell history. confirm is that acknowledgement, "" when none was
 // given. A refusal is a *UsageError; an env the config does not list as production needs none.
 //
-// With no configured repo there is no envs.production list, so every env would look
+// With no repos[] entry selected there is no envs.production list, so every env would look
 // non-production by omission. That fails closed, as the direct-commit preflight does (§8: never
 // provide a fallback default for required configuration) — though not outright, since restarting
 // against an unconfigured repo is a legitimate thing to want: it is "we cannot tell, so
@@ -67,7 +67,7 @@ func (s *Service) RestartInterval() time.Duration {
 func (s Settings) CheckRestartConfirmed(env, confirm string) error {
 	if s.Repo == nil {
 		if confirm != env {
-			return &UsageError{Msg: fmt.Sprintf("no configured repo, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway", env, env)}
+			return &UsageError{Msg: fmt.Sprintf("no repos[] entry is selected, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway", env, env)}
 		}
 		return nil
 	}

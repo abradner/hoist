@@ -163,3 +163,21 @@ func refsOf(t *testing.T, clone string) string {
 	}
 	return string(out)
 }
+
+// The note naming the pair used is the last thing before the work starts: a plan refused for any
+// other reason (here an unknown digest source, which NewResolveOptions rejects after the env pair
+// is filled in) must not first announce a promotion it never makes.
+func TestPairingNoteIsNotPrintedForARefusedPlan(t *testing.T) {
+	cfg := pairsConfig(t)
+	code, out, errOut := run3(t, "--config", cfg, "plan", "--dry-run", "--to", "app-production", "--digest-sources", "pods,vault")
+	if code != exitUsage || out != "" {
+		t.Fatalf("exit %d, stdout %q, stderr %.200q; want a usage refusal and nothing planned", code, out, errOut)
+	}
+	if strings.Contains(errOut, "envs.pairs promotes") {
+		t.Errorf("the refused plan announced a pairing first:\n%s", errOut)
+	}
+	// Positive control: the same command with a valid digest source does print it.
+	if code, _, errOut := run3(t, "--config", cfg, "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 || !strings.Contains(errOut, "--from not given; envs.pairs promotes app-staging into app-production") {
+		t.Errorf("control: exit %d, stderr %.200q", code, errOut)
+	}
+}

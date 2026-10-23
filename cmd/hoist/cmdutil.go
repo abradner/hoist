@@ -45,20 +45,33 @@ func commandContext(deadline time.Duration) (context.Context, context.CancelFunc
 // returned unchanged (the caller's own "required" refusal covers neither), and with exactly one
 // given — the caller checks that the flag was GIVEN, not that its value is non-empty, so
 // `--to "$UNSET"` stays the refusal it always was (§9 entry 16) — the other is the pair
-// envs.pairs configures (service.Settings.PairEnvs, #173). A pair filled in
-// from the config is named on stderr, so the operator sees which promotion they are about to
-// plan or start. ok is false when the config could not fill it in; code is then the exit code.
-func pairedEnvs(who string, set service.Settings, from, to string, stderr io.Writer) (f, t string, code int, ok bool) {
+// envs.pairs configures (service.Settings.PairEnvs, #173). note is the stderr line that names the
+// pair used, so the operator sees which promotion they are about to plan or start; it is returned,
+// not printed, so the caller prints it only once every other refusal has been passed and the note
+// never announces a command that is then refused. ok is false when the config could not fill the
+// other env in; code is then the exit code.
+func pairedEnvs(who string, set service.Settings, from, to string, stderr io.Writer) (f, t, note string, code int, ok bool) {
 	pf, pt, err := set.PairEnvs(from, to)
 	if err != nil {
-		c, _ := renderStartError(io.Discard, stderr, who, err)
-		return "", "", c, false
+		return "", "", "", refuse(stderr, who, err), false
 	}
 	switch {
 	case from == "" && pf != "":
-		fmt.Fprintf(stderr, "%s: --from not given; envs.pairs promotes %s into %s\n", who, pf, pt)
+		note = fmt.Sprintf("%s: --from not given; envs.pairs promotes %s into %s\n", who, pf, pt)
 	case to == "" && pt != "":
-		fmt.Fprintf(stderr, "%s: --to not given; envs.pairs promotes %s into %s\n", who, pf, pt)
+		note = fmt.Sprintf("%s: --to not given; envs.pairs promotes %s into %s\n", who, pf, pt)
 	}
-	return pf, pt, 0, true
+	return pf, pt, note, 0, true
+}
+
+// refuse renders a refusal error and returns a non-zero exit code. renderStartError returns 0 for
+// the one error that is a success (service.AlreadyCurrentError), and prints that one to stdout,
+// which refuse discards; no refusal produces it, but a refusal that read as "proceed" or exited
+// silently would be the worst way for one to start, so a zero code is turned into a failure that
+// says what it was.
+func refuse(stderr io.Writer, cmdName string, err error) int {
+	if code, _ := renderStartError(io.Discard, stderr, cmdName, err); code != 0 {
+		return code
+	}
+	return failf(stderr, cmdName, exitFailure, "%v", err)
 }

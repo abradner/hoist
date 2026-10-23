@@ -83,8 +83,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// would be refused still says so.
 	svc := service.New(set, serviceDeps())
 	if err := set.CheckRestartConfirmed(*env, *confirmProduction); err != nil {
-		code, _ := renderStartError(io.Discard, stderr, "hoist restart", err)
-		return code
+		return refuse(stderr, "hoist restart", err)
 	}
 
 	// set.KubeContext is already the flag, else the selected repo's kube.context (selectRepo).

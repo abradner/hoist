@@ -67,12 +67,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
+	pairNote := ""
 	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
-		f, t, code, ok := pairedEnvs("hoist promote", set, *from, *to, stderr)
+		f, t, note, code, ok := pairedEnvs("hoist promote", set, *from, *to, stderr)
 		if !ok {
 			return code
 		}
-		*from, *to = f, t
+		*from, *to, pairNote = f, t, note
 	}
 	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist promote: --repo, --from and --to are required")
@@ -96,6 +97,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
+	fmt.Fprint(stderr, pairNote)
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
 
@@ -249,15 +251,4 @@ func checkDirectPreflight(cmdName string, set service.Settings, direct bool, con
 		return refuse(stderr, cmdName, err)
 	}
 	return 0
-}
-
-// refuse renders a preflight error and returns a non-zero exit code. renderStartError returns 0
-// for the one error that is a success (service.AlreadyCurrentError); a preflight never produces
-// that, but a refusal that read as "proceed" would be the worst way for it to start, so a zero
-// code is turned into a failure here.
-func refuse(stderr io.Writer, cmdName string, err error) int {
-	if code, _ := renderStartError(io.Discard, stderr, cmdName, err); code != 0 {
-		return code
-	}
-	return exitFailure
 }
