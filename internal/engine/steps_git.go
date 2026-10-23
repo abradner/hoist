@@ -111,8 +111,59 @@ func (c CommittedStep) Observe(ctx context.Context, s *PromotionState) (Observat
 			sha, extra, missing,
 		)}, nil
 	}
+	// A run that has made no commit yet can still find one that matches: a worktree and local
+	// branch an earlier run of this same promotion left behind (it landed before cleanup
+	// existed, its cleanup was refused, it was killed). If that commit is already in origin's
+	// base it landed then, so it is not this run's: adopting it would re-push it, and the
+	// earlier run's merged PR would then name "this run's" commit as its head (#332, the second
+	// door to #41). A commit of this run's own, made before a kill and not yet pushed, is not
+	// in the base, so a resume still adopts it.
+	if s.CommitSHA == "" {
+		tip, ok, err := c.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
+		if err != nil {
+			return Observation{}, fmt.Errorf("fetching origin/%s to check the worktree's commit is this run's: %w", s.Base, err)
+		}
+		if ok {
+			landed, err := c.Git.IsAncestor(ctx, s.CloneDir, sha, tip)
+			if err != nil {
+				return Observation{}, fmt.Errorf("is %s already in origin/%s: %w", sha, s.Base, err)
+			}
+			if landed {
+				// Landed, and the base still carries exactly this content: the same promotion,
+				// already done (a re-run while nothing has moved). Adopting it is right; the
+				// landing step then reads it landed. Only when the base has moved on (A, then B,
+				// then A again) is the leftover commit an earlier run's and not this one's.
+				intact, err := c.carriedAt(ctx, s, tip)
+				if err != nil {
+					return Observation{}, err
+				}
+				if intact {
+					s.CommitSHA = sha
+					return Observation{Satisfied: true, Detail: "HEAD " + sha + " already matches the planned edits, and origin/" + s.Base + " still carries them"}, nil
+				}
+				return Observation{Blocked: fmt.Sprintf(
+					"the worktree at %s is on %s at %s, a commit an earlier run of this same promotion already landed in %s, which has since moved on — it is not this run's. Nothing was pushed. Remove the leftover (git worktree remove %s, then git branch -D %s, in %s) and run again",
+					s.WorktreeDir, s.Branch, sha, s.Base, s.WorktreeDir, s.Branch, s.CloneDir,
+				)}, nil
+			}
+		}
+	}
 	s.CommitSHA = sha
 	return Observation{Satisfied: true, Detail: "HEAD " + sha + " already matches the planned edits"}, nil
+}
+
+// carriedAt reports whether rev carries every planned file's expected content (ExpectedBlobs).
+func (c CommittedStep) carriedAt(ctx context.Context, s *PromotionState, rev string) (bool, error) {
+	for path, want := range s.ExpectedBlobs {
+		got, ok, err := c.Git.LsTreeBlob(ctx, s.CloneDir, rev, path)
+		if err != nil {
+			return false, fmt.Errorf("reading %s at origin/%s: %w", path, s.Base, err)
+		}
+		if !ok || got != want {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // verifyExactChangedPaths confirms that sha's commit changes exactly the files the plan

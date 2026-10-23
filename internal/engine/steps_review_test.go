@@ -1495,3 +1495,45 @@ func TestMergedRefusesAnEarlierRunsMergedPR(t *testing.T) {
 		t.Fatalf("re-observing must clear run 1's merge from an old state, LandedSHA %q", second.LandedSHA())
 	}
 }
+
+// TestARerunDoesNotAdoptAnEarlierRunsLeftoverWorktree is #332, the second door to #41: when run
+// 1's worktree and local branch survived (landed before cleanup existed, a refused cleanup, a
+// killed run), run 2 of the same set reuses them, finds run 1's commit already matching the
+// plan, adopts it as its own, re-pushes it, and run 1's merged PR then names "this run's"
+// commit as its head. The commit is already in origin's base, so it cannot be this run's.
+func TestARerunDoesNotAdoptAnEarlierRunsLeftoverWorktree(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	wt := filepath.Join(t.TempDir(), "wt")
+	first := driveToPR(t, fx, wt, f)
+	f.SetHeadSHA(first.PR.Number, first.CommitSHA)
+	mergeToBase(t, first)
+	if err := (MergedStep{Forge: f, Git: git.Exec{}}).Act(ctx(), first); err != nil {
+		t.Fatalf("run 1 merge: %v", err)
+	}
+	baseBefore := strings.TrimSpace(runHostOut(t, fx.originDir, "rev-parse", "main~1"))
+	// Run 1's worktree and local branch are NOT cleaned up.
+
+	other := filepath.Join(t.TempDir(), "other")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	runHost(t, other, "checkout", "-q", baseBefore, "--", first.Edits[0].File)
+	runHost(t, other, "commit", "-q", "-m", "deploy B")
+	runHost(t, other, "push", "-q", "origin", "HEAD:main")
+	runHost(t, fx.cloneDir, "fetch", "-q", "origin")
+
+	second := newState(fx, wt) // same id, so the same worktree directory, as in production
+	err := Drive(ctx(), CoreSteps(git.Exec{}, f, nil), second, nil)
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || blocked.Step != StepCommitted {
+		t.Fatalf("run 2 must stop at the commit step, not adopt run 1's commit: err %v, phase %s, commit %s (run 1 %s)", err, second.Phase, second.CommitSHA, first.CommitSHA)
+	}
+	if !strings.Contains(blocked.Reason, wt) {
+		t.Fatalf("the block should name the leftover worktree %s: %s", wt, blocked.Reason)
+	}
+	if second.CommitSHA != "" {
+		t.Fatalf("run 2 recorded run 1's commit %s as its own", second.CommitSHA)
+	}
+	if _, there, err := (git.Exec{}).LsRemoteBranch(ctx(), fx.cloneDir, "origin", second.Branch); err != nil || there {
+		t.Fatalf("run 1's branch must not be pushed again (there=%v, err=%v)", there, err)
+	}
+}
