@@ -28,7 +28,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/abradner/hoist/internal/app/plan"
+	"github.com/abradner/hoist/internal/app/writepath"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
@@ -71,8 +71,8 @@ type StartMsg struct {
 // Mode values — plan's own, so the root can treat both screens' StartMsgs the same way
 // (M10: the two packages had spelled them differently while claiming to mirror each other).
 const (
-	ModePR     = plan.ModePR
-	ModeDirect = plan.ModeDirect
+	ModePR     = writepath.ModePR
+	ModeDirect = writepath.ModeDirect
 )
 
 // History is what the picker already learned about the build being deployed, carried in so
@@ -180,7 +180,7 @@ func New(pl gitops.Plan, root, image string, envs config.EnvsConfig, styles ui.S
 		now:        time.Now,
 		showYAML:   true, // until WithHistory supplies commits to lead with
 	}
-	body, err := plan.RenderDiff(root, pl.Edits, ticked)
+	body, err := writepath.RenderDiff(root, pl.Edits, ticked)
 	if err != nil {
 		m.diffErr = err
 	} else {
@@ -236,7 +236,7 @@ func (m Model) Reload(pl gitops.Plan, view service.RepoView) Model {
 		ticked[e.Ref.Repo] = true
 	}
 	m.ticked = ticked
-	body, err := plan.RenderDiff(m.root, pl.Edits, ticked)
+	body, err := writepath.RenderDiff(m.root, pl.Edits, ticked)
 	if err != nil {
 		m.diffErr = err
 	} else {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/history"
 	"github.com/abradner/hoist/internal/app/scope"
+	"github.com/abradner/hoist/internal/app/writepath"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
@@ -37,8 +38,8 @@ import (
 
 // Mode is the write path this plan would use.
 const (
-	ModePR     = "pr"
-	ModeDirect = "direct"
+	ModePR     = writepath.ModePR
+	ModeDirect = writepath.ModeDirect
 )
 
 // Func builds one gitops.Plan through internal/service's own Plan — the identical builder
@@ -974,7 +975,7 @@ func (m Model) recomputeDiff() Model {
 	for _, r := range m.ticked {
 		ticked[r] = true
 	}
-	diff, err := RenderDiff(m.repo.Root, m.plan.Edits, ticked)
+	diff, err := writepath.RenderDiff(m.repo.Root, m.plan.Edits, ticked)
 	if err != nil {
 		m.err = err
 		return m

@@ -1635,7 +1635,7 @@ func (m Model) capturesText() bool {
 
 // filterTicked narrows p's Edits down to only the repos the operator actually ticked before
 // confirming — the same set plan.Model.recomputeDiff already filters the confirm screen's own
-// diff by (internal/app/plan/rows.go's RenderDiff: "if !ticked[e.Ref.Repo] ... continue").
+// diff by (internal/app/writepath.RenderDiff: "if !ticked[e.Ref.Repo] ... continue").
 // Without this, plan.StartMsg's Plan field carries every edit BuildPlan produced regardless of
 // what the operator unticked (plan.Model never mutates m.plan itself — only the rendered diff
 // and m.ticked track the selection), so a real promotion would commit every repo in the plan,
