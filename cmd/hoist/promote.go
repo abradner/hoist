@@ -231,6 +231,11 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 		var blocked *engine.BlockedError
 		if errors.As(err, &blocked) {
 			fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(blocked.Error()))
+			// The engine's reason is face-neutral; the way to override it is this face's own
+			// gesture (the TUI's is shift+c on the flight screen).
+			if blocked.Step == engine.StepCIGreen && engine.IsCINonePromptBlock(blocked.Reason) {
+				fmt.Fprintf(stderr, "%s: to treat the missing checks as green for this promotion: hoist resume %s --override-ci-none\n", cmdName, s.ID)
+			}
 			return exitFailure
 		}
 		fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))

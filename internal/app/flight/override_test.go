@@ -204,3 +204,19 @@ func TestOverrideOfferGoneOnceCIIsSatisfied(t *testing.T) {
 		t.Error("offer still made after CI is satisfied")
 	}
 }
+
+// TestBlockedOnCINoneNamesOnlyTheTUIsGesture (UX-M2): the screen shows the engine's reason and its
+// own `shift+c` offer. The CLI's `--override-ci-none` is the wrong instruction here, so it appears
+// nowhere in the view, at either harness size.
+func TestBlockedOnCINoneNamesOnlyTheTUIsGesture(t *testing.T) {
+	m := blockedOnCINone(t)
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		v := m.SetSize(size[0], size[1]).View()
+		if strings.Contains(v, "--override-ci-none") || strings.Contains(v, "hoist resume") {
+			t.Errorf("%dx%d: the flight screen names the CLI's gesture:\n%s", size[0], size[1], v)
+		}
+		if !strings.Contains(v, "shift+c") {
+			t.Errorf("%dx%d: control: the screen's own gesture must still be named:\n%s", size[0], size[1], v)
+		}
+	}
+}

@@ -7,7 +7,7 @@
 │✓ PR                                                                          │
 │✗ CI                                                                          │
 │    no checks reported after the grace period; ci.none=prompt requires an     │
-│    explicit override — re-run `hoist resume abcd1234 --override-ci-none`     │
+│    explicit override                                                         │
 │· approval                                                                    │
 │· merge                                                                       │
 │· argo refresh                                                                │

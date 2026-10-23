@@ -227,9 +227,9 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 		return Observation{Satisfied: true, Detail: "no checks reported after the grace period; ci.none=green" + ignoring}, nil
 	default: // "prompt", and any empty value a caller forgot to fill from Normalize's default
 		if s.CINoneOverride {
-			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator (--override-ci-none, or c on the flight screen)" + ignoring}, nil
+			return Observation{Satisfied: true, Detail: "no checks reported after the grace period; overridden by the operator" + ignoring}, nil
 		}
-		return Observation{Blocked: ciNonePromptBlockedPrefix + " — re-run `hoist resume " + s.ID + " --override-ci-none`" + ignoring}, nil
+		return Observation{Blocked: ciNonePromptBlockedPrefix + ignoring}, nil
 	}
 }
 
@@ -248,11 +248,15 @@ func ignoredNote(names []string) string {
 // and nothing reported"; IsCINonePromptBlock is how the flight screen recognises it. One
 // constant, used by both, so the TUI's `c` offer (#103) can never be shown for a different
 // block or withheld from this one because the wording drifted.
+//
+// The reason is deliberately face-neutral: how to override it is a gesture of the face showing
+// it (`hoist resume <id> --override-ci-none` at the CLI, shift+c on the flight screen), and a
+// reason that named one told the other the wrong instruction (UX-M2).
 const ciNonePromptBlockedPrefix = "no checks reported after the grace period; ci.none=prompt requires an explicit override"
 
 // IsCINonePromptBlock reports whether blocked is CIGreenStep's ci.none=prompt reason — the one
 // Blocked observation an operator can lift in-band, by setting PromotionState.CINoneOverride
-// (`hoist resume --override-ci-none`, or `c` on the flight screen) and re-observing. Every
+// (`hoist resume --override-ci-none`, or `shift+c` on the flight screen) and re-observing. Every
 // other Blocked reason CIGreenStep produces (a failed or skipped check, ci.none=block) has no
 // override and must not match.
 func IsCINonePromptBlock(blocked string) bool {

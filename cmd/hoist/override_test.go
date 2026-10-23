@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/forge"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
@@ -121,5 +124,32 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 	}
 	if saved == nil || !saved.CINoneOverride {
 		t.Errorf("state file should persist CINoneOverride=true after the re-drive, got %+v", saved)
+	}
+}
+
+// TestBlockedCINoneReasonGetsTheCLIsOwnGesture (UX-M2): the engine's ci.none=prompt reason is
+// face-neutral, so the CLI names its own way out — `hoist resume <id> --override-ci-none` — once,
+// after the reason. Built from the engine's own reason so the test follows its wording.
+func TestBlockedCINoneReasonGetsTheCLIsOwnGesture(t *testing.T) {
+	st := &engine.PromotionState{ID: "abcd1234", CINone: "prompt", PR: &forge.PR{Number: 7, CreatedAt: time.Now().Add(-time.Hour)}, PushedSHA: "abc"}
+	obs, err := engine.CIGreenStep{Forge: &forge.Fake{}}.Observe(context.Background(), st)
+	if err != nil || !engine.IsCINonePromptBlock(obs.Blocked) {
+		t.Fatalf("precondition: want the ci.none=prompt block, got %+v err=%v", obs, err)
+	}
+	var out, errOut bytes.Buffer
+	code := reportDriveResult(&out, &errOut, "hoist resume", "a", "b", st, &engine.BlockedError{Step: engine.StepCIGreen, Reason: obs.Blocked})
+	if code == 0 {
+		t.Fatal("a blocked drive must not exit 0")
+	}
+	const want = "hoist resume abcd1234 --override-ci-none"
+	if n := strings.Count(errOut.String(), want); n != 1 {
+		t.Fatalf("the CLI's override command must appear once, got %d:\n%s", n, errOut.String())
+	}
+
+	// Control: another step's block, and ci.none=block's, offer no override.
+	errOut.Reset()
+	reportDriveResult(&out, &errOut, "hoist resume", "a", "b", st, &engine.BlockedError{Step: engine.StepMerged, Reason: "branch protection"})
+	if strings.Contains(errOut.String(), "--override-ci-none") {
+		t.Fatalf("no override is offered for an unrelated block:\n%s", errOut.String())
 	}
 }
