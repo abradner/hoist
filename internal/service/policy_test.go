@@ -110,8 +110,8 @@ func TestPairEnvs(t *testing.T) {
 		{"from with no target", one, "prod", "", "", "", "no envs.pairs entry says where prod promotes to; name the target with --to"},
 		{"to with several sources", many, "", "prod", "", "", "several envs.pairs entries promote into prod (canary, stg); name the source with --from"},
 		{"from, and no pair at all", pairSettings(nil), "stg", "", "", "", "no envs.pairs entry says where stg promotes to; name the target with --to"},
-		{"to, no configured repo", service.Settings{}, "", "prod", "", "", "no configured repo, so envs.pairs is unknown; name the source with --from"},
-		{"from, no configured repo", service.Settings{}, "stg", "", "", "", "no configured repo, so envs.pairs is unknown; name the target with --to"},
+		{"to, no configured repo", service.Settings{}, "", "prod", "", "", "no repos[] entry is selected, so envs.pairs is unknown; name the source with --from"},
+		{"from, no configured repo", service.Settings{}, "stg", "", "", "", "no repos[] entry is selected, so envs.pairs is unknown; name the target with --to"},
 	} {
 		f, to, err := tc.set.PairEnvs(tc.from, tc.to)
 		if tc.wantErr != "" {
@@ -124,5 +124,20 @@ func TestPairEnvs(t *testing.T) {
 		if err != nil || f != tc.wantF || to != tc.wantT {
 			t.Errorf("%s: got (%q, %q, %v), want (%q, %q)", tc.name, f, to, err, tc.wantF, tc.wantT)
 		}
+	}
+}
+
+// Service.Preflight hands the request's Confirmed through to the gate. A TUI direct start that has
+// not been confirmed must be stopped HERE, before StartPromotion takes a claim and saves state;
+// Drive's own gate would stop it later, which is the hole Preflight exists to close. It fails with
+// Preflight passing Confirmed:true.
+func TestPreflightPassesConfirmedThroughToTheGate(t *testing.T) {
+	svc := service.New(prodSettings("me/gitops"), service.Deps{})
+	var blocked *engine.BlockedError
+	if err := svc.Preflight("app-staging", service.Mode{Direct: true}); !errors.As(err, &blocked) {
+		t.Errorf("an unconfirmed direct start: got %v, want a BlockedError from Preflight itself", err)
+	}
+	if err := svc.Preflight("app-staging", service.Mode{Direct: true, Confirmed: true}); err != nil {
+		t.Errorf("the same start confirmed was refused: %v", err)
 	}
 }

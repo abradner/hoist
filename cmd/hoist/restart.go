@@ -13,7 +13,6 @@ import (
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runRestart is `hoist restart`: roll an env's Deployments without changing the image references
@@ -116,13 +115,13 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	at := time.Now().UTC()
 	restarted, rerr := svc.RestartDo(ctx, pl, at)
 	if rerr != nil {
-		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
 		// Say what did roll before the failure: some pods are already restarting, and an
 		// operator needs to know which.
+		code := fail(stderr, "hoist restart", exitFailure, rerr)
 		if len(restarted) > 0 {
-			fmt.Fprintf(stderr, "hoist restart: already restarted: %s\n", strings.Join(restarted, ", "))
+			failf(stderr, "hoist restart", exitFailure, "already restarted: %s", strings.Join(restarted, ", "))
 		}
-		return exitFailure
+		return code
 	}
 	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
 

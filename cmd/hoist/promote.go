@@ -12,7 +12,6 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runPromote is `hoist promote`: builds the same gitops.Plan `hoist plan --dry-run` would
@@ -161,8 +160,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 	if errors.As(err, &usage) {
 		return failf(stderr, cmdName, exitUsage, "%s", usage.Msg), true
 	}
-	fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))
-	return exitFailure, true
+	return fail(stderr, cmdName, exitFailure, err), true
 }
 
 // reportDriveResult renders Driver.Run's outcome the same way for hoist promote and
@@ -200,22 +198,14 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 		}
 		return 0
 	case errors.Is(err, engine.ErrWaiting):
-		fmt.Fprintf(stderr, "%s: still waiting for signing approval; re-run to resume\n", cmdName)
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "still waiting for signing approval; re-run to resume")
 	case errors.Is(err, context.DeadlineExceeded):
-		fmt.Fprintf(stderr, "%s: %s at %s (poll.deadline elapsed); re-run to resume\n", cmdName, s.Phase, redact.Strings(historyDetail(s)))
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "%s at %s (poll.deadline elapsed); re-run to resume", s.Phase, historyDetail(s))
 	case errors.Is(err, context.Canceled):
-		fmt.Fprintf(stderr, "%s: interrupted while %s; re-run to resume\n", cmdName, s.Phase)
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "interrupted while %s; re-run to resume", s.Phase)
 	default:
-		var blocked *engine.BlockedError
-		if errors.As(err, &blocked) {
-			fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(blocked.Error()))
-			return exitFailure
-		}
-		fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))
-		return exitFailure
+		// A BlockedError and any other error print the same way; both are redacted by fail.
+		return fail(stderr, cmdName, exitFailure, err)
 	}
 }
 
@@ -240,8 +230,7 @@ func historyDetail(s *engine.PromotionState) string {
 func checkDirectPreflight(cmdName string, set service.Settings, direct bool, confirmDirect, targetEnv string, stderr io.Writer) int {
 	mode := service.Mode{Direct: direct}
 	if err := set.PreflightConfig(mode); err != nil {
-		code, _ := renderStartError(io.Discard, stderr, cmdName, err)
-		return code
+		return refuse(stderr, cmdName, err)
 	}
 	if !direct {
 		return 0
@@ -257,8 +246,18 @@ func checkDirectPreflight(cmdName string, set service.Settings, direct bool, con
 	// is true: reaching here required --confirm-direct to equal the target exactly.
 	mode.Confirmed = true
 	if err := set.PreflightGate(targetEnv, mode); err != nil {
-		code, _ := renderStartError(io.Discard, stderr, cmdName, err)
-		return code
+		return refuse(stderr, cmdName, err)
 	}
 	return 0
+}
+
+// refuse renders a preflight error and returns a non-zero exit code. renderStartError returns 0
+// for the one error that is a success (service.AlreadyCurrentError); a preflight never produces
+// that, but a refusal that read as "proceed" would be the worst way for it to start, so a zero
+// code is turned into a failure here.
+func refuse(stderr io.Writer, cmdName string, err error) int {
+	if code, _ := renderStartError(io.Discard, stderr, cmdName, err); code != 0 {
+		return code
+	}
+	return exitFailure
 }

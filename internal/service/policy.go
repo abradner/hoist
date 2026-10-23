@@ -130,7 +130,7 @@ func (s Settings) PairEnvs(from, to string) (string, string, error) {
 		if to == "" {
 			what = "target"
 		}
-		return "", "", &UsageError{Msg: fmt.Sprintf("no configured repo, so envs.pairs is unknown; name the %s with %s", what, flag)}
+		return "", "", &UsageError{Msg: fmt.Sprintf("no repos[] entry is selected, so envs.pairs is unknown; name the %s with %s", what, flag)}
 	}
 	envs := s.Repo.Envs
 	if to == "" {

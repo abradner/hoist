@@ -42,9 +42,10 @@ var browserOpener = func(timeout time.Duration) func(url string) error {
 // browserCommand is the pure half of defaultOpenBrowser: for a given runtime.GOOS value, it
 // picks the program and arguments that would open url in the operator's default browser — `open`
 // on macOS, `xdg-open` on everything else — without ever touching os/exec. hoist is released for
-// darwin and linux only (.goreleaser.yaml), so there is no Windows branch to maintain; any other
-// GOOS gets xdg-open's Unix convention rather than an error, on the theory that a BSD hoist is
-// built on by hand is more likely to have it than not. Taking goos as a parameter (rather than
+// darwin and linux only (.goreleaser.yaml), and does not build for Windows at all (pkg/git uses
+// Setpgid and syscall.Kill), so there is no Windows branch to maintain; any other GOOS gets
+// xdg-open's Unix convention rather than an error, on the theory that a BSD hoist is built on by
+// hand is more likely to have it than not. Taking goos as a parameter (rather than
 // reading runtime.GOOS itself) is the seam wiring_test.go uses to exercise every branch on every
 // OS, without a build tag per branch and without ever calling exec.Command in a test (no test in
 // this repo launches a real browser).
@@ -58,7 +59,7 @@ func browserCommand(goos, url string) (name string, args []string) {
 // defaultOpenBrowser opens url in the operator's default browser (no new dependency, AGENTS.md
 // §4.7; e.g. github.com/pkg/browser is exactly this well-known exec.Command-per-platform idiom
 // in a package no heavier than browserCommand's dozen lines plus this one exec.Command call
-// already covers). Run, not Start-and-reap: the LAUNCHER (open/xdg-open/rundll32) is what this
+// already covers). Run, not Start-and-reap: the LAUNCHER (open/xdg-open) is what this
 // call waits on, not the browser itself, which stays running long after the launcher — designed
 // to hand off and exit — has already returned. An earlier Start-and-reap shape (a
 // startAndReap helper, since removed — its only caller was this function, and Run reaps the
@@ -70,16 +71,17 @@ func browserCommand(goos, url string) (name string, args []string) {
 // nothing actually opened. timeout (preferences.browser_launch_timeout,
 // default 5s) bounds the wait so a genuinely wedged launcher cannot block the TUI's whole event
 // loop indefinitely — generous for what should normally be a near-instant fork+exec-and-return
-// (open/xdg-open/rundll32 are all designed as fire-and-forget dispatchers that hand off and exit
+// (open/xdg-open are both designed as fire-and-forget dispatchers that hand off and exit
 // immediately, never blocking for the browser's own lifetime), while still bounding the worst
 // case (no DISPLAY set, a genuinely wedged launcher) to a few seconds of TUI unresponsiveness
 // rather than forever.
 //
 // The only caller today is flight.OpenPRMsg's handler (app.go), whose url is always
 // PRURL(state) — a PR URL the forge itself returned when this promotion opened it, not
-// something an attacker gets to choose in the common case. The URL is passed as one argument
-// to a launcher that runs no shell, so no metacharacter in it can split into a second command
-// whoever supplies it.
+// something an attacker gets to choose in the common case. hoist itself runs no shell: the URL
+// is one argument to exec.Command. What the launcher does with it is the launcher's business
+// (xdg-open is a shell script on Linux and has had injection bugs of its own), which is why
+// the URL stays one the forge returned and is not taken from anywhere else.
 func defaultOpenBrowser(timeout time.Duration, url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
 	if err := runLauncher(timeout, name, args...); err != nil {

@@ -16,12 +16,11 @@ import (
 // runWatch is `hoist watch --app <name>`: a read-only snapshot (or, without --once, a poll
 // loop) of one Argo Application's sync/health/revision and the rollout progress of every
 // Deployment/Job/CronJob its family declares. It is READ-ONLY by construction (AGENTS.md
-// invariant 5 of the M5 brief): this function, and everything it calls, holds only an
-// argo.Argo and a rollout.Rollout value and never once calls Argo.Refresh — the interface
-// itself has no other write method, so this is a compile-time guarantee, not just a
-// convention; watchAppSnapshot's own tests additionally assert zero "Refresh" calls ever
-// appear in a Fake's Calls after a run, as the brief's own "test or code-inspection-provable
-// guarantee" asks for both.
+// invariant 5 of the M5 brief): it holds only a *service.Watch, whose Read calls Argo.Get,
+// Rollout.Deployment and Rollout.JobLike and never Argo.Refresh. argo.Argo does have a Refresh
+// method, so this is a test and a code-inspection guarantee, not a compile-time one:
+// TestWatchNeverCallsRefresh asserts zero "Refresh" calls ever appear in a Fake's Calls after a
+// run.
 func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist watch", flag.ContinueOnError)
 	fs.SetOutput(stderr)

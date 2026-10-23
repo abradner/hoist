@@ -62,7 +62,7 @@ func TestPlanRefusesWhenEnvsPairsCannotFillTheOtherEnvIn(t *testing.T) {
 		{"nothing promotes into the target", pairsConfig(t), []string{"--to", "app-staging"}, "no envs.pairs entry promotes into app-staging; name the source with --from"},
 		{"the source has no target", pairsConfig(t), []string{"--from", "app-production"}, "no envs.pairs entry says where app-production promotes to; name the target with --to"},
 		{"several sources", pairsConfig(t, "app-canary: app-production"), []string{"--to", "app-production"}, "several envs.pairs entries promote into app-production (app-canary, app-staging); name the source with --from"},
-		{"no configured repo", "", []string{"--to", "app-production"}, "no configured repo, so envs.pairs is unknown; name the source with --from"},
+		{"no configured repo", "", []string{"--to", "app-production"}, "no repos[] entry is selected, so envs.pairs is unknown; name the source with --from"},
 	} {
 		args := []string{"--digest-sources", "none", "plan", "--dry-run"}
 		if tc.cfg != "" {

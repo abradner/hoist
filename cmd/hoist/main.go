@@ -131,9 +131,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fs.Usage()
 			return exitUsage
 		}
-		rf := sel.resolve
-		rf.kubeContext = "" // the root's --kube-context is Settings.KubeContext, not a resolve flag
-		return tuiRunner(set, rf, stdout, stderr)
+		return tuiRunner(set, sel.resolve, stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
@@ -420,6 +418,12 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
+	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
+	// default" only when the flag was not given at all. Checked before the env pair is filled in,
+	// so no "--from not given; envs.pairs promotes …" note is printed for a plan that is refused.
+	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
+		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
+	}
 	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
 		f, t, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
 		if !ok {
@@ -433,11 +437,6 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		return exitUsage
 	}
 	prefixes := set.Promotable
-	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
-	// default" only when the flag was not given at all.
-	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
-		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
-	}
 	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitUsage, err)
