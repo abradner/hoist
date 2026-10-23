@@ -240,3 +240,16 @@ func TestBuildTagsFuncHonoursThePickersContract(t *testing.T) {
 		t.Errorf("registry failure: the registry list should report the real error, got %v", err)
 	}
 }
+
+// refusal never lets a refusal read as success or exit silently: the one error renderStartError
+// treats as a success (AlreadyCurrentError, exit 0) becomes a failure that says what it was.
+func TestRefusalIsNeverSilentOrZero(t *testing.T) {
+	var buf bytes.Buffer
+	if code := refusal(&buf, "hoist x", &service.AlreadyCurrentError{SourceEnv: "a", TargetEnv: "b"}); code != exitFailure || !strings.Contains(buf.String(), "hoist x:") {
+		t.Errorf("AlreadyCurrentError: exit %d, stderr %q; want %d and a message", code, buf.String(), exitFailure)
+	}
+	buf.Reset()
+	if code := refusal(&buf, "hoist x", &service.UsageError{Msg: "give --to"}); code != exitUsage || !strings.Contains(buf.String(), "give --to") {
+		t.Errorf("UsageError: exit %d, stderr %q", code, buf.String())
+	}
+}

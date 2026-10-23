@@ -176,6 +176,11 @@ func TestPairingNoteIsNotPrintedForARefusedPlan(t *testing.T) {
 	if strings.Contains(errOut, "envs.pairs promotes") {
 		t.Errorf("the refused plan announced a pairing first:\n%s", errOut)
 	}
+	// promote behaves the same (the order was only shown for plan before).
+	code, out, errOut = run3(t, "--config", cfg, "promote", "--to", "app-production", "--digest-sources", "pods,vault")
+	if code != exitUsage || out != "" || strings.Contains(errOut, "envs.pairs promotes") {
+		t.Errorf("promote: exit %d, stdout %q, stderr %.200q; want a usage refusal with no pairing note", code, out, errOut)
+	}
 	// Positive control: the same command with a valid digest source does print it.
 	if code, _, errOut := run3(t, "--config", cfg, "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 || !strings.Contains(errOut, "--from not given; envs.pairs promotes app-staging into app-production") {
 		t.Errorf("control: exit %d, stderr %.200q", code, errOut)

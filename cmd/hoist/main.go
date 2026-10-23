@@ -419,8 +419,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
-	// default" only when the flag was not given at all. Checked before the env pair is filled in,
-	// so no "--from not given; envs.pairs promotes …" note is printed for a plan that is refused.
+	// default" only when the flag was not given at all.
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
 		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
 	}
@@ -452,10 +451,11 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
+	// Every refusal is behind us: say which env pair envs.pairs filled in (empty when none was).
+	fmt.Fprint(stderr, pairNote)
 	// Signal/deadline-aware, exactly like runPromote/runDeploy's own ctx (promote.go's own
 	// comment on this same call): resolution can talk to the cluster and the registry, so ^C
 	// or the poll deadline must be able to interrupt it here too, not just the write path.
-	fmt.Fprint(stderr, pairNote)
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})

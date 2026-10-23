@@ -232,7 +232,7 @@ func historyDetail(s *engine.PromotionState) string {
 func checkDirectPreflight(cmdName string, set service.Settings, direct bool, confirmDirect, targetEnv string, stderr io.Writer) int {
 	mode := service.Mode{Direct: direct}
 	if err := set.PreflightConfig(mode); err != nil {
-		return refuse(stderr, cmdName, err)
+		return refusal(stderr, cmdName, err)
 	}
 	if !direct {
 		return 0
@@ -248,7 +248,7 @@ func checkDirectPreflight(cmdName string, set service.Settings, direct bool, con
 	// is true: reaching here required --confirm-direct to equal the target exactly.
 	mode.Confirmed = true
 	if err := set.PreflightGate(targetEnv, mode); err != nil {
-		return refuse(stderr, cmdName, err)
+		return refusal(stderr, cmdName, err)
 	}
 	return 0
 }

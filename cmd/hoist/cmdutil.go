@@ -53,7 +53,7 @@ func commandContext(deadline time.Duration) (context.Context, context.CancelFunc
 func pairedEnvs(who string, set service.Settings, from, to string, stderr io.Writer) (f, t, note string, code int, ok bool) {
 	pf, pt, err := set.PairEnvs(from, to)
 	if err != nil {
-		return "", "", "", refuse(stderr, who, err), false
+		return "", "", "", refusal(stderr, who, err), false
 	}
 	switch {
 	case from == "" && pf != "":
@@ -64,12 +64,12 @@ func pairedEnvs(who string, set service.Settings, from, to string, stderr io.Wri
 	return pf, pt, note, 0, true
 }
 
-// refuse renders a refusal error and returns a non-zero exit code. renderStartError returns 0 for
+// refusal renders a refusal error and returns a non-zero exit code. renderStartError returns 0 for
 // the one error that is a success (service.AlreadyCurrentError), and prints that one to stdout,
-// which refuse discards; no refusal produces it, but a refusal that read as "proceed" or exited
+// which refusal discards; no refusal produces it, but a refusal that read as "proceed" or exited
 // silently would be the worst way for one to start, so a zero code is turned into a failure that
 // says what it was.
-func refuse(stderr io.Writer, cmdName string, err error) int {
+func refusal(stderr io.Writer, cmdName string, err error) int {
 	if code, _ := renderStartError(io.Discard, stderr, cmdName, err); code != 0 {
 		return code
 	}
