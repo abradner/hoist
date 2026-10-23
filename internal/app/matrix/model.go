@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -45,11 +44,12 @@ const (
 	chooserOpenPR                    // o with several in flight that have PRs
 )
 
-// DriftMsg is one env's answer. gen is the refresh generation it belongs to, so a slow
-// answer from before a refresh (F5) or a previous instance of this screen is dropped rather
-// than painting stale drift over a newer answer.
+// DriftMsg is one env's answer. from is the scope ID of the refresh it belongs to (scope.New
+// at construction and again on each refresh), so a slow answer from before a refresh (F5) or
+// a previous instance of this screen is dropped rather than painting stale drift over a newer
+// answer.
 type DriftMsg struct {
-	gen     uint64
+	from    scope.ID
 	env     string
 	running map[string][]image.Ref
 	err     error
@@ -65,22 +65,22 @@ type DriftMsg struct {
 // there is then nothing freshly read to name.
 type RefreshRepoFunc func(ctx context.Context) (*gitops.Repo, string, error)
 
-// RepoRefreshedMsg carries RefreshRepoFunc's answer back to Update. Gen ties it to the
-// askRepoRefresh call that issued it, the same way DriftMsg's own gen does for the cluster
-// fan-out.
+// StampedBy implements scope.Stamped.
+func (d DriftMsg) StampedBy() scope.ID { return d.from }
+
+// RepoRefreshedMsg carries RefreshRepoFunc's answer back to Update. Gen is the scope ID of
+// the askRepoRefresh call that issued it, the same way DriftMsg's own from does for the
+// cluster fan-out. A Model that has not yet asked holds the zero ID, which is what an
+// unstamped Gen of 0 matches.
 type RepoRefreshedMsg struct {
-	Gen  uint64
+	Gen  scope.ID
 	Repo *gitops.Repo
 	Rev  string
 	Err  error
 }
 
-// nextGen numbers refresh generations across every Model this process builds, so two
-// matrices (an earlier one popped away) can never confuse each other's answers.
-var nextGen atomic.Uint64
-
-// nextRepoGen numbers repo-refresh generations the same way nextGen numbers drift ones.
-var nextRepoGen atomic.Uint64
+// StampedBy implements scope.Stamped.
+func (r RepoRefreshedMsg) StampedBy() scope.ID { return r.Gen }
 
 // Model is the matrix screen. It is a value: Update, SetSize and SetStyles return the
 // updated model.
@@ -123,13 +123,13 @@ type Model struct {
 	running  Running
 	pending  map[string]bool
 	driftErr map[string]string
-	gen      uint64
+	driftID  scope.ID
 
 	driftTimeout time.Duration
 
 	refreshingRepo bool
 	refreshAgain   bool
-	repoGen        uint64
+	repoID         scope.ID
 	refreshErr     string
 
 	chooser       *huh.Select[string]
@@ -196,7 +196,7 @@ func New(repo *gitops.Repo, promotable []string, envs config.EnvsConfig, drift D
 		pending:    map[string]bool{},
 		driftErr:   map[string]string{},
 		now:        time.Now,
-		gen:        nextGen.Add(1),
+		driftID:    scope.New(),
 	}
 	m.col = firstNonProductionColumn(m.matrix, envs)
 	m = m.WithDrift(drift)
@@ -225,7 +225,7 @@ func (m Model) refresh() (Model, tea.Cmd) {
 	if m.drift == nil || len(m.matrix.Envs) == 0 {
 		return m, nil
 	}
-	m.gen = nextGen.Add(1)
+	m.driftID = scope.New()
 	m.pending = map[string]bool{}
 	for _, env := range m.matrix.Envs {
 		m.pending[env] = true
@@ -238,7 +238,7 @@ func (m Model) askCluster() tea.Cmd {
 	if m.drift == nil || len(m.matrix.Envs) == 0 {
 		return nil
 	}
-	gen, drift := m.gen, m.drift
+	id, drift := m.driftID, m.drift
 	timeout := m.driftTimeout
 	if timeout <= 0 {
 		timeout = scope.Drift
@@ -253,7 +253,7 @@ func (m Model) askCluster() tea.Cmd {
 			if err != nil && errors.Is(err, context.DeadlineExceeded) {
 				err = fmt.Errorf("did not answer in %s", timeout)
 			}
-			return DriftMsg{gen: gen, env: env, running: running, err: err}
+			return DriftMsg{from: id, env: env, running: running, err: err}
 		})
 	}
 	return tea.Batch(cmds...)
@@ -269,8 +269,8 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.refreshingRepo = true
-	m.repoGen = nextRepoGen.Add(1)
-	gen, refresh := m.repoGen, m.refreshRepo
+	m.repoID = scope.New()
+	id, refresh := m.repoID, m.refreshRepo
 	return m, func() tea.Msg {
 		ctx, cancel := scope.Timeout(scope.RefreshRepo)
 		defer cancel()
@@ -278,7 +278,7 @@ func (m Model) askRepoRefresh() (Model, tea.Cmd) {
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
 			err = fmt.Errorf("did not answer in %s", scope.RefreshRepo)
 		}
-		return RepoRefreshedMsg{Gen: gen, Repo: repo, Rev: rev, Err: err}
+		return RepoRefreshedMsg{Gen: id, Repo: repo, Rev: rev, Err: err}
 	}
 }
 
@@ -294,7 +294,7 @@ func (m Model) RequestRefresh() (Model, tea.Cmd) {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case DriftMsg:
-		if msg.gen != m.gen {
+		if scope.Foreign(m.driftID, msg) {
 			return m, nil
 		}
 		delete(m.pending, msg.env)
@@ -307,7 +307,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.matrix = Order(Compute(m.repo, m.promotable, m.running), m.envs)
 		return m.layout(), nil
 	case RepoRefreshedMsg:
-		if msg.Gen != m.repoGen {
+		if scope.Foreign(m.repoID, msg) {
 			return m, nil
 		}
 		m.refreshingRepo = false
