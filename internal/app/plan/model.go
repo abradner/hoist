@@ -266,10 +266,7 @@ func (m Model) ResetStarting() Model {
 // diff's whole point is the digest, and a hard-truncated line hides it past the pane's right
 // edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	v.SoftWrap = true
-	return v
+	return keys.NewViewport(true, true)
 }
 
 // New builds the plan screen, which retires the old "P forces a prompt" gesture: p on the
@@ -866,7 +863,7 @@ func (m *Model) buildConfirm() {
 		Value(&m.confirmValue)
 	m.confirmDirect.WithKeyMap(keys.HuhKeyMap())
 	m.confirmDirect.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmDirect.WithWidth(m.dialogWidth())
+	m.confirmDirect.WithWidth(ui.DialogWidth(m.width))
 }
 
 func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
@@ -909,7 +906,7 @@ func (m *Model) buildOverride(repo string) {
 		Value(&m.overrideValue)
 	m.overrideInput.WithKeyMap(keys.HuhKeyMap())
 	m.overrideInput.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.overrideInput.WithWidth(m.dialogWidth())
+	m.overrideInput.WithWidth(ui.DialogWidth(m.width))
 }
 
 // updateOverride drives the o dialog: esc closes it with nothing changed; enter validates
@@ -959,7 +956,7 @@ func (m Model) updateOverride(msg tea.Msg) (Model, tea.Cmd) {
 func (m Model) overrideBody() string {
 	body := m.overrideInput.View()
 	if m.overrideErr != "" {
-		body += "\n" + m.styles.Bad.Render(ansi.Wordwrap(m.overrideErr, m.dialogWidth(), ""))
+		body += "\n" + m.styles.Bad.Render(ansi.Wordwrap(m.overrideErr, ui.DialogWidth(m.width), ""))
 	}
 	return body
 }
@@ -1050,8 +1047,6 @@ func (m Model) SetSize(width, height int) Model {
 	return m.layout()
 }
 
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
-
 // layout sizes the two panes to the frame's body: the header and totals section take two
 // rows, the notes section (when it shows) its own, and the panes share the rest.
 func (m Model) layout() Model {
@@ -1064,7 +1059,7 @@ func (m Model) layout() Model {
 	if notes != "" {
 		sections++
 	}
-	body := max(ui.BodyHeight(m.height, sections)-2-strings.Count(notes, "\n")-boolInt(notes != ""), 3)
+	body := max(ui.BodyHeight(m.height, sections)-2-strings.Count(notes, "\n")-ui.BoolInt(notes != ""), 3)
 	leftWidth := min(max(inner*2/5, 36), 56)
 	rightWidth := max(inner-leftWidth-1, 10)
 	if leftWidth != m.leftWidth {
@@ -1094,10 +1089,10 @@ func (m Model) layout() Model {
 		m.multiSelect.WithHeight(max(body-extra, 3))
 	}
 	if m.confirmDirect != nil {
-		m.confirmDirect.WithWidth(m.dialogWidth())
+		m.confirmDirect.WithWidth(ui.DialogWidth(m.width))
 	}
 	if m.overrideInput != nil {
-		m.overrideInput.WithWidth(m.dialogWidth())
+		m.overrideInput.WithWidth(ui.DialogWidth(m.width))
 	}
 	resized := m.viewport.Width() != rightWidth
 	m.viewport.SetWidth(rightWidth)
@@ -1107,13 +1102,6 @@ func (m Model) layout() Model {
 		m = m.refreshRight()
 	}
 	return m
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // SetStyles applies the palette (and its dark/light flag to every huh field via huh's own
@@ -1249,12 +1237,12 @@ func (m Model) totalsSection() string {
 			}
 		}
 	}
-	parts := []string{m.styles.Title.Render(plural(repos, "repo") + " ticked")}
+	parts := []string{m.styles.Title.Render(ui.Plural(repos, "repo") + " ticked")}
 	if commits > 0 || (loading == 0 && missing == 0 && repos > 0) {
-		parts = append(parts, m.styles.Title.Render(plural(commits, "commit")))
+		parts = append(parts, m.styles.Title.Render(ui.Plural(commits, "commit")))
 	}
 	if migrations > 0 {
-		word := plural(migrations, "migration")
+		word := ui.Plural(migrations, "migration")
 		if capped > 0 {
 			word += " (at least)"
 		}
@@ -1265,7 +1253,7 @@ func (m Model) totalsSection() string {
 	// (v2·05b): "N image references, M files" — the plan's own version of deploy.scale's
 	// identical count, over the same ticked set every other part of this line counts.
 	if refs, files := ImageRefStats(m.plan, ticked); refs > 0 {
-		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("%s, %s", plural(refs, "image reference"), plural(files, "file"))))
+		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("%s, %s", ui.Plural(refs, "image reference"), ui.Plural(files, "file"))))
 	}
 	if loading > 0 {
 		parts = append(parts, m.styles.Dim.Render(fmt.Sprintf("history loading for %d", loading)))
@@ -1282,13 +1270,6 @@ func (m Model) totalsSection() string {
 		right = m.styles.Dim.Render("d  back to impact")
 	}
 	return ui.StatusBar(max(m.width-2, 1), line, right)
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return "1 " + word
-	}
-	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // notes is the section under the panes: the transient notice, or the production skip
@@ -1455,7 +1436,7 @@ func (m Model) impactBody() string {
 	// "image reference(s)", never "occurrence(s)" — the latter is this codebase's own
 	// internal term (AGENTS.md's domain-noun glossary) and reads as jargon on the one screen an
 	// operator is about to press enter on (mirrors deploy.scale's identical wording).
-	lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("%s · %s · digest from %s", plural(r.Count, "image reference"), plural(r.Files, "file"), r.Source), width, "")))
+	lines = append(lines, m.styles.Dim.Render(ansi.Wrap(fmt.Sprintf("%s · %s · digest from %s", ui.Plural(r.Count, "image reference"), ui.Plural(r.Files, "file"), r.Source), width, "")))
 	lines = append(lines, "")
 	mapped := m.histFn.Mapped == nil || m.histFn.Mapped(r.Repo)
 	if m.histFn.Delta == nil {
@@ -1479,7 +1460,7 @@ func (m Model) impactBody() string {
 			if st.Delta.MigrationsIncomplete {
 				qualifier = " (at least)" // the forge capped the history; this list is a floor
 			}
-			lines = append(lines, "", m.styles.Warn.Render(plural(len(st.Delta.Migrations), "migration")+qualifier+" run on this promotion:"))
+			lines = append(lines, "", m.styles.Warn.Render(ui.Plural(len(st.Delta.Migrations), "migration")+qualifier+" run on this promotion:"))
 			for _, f := range st.Delta.Migrations {
 				lines = append(lines, m.styles.Dim.Render("  "+ansi.Truncate(f, width-2, "…")))
 			}

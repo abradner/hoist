@@ -128,9 +128,7 @@ type Model struct {
 // space/f/b to page and bare "d"/"u" to half-page — none of it shown on this screen's footer
 // or help overlay.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	return v
+	return keys.NewViewport(false, true)
 }
 
 // New builds the screen for one family in one env. Nothing is read until Init runs.

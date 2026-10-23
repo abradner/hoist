@@ -18,6 +18,7 @@ import (
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -322,7 +323,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		nm := m.WithRepo(msg.Repo)
 		if msg.Rev != "" {
-			nm.notice = fmt.Sprintf("origin/%s re-read · %s", nm.baseName(), shortSHA(msg.Rev))
+			nm.notice = fmt.Sprintf("origin/%s re-read · %s", nm.baseName(), ui.ShortSHA(msg.Rev))
 		}
 		if again {
 			return nm.askRepoRefresh()
@@ -521,16 +522,11 @@ func (m Model) doAbandonFromPane() (Model, tea.Cmd) {
 		return m, nil
 	}
 	s := m.inflight[m.paneCursor]
-	confirm := huh.NewConfirm().
-		Title(fmt.Sprintf("abandon %s (%s → %s)?", paneID(s), s.Source, s.Target)).
-		Affirmative("abandon").Negative("cancel")
-	// A standalone huh field ships a zero keymap and ignores every key (AGENTS.md §9 entry 6).
-	confirm.WithKeyMap(keys.HuhKeyMap())
-	confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmAbandon = confirm
+	cf := confirm.New(fmt.Sprintf("abandon %s (%s → %s)?", paneID(s), s.Source, s.Target), 0).Affirmative("abandon").Negative("cancel")
+	m.confirmAbandon = cf
 	m.confirmAbandonID = s.ID
 	m.confirmAbandonBuild = s
-	return m, tea.Batch(confirm.Init(), confirm.Focus())
+	return m, tea.Batch(cf.Init(), cf.Focus())
 }
 
 func (m Model) updateConfirmAbandon(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -1041,7 +1037,7 @@ func (m Model) gridHeight() int {
 		sections++
 	}
 	rows := ui.BodyHeight(m.height, sections) - 1 /* subheader */
-	rows -= lipgloss.Height(notes) * boolInt(notes != "")
+	rows -= lipgloss.Height(notes) * ui.BoolInt(notes != "")
 	rows -= len(detail)
 	rows -= m.paneRows(m.paneBudget())
 	return max(rows-3, 1)
@@ -1086,13 +1082,6 @@ func (m Model) layout() Model {
 		m.chooser.WithWidth(max(m.width-8, 20))
 	}
 	return m
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // notes is the section under the grid: the transient notice or hint first, else what the
@@ -1262,13 +1251,6 @@ func (m Model) baseName() string {
 		return "main"
 	}
 	return m.base
-}
-
-func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
 }
 
 func displayRoot(root string) string {

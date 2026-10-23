@@ -67,10 +67,7 @@ func New(log Log, now func() time.Time) Model {
 
 // newViewport binds only the paging keys, the same set config.Model's own body uses.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	v.MouseWheelEnabled = false
-	return v
+	return keys.NewViewport(false, false)
 }
 
 // Init has nothing to fetch: everything the screen shows arrived in New.

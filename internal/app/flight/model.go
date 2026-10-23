@@ -199,9 +199,7 @@ func (m Model) WithNow(now func() time.Time) Model {
 // and the bubbles default paged the log out from under an operator who pressed it expecting
 // nothing to happen.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	return v
+	return keys.NewViewport(false, true)
 }
 
 // NewAttached builds the flight screen already attached to one session.Controller entry — the
@@ -498,7 +496,7 @@ func (m Model) openFamilyChooser(fams []string) (Model, tea.Cmd) {
 	sel := huh.NewSelect[string]().Title("watch which family?").Options(opts...)
 	sel.WithKeyMap(keys.HuhKeyMap())
 	sel.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	sel.WithWidth(m.dialogWidth())
+	sel.WithWidth(ui.DialogWidth(m.width))
 	m.choosingFamily = true
 	m.familyChooser = sel
 	return m, tea.Batch(sel.Init(), sel.Focus())
@@ -556,7 +554,7 @@ func (m Model) openConfirm() (Model, tea.Cmd) {
 	// the one shared keymap every standalone huh field in this app now uses.
 	m.confirmOverride.WithKeyMap(keys.HuhKeyMap())
 	m.confirmOverride.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmOverride.WithWidth(m.dialogWidth())
+	m.confirmOverride.WithWidth(ui.DialogWidth(m.width))
 	return m, tea.Batch(m.confirmOverride.Init(), m.confirmOverride.Focus())
 }
 
@@ -586,8 +584,6 @@ func (m Model) confirmAgreed() bool {
 	return v
 }
 
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
-
 // openConfirmAbandon raises the shift+x gesture's own dialog — the identical keypress-then-confirm
 // shape as openConfirm/the tag picker's D, on its own independent widget.
 func (m Model) openConfirmAbandon() (Model, tea.Cmd) {
@@ -599,7 +595,7 @@ func (m Model) openConfirmAbandon() (Model, tea.Cmd) {
 	// (AGENTS.md §9 entry 6). keys.HuhKeyMap rather than huh.NewDefaultKeyMap directly.
 	m.confirmAbandon.WithKeyMap(keys.HuhKeyMap())
 	m.confirmAbandon.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirmAbandon.WithWidth(m.dialogWidth())
+	m.confirmAbandon.WithWidth(ui.DialogWidth(m.width))
 	return m, tea.Batch(m.confirmAbandon.Init(), m.confirmAbandon.Focus())
 }
 
@@ -635,13 +631,13 @@ func (m Model) confirmAbandonAgreed() bool {
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
 	if m.confirmOverride != nil {
-		m.confirmOverride.WithWidth(m.dialogWidth())
+		m.confirmOverride.WithWidth(ui.DialogWidth(m.width))
 	}
 	if m.confirmAbandon != nil {
-		m.confirmAbandon.WithWidth(m.dialogWidth())
+		m.confirmAbandon.WithWidth(ui.DialogWidth(m.width))
 	}
 	if m.familyChooser != nil {
-		m.familyChooser.WithWidth(m.dialogWidth())
+		m.familyChooser.WithWidth(ui.DialogWidth(m.width))
 	}
 	return m.layout()
 }

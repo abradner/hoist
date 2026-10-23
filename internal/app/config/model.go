@@ -56,10 +56,7 @@ func New(path string, found bool, text string) Model {
 // (#120): pgup/pgdn, ctrl+u/ctrl+d; g/G are handled by Update since the viewport's own
 // defaults for them are "home"/"end" names this screen does not otherwise use.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	v.MouseWheelEnabled = false
-	return v
+	return keys.NewViewport(false, false)
 }
 
 // Init has nothing to fetch: everything the screen shows arrived in New.

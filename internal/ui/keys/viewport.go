@@ -35,3 +35,16 @@ func ViewportKeyMap() viewport.KeyMap {
 		Up:           Up.Bubbles(),
 	}
 }
+
+// NewViewport is the one constructor for a read-only scrolling body: ViewportKeyMap instead of
+// the bubbles default (see ViewportKeyMap), soft-wrapped when softWrap is set, and with the
+// mouse wheel on when mouseWheel is set (bubbles' default; config and activity turn it off).
+// The tag picker's own viewport also drops line movement from the keymap, so it keeps its
+// own constructor.
+func NewViewport(softWrap, mouseWheel bool) viewport.Model {
+	v := viewport.New()
+	v.KeyMap = ViewportKeyMap()
+	v.SoftWrap = softWrap
+	v.MouseWheelEnabled = mouseWheel
+	return v
+}
