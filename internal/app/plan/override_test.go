@@ -12,6 +12,7 @@ import (
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
 	"github.com/abradner/hoist/pkg/resolve"
 )
@@ -230,6 +231,63 @@ func TestOverrideRebuildKeepsTheTickedSetAndCursor(t *testing.T) {
 	if has(start.Ticked, unticked) || !has(start.Ticked, kept) {
 		t.Errorf("StartMsg.Ticked = %v, want %s absent and %s present", start.Ticked, unticked, kept)
 	}
+}
+
+// TestOverrideRebuildTicksARowThatBecameSelectable is #161. A repo the first resolve could not
+// supply a digest for (a transient registry failure) is a disabled row with no checkbox; an
+// override of another repo rebuilds the plan, the resolver now succeeds for it, and the row is
+// offered, but the rebuild kept only the previous ticked set, so it arrived unticked and Enter
+// promoted everything but it, silently. Control: a row that was selectable and unticked before
+// stays unticked.
+func TestOverrideRebuildTicksARowThatBecameSelectable(t *testing.T) {
+	const flaky = "ghcr.io/example/marketing"
+	r := discoverFixture(t)
+	calls := 0
+	fake := fakePlanFunc([]string{"ghcr.io/"}, func(context.Context, service.PlanRequest) (service.Resolution, bool, error) {
+		calls++
+		if calls > 1 {
+			return service.Resolution{KubeContext: "test-context"}, false, nil
+		}
+		return service.Resolution{KubeContext: "test-context", Res: map[string]resolve.Resolution{
+			flaky: {Repo: flaky, Warnings: []gitops.Warning{{Code: resolve.WarnUnresolved, Message: "transient failure for " + flaky}}},
+		}}, true, nil
+	})
+	m := New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, "app-staging", "app-production", fake, history.Funcs{})
+	m = uitest.Drain(m, m.Init(), updateFn)
+	m = m.SetSize(100, 30).SetStyles(ui.NewStyles(true))
+	sel := Selectable(m.rows)
+	if len(sel) < 2 || has(reposOf(sel), flaky) {
+		t.Fatalf("setup: want >=2 selectable rows and %s disabled, selectable = %v", flaky, reposOf(sel))
+	}
+	unticked, hovered := sel[0].Repo, sel[1].Repo
+	m = uitest.Keys(m, updateFn, "space", "down") // untick the first row, move to the second
+	if has(m.ticked, unticked) {
+		t.Fatalf("setup: %s still ticked", unticked)
+	}
+
+	m = uitest.Keys(m, updateFn, "e")
+	m = typeInto(m, hovered+":v9@"+overrideDigest)
+	m = uitest.Keys(m, updateFn, "enter")
+	if m.overriding || calls != 2 {
+		t.Fatalf("override did not rebuild: overriding=%v calls=%d err=%q", m.overriding, calls, m.overrideErr)
+	}
+	if !has(reposOf(Selectable(m.rows)), flaky) {
+		t.Fatalf("setup: the rebuild did not make %s selectable", flaky)
+	}
+	if !has(m.ticked, flaky) {
+		t.Errorf("the row that became selectable arrived unticked: ticked = %v", m.ticked)
+	}
+	if has(m.ticked, unticked) {
+		t.Errorf("control: %s was unticked before the rebuild and must stay so: ticked = %v", unticked, m.ticked)
+	}
+}
+
+func reposOf(rows []Row) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Repo)
+	}
+	return out
 }
 
 func has(set []string, s string) bool {

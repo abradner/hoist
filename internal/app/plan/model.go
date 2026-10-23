@@ -333,8 +333,9 @@ func (m Model) WithNow(now func() time.Time) Model {
 // what F5 just fetched rather than the boot-time snapshot it was opened with. A no-op outside
 // stateReady: a load already in flight (stateLoading) or a still-open env prompt has nothing yet
 // to rebuild FROM. keepTicked/a fresh scope ID mirror the override rebuild's own shape
-// (updateOverride) — the operator's ticked set survives, intersected against whatever the fresh
-// plan's rows turn out to be, and a load already outstanding for the stale repo is dropped by
+// (updateOverride) — the operator's ticked set survives, narrowed to the fresh plan's selectable
+// rows, with any row that was not selectable before ticked as a first load would tick it
+// (withNewlySelectable, #161: a repo that appears after the refresh arrives ticked), and a load already outstanding for the stale repo is dropped by
 // the scope.Foreign guard rather than landing on rows this reload never asked for.
 func (m Model) Reload(repo *gitops.Repo) (Model, tea.Cmd) {
 	if m.state != stateReady || repo == nil {
@@ -443,15 +444,21 @@ func (m *Model) rebuildMultiSelect() {
 	}
 }
 
-// intersect keeps the ticked repos that are still selectable rows, in row order.
-func intersect(ticked []string, rows []Row) []string {
-	set := map[string]bool{}
+// withNewlySelectable is ticked narrowed to the rows still selectable, plus every row that is
+// selectable now and was not before: an explicit untick survives, a newly offered row is ticked.
+// In row order.
+func withNewlySelectable(ticked []string, before, now []Row) []string {
+	was := make(map[string]bool, len(before))
+	for _, r := range before {
+		was[r.Repo] = true
+	}
+	set := make(map[string]bool, len(ticked))
 	for _, t := range ticked {
 		set[t] = true
 	}
-	out := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if set[r.Repo] {
+	out := make([]string, 0, len(now))
+	for _, r := range now {
+		if set[r.Repo] || !was[r.Repo] {
 			out = append(out, r.Repo)
 		}
 	}
@@ -610,6 +617,7 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 		m.err = msg.err
 		return m, nil
 	}
+	before := Selectable(m.rows)
 	m.plan = msg.plan
 	m.outcome = msg.outcome
 	m.view = msg.view
@@ -619,8 +627,11 @@ func (m Model) onLoaded(msg loadedMsg) (Model, tea.Cmd) {
 		// An override rebuild keeps what the operator unticked: rebuilding from scratch
 		// would tick every row again, and Enter would promote the repos they had excluded.
 		// The set is intersected with the rebuilt rows (a repo may have stopped being
-		// selectable), and rebuildMultiSelect puts the cursor back by repo (#121).
-		m.ticked = intersect(m.ticked, Selectable(m.rows))
+		// selectable), a row that was not selectable before and is now (an unresolved digest
+		// that resolved this time) is ticked as a first load would tick it, so the promotion
+		// does not silently omit it (#161), and rebuildMultiSelect puts the cursor back by
+		// repo (#121).
+		m.ticked = withNewlySelectable(m.ticked, before, Selectable(m.rows))
 		m.rebuildMultiSelect()
 	} else {
 		m.buildMultiSelect()
