@@ -189,10 +189,10 @@ func TestEnterRefusesWhenTheDiffCouldNotBeRendered(t *testing.T) {
 // TestModeToggleCompletesThroughRealInput is the deploy screen's half of the same defect the
 // tag picker had: huh.NewConfirm leaves its keymap zero-valued, so a standalone Confirm matched
 // no key at all and the advertised toggle could never be completed — and the screen then read
-// m.confirmV, a field on a Model copy every Update supersedes, so even a working keypress would
+// a bound bool, a field on a Model copy every Update supersedes, so even a working keypress would
 // not have been seen (Copilot, PR #72). T3-08 moves the toggle from `m` to `shift+d`.
 //
-// Driven only through keypresses: nothing here may touch m.confirmV.
+// Driven only through keypresses: nothing here may touch a bound bool.
 func TestModeToggleCompletesThroughRealInput(t *testing.T) {
 	m := fixture(t, config.EnvsConfig{})
 	if m.mode != ModePR {

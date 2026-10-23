@@ -32,6 +32,7 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -133,7 +134,6 @@ type Model struct {
 	diffErr  error
 	mode     string
 	confirm  *huh.Confirm
-	confirmV bool
 	notice   string
 	ticked   map[string]bool
 
@@ -345,20 +345,8 @@ func (m Model) toggleDirect() (Model, tea.Cmd) {
 		m.mode = ModePR
 		return m, nil
 	}
-	m.confirmV = false
-	m.confirm = huh.NewConfirm().
-		Title(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target)).
-		Description("Nothing reviews this before it deploys.").
-		Value(&m.confirmV)
-	// WithKeyMap(keys.HuhKeyMap()) is not optional decoration: huh.NewConfirm leaves keymap
-	// zero-valued, and a zero key.Binding matches nothing, so a Confirm used standalone rather
-	// than inside a huh.Form ignores every keypress — without this y/n/←/→ all did nothing and
-	// this screen could not be switched to direct mode at all. keys.HuhKeyMap
-	// (AGENTS.md §9 entry 6) rather than huh.NewDefaultKeyMap() directly, so this dialog's
-	// home/end and MultiSelect-toggle keys agree with every other huh field in the app.
-	m.confirm.WithKeyMap(keys.HuhKeyMap())
-	m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirm.WithWidth(ui.DialogWidth(m.width))
+	m.confirm = confirm.New(fmt.Sprintf("Commit %s straight to %s with no PR?", m.image, m.target), m.width).
+		Description("Nothing reviews this before it deploys.")
 	return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 }
 
@@ -372,10 +360,10 @@ func (m Model) updateConfirm(msg tea.Msg) (Model, tea.Cmd) {
 		m.confirm = c
 	}
 	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "enter" {
-		// Read from the widget, not from m.confirmV: Value takes the address of a field in
+		// Read from the widget, never a bound bool: Value takes the address of a field in
 		// whichever Model copy built the confirm, and every Update since has returned a new
-		// copy, so this model's own field never moves however the operator answers.
-		agreed, _ := m.confirm.GetValue().(bool)
+		// copy, so that field never moves however the operator answers.
+		agreed := confirm.Agreed(m.confirm)
 		m.confirm = nil
 		if agreed {
 			m.mode = ModeDirect

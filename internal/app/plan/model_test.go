@@ -271,7 +271,7 @@ func TestModeToggleAfterConfirm(t *testing.T) {
 		t.Fatalf("the dialog must sit over the screen:\n%s", v)
 	}
 	// Answered through the widget's own key, never by assigning the bound bool: an earlier
-	// version of this test set m.confirmValue directly and so never noticed that
+	// version of this test set the bound bool directly and so never noticed that
 	// huh.NewConfirm ships a zero keymap and ignored every keypress — the gesture could not
 	// be completed by a real operator at all (#85's named trap, the plan screen's instance).
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
