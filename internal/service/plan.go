@@ -174,6 +174,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (PlannedChange, err
 	if err != nil {
 		return PlannedChange{}, err
 	}
+	WarnSkippedStagingProduction(&pl, s.envsConfig())
 	if res != nil {
 		// runPlan/runPromote (cmd/hoist) and the TUI plan screen all used to prepend this
 		// themselves; Plan is now the one place that does it, so it is fixed by construction
