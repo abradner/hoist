@@ -38,6 +38,7 @@ package engine
 // the PR opened — and is not taken (issue #47, decided rather than deferred).
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -619,6 +620,13 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 			headOK := fresh.HeadSHA == "" || expected == "" || fresh.HeadSHA == expected
 			if ferr == nil && ok && fresh.Merged && fresh.Base == s.Base && headOK {
 				s.PR = &fresh
+			} else if errors.Is(err, forge.ErrMergeRefused) {
+				// Reached only after the recovery above found nothing merged (GitHub answers an
+				// already-merged PR with the same 405). Asking again changes nothing: someone has
+				// to satisfy the rule on the forge.
+				return &ActBlockedError{Reason: fmt.Sprintf(
+					"GitHub refused the merge of PR #%d: branch protection on %s or the repository's merge settings do not allow it (a required review or check, or squash merges) — satisfy it on GitHub, then press r or run hoist resume %s",
+					s.PR.Number, s.Base, s.ID)}
 			} else {
 				return fmt.Errorf("merging PR #%d: %w", s.PR.Number, err)
 			}

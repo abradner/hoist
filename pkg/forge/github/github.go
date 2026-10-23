@@ -518,6 +518,11 @@ func (c *Client) MergePR(ctx context.Context, prNumber int, expectedHeadSHA stri
 		if errors.As(err, &herr) && herr.StatusCode == http.StatusConflict {
 			return forge.PR{}, fmt.Errorf("github: merging PR #%d: HTTP 409 %s: %w", prNumber, redact.Strings(herr.Message), forge.ErrStaleHead)
 		}
+		if errors.As(err, &herr) && herr.StatusCode == http.StatusMethodNotAllowed {
+			// 405: branch protection or the repo's merge settings refuse this merge. The body's
+			// message is free-form remote text and is not rendered (AGENTS.md §4.10, F5).
+			return forge.PR{}, fmt.Errorf("github: merging PR #%d: HTTP 405: %w", prNumber, forge.ErrMergeRefused)
+		}
 		return forge.PR{}, translateErr(fmt.Sprintf("merging PR #%d", prNumber), err)
 	}
 	// The merge response itself carries no head/base/branch info — re-fetch the PR so the

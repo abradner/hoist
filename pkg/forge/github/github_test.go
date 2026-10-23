@@ -630,6 +630,25 @@ func TestMergePRRefusesStaleHead(t *testing.T) {
 	}
 }
 
+// TestMergePRMapsBranchProtectionRefusal is #299 at the wire level: a 405 from the merge call is
+// branch protection or the repo's merge settings, and must be forge.ErrMergeRefused — distinct
+// from ErrStaleHead — without rendering GitHub's free-form message (AGENTS.md §4.10, F5).
+func TestMergePRMapsBranchProtectionRefusal(t *testing.T) {
+	c := newTestClient(t, map[string]func(*http.Request) (int, string){
+		"PUT /repos/example/gitops/pulls/7/merge": static(405, `{"message":"Required status check is expected. UNTRUSTED-REMOTE-TEXT"}`),
+	})
+	_, err := c.MergePR(context.Background(), 7, "deadbeef")
+	if !errors.Is(err, forge.ErrMergeRefused) {
+		t.Fatalf("expected forge.ErrMergeRefused, got %v", err)
+	}
+	if errors.Is(err, forge.ErrStaleHead) {
+		t.Fatalf("a 405 is not a stale head: %v", err)
+	}
+	if strings.Contains(err.Error(), "UNTRUSTED-REMOTE-TEXT") {
+		t.Fatalf("the remote's free-form message must not be rendered: %v", err)
+	}
+}
+
 func TestTagsResolvesEachCommitDate(t *testing.T) {
 	c := newTestClient(t, map[string]func(*http.Request) (int, string){
 		"GET /repos/example/gitops/tags":       static(200, `[{"name":"v1"},{"name":"v2"}]`),

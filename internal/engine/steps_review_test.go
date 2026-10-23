@@ -838,6 +838,65 @@ func TestMergedUnresolvableMergeSHABlocksCleanly(t *testing.T) {
 	}
 }
 
+// TestMergedActBlocksWhenTheForgeRefusesTheMerge is #299: GitHub answers a merge that branch
+// protection forbids with 405, which MergedStep.Act used to return as a plain error — a failed
+// Act every poll, with the forge's raw text. It is a stop retrying cannot resolve, so it must
+// reach the drive as a *BlockedError naming the PR and the way out, and Drive must record it.
+func TestMergedActBlocksWhenTheForgeRefusesTheMerge(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.MergeRefused = true
+
+	step := MergedStep{Forge: f, Git: git.Exec{}}
+	var ab *ActBlockedError
+	if err := step.Act(ctx(), s); !errors.As(err, &ab) {
+		t.Fatalf("Act = %v, want an *ActBlockedError", err)
+	}
+	for _, want := range []string{"PR #" + strconv.Itoa(s.PR.Number), "refused the merge", s.Base, "hoist resume " + s.ID} {
+		if !strings.Contains(ab.Reason, want) {
+			t.Errorf("reason %q lacks %q", ab.Reason, want)
+		}
+	}
+
+	done, statuses, err := DriveStatus(ctx(), []Step{step}, s, nil)
+	var blocked *BlockedError
+	if done || !errors.As(err, &blocked) || blocked.Step != StepMerged {
+		t.Fatalf("DriveStatus = done %v, err %v; want a *BlockedError at %s", done, err, StepMerged)
+	}
+	if Retryable(err) {
+		t.Fatalf("a refused merge must not be retryable: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].Blocked == "" {
+		t.Fatalf("statuses = %+v, want one Blocked row", statuses)
+	}
+	last := s.History[len(s.History)-1]
+	if !strings.HasPrefix(last.Detail, "blocked: ") {
+		t.Fatalf("last history entry = %+v, want a blocked: record", last)
+	}
+}
+
+// TestMergedActRecoversAMergedPREvenWhenTheForgeAnswers405 is the control for the test above:
+// GitHub gives the same 405 for a merge that already happened (the lost-response case), and that
+// must still go through the FindPR recovery, never to Blocked.
+func TestMergedActRecoversAMergedPREvenWhenTheForgeAnswers405(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	if _, err := f.MergePR(ctx(), s.PR.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.MergeRefused = true
+
+	step := MergedStep{Forge: f, Git: git.Exec{}}
+	if err := step.Act(ctx(), s); err != nil {
+		t.Fatalf("an already-merged PR answered with 405 must recover via FindPR: %v", err)
+	}
+	if !s.PR.Merged || s.MergeSHA == "" {
+		t.Fatalf("recovery lost the merged state: PR=%+v MergeSHA=%q", s.PR, s.MergeSHA)
+	}
+}
+
 // TestMergedResumesAfterKilledMergeCall is the named adversary: MergePR errors (the client
 // never saw a response, but the merge may have landed server-side) — Act must re-check FindPR
 // before treating it as a real failure, never re-issue a second merge call blindly once it
