@@ -313,7 +313,8 @@ func WorktreeDir(id string) (string, error) {
 
 // SaveState writes s to path atomically: a temp file in the same directory, then rename, so a
 // process killed mid-write never leaves partial JSON where the next run will look (Known bug
-// classes: "A state file write that isn't atomic"). The file states its own permissions
+// classes: "A state file write that isn't atomic"). The temp file is fsynced before the rename and
+// the directory after it, so a power loss leaves the old file or the new one, never an empty name. The file states its own permissions
 // explicitly (AGENTS.md §8) rather than inheriting the umask — 0600, since it names local
 // paths and, once M4 lands, will sit next to CI/approval state a stranger on a shared machine
 // has no business reading.
@@ -345,6 +346,12 @@ func SaveState(path string, s *PromotionState) error {
 		_ = tmp.Close()
 		return err
 	}
+	// Flush to stable storage BEFORE the name becomes visible: rename/link without it can,
+	// after a power loss, leave the final name pointing at an empty or partial file.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -352,7 +359,21 @@ func SaveState(path string, s *PromotionState) error {
 		return err
 	}
 	success = true
+	syncDir(dir)
 	return nil
+}
+
+// syncDir flushes a directory's entries (a rename or link just made) to stable storage, so the
+// new name survives a power loss along with the file content Sync already flushed. Best effort:
+// not every filesystem supports fsync on a directory, and the file itself is already durable —
+// at worst the old name is what survives, which every caller already tolerates.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // DeleteState removes the state file at path — `hoist abandon`'s own write. Idempotent, the
