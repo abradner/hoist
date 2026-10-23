@@ -386,7 +386,7 @@ func TestHistoryPaneNamesEveryGap(t *testing.T) {
 // A stale history answer (an earlier picker instance) never lands.
 func TestStaleHistoryResultIsDiscarded(t *testing.T) {
 	m := historyModel(t, fourteenAhead, nil)
-	stale := historyMsg{gen: m.generation - 1, tag: "v3", delta: migrate.Delta{Direction: migrate.DirectionSame}}
+	stale := historyMsg{id: m.scope.ID - 1, tag: "v3", delta: migrate.Delta{Direction: migrate.DirectionSame}}
 	m2, _ := m.Update(stale)
 	if len(m2.currentCommits()) != 14 {
 		t.Fatal("a stale generation's delta replaced the current one")

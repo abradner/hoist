@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -118,16 +117,9 @@ type SelectedMsg struct {
 	HistoryNote   string
 }
 
-// nextGeneration hands out this process's next tag-picker generation id. Package-level and
-// monotonically increasing (never reused, never reset) so that every Model instance New ever
-// constructs — for the same image repo or a different one — gets a value no other instance,
-// past or future, ever holds. See generation's own doc comment on Model for why imageRepo alone
-// cannot serve this purpose.
-var nextGeneration atomic.Int64
-
-// regTagsLoadedMsg, gitTagsLoadedMsg, metaLoadedMsg, historyMsg and ageMsg all carry gen, the picker instance that
-// requested them: each command closes over m.generation at the moment it is created, and the
-// handlers discard a result whose gen doesn't match this model's own current one.
+// regTagsLoadedMsg, gitTagsLoadedMsg, metaLoadedMsg, historyMsg and ageMsg all carry id, the scope ID of the picker
+// instance that requested them: each command closes over m.scope.ID at the moment it is created, and
+// Update drops (scope.Foreign) a result whose id isn't this model's own current one.
 // internal/app's root routes a message to whatever screen is currently on top of its stack by
 // type alone, not by which Model instance produced the tea.Cmd that resolves to it — if an
 // operator leaves this picker while its own commands are still in flight and opens a picker
@@ -135,17 +127,17 @@ var nextGeneration atomic.Int64
 // silently populate it with another repo's rows/metadata (common tag names like "latest" make
 // this look plausible rather than obviously wrong).
 //
-// gen, not imageRepo, is what actually discriminates instances: imageRepo scopes only by
+// id, not imageRepo, is what actually discriminates instances: imageRepo scopes only by
 // REPOSITORY, and two picker instances for the SAME repo are common — closing this picker while
 // its commands are still in flight, then immediately reopening a new picker for the identical
-// repo, gives the new instance the identical imageRepo value. gen is assigned fresh by New for
+// repo, gives the new instance the identical imageRepo value. id is assigned fresh by scope.Open for
 // every instance regardless of repo, so it discriminates same-repo reopens exactly as it
 // discriminates cross-repo ones; imageRepo is kept on these messages for context/debugging
 // only, not as part of the discard decision.
 // regTagsLoadedMsg carries RegTagsFunc's own answer — the fast half of the load (#PR8).
 type regTagsLoadedMsg struct {
 	imageRepo string
-	gen       int64
+	id        scope.ID
 	regTags   []string
 	err       error
 }
@@ -155,7 +147,7 @@ type regTagsLoadedMsg struct {
 // land in.
 type gitTagsLoadedMsg struct {
 	imageRepo string
-	gen       int64
+	id        scope.ID
 	gitTags   []forge.GitTag
 	mapped    bool // this call's own observed answer — see GitTagsFunc's doc comment.
 	err       error
@@ -163,7 +155,7 @@ type gitTagsLoadedMsg struct {
 
 type metaLoadedMsg struct {
 	imageRepo string
-	gen       int64
+	id        scope.ID
 	tag       string
 	meta      registry.ImageMeta
 	err       error
@@ -171,7 +163,7 @@ type metaLoadedMsg struct {
 
 // historyMsg is one tag's delta against the declared reference.
 type historyMsg struct {
-	gen   int64
+	id    scope.ID
 	tag   string
 	delta migrate.Delta
 	err   error
@@ -179,10 +171,18 @@ type historyMsg struct {
 
 // ageMsg is the declared occurrence's live age (when its manifest line last changed).
 type ageMsg struct {
-	gen int64
+	id  scope.ID
 	age migrate.LineAge
 	err error
 }
+
+// StampedBy implements scope.Stamped for all five async results: Update drops one whose id is
+// not this instance's current scope ID (see Update's first line).
+func (m regTagsLoadedMsg) StampedBy() scope.ID { return m.id }
+func (m gitTagsLoadedMsg) StampedBy() scope.ID { return m.id }
+func (m metaLoadedMsg) StampedBy() scope.ID    { return m.id }
+func (m historyMsg) StampedBy() scope.ID       { return m.id }
+func (m ageMsg) StampedBy() scope.ID           { return m.id }
 
 // keyMap is the tag picker's own key set, sourced from the approved keymap (docs/audit's
 // "Screen × key" table, internal/ui/keys' registry) rather than invented locally. enter
@@ -224,14 +224,6 @@ type Model struct {
 	mapped     bool // RepoConfig.Apps has an entry for imageRepo
 	production bool
 
-	// generation uniquely identifies this Model instance, assigned once by New from
-	// nextGeneration. Two instances for the SAME imageRepo (closing this picker while its
-	// commands are still in flight, then immediately reopening a new picker for the identical
-	// repo) get different generations — imageRepo alone cannot tell them apart, since a
-	// reopened picker's imageRepo is, by definition, identical to the one it replaced. See
-	// regTagsLoadedMsg/metaLoadedMsg's own doc comment.
-	generation int64
-
 	// scope owns the ctx every listFn/metaFn/history call this instance ever makes (the
 	// commands close over scope.Ctx(), never context.Background() directly). scope.Close is
 	// called both explicitly — once the operator leaves this picker for good (Esc, a review
@@ -239,7 +231,7 @@ type Model struct {
 	// picker) — and again by the root's own pop when this screen is actually
 	// removed from the stack (AGENTS.md §4.8; safe to call more than once). Without it, a load
 	// already in flight when the picker closes keeps running to completion in the background
-	// even though its eventual result is already discarded by the generation guard above — for
+	// even though its eventual result is already discarded by the scope guard in Update — for
 	// a mapped repo, ListFunc can walk Forge.Tags through up to 301 sequential GitHub requests,
 	// so repeatedly opening and closing pickers could pile up obsolete crawls consuming the API
 	// rate limit, or leave one hanging behind a slow request, for no operator-visible reason.
@@ -323,7 +315,6 @@ func New(imageRepo, target string, o Options) Model {
 		target:             target,
 		mapped:             o.Mapped,
 		production:         o.Production,
-		generation:         nextGeneration.Add(1),
 		scope:              scope.Open(),
 		stagingEnv:         o.StagingEnv,
 		stagingTags:        o.StagingTags,
@@ -365,17 +356,17 @@ func (m Model) Init() tea.Cmd {
 func (m Model) regTagsCmd() tea.Cmd {
 	regTagsFn := m.regTagsFn
 	imageRepo := m.imageRepo
-	gen := m.generation
+	id := m.scope.ID
 	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		if regTagsFn == nil {
 			// Name imageRepo (not a generic "no registry" message) and point at the config knob that supplies
 			// regTagsFn (cmd/hoist wires this from the matching registries[] entry —
 			// BuildFunc's own doc comment).
-			return regTagsLoadedMsg{imageRepo: imageRepo, gen: gen, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
+			return regTagsLoadedMsg{imageRepo: imageRepo, id: id, err: fmt.Errorf("no registry configured for %s; add a matching entry under registries[] in the config file", imageRepo)}
 		}
 		regTags, err := regTagsFn(ctx)
-		return regTagsLoadedMsg{imageRepo: imageRepo, gen: gen, regTags: regTags, err: err}
+		return regTagsLoadedMsg{imageRepo: imageRepo, id: id, regTags: regTags, err: err}
 	}
 }
 
@@ -389,28 +380,28 @@ func (m Model) gitTagsCmd() tea.Cmd {
 	}
 	gitTagsFn := m.gitTagsFn
 	imageRepo := m.imageRepo
-	gen := m.generation
+	id := m.scope.ID
 	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		gitTags, mapped, err := gitTagsFn(ctx)
-		return gitTagsLoadedMsg{imageRepo: imageRepo, gen: gen, gitTags: gitTags, mapped: mapped, err: err}
+		return gitTagsLoadedMsg{imageRepo: imageRepo, id: id, gitTags: gitTags, mapped: mapped, err: err}
 	}
 }
 
 func (m Model) fetchCmd(tag string) tea.Cmd {
 	metaFn := m.metaFn
 	imageRepo := m.imageRepo
-	gen := m.generation
+	id := m.scope.ID
 	ctx := m.scope.Ctx()
 	return func() tea.Msg {
 		if metaFn == nil {
 			// Same class of fix as loadCmd's listFn==nil case above: name the image repo and
 			// tag this call was for, and point at the same registries[] config knob, rather
 			// than a bare "no registry configured" the operator can't act on.
-			return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, err: fmt.Errorf("no registry configured for %s:%s; add a matching entry under registries[] in the config file", imageRepo, tag)}
+			return metaLoadedMsg{imageRepo: imageRepo, id: id, tag: tag, err: fmt.Errorf("no registry configured for %s:%s; add a matching entry under registries[] in the config file", imageRepo, tag)}
 		}
 		meta, err := metaFn(ctx, tag)
-		return metaLoadedMsg{imageRepo: imageRepo, gen: gen, tag: tag, meta: meta, err: err}
+		return metaLoadedMsg{imageRepo: imageRepo, id: id, tag: tag, meta: meta, err: err}
 	}
 }
 
@@ -424,12 +415,12 @@ func (m Model) historyCmd(tag string) tea.Cmd {
 		return nil
 	}
 	m.deltas[tag] = history.State{}
-	delta, gen, ctx := m.histFn.Delta, m.generation, m.scope.Ctx()
+	delta, id, ctx := m.histFn.Delta, m.scope.ID, m.scope.Ctx()
 	from := m.declared.Ref
 	to := image.Ref{Repo: m.imageRepo, Tag: tag}
 	return func() tea.Msg {
 		d, err := delta(ctx, from, to)
-		return historyMsg{gen: gen, tag: tag, delta: d, err: err}
+		return historyMsg{id: id, tag: tag, delta: d, err: err}
 	}
 }
 
@@ -438,15 +429,18 @@ func (m Model) ageCmd() tea.Cmd {
 	if m.histFn.LiveAge == nil || m.declared == nil {
 		return nil
 	}
-	liveAge, gen, ctx, occ := m.histFn.LiveAge, m.generation, m.scope.Ctx(), m.declared.Occurrence
+	liveAge, id, ctx, occ := m.histFn.LiveAge, m.scope.ID, m.scope.Ctx(), m.declared.Occurrence
 	return func() tea.Msg {
 		age, err := liveAge(ctx, occ)
-		return ageMsg{gen: gen, age: age, err: err}
+		return ageMsg{id: id, age: age, err: err}
 	}
 }
 
 // Update handles the async loads, the spinner tick, and the screen's own keys.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if scope.Foreign(m.scope.ID, msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case regTagsLoadedMsg:
 		return m.onRegTagsLoaded(msg)
@@ -455,15 +449,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case metaLoadedMsg:
 		return m.onMetaLoaded(msg)
 	case historyMsg:
-		if msg.gen != m.generation {
-			return m, nil
-		}
 		m.deltas[msg.tag] = history.State{Loaded: true, Delta: msg.delta, Err: msg.err}
 		return m, nil
 	case ageMsg:
-		if msg.gen != m.generation {
-			return m, nil
-		}
 		m.age, m.ageErr, m.ageKnown = msg.age, msg.err, true
 		return m, nil
 	case spinner.TickMsg:
@@ -484,13 +472,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 // rows DeriveRows already produces for that case, and onGitTagsLoaded backfills them once it
 // lands.
 func (m Model) onRegTagsLoaded(msg regTagsLoadedMsg) (Model, tea.Cmd) {
-	if msg.gen != m.generation {
-		// A stale result from a picker instance this model is not (a closed-and-reopened
-		// picker for the same repo, or a different repo entirely) — discard it without
-		// touching any of this model's own state (see this message's own doc comment; gen,
-		// not imageRepo, is what actually discriminates instances here).
-		return m, nil
-	}
 	m.state = stateReady
 	if msg.err != nil {
 		m.err = msg.err
@@ -512,9 +493,6 @@ func (m Model) onRegTagsLoaded(msg regTagsLoadedMsg) (Model, tea.Cmd) {
 // use directly once it runs. Never blocks the picker's own opening: gitTagsCmd's own slow N+1
 // crawl (a mapped repo's cost) is exactly what this exists to keep off the critical path.
 func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
-	if msg.gen != m.generation {
-		return m, nil
-	}
 	m.gitTagsLoaded = true
 	if msg.err != nil {
 		// Degrade, not fail (AGENTS.md principle 5): the registry tags alone are still a
@@ -574,10 +552,6 @@ func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) onMetaLoaded(msg metaLoadedMsg) (Model, tea.Cmd) {
-	if msg.gen != m.generation {
-		// Same stale-result guard as onRegTagsLoaded — see regTagsLoadedMsg's own doc comment.
-		return m, nil
-	}
 	for i, r := range m.rows {
 		if r.Tag == msg.tag {
 			m.rows[i].MetaLoading = false
@@ -678,15 +652,15 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 }
 
 // reload discards this instance's loaded tags, deltas and age, and re-issues Init's own load
-// commands (its r/F5/ctrl+r "reload tags" row). generation is bumped exactly as a fresh
+// commands (its r/F5/ctrl+r "reload tags" row). The scope ID is replaced exactly as a fresh
 // New would assign one, so any regTagsLoadedMsg/gitTagsLoadedMsg/metaLoadedMsg/historyMsg/ageMsg
-// still in flight from before the reload is discarded by the same stale-generation guard that
+// still in flight from before the reload is discarded by the same scope.Foreign guard that
 // already protects a closed-and-reopened picker (regTagsLoadedMsg's own doc comment) — reload is
 // not a new Model instance, but it needs the identical discrimination for the commands it
 // discards without cancelling (scope.Scope has no per-command cancel, only Close for the whole
 // instance).
 func (m Model) reload() (Model, tea.Cmd) {
-	m.generation = nextGeneration.Add(1)
+	m.scope.ID = scope.New()
 	m.state = stateLoading
 	m.err = nil
 	m.regTags, m.regTagsLoaded = nil, false
@@ -1046,7 +1020,7 @@ func (m Model) fetchVisible() (Model, tea.Cmd) {
 		// open and the row remains visible. No explicit retry action exists yet this round
 		// (the finding allows either shape) — a failed row simply stays settled, rendered via
 		// builtCell/digestCell's own "load failed"/"—" cases, until this Model is torn down
-		// and a fresh one (a new generation) is opened.
+		// and a fresh one (a new scope ID) is opened.
 		if m.rows[i].MetaLoaded || m.rows[i].MetaLoading || m.rows[i].MetaErr != nil {
 			continue
 		}

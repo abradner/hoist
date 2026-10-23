@@ -799,8 +799,8 @@ func TestStaleListResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	if first.imageRepo != second.imageRepo {
 		t.Fatalf("fixture precondition: both instances must share imageRepo %q, got %q and %q", repo, first.imageRepo, second.imageRepo)
 	}
-	if first.generation == second.generation {
-		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.generation)
+	if first.scope.ID == second.scope.ID {
+		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.scope.ID)
 	}
 	beforeRows := append([]Row(nil), second.rows...)
 	beforeState := second.state
@@ -828,8 +828,8 @@ func TestStaleMetaResultFromClosedAndReopenedSameRepoIsDiscarded(t *testing.T) {
 	staleMsg := first.fetchCmd("v1")() // captured while first was still in flight, never delivered.
 
 	second := readyModel(t, "app-staging", true, false)
-	if first.generation == second.generation {
-		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.generation)
+	if first.scope.ID == second.scope.ID {
+		t.Fatalf("two distinct Model instances must never share a generation, got %d for both", first.scope.ID)
 	}
 	before := append([]Row(nil), second.rows...)
 
@@ -1141,5 +1141,29 @@ func TestErrorWrapsNotTruncates(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2 (r reissued the load)", calls)
+	}
+}
+
+// A result requested before an in-place reload (r) is dropped: reload re-stamps the scope ID, so
+// the earlier load's answer cannot repopulate the picker the reload just emptied.
+func TestResultFromBeforeReloadIsDiscarded(t *testing.T) {
+	m := readyModel(t, "app-staging", true, false)
+	stale := m.regTagsCmd()() // asked under the pre-reload scope ID, never delivered.
+	m, _ = m.reload()
+	if m.state != stateLoading {
+		t.Fatalf("fixture precondition: reload leaves stateLoading, got %v", m.state)
+	}
+	after, cmd := m.Update(stale)
+	if cmd != nil {
+		t.Fatalf("a pre-reload result should be dropped silently, got a command: %v", cmd())
+	}
+	if after.state != stateLoading || after.rows != nil {
+		t.Fatalf("pre-reload result landed: state=%v rows=%v", after.state, after.rows)
+	}
+	// Positive control: a result of the reload's own request lands.
+	fresh := m.regTagsCmd()()
+	after, _ = m.Update(fresh)
+	if after.state != stateReady {
+		t.Fatalf("control: the current load's result should land, state=%v", after.state)
 	}
 }
