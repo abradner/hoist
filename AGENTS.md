@@ -235,9 +235,11 @@ the Deployment still converging, and Blocks on one past its progress deadline; t
 (`rolloutCause`) covers only that Application's own edits, and only the occurrences not
 superseded at the revision Argo synced, so neither another Application's Deployment nor a later
 deploy's failed rollout can Block it (#259). Argo's revision can lag the base: when the base has since undone the
-supersede (the image put back, a rewrite, the branch gone), the stale revision is treated as not
-carrying this promotion — the step waits for Argo to sync the tip, still Blocking first on
-Degraded or a failed operation. *Stated, not enforced:* all of this reaches `ArgoSyncedStep` on the
+supersede (the image put back, a rewrite, the branch gone), the stale revision no longer stands
+for this promotion, and nor do its health and operation phase — they are the later deploy's, and
+reverting a deploy that broke is the likeliest way a supersede is undone — so the step waits for
+Argo to sync the tip without the Degraded and Failed-operation Blocks, and judges the tip,
+health gates included, once Argo has synced it (#265). *Stated, not enforced:* all of this reaches `ArgoSyncedStep` on the
 PR path only. On the direct path a supersede moves `PushedSHA`, and so `LandedSHA()`, to the
 superseding tip; once Argo syncs it, `revisionCarries` takes its `rev == LandedSHA()` shortcut
 and the Application stays health-gated by the later deploy, so that deploy's Degraded health
