@@ -248,6 +248,12 @@ func TestQuitWithRunningDriveAsksFirst(t *testing.T) {
 	if top.(Model).sess.Running("abcd1234") {
 		t.Error("confirming quit must drop the entry from session.Controller (StopAll)")
 	}
+	// FB-H4: main reads InFlightIDs from the final model to print each `hoist resume <id>`
+	// line, and StopAll has just emptied the controller it used to read them from. The drive
+	// still exists in the world, so its id must still be named.
+	if ids := top.(Model).InFlightIDs(); len(ids) != 1 || ids[0] != "abcd1234" {
+		t.Errorf("InFlightIDs() after a confirmed quit = %v, want [abcd1234] so main prints its resume line", ids)
+	}
 	select {
 	case err := <-gotErr:
 		if !errors.Is(err, context.Canceled) {

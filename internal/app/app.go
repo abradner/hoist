@@ -162,6 +162,12 @@ type Model struct {
 	// closed one: a caller that forgets this gets a confirm it did not need, never a missing one.
 	envsFromConfig bool
 
+	// quitIDs is what InFlightIDs named at the moment q's confirm was answered yes. StopAll
+	// then empties the controller InFlightIDs reads, and main asks the final model for the ids to
+	// print resume lines for only after the program has quit (FB-H4); the drives are still in
+	// the world, so they must still be named.
+	quitIDs []string
+
 	// quitConfirming/quitConfirm/quitConfirmValue are q's own dialog, raised only when
 	// session.Controller.AnyRunning is true (leaving flight never cancels a
 	// drive, so quitting the whole program is the one gesture that still needs a confirm before
@@ -1329,6 +1335,7 @@ func (m Model) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// real branch/PR/state file are untouched, and `hoist resume` re-observes each one
 			// from the top exactly as if the operator had quit before ever starting the TUI
 			// (AGENTS.md §4.1).
+			m.quitIDs = m.InFlightIDs()
 			m.sess = m.sess.StopAll()
 			return m, tea.Quit
 		}
@@ -1601,12 +1608,26 @@ func (m Model) updateHelp(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // (keymap rule 4: "on the way out it prints the ids still in flight"), so an operator who quit
 // past a running drive (q's own confirm, or ctrl+c's immediate exit) is told exactly how to pick
 // each one back up rather than having to remember or reconstruct it.
+//
+// *Stated, not enforced:* an entry still Building has no id yet (onBuilt copies it from the
+// started promotion's state), so a promotion whose first state save lands in the window between
+// that save and its built message is not named when q is confirmed, or ctrl+c pressed, in that window; it is still on
+// disk, and `hoist promotions` lists it. Closing it needs StartPromotion to report the id as soon
+// as the state is saved (issue #293, item 6).
 func (m Model) InFlightIDs() []string {
+	seen := map[string]bool{}
 	var ids []string
-	for _, snap := range m.sess.Live() {
-		if snap.ID != "" {
-			ids = append(ids, snap.ID)
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
+	}
+	for _, snap := range m.sess.Live() {
+		add(snap.ID)
+	}
+	for _, id := range m.quitIDs {
+		add(id)
 	}
 	sort.Strings(ids)
 	return ids
