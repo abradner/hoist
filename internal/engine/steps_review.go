@@ -214,7 +214,7 @@ func (c CIGreenStep) Observe(ctx context.Context, s *PromotionState) (Observatio
 	}
 	elapsed := c.now().Sub(s.PR.CreatedAt)
 	if elapsed < s.CIGrace {
-		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (%s of %s grace elapsed)%s", elapsed.Round(time.Second), s.CIGrace, ignoring)}, nil
+		return Observation{Waiting: true, Detail: fmt.Sprintf("no checks reported yet (grace until %s)%s", s.PR.CreatedAt.Add(s.CIGrace).Local().Format("15:04:05"), ignoring)}, nil
 	}
 	switch s.CINone {
 	case "block":
