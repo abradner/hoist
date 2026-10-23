@@ -566,3 +566,43 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 		})
 	}
 }
+
+// TestRolledOutRenamedDeploymentBlocksRatherThanSatisfies pins #264's direction while its design
+// question is open: a later commit renames the promotion's Deployment and changes its image at
+// the same YAML path, so the occurrence reads superseded, but the Deployment this promotion
+// wrote is gone from the cluster. RolledOutStep must Block naming it — a visible, conservative
+// stop — and never read Satisfied: whether a renamed workload is the same subject (superseded)
+// or a gone one is the operator's call, and until it is made the gate stands.
+func TestRolledOutRenamedDeploymentBlocksRatherThanSatisfies(t *testing.T) {
+	w := newWorld(t)
+	s := w.promote()
+	w.merge(s)
+
+	other := filepath.Join(t.TempDir(), "rename-clone")
+	runHost(t, "", "clone", "-q", w.fx.originDir, other)
+	p := filepath.Join(other, "cluster/apps/app-production/app/deployment.yaml")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := strings.Replace(strings.Replace(string(b), "  name: app\n", "  name: app-v2\n", 1), s.Edits[0].New.String(), supersededRef, 1)
+	if renamed == string(b) || !strings.Contains(renamed, "name: app-v2") || !strings.Contains(renamed, supersededRef) {
+		t.Fatalf("fixture precondition: rename and repoint failed:\n%s", renamed)
+	}
+	if err := os.WriteFile(p, []byte(renamed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, other, "commit", "-q", "-a", "-m", "a later deploy that renames the Deployment")
+	runHost(t, other, "push", "-q", "origin", "main")
+
+	// Strict: a Deployment the fake was not told about is absent, as from the real adaptor.
+	w.ro = &rollout.Fake{Strict: true}
+	live(w.ro, s.TargetEnv, "app-v2", supersededRef, true, false)
+	obs := w.rolledOutObservation(s)
+	if obs.Satisfied {
+		t.Fatalf("the Deployment this promotion wrote is gone; must not read rolled out, got %+v", obs)
+	}
+	if !strings.Contains(obs.Blocked, "Deployment "+s.TargetEnv+"/app not found") {
+		t.Errorf("want a Block naming the missing Deployment, got %+v", obs)
+	}
+}
