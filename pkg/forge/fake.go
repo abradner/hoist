@@ -31,6 +31,10 @@ type Fake struct {
 	// permissions hiccup a caller must retry rather than treat as authoritative absence).
 	ChecksBySHA map[string]CheckSummary
 	ChecksErr   error
+	// PendingChecks, when positive, makes that many of the next Checks calls report one check
+	// still pending, whatever the sha, before the configuration above applies again. A test
+	// that needs a CI wait to happen sets it, rather than racing a short ci.grace (#294).
+	PendingChecks int
 	// NamedChecksBySHA configures Checks with individual named checks, folded through Summarize
 	// with the caller's ignore list exactly as the real adaptor does; it takes precedence over
 	// ChecksBySHA for a sha present in both. ChecksBySHA's pre-folded summaries cannot be
@@ -210,6 +214,10 @@ func (f *Fake) Checks(_ context.Context, sha string, ignore []string) (CheckSumm
 	f.Calls = append(f.Calls, "Checks "+sha)
 	if f.ChecksErr != nil {
 		return CheckSummary{}, f.ChecksErr
+	}
+	if f.PendingChecks > 0 {
+		f.PendingChecks--
+		return CheckSummary{Total: 1, Pending: 1}, nil
 	}
 	if named, ok := f.NamedChecksBySHA[sha]; ok {
 		return Summarize(named, ignore), nil

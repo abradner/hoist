@@ -77,7 +77,11 @@ func TestPromoteNarratesEachPhaseAsItHappens(t *testing.T) {
 // --quiet drops the progress lines and nothing else: the run still succeeds and stdout is
 // unchanged.
 func TestPromoteQuietPrintsNoProgress(t *testing.T) {
-	cfgPath, _, _ := newPromoteFixture(t)
+	cfgPath, _, f := newPromoteFixture(t)
+	// The positive control below needs the drive to wait on CI at least once. The fixture's
+	// 5ms ci.grace alone does not guarantee that: under load the first look at CI can come
+	// after the grace has passed, find nothing to wait for, and print nothing (#294).
+	f.PendingChecks = 1
 	var out, errOut bytes.Buffer
 	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production", "--quiet"}, &out, &errOut); got != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", got, errOut.String())
