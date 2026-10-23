@@ -329,7 +329,7 @@ func TestDriftAnswersRefineTheColumn(t *testing.T) {
 		t.Fatalf("cluster error not shown for c:\n%s", v)
 	}
 	// A stale answer (an earlier generation) is dropped.
-	stale := DriftMsg{gen: m.gen - 1, env: "a", running: map[string][]image.Ref{"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}}
+	stale := DriftMsg{from: m.driftID - 1, env: "a", running: map[string][]image.Ref{"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: "v99", Digest: digestC}}}}
 	m2, _ := m.Update(stale)
 	if strings.Contains(ansi.Strip(m2.View()), "v99") {
 		t.Fatal("a stale generation's answer was applied")
@@ -378,8 +378,8 @@ func TestWithDriftLeavesAnsweredEnvsAlone(t *testing.T) {
 	if !m.pending["a"] || !m.pending["b"] {
 		t.Fatalf("pending = %v; want every env pending after the first WithDrift", m.pending)
 	}
-	m, _ = m.Update(DriftMsg{gen: m.gen, env: "a", running: map[string][]image.Ref{}})
-	m, _ = m.Update(DriftMsg{gen: m.gen, env: "c", err: errors.New("cluster unreachable")})
+	m, _ = m.Update(DriftMsg{from: m.driftID, env: "a", running: map[string][]image.Ref{}})
+	m, _ = m.Update(DriftMsg{from: m.driftID, env: "c", err: errors.New("cluster unreachable")})
 	m = m.WithDrift(drift)
 	if m.pending["a"] {
 		t.Error("env a answered before the second WithDrift, yet it is pending again")
@@ -559,7 +559,7 @@ func TestSecondRepoRefreshWhileOneIsOutstandingIsSkipped(t *testing.T) {
 // TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored is a regression test for the
 // paired P3 finding: RepoRefreshedMsg carried no generation, unlike DriftMsg, so an
 // outstanding refresh from an earlier instance of this screen (popped, then re-pushed — the
-// same "two matrices" case nextGen's own doc comment names) could land after a newer
+// same "two matrices" case the scope package's own doc comment names) could land after a newer
 // instance's own refresh and silently overwrite its repo. m1 stands in for the popped screen;
 // m2 for the one currently on the root's stack — m1's stale answer must never reach m2's repo.
 func TestStaleRepoRefreshFromAnEarlierModelGenerationIsIgnored(t *testing.T) {
@@ -718,5 +718,38 @@ func TestConfigKeyEmitsOpenConfigMsg(t *testing.T) {
 	}
 	if got := emitted(t, m, "C"); got != nil {
 		t.Fatalf("capital C emitted %+v, want nothing (retired)", got)
+	}
+}
+
+// TestStaleDriftAnswerIsDroppedAcrossInstancesAndReloads: the drift fan-out is stamped with the
+// asking instance's scope ID. An answer issued by an earlier Model (popped, then reopened) or
+// before this Model's own refresh must not paint over the current one. Answers are read from
+// the commands themselves, never built by hand, so the stamp is what is under test.
+func TestStaleDriftAnswerIsDroppedAcrossInstancesAndReloads(t *testing.T) {
+	answer := func(tag string) DriftFunc {
+		return func(_ context.Context, _ string) (map[string][]image.Ref, error) {
+			return map[string][]image.Ref{"ghcr.io/x/app": {{Repo: "ghcr.io/x/app", Tag: tag, Digest: digestC}}}, nil
+		}
+	}
+
+	// An earlier instance's answers land on a later instance.
+	m1 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, answer("v-old-instance"))
+	m2 := New(fixture(), []string{"ghcr.io/"}, config.EnvsConfig{}, answer("v-new")).SetSize(120, 40)
+	m2 = uitest.Drain(m2, m1.Init(), update)
+	if len(m2.running) != 0 || strings.Contains(ansi.Strip(m2.View()), "v-old-instance") {
+		t.Fatal("a drift answer from an earlier Model instance was applied")
+	}
+
+	// An answer asked before a reload lands after it.
+	old := m2.Init()
+	m2, fresh := m2.refresh()
+	m2 = uitest.Drain(m2, old, update)
+	if len(m2.running) != 0 {
+		t.Fatal("a drift answer from before the refresh was applied")
+	}
+	// Positive control: the refresh's own answers do land.
+	m2 = uitest.Drain(m2, fresh, update)
+	if len(m2.running) == 0 {
+		t.Fatal("control: the current refresh's answers were dropped")
 	}
 }
