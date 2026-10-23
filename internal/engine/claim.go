@@ -186,7 +186,7 @@ func tryClaim(path string, data []byte) error {
 	}
 	// Flush to stable storage BEFORE the name becomes visible: rename/link without it can,
 	// after a power loss, leave the final name pointing at an empty or partial file.
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}

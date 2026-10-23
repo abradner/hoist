@@ -354,7 +354,7 @@ func SaveState(path string, s *PromotionState) error {
 	}
 	// Flush to stable storage BEFORE the name becomes visible: rename/link without it can,
 	// after a power loss, leave the final name pointing at an empty or partial file.
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -368,6 +368,10 @@ func SaveState(path string, s *PromotionState) error {
 	syncDir(dir)
 	return nil
 }
+
+// syncFile flushes a file's data to stable storage. A variable so a test can see that a save
+// (and a claim) flushes before the name becomes visible, and stops if the flush fails.
+var syncFile = (*os.File).Sync
 
 // syncDir flushes a directory's entries (a rename or link just made) to stable storage, so the
 // new name survives a power loss along with the file content Sync already flushed. Best effort:
