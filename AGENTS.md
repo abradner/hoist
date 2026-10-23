@@ -230,7 +230,11 @@ all — only when every occurrence of the promotion's in that Application is sup
 revision Argo synced and again at the base tip it fetched, with this promotion's landing in that
 tip's history. So a later deploy's failed rollout (which Argo reports as Degraded) does not Block
 a promotion it replaced, and an Application with one superseded occurrence and one intact one
-stays health-gated. Argo's revision can lag the base: when the base has since undone the
+stays health-gated. When a health-gated Application is Synced but not Healthy, the step names
+the Deployment still converging, and Blocks on one past its progress deadline; that read
+(`rolloutCause`) covers only that Application's own edits, and only the occurrences not
+superseded at the revision Argo synced, so neither another Application's Deployment nor a later
+deploy's failed rollout can Block it (#259). Argo's revision can lag the base: when the base has since undone the
 supersede (the image put back, a rewrite, the branch gone), the stale revision is treated as not
 carrying this promotion — the step waits for Argo to sync the tip, still Blocking first on
 Degraded or a failed operation. *Stated, not enforced:* all of this reaches `ArgoSyncedStep` on the

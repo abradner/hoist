@@ -975,16 +975,18 @@ func twoAppGitBackedState(t *testing.T) (s *PromotionState, originDir string, we
 			"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/" + env + "/" + family + "\n" +
 			"  destination:\n    server: https://kubernetes.default.svc\n    namespace: " + env + "\n"
 	}
-	deployment := func(env, ref string) string {
-		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n  namespace: " + env + "\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: " + ref + "\n"
+	// Each family's Deployment and container are named for the family, so a rollout fake can
+	// tell the two Applications' Deployments apart (#259).
+	deployment := func(env, family, ref string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: " + family + "\n  namespace: " + env + "\nspec:\n  template:\n    spec:\n      containers:\n        - name: " + family + "\n          image: " + ref + "\n"
 	}
 	digestOld := "sha256:" + strings.Repeat("0", 64)
 	digestNew := "sha256:" + strings.Repeat("1", 64)
 	for _, family := range []string{"app", "web"} {
 		write("cluster/apps/app-staging-"+family+".yaml", wrapper("app-staging", family))
 		write("cluster/apps/app-production-"+family+".yaml", wrapper("app-production", family))
-		write("cluster/apps/app-staging/"+family+"/deployment.yaml", deployment("app-staging", "ghcr.io/example/"+family+":v2@"+digestNew))
-		write("cluster/apps/app-production/"+family+"/deployment.yaml", deployment("app-production", "ghcr.io/example/"+family+":v1@"+digestOld))
+		write("cluster/apps/app-staging/"+family+"/deployment.yaml", deployment("app-staging", family, "ghcr.io/example/"+family+":v2@"+digestNew))
+		write("cluster/apps/app-production/"+family+"/deployment.yaml", deployment("app-production", family, "ghcr.io/example/"+family+":v1@"+digestOld))
 	}
 	runHost(t, seed, "add", ".")
 	runHost(t, seed, "commit", "-q", "-m", "seed")
@@ -1105,8 +1107,9 @@ func TestArgoSyncedScopesSupersedeToItsOwnApplication(t *testing.T) {
 	}
 }
 
-// twoDeploymentState is a minimal, git-free PromotionState (rolloutCause reads only
-// s.Edits/s.TargetEnv, never git or forge) with two distinct Deployments — "app" and "web",
+// twoDeploymentState is a minimal, git-free PromotionState (with no Git and no revision,
+// rolloutCause reads only s.Edits/s.EditApps/s.TargetEnv, never git or forge) with two distinct
+// Deployments in one Application — "app" and "web",
 // sorted-iteration order — for the multi-Deployment tests below, which an adversarial review
 // found nothing in this package exercised: every existing fixture has exactly one Deployment,
 // so a regression in the sorted-iteration or first-match-wins logic would pass unnoticed.
@@ -1114,11 +1117,15 @@ func twoDeploymentState() *PromotionState {
 	return &PromotionState{
 		TargetEnv: "app-production",
 		Edits: []gitops.Edit{
-			{Occurrence: gitops.Occurrence{Kind: "Deployment", Name: "app", Container: "app"}, New: image.Ref{Repo: "ghcr.io/example/app", Tag: "v3"}},
-			{Occurrence: gitops.Occurrence{Kind: "Deployment", Name: "web", Container: "web"}, New: image.Ref{Repo: "ghcr.io/example/web", Tag: "v3"}},
+			{Occurrence: gitops.Occurrence{File: "app.yaml", Kind: "Deployment", Name: "app", Container: "app"}, New: image.Ref{Repo: "ghcr.io/example/app", Tag: "v3"}},
+			{Occurrence: gitops.Occurrence{File: "web.yaml", Kind: "Deployment", Name: "web", Container: "web"}, New: image.Ref{Repo: "ghcr.io/example/web", Tag: "v3"}},
 		},
+		EditApps: map[string]string{"app.yaml": twoDeploymentApp, "web.yaml": twoDeploymentApp},
 	}
 }
+
+// twoDeploymentApp is the one Application both of twoDeploymentState's Deployments belong to.
+const twoDeploymentApp = "app-app-production"
 
 // TestRolloutCauseFindsADeadlineExceededDeploymentThatIsNotFirst proves the sorted-iteration
 // path actually reaches every Deployment, not just whichever happened to iterate first out of
@@ -1134,7 +1141,7 @@ func TestRolloutCauseFindsADeadlineExceededDeploymentThatIsNotFirst(t *testing.T
 		DeadlineExceeded: true, Detail: "ProgressDeadlineExceeded: web's own ReplicaSet timed out",
 	})
 
-	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s)
+	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s, twoDeploymentApp, "")
 	if !blocked {
 		t.Fatalf("rolloutCause = (%q, %v), want blocked=true — web has exceeded its deadline", detail, blocked)
 	}
@@ -1172,7 +1179,7 @@ func TestRolloutCauseDegradesRatherThanReportAPartialVerdict(t *testing.T) {
 	})
 	ro := errOnDeployment{Fake: inner, name: "app", err: errors.New("dial tcp: connection reset by peer")}
 
-	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s)
+	detail, blocked := (ArgoSyncedStep{Rollout: ro}).rolloutCause(ctx(), s, twoDeploymentApp, "")
 	if blocked || detail != "" {
 		t.Fatalf("rolloutCause = (%q, %v), want (\"\", false) — app's transient error must not be silently skipped in favor of a confident verdict about web", detail, blocked)
 	}
