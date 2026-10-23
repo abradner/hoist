@@ -850,8 +850,8 @@ func TestArgoSyncedNamesTheStalledDeploymentWhenHealthIsProgressing(t *testing.T
 		for i, w := range wants {
 			imgs[i] = rollout.ContainerImage{Name: w.Container, Init: w.Init, Image: w.New}
 		}
-		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
-			Namespace: s.TargetEnv, Name: name, Images: imgs,
+		ro.SetDeployment(s.TargetEnv, name.Name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name.Name, Images: imgs,
 			Complete: false, Detail: "1 of 2 updated replicas are available",
 		})
 	}
@@ -882,8 +882,8 @@ func TestArgoSyncedBlocksOnADeadlineExceededRollout(t *testing.T) {
 	deployments, _ := groupEditsByWorkload(s.Edits)
 	ro := &rollout.Fake{}
 	for name := range deployments {
-		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
-			Namespace: s.TargetEnv, Name: name,
+		ro.SetDeployment(s.TargetEnv, name.Name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name.Name,
 			DeadlineExceeded: true, Detail: "ProgressDeadlineExceeded: ReplicaSet has timed out progressing",
 		})
 	}
@@ -923,8 +923,8 @@ func TestArgoSyncedDoesNotGateOnRolloutOnceThisPromotionWasSuperseded(t *testing
 	deployments, _ := groupEditsByWorkload(s.Edits)
 	ro := &rollout.Fake{}
 	for name := range deployments {
-		ro.SetDeployment(s.TargetEnv, name, rollout.DeploymentStatus{
-			Namespace: s.TargetEnv, Name: name,
+		ro.SetDeployment(s.TargetEnv, name.Name, rollout.DeploymentStatus{
+			Namespace: s.TargetEnv, Name: name.Name,
 			DeadlineExceeded: true, Detail: "an unrelated later deploy's own rollout failed",
 		})
 	}

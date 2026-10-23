@@ -18,6 +18,9 @@ type Fake struct {
 
 	Deployments map[depKey]DeploymentStatus
 	JobLikes    map[jobKey]JobLikeStatus
+	// Workloads holds StatefulSets and DaemonSets (SetWorkload); DeploymentErr and Strict apply
+	// to them as to Deployments.
+	Workloads map[jobKey]DeploymentStatus
 	// DeploymentErr and JobLikeErr, when set, are returned by every call to the matching
 	// method instead of the configured/zero-value behavior.
 	DeploymentErr, JobLikeErr, RestartErr error
@@ -74,6 +77,31 @@ func (f *Fake) Restart(_ context.Context, namespace, name string, at time.Time) 
 		hook(namespace, name, at)
 	}
 	return nil
+}
+
+// SetWorkload records namespace/name's current status for kind "StatefulSet" or "DaemonSet".
+func (f *Fake) SetWorkload(namespace, name, kind string, st DeploymentStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Workloads == nil {
+		f.Workloads = map[jobKey]DeploymentStatus{}
+	}
+	f.Workloads[jobKey{namespace, name, kind}] = st
+}
+
+// Workload implements Rollout, with Deployment's own unconfigured and Strict behaviour.
+func (f *Fake) Workload(_ context.Context, namespace, name, kind string) (DeploymentStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, fmt.Sprintf("%s %s/%s", kind, namespace, name))
+	if f.DeploymentErr != nil {
+		return DeploymentStatus{}, f.DeploymentErr
+	}
+	st, ok := f.Workloads[jobKey{namespace, name, kind}]
+	if !ok && f.Strict {
+		return DeploymentStatus{}, fmt.Errorf("reading %s %s/%s: %w", kind, namespace, name, ErrNotFound)
+	}
+	return st, nil
 }
 
 // SetJobLike records namespace/name/kind's current status, thread-safely.
