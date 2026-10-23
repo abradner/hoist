@@ -435,11 +435,11 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 		)}, nil
 	}
 	s.PR = &pr
+	expected := s.PushedSHA
+	if expected == "" {
+		expected = s.CommitSHA
+	}
 	if !pr.Merged {
-		expected := s.PushedSHA
-		if expected == "" {
-			expected = s.CommitSHA
-		}
 		if expected != "" && pr.HeadSHA != "" && pr.HeadSHA != expected {
 			return Observation{Blocked: fmt.Sprintf(
 				"PR #%d's head is now %s, but this promotion last observed %s pushed — something else moved the branch; refusing to merge",
@@ -447,6 +447,9 @@ func (m MergedStep) Observe(ctx context.Context, s *PromotionState) (Observation
 			)}, nil
 		}
 		return Observation{Satisfied: false}, nil
+	}
+	if blocked := notThisRunsMerge(s, pr); blocked != "" {
+		return Observation{Blocked: blocked}, nil
 	}
 	// pr.Merged is a historical fact the forge is reporting from a merge that may have
 	// happened anywhere from seconds to weeks ago — it is not, by itself, proof that s.Base's
@@ -638,4 +641,41 @@ func (m MergedStep) Act(ctx context.Context, s *PromotionState) error {
 		return fmt.Errorf("merge succeeded (%s) but deleting origin/%s failed, will retry: %w", s.MergeSHA, s.Branch, err)
 	}
 	return nil
+}
+
+// notThisRunsMerge is #41 phase 1: a merged PR whose head is known and is not this run's commit
+// is not this run's merge. The id is deterministic, so re-promoting the same digest set into an
+// env that has since moved on (A, then B, then A again) reuses the branch name, and the forge
+// still holds the first run's merged PR. Reading that as this run's merge reported "merged"
+// while the env still declared B, and MergedStep.Act then deleted the branch this run had just
+// pushed. The same answer covers a PR whose head someone else moved before merging it by hand:
+// what merged is not the commit hoist made and verified. Both PROpenedStep (so the drive stops
+// before asking for an approval on a PR that is already merged) and MergedStep ask it.
+//
+// It returns the block text, or "" when the PR is unmerged or the heads agree. An unknown head
+// on either side is not a basis to refuse here, as on the unmerged path; landedGuard, which
+// decides whether earlier steps may be skipped, is stricter and treats a forge that does not
+// say as no. A distinguishing id for an identical re-promotion is #41's open design question.
+//
+// A state written by a hoist without this check may have recorded the earlier merge as its own
+// landing (MergeSHA). That record is cleared here: it is what `hoist abandon` reads to refuse a
+// landed promotion, and leaving it would refuse the very command this block offers.
+func notThisRunsMerge(s *PromotionState, pr forge.PR) string {
+	if !pr.Merged {
+		return ""
+	}
+	expected := s.PushedSHA
+	if expected == "" {
+		expected = s.CommitSHA
+	}
+	if expected == "" || pr.HeadSHA == "" || pr.HeadSHA == expected {
+		return ""
+	}
+	if s.MergeSHA != "" && s.MergeSHA == pr.MergeSHA {
+		s.MergeSHA = ""
+	}
+	return fmt.Sprintf(
+		"PR #%d for branch %s was merged with head %s, not this run's commit %s — either an earlier run's PR for this same set of images (hoist cannot open a second PR for an identical set yet, #41) or someone changed the branch before merging it. Nothing this run made has landed. Check the env, then make the change by hand or retire this run with `hoist abandon %s --confirm-abandon=%s` (it deletes this run's branch, worktree and state file; the merged PR is left alone)",
+		pr.Number, s.Branch, pr.HeadSHA, expected, s.ID, s.ID,
+	)
 }
