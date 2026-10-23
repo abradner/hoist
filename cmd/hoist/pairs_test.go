@@ -15,6 +15,13 @@ func pairsConfig(t *testing.T, extraPairs ...string) string {
 	return writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    promotable: [ghcr.io/example/]\n    envs:\n      pairs: { "+strings.Join(pairs, ", ")+" }\n")
 }
 
+// pairsConfigWithGitHub is pairsConfig plus repos[].github, which promote needs before it gets
+// past checkDirectPreflight to the refusals that come after the pairing.
+func pairsConfigWithGitHub(t *testing.T) string {
+	t.Helper()
+	return writeConfig(t, "repos:\n  - path: "+absFixture(t)+"\n    github: me/gitops\n    promotable: [ghcr.io/example/]\n    envs:\n      pairs: { app-staging: app-production }\n")
+}
+
 // #173: envs.pairs states which env promotes into which, and until now only the TUI read it.
 // `hoist plan` and `hoist promote` demanded both --from and --to even when the config already
 // named the other one. With one given, the other is the configured pair; the dry run's output is
@@ -164,25 +171,34 @@ func refsOf(t *testing.T, clone string) string {
 	return string(out)
 }
 
-// The note naming the pair used is the last thing before the work starts: a plan refused for any
-// other reason (here an unknown digest source, which NewResolveOptions rejects after the env pair
-// is filled in) must not first announce a promotion it never makes.
-func TestPairingNoteIsNotPrintedForARefusedPlan(t *testing.T) {
-	cfg := pairsConfig(t)
-	code, out, errOut := run3(t, "--config", cfg, "plan", "--dry-run", "--to", "app-production", "--digest-sources", "pods,vault")
-	if code != exitUsage || out != "" {
-		t.Fatalf("exit %d, stdout %q, stderr %.200q; want a usage refusal and nothing planned", code, out, errOut)
+// The note naming the pair used is the last thing before the work starts: a command refused for
+// any other reason must not first announce a promotion it never makes. The refusal used here is an
+// unknown digest source, which NewResolveOptions rejects after the env pair is filled in and (for
+// promote) after checkDirectPreflight, so a note printed anywhere earlier than that shows up. The
+// reason is asserted, not assumed: promote needs repos[].github to get that far.
+func TestPairingNoteIsNotPrintedForARefusedCommand(t *testing.T) {
+	const reason = "vault" // the unknown source the refusal names
+	for _, tc := range []struct {
+		name string
+		cfg  string
+		args []string
+	}{
+		{"plan", pairsConfig(t), []string{"plan", "--dry-run", "--to", "app-production", "--digest-sources", "pods,vault"}},
+		{"promote", pairsConfigWithGitHub(t), []string{"promote", "--to", "app-production", "--digest-sources", "pods,vault"}},
+	} {
+		code, out, errOut := run3(t, append([]string{"--config", tc.cfg}, tc.args...)...)
+		if code != exitUsage || out != "" {
+			t.Errorf("%s: exit %d, stdout %q, stderr %.200q; want a usage refusal and nothing planned", tc.name, code, out, errOut)
+		}
+		if !strings.Contains(errOut, reason) {
+			t.Errorf("%s: refused for some other reason than the unknown digest source:\n%.300s", tc.name, errOut)
+		}
+		if strings.Contains(errOut, "envs.pairs promotes") {
+			t.Errorf("%s: the refused command announced a pairing first:\n%s", tc.name, errOut)
+		}
 	}
-	if strings.Contains(errOut, "envs.pairs promotes") {
-		t.Errorf("the refused plan announced a pairing first:\n%s", errOut)
-	}
-	// promote behaves the same (the order was only shown for plan before).
-	code, out, errOut = run3(t, "--config", cfg, "promote", "--to", "app-production", "--digest-sources", "pods,vault")
-	if code != exitUsage || out != "" || strings.Contains(errOut, "envs.pairs promotes") {
-		t.Errorf("promote: exit %d, stdout %q, stderr %.200q; want a usage refusal with no pairing note", code, out, errOut)
-	}
-	// Positive control: the same command with a valid digest source does print it.
-	if code, _, errOut := run3(t, "--config", cfg, "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 || !strings.Contains(errOut, "--from not given; envs.pairs promotes app-staging into app-production") {
+	// Positive control: the same plan with a valid digest source does print the note.
+	if code, _, errOut := run3(t, "--config", pairsConfig(t), "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 || !strings.Contains(errOut, "--from not given; envs.pairs promotes app-staging into app-production") {
 		t.Errorf("control: exit %d, stderr %.200q", code, errOut)
 	}
 }
