@@ -195,12 +195,14 @@ func (m Model) onGitTagsLoaded(msg gitTagsLoadedMsg) (Model, tea.Cmd) {
 	m.gitTagsLoaded = true
 	if msg.err != nil {
 		// Degrade, not fail (AGENTS.md principle 5): the registry tags alone are still a
-		// usable picker, just without invariant 3's own preferred ordering. service.TagSource's
-		// GitTags returns the forge's error as an error (it no longer turns it into
-		// mapped=false with a nil error itself), so this is where the degrade happens: folded
-		// into the msg.mapped==false handling below (GitTagsFunc's own doc comment: "GitTags is
-		// always nil/empty when mapped is false, whichever reason made it false") rather than
-		// returning early here unchanged.
+		// usable picker, just without invariant 3's own preferred ordering — the same
+		// degrade-not-fail shape cmd/hoist's own GitTagsFunc implementation already applies
+		// when the forge call itself errors. Folded into the msg.mapped==false handling below
+		// (GitTagsFunc's own doc comment: "GitTags is always nil/empty when mapped is false,
+		// whichever reason made it false") rather than returning early here unchanged — this
+		// call's own error is latent in real wiring today (cmd/hoist's own GitTagsFunc already
+		// converts a forge error to mapped=false, nil err), but a second forge adaptor
+		// shouldn't have to rediscover the fallback gap below by hitting it directly.
 		msg.mapped = false
 	}
 	// This call's own observed answer (GitTagsFunc's doc comment) supersedes New's
