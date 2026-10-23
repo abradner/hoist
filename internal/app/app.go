@@ -29,6 +29,7 @@ import (
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/image"
@@ -168,17 +169,16 @@ type Model struct {
 	// the world, so they must still be named.
 	quitIDs []string
 
-	// quitConfirming/quitConfirm/quitConfirmValue are q's own dialog, raised only when
+	// quitConfirming/quitConfirm are q's own dialog, raised only when
 	// session.Controller.AnyRunning is true (leaving flight never cancels a
 	// drive, so quitting the whole program is the one gesture that still needs a confirm before
 	// every running drive is actually stopped watching at once) — the same keypress-then-
 	// huh.Confirm shape every other destructive gesture in this package uses, read back with
-	// GetValue, never confirmValue itself (AGENTS.md §9 entry 6). ctrl+c is deliberately NOT
+	// GetValue, with no bound bool to read instead (AGENTS.md §9 entry 6). ctrl+c is deliberately NOT
 	// gated by this: promotion state is durable (§4.1) and `hoist resume` recovers whatever
 	// either quit path interrupts, confirmed with the operator.
-	quitConfirming   bool
-	quitConfirm      *huh.Confirm
-	quitConfirmValue bool
+	quitConfirming bool
+	quitConfirm    *huh.Confirm
 
 	// kbd is what the terminal answered when View below asked for
 	// KeyboardEnhancements.ReportAllKeysAsEscapeCodes — flag 8, the one Kitty-protocol
@@ -506,7 +506,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		if m.quitConfirm != nil {
-			m.quitConfirm.WithWidth(m.dialogWidth())
+			m.quitConfirm.WithWidth(ui.DialogWidth(m.width))
 		}
 		return m.each(func(s Screen) Screen { return s.SetSize(msg.Width, msg.Height) }), nil
 	case tea.BackgroundColorMsg:
@@ -1307,14 +1307,8 @@ func (m Model) View() tea.View {
 // stops anything.
 func (m Model) openQuitConfirm() (Model, tea.Cmd) {
 	m.quitConfirming = true
-	m.quitConfirmValue = false
 	title := "Quit hoist? Every drive still running here will stop being watched — nothing is rolled back, and `hoist resume` picks each one back up later."
-	m.quitConfirm = huh.NewConfirm().Title(title).Value(&m.quitConfirmValue)
-	// Not decoration: huh.NewConfirm ships a zero keymap, so without this y/n/enter do nothing
-	// (AGENTS.md §9 entry 6).
-	m.quitConfirm.WithKeyMap(keys.HuhKeyMap())
-	m.quitConfirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.quitConfirm.WithWidth(m.dialogWidth())
+	m.quitConfirm = confirm.New(title, m.width)
 	return m, tea.Batch(m.quitConfirm.Init(), m.quitConfirm.Focus())
 }
 
@@ -1347,7 +1341,7 @@ func (m Model) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// quitConfirmAgreed reads the operator's answer from the widget, never from quitConfirmValue —
+// quitConfirmAgreed reads the operator's answer from the widget, never from a bound bool —
 // Value binds a pointer into the copy of this value-typed model that built the widget, so a later
 // Update can never see a write through it (AGENTS.md §9 entry 6).
 func (m Model) quitConfirmAgreed() bool {
@@ -1357,10 +1351,6 @@ func (m Model) quitConfirmAgreed() bool {
 	v, _ := m.quitConfirm.GetValue().(bool)
 	return v
 }
-
-// dialogWidth sizes a root-level huh dialog the same way flight.Model and tags.Model already
-// size theirs.
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 
 // openRestart pushes the restart screen for one family in one env. The Deployment names come
 // from the repo here, in the root, for the same reason openDeploy builds its plan here: the

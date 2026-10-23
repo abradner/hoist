@@ -21,6 +21,7 @@ import (
 	"github.com/abradner/hoist/internal/app/scope"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
+	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
 	"github.com/abradner/hoist/pkg/redact"
 )
@@ -180,9 +181,7 @@ func (m Model) busy() bool {
 // rather than left on viewport.New()'s bubbles-library default, which binds bare
 // "d" to half-page down — the registry lists "d" as unbound on this screen.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	return v
+	return keys.NewViewport(false, true)
 }
 
 // New builds the screen for one family in one env. names are the Deployments the repo says that
@@ -347,13 +346,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			if m.unknown {
 				why = "No config for this repo, so hoist cannot tell whether it is production."
 			}
-			m.confirm = huh.NewConfirm().
-				Title(fmt.Sprintf("Restart %s in %s? %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env, why))
-			// huh.NewConfirm leaves keymap zero-valued, and a zero key.Binding matches nothing:
-			// a Confirm used standalone rather than inside a huh.Form ignores every keypress.
-			m.confirm.WithKeyMap(keys.HuhKeyMap())
-			m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-			m.confirm.WithWidth(m.dialogWidth())
+			m.confirm = confirm.New(fmt.Sprintf("Restart %s in %s? %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env, why), m.width)
 			return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 		}
 		return m.start()
@@ -596,8 +589,6 @@ func (m Model) stateWord() string {
 	}
 }
 
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
-
 // layout sizes the body viewport to what the frame leaves.
 func (m Model) layout() Model {
 	sections := 2
@@ -609,7 +600,7 @@ func (m Model) layout() Model {
 	m.body.SetWidth(m.width - 2)
 	m.body.SetHeight(max(ui.BodyHeight(m.height, sections)-fixed, 3))
 	if m.confirm != nil {
-		m.confirm.WithWidth(m.dialogWidth())
+		m.confirm.WithWidth(ui.DialogWidth(m.width))
 	}
 	return m
 }

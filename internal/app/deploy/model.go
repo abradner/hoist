@@ -156,10 +156,7 @@ func (m Model) ResetStarting() Model {
 // the yaml diff's whole point is the digest, and a hard-truncated line
 // hides it past the pane's right edge — wrapping trades a taller line for a visible one.
 func newViewport() viewport.Model {
-	v := viewport.New()
-	v.KeyMap = keys.ViewportKeyMap()
-	v.SoftWrap = true
-	return v
+	return keys.NewViewport(true, true)
 }
 
 // New builds the screen for an already-constructed deploy plan. root is the repo checkout the
@@ -361,7 +358,7 @@ func (m Model) toggleDirect() (Model, tea.Cmd) {
 	// home/end and MultiSelect-toggle keys agree with every other huh field in the app.
 	m.confirm.WithKeyMap(keys.HuhKeyMap())
 	m.confirm.WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-	m.confirm.WithWidth(m.dialogWidth())
+	m.confirm.WithWidth(ui.DialogWidth(m.width))
 	return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 }
 
@@ -403,12 +400,10 @@ func (m Model) start(mode string) tea.Cmd {
 func (m Model) SetSize(width, height int) Model {
 	m.width, m.height = width, height
 	if m.confirm != nil {
-		m.confirm.WithWidth(m.dialogWidth())
+		m.confirm.WithWidth(ui.DialogWidth(m.width))
 	}
 	return m.layout()
 }
-
-func (m Model) dialogWidth() int { return max(min(m.width-8, 72), 20) }
 
 func (m Model) layout() Model {
 	if m.width <= 0 || m.height <= 0 {
@@ -751,12 +746,5 @@ func scale(pl gitops.Plan) string {
 		n++
 		files[e.File] = true
 	}
-	return fmt.Sprintf("%s in %s", plural(n, "image reference"), plural(len(files), "file"))
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, word)
-	}
-	return fmt.Sprintf("%d %ss", n, word)
+	return fmt.Sprintf("%s in %s", ui.Plural(n, "image reference"), ui.Plural(len(files), "file"))
 }
