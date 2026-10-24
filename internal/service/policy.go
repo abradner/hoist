@@ -41,26 +41,33 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 }
 
 // Preflight is StartPromotion's own early gate, called before any freshness check, claim or
-// state save — this is the trust-boundary fix unifying on StartPromotion closes: the CLI has
-// always run its identical checkDirectPreflight before ever building a
-// worktree or a claim, but the TUI's own buildStartPromotion only ever reached
-// engine.DirectCommitGateStep once Drive itself first ran the step — AFTER the claim and the
-// initial state save. Calling the identical gate here, first, closes that gap for both faces
-// without weakening engine.DirectCommitGateStep's own status as the SOLE enforcement point
-// (AGENTS.md §4.5): deleting this call cannot make a production direct commit possible, because
-// StepsFor's own direct step list still carries the same step, checked again the moment Drive
-// first runs (AGENTS.md §8, layered checks — the deletion test). ProductionEnvs is always
-// s.settings.ProductionEnvs(), unfiltered, exactly as engine.StepsFor's own doc comment demands.
+// state save, and the one place a start's prerequisites are stated: the CLI calls its two halves
+// (PreflightConfig, PreflightGate) around its own --confirm-direct match, so `hoist promote`,
+// `hoist deploy` and the TUI refuse the same shapes in the same words (AR-M8, #201.5).
 //
-// For a non-direct request this only checks the forge identity every promotion eventually needs
-// (repos[].github) — the same check the CLI's old runPromote/runDeploy made before ever calling
-// their own buildPromotionForConfirm, and the TUI's old buildStartPromotion (cmd/hoist/wiring.go,
-// both since removed) made separately for itself; unified here, in
-// StartPromotion's one call to Preflight, so neither face can drift from the other's wording
-// again.
+// Reaching engine.DirectCommitGateStep here, first, is what closes the TUI's old hole: its
+// buildStartPromotion only reached the gate once Drive first ran the step — AFTER the claim and
+// the initial state save. This does not make the gate any less the SOLE enforcement point
+// (AGENTS.md §4.5): deleting this call cannot make a production direct commit possible, because
+// StepsFor's direct step list carries the same step, checked again the moment Drive first runs
+// (§8, layered checks — the deletion test). ProductionEnvs is always the settings' own,
+// unfiltered, exactly as engine.StepsFor's doc comment demands.
 func (s *Service) Preflight(target string, m Mode) error {
+	if err := s.settings.PreflightConfig(m); err != nil {
+		return err
+	}
 	if !m.Direct {
-		if s.settings.Repo == nil || s.settings.Repo.GitHub == "" {
+		return nil
+	}
+	return s.settings.PreflightGate(target, m)
+}
+
+// PreflightConfig checks the configuration a start needs, before anything else is asked. Every
+// promotion needs repos[].github (the forge identity); a direct one needs a configured repo too.
+// Refusals are *UsageError.
+func (s Settings) PreflightConfig(m Mode) error {
+	if !m.Direct {
+		if s.Repo == nil || s.Repo.GitHub == "" {
 			return &UsageError{Msg: "the selected repo has no github: owner/name configured; add repos[].github to the config file"}
 		}
 		return nil
@@ -70,7 +77,7 @@ func (s *Service) Preflight(target string, m Mode) error {
 	// ProductionEnvs empty and every env look non-production by omission. Fail fast rather than
 	// silently treat "unconfigured" as "safe" (AGENTS.md §8: never provide a fallback default
 	// for required configuration).
-	if s.settings.Repo == nil {
+	if s.Repo == nil {
 		return &UsageError{Msg: "--direct requires a configured repo (repos[].envs.production must be known — hoist cannot otherwise tell a production env from any other)"}
 	}
 	// Direct mode still needs the same github: owner/name the non-direct branch above requires
@@ -78,10 +85,17 @@ func (s *Service) Preflight(target string, m Mode) error {
 	// into the promotion's id, which names the state path, the branch and the worktree
 	// directory. Two repos both configured without github: that promote the same env+digest set
 	// would otherwise derive the IDENTICAL id.
-	if s.settings.Repo.GitHub == "" {
+	if s.Repo.GitHub == "" {
 		return &UsageError{Msg: "the selected repo has no github: owner/name configured; add repos[].github to the config file (direct mode still needs it — promotion identity is hashed from it)"}
 	}
-	gate := engine.DirectCommitGateStep{ProductionEnvs: s.settings.ProductionEnvs(), Confirmed: m.Confirmed}
+	return nil
+}
+
+// PreflightGate runs engine.DirectCommitGateStep for a direct start into target: a production env
+// is refused outright, and an unconfirmed direct commit is blocked (m.Confirmed). It is the
+// step's own Observe, not a copy of its rule.
+func (s Settings) PreflightGate(target string, m Mode) error {
+	gate := engine.DirectCommitGateStep{ProductionEnvs: s.ProductionEnvs(), Confirmed: m.Confirmed}
 	obs, err := gate.Observe(context.Background(), &engine.PromotionState{TargetEnv: target})
 	if err != nil {
 		return err
