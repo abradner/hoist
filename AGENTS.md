@@ -195,8 +195,11 @@ the wrapped step's own "not satisfied" — one failed forge lookup during the ro
 not rebuild a worktree and re-push a merged branch — and it is that whatever the state file
 records: a promotion can land without its state file saying so (merged by hand, killed between
 the merge and the save), and a listing cleans up from its own observation without saving. And a
-merged PR counts as this run's landing only when the forge names this run's commit as its head;
-a forge that does not say is not agreement (#41).
+merged PR whose head the forge names as a commit other than this run's is not this run's landing
+— an earlier run's PR for the same id, or a branch someone moved before merging it by hand — so
+`PROpenedStep` and `MergedStep` block on it rather than adopt it (#41 phase 1,
+`notThisRunsMerge`). `landedGuard` is stricter: there a forge that does not name the head is not
+agreement either, so no earlier step is skipped on it.
 
 **A superseded promotion is finished, occurrence by occurrence (#168).** `RolledOutStep`
 compares live containers against `Edit.New`, which a superseded occurrence will never carry

@@ -426,6 +426,10 @@ func (p PROpenedStep) Observe(ctx context.Context, s *PromotionState) (Observati
 			pr.Number, s.Branch, s.Branch, s.Base, pr.Number, pr.Number,
 		)}, nil
 	}
+	if blocked := notThisRunsMerge(s, pr); blocked != "" {
+		s.PR = &pr
+		return Observation{Blocked: blocked}, nil
+	}
 	s.PR = &pr
 	return Observation{Satisfied: true, Detail: fmt.Sprintf("PR #%d already exists (%s)", pr.Number, pr.URL)}, nil
 }

@@ -1333,3 +1333,88 @@ func TestCIGreenBlockedDetailNamesWhatWasIgnored(t *testing.T) {
 		t.Fatalf("blocked detail must name the failure and the ignore, got %+v", obs)
 	}
 }
+
+// TestMergedRefusesAnEarlierRunsMergedPR is #41's A→B→A regression. The promotion id is
+// deterministic, so re-promoting digest set A into an env after B moved it on reuses A's branch
+// name and finds A's first, merged PR by that name. That PR merged A's first commit, not the one
+// this run made: reading it as this run's merge reported "merged" while the env still declared
+// B, and Act deleted the branch this run had just pushed. The head the forge names is the test.
+func TestMergedRefusesAnEarlierRunsMergedPR(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	// Run 1 (set A): branch, commit, push, PR, merge into the base, branch deleted.
+	first := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt1"), f)
+	f.SetHeadSHA(first.PR.Number, first.CommitSHA)
+	mergeToBase(t, first)
+	step := MergedStep{Forge: f, Git: git.Exec{}}
+	if err := step.Act(ctx(), first); err != nil {
+		t.Fatalf("run 1 merge: %v", err)
+	}
+	baseBefore := strings.TrimSpace(runHostOut(t, fx.originDir, "rev-parse", "main~1"))
+	// Landed, so its worktree and local branch are cleaned up (CleanupLanded, R-011).
+	runHost(t, fx.cloneDir, "worktree", "remove", "--force", first.WorktreeDir)
+	runHost(t, fx.cloneDir, "branch", "-D", first.Branch)
+
+	// B: a later deploy rewrites the same manifest back to what it was before A — forward, on
+	// top of A's merge, as a real deploy would.
+	other := filepath.Join(t.TempDir(), "other")
+	runHost(t, "", "clone", "-q", fx.originDir, other)
+	file := first.Edits[0].File
+	runHost(t, other, "checkout", "-q", baseBefore, "--", file)
+	runHost(t, other, "commit", "-q", "-m", "deploy B")
+	runHost(t, other, "push", "-q", "origin", "HEAD:main")
+	runHost(t, fx.cloneDir, "fetch", "-q", "origin")
+
+	// Run 2 (set A again): same id, same branch. It makes a new commit on top of B and pushes
+	// it, then finds run 1's merged PR by branch name. The drive must stop there, before CI and
+	// approval are asked about a PR that is already merged.
+	second := newState(fx, filepath.Join(t.TempDir(), "wt2"))
+	err := Drive(ctx(), CoreSteps(git.Exec{}, f, nil), second, nil)
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || second.Phase != StepPROpened {
+		t.Fatalf("run 2 should stop blocked at the PR step: err %v, phase %s", err, second.Phase)
+	}
+	if second.CommitSHA == "" || second.CommitSHA == first.CommitSHA {
+		t.Fatalf("run 2 should have made its own commit: first %s, second %s", first.CommitSHA, second.CommitSHA)
+	}
+	if second.PR == nil || second.PR.Number != first.PR.Number {
+		t.Fatalf("fixture: run 2 should find run 1's PR by branch name, got %+v", second.PR)
+	}
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "Checks ") || strings.HasPrefix(c, "Comments ") || strings.HasPrefix(c, "MergePR ") && c != "MergePR "+strconv.Itoa(first.PR.Number) {
+			t.Fatalf("run 2 asked the forge %q about a PR that is not its own", c)
+		}
+	}
+
+	// MergedStep, the landing step, gives the same answer when asked directly (a status probe,
+	// or a listing): run 1's merge is not run 2's landing.
+	obs, err := step.Observe(ctx(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Satisfied || obs.Blocked == "" {
+		t.Fatalf("run 1's merged PR is not evidence run 2 landed: want Blocked, got %+v", obs)
+	}
+	for _, want := range []string{"#" + strconv.Itoa(first.PR.Number), "hoist abandon " + second.ID} {
+		if !strings.Contains(obs.Blocked, want) {
+			t.Fatalf("block should name %q: %s", want, obs.Blocked)
+		}
+	}
+	if second.MergeSHA != "" || second.LandedSHA() != "" {
+		t.Fatalf("run 2 must not record run 1's merge as its own landing: MergeSHA %q", second.MergeSHA)
+	}
+	if _, there, err := (git.Exec{}).LsRemoteBranch(ctx(), fx.cloneDir, "origin", second.Branch); err != nil || !there {
+		t.Fatalf("run 2's pushed branch must still be on origin (there=%v, err=%v)", there, err)
+	}
+
+	// A state file written before this check may already carry run 1's merge as its own
+	// landing. Re-observing clears that record, so `hoist abandon` (which refuses a state whose
+	// LandedSHA is set) can do what the block tells the operator to do.
+	second.MergeSHA = first.MergeSHA
+	if obs, err := step.Observe(ctx(), second); err != nil || obs.Blocked == "" {
+		t.Fatalf("an old state carrying run 1's merge should block too: %+v, %v", obs, err)
+	}
+	if second.LandedSHA() != "" {
+		t.Fatalf("re-observing must clear run 1's merge from an old state, LandedSHA %q", second.LandedSHA())
+	}
+}
