@@ -1495,3 +1495,24 @@ func TestMergedRefusesAnEarlierRunsMergedPR(t *testing.T) {
 		t.Fatalf("re-observing must clear run 1's merge from an old state, LandedSHA %q", second.LandedSHA())
 	}
 }
+
+// TestMergedActDoesNotBlockWhenSomeoneElseMergedADifferentHead (foreman's read of #306): GitHub
+// answers a merge of an already-merged PR with 405 too. When the recovery read finds the PR
+// merged, but with a head that is not this promotion's, that is someone else's merge, not a
+// refusal to resolve on the forge: the plain error stands, and the next Observe blocks on it.
+func TestMergedActDoesNotBlockWhenSomeoneElseMergedADifferentHead(t *testing.T) {
+	fx := newFixture(t)
+	f := &forge.Fake{}
+	s := driveToPR(t, fx, filepath.Join(t.TempDir(), "wt"), f)
+	f.SetHeadSHA(s.PR.Number, "someone-elses-head")
+	if _, err := f.MergePR(ctx(), s.PR.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.MergeRefused = true
+
+	err := (MergedStep{Forge: f, Git: git.Exec{}}).Act(ctx(), s)
+	var ab *ActBlockedError
+	if err == nil || errors.As(err, &ab) {
+		t.Fatalf("Act = %v; someone else's merge is not a refusal to resolve on the forge", err)
+	}
+}

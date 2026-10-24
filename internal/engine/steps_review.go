@@ -686,7 +686,7 @@ func notThisRunsMerge(s *PromotionState, pr forge.PR) string {
 		s.MergeSHA = ""
 	}
 	return fmt.Sprintf(
-		"PR #%d for branch %s was merged with head %s, not this run's commit %s — either an earlier run's PR for this same set of images (hoist cannot open a second PR for an identical set yet, #41) or someone changed the branch before merging it. Nothing this run made has landed. Check the env, then make the change by hand or retire this run with `hoist abandon %s --confirm-abandon=%s` (it deletes this run's branch, worktree and state file; the merged PR is left alone)",
+		"PR #%d for branch %s was merged with head %s, not this run's commit %s — either an earlier run's PR for this same set of images (hoist cannot open a second PR for an identical set yet, #41) or someone changed the branch before merging it. This run's own commit is not what merged. Check the env, then make the change by hand or retire this run with `hoist abandon %s --confirm-abandon=%s` (it deletes this run's branch, worktree and state file; the merged PR is left alone)",
 		pr.Number, s.Branch, pr.HeadSHA, expected, s.ID, s.ID,
 	)
 }

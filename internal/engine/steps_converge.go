@@ -366,12 +366,14 @@ const (
 //
 // Three cases, in order:
 //
-//  1. rev IS LandedSHA(), and LandedSHA() is this promotion's own commit — the exact match,
-//     unchanged, and still the common one during the window before anything else lands on the
-//     base. A direct promotion's LandedSHA() that a supersede moved is judged as case 3.
-//  2. LandedSHA() is not an ancestor of rev — Argo has not caught up (or has synced to a
+// The anchor is this promotion's own commit: the merge commit on the PR path (LandedSHA()), the
+// pushed commit on the direct path (CommitSHA — not PushedSHA, which follows the live tip).
+//
+//  1. rev IS the anchor — the exact match, unchanged, and still the common one during the
+//     window before anything else lands on the base.
+//  2. The anchor is not an ancestor of rev — Argo has not caught up (or has synced to a
 //     revision this promotion is not part of at all). Not carried.
-//  3. LandedSHA() is an ancestor of rev — the base advanced past us. Ancestry alone is NOT
+//  3. The anchor is an ancestor of rev — the base advanced past us. Ancestry alone is NOT
 //     enough here, for exactly the reason DirectPushedStep.Observe documents: a revert commit
 //     never removes the reverted commit from history, so this stays true forever even after
 //     every byte has been undone. observeLanded reads what rev actually declares, and only
@@ -387,7 +389,17 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 	// PushedSHA to the superseding tip (DirectPushedStep records the revision that carries the
 	// content), and that revision has to be judged like any other descendant, or the later
 	// deploy's health would gate the promotion it replaced (#291).
-	if rev == s.LandedSHA() && (!s.Direct || s.PushedSHA == s.CommitSHA) {
+	// The anchor is this promotion's own commit: the merge commit on the PR path, and on the
+	// direct path the pushed commit itself (CommitSHA), not PushedSHA. DirectPushedStep moves
+	// PushedSHA to whatever tip still carries the content, on every walk, so anchoring there
+	// made any Argo revision older than the live tip "not carried" and blocked on the health of
+	// a later deploy's revision (foreman's read of #326). At its own commit a promotion's edits
+	// are intact by construction, so that revision is carried outright.
+	anchor := s.LandedSHA()
+	if s.Direct && s.CommitSHA != "" {
+		anchor = s.CommitSHA
+	}
+	if rev == anchor {
 		return revCarried, "", nil
 	}
 	if a.Git == nil || rev == "" || s.CloneDir == "" {
@@ -403,7 +415,7 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		}
 		*base = baseFetch{done: true, tip: tip, ok: ok}
 	}
-	isAncestor, aerr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), rev)
+	isAncestor, aerr := a.Git.IsAncestor(ctx, s.CloneDir, anchor, rev)
 	if aerr != nil || !isAncestor {
 		// An unresolvable revision is not an error worth failing the whole promotion over —
 		// Argo can report a revision this clone genuinely does not have (a force-pushed base,

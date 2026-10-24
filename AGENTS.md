@@ -240,9 +240,10 @@ for this promotion, and nor do its health and operation phase — they are the l
 reverting a deploy that broke is the likeliest way a supersede is undone — so the step waits for
 Argo to sync the tip without the Degraded and Failed-operation Blocks, and judges the tip,
 health gates included, once Argo has synced it (#265). All of this holds on the direct path
-too: there a supersede moves `PushedSHA`, and so `LandedSHA()`, to the superseding tip, so
-`revisionCarries` takes its `rev == LandedSHA()` shortcut only while `PushedSHA` is still the
-promotion's own commit, and otherwise judges that revision like any other descendant (#291).
+too, because `revisionCarries` anchors on the promotion's own commit there (`CommitSHA`), not
+on `LandedSHA()`: a supersede, and every later walk, moves `PushedSHA` and so `LandedSHA()` to
+the live tip, and anchoring on that made any Argo revision older than the tip "not carried" and
+blocked on a later deploy's health (#291, and the foreman's read of #326).
 
 ### 4.2 Digests, not tags — and byte-minimal edits
 
