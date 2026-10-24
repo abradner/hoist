@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -505,5 +506,68 @@ func TestDeployDryRunUntouchedDistinguishesNarrowedFirstParty(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "(first-party, outside --promotable ghcr.io/example/web)") || !strings.Contains(s, "docker.io/temporalio/server:1.31.2  (third-party: outside ghcr.io/example/web)") {
 		t.Errorf("deploy dry run mislabels the untouched repos:\n%s", s)
+	}
+}
+
+// deployContexts runs a full deploy against the fixture with repos[].kube.context set to
+// "repo-ctx" and returns every kube context the Argo and rollout clients were asked for.
+func deployContexts(t *testing.T, extra ...string) []string {
+	t.Helper()
+	cfgPath, _, _ := newPromoteFixture(t)
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withKube := strings.Replace(string(body), "    apps_root: cluster/apps\n", "    apps_root: cluster/apps\n    kube:\n      context: repo-ctx\n", 1)
+	if withKube == string(body) {
+		t.Fatal("could not add kube.context to the fixture config")
+	}
+	if err := os.WriteFile(cfgPath, []byte(withKube), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rolloutFor(t, "ghcr.io/example/app:v3@"+digestThird)
+	var got []string
+	prevArgo, prevRollout := adaptors.Argo, adaptors.Rollout
+	t.Cleanup(func() { adaptors.Argo, adaptors.Rollout = prevArgo, prevRollout })
+	adaptors.Argo = func(kc string) (argo.Argo, string, error) { got = append(got, "argo:"+kc); return prevArgo(kc) }
+	adaptors.Rollout = func(kc string) (rollout.Rollout, string, error) {
+		got = append(got, "rollout:"+kc)
+		return prevRollout(kc)
+	}
+
+	args := append([]string{"--config", cfgPath, "deploy", "--env", "app-production", "--image", "ghcr.io/example/app:v3@" + digestThird}, extra...)
+	var out, errOut bytes.Buffer
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	return got
+}
+
+// `hoist deploy` drove Argo and the rollout watch on its own --kube-context flag's value, whose
+// default is the root's flag (usually ""), so a repo's configured kube.context was ignored: the
+// Argo refresh and the rollout watch went to whatever the kubeconfig's current context was. Every
+// other command takes flag, else repos[].kube.context, else current (selectRepo); deploy did the
+// last step by hand over the top of it. It fails with the override restored.
+func TestDeployUsesTheReposKubeContext(t *testing.T) {
+	got := deployContexts(t)
+	if len(got) == 0 {
+		t.Fatal("no cluster client was built (the control: a deploy drives Argo and the rollout)")
+	}
+	for _, c := range got {
+		if !strings.HasSuffix(c, ":repo-ctx") {
+			t.Errorf("a deploy asked for %q; want the repo's configured kube context repo-ctx every time (all: %v)", c, got)
+		}
+	}
+}
+
+func TestDeployKubeContextFlagStillWins(t *testing.T) {
+	got := deployContexts(t, "--kube-context", "flag-ctx")
+	if len(got) == 0 {
+		t.Fatal("no cluster client was built")
+	}
+	for _, c := range got {
+		if !strings.HasSuffix(c, ":flag-ctx") {
+			t.Errorf("--kube-context flag-ctx: a deploy asked for %q (all: %v)", c, got)
+		}
 	}
 }
