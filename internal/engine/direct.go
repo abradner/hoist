@@ -196,12 +196,14 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 		// A commit this clone does not have is answered before the ancestry query, as
 		// MergedStep.mergeWasReverted does: `git merge-base --is-ancestor` exits 128 on a
 		// missing object, and that error came back the same on every walk, a retryable
-		// LandingUnknownError forever: every listing and resume errored and abandon could not
-		// run (foreman's read of #307; #311). A commit the clone lacks (a re-clone, an unpushed
-		// commit gc'd) is no evidence this promotion landed: not landed, as before #307. The env
-		// stays held by it, as an in-flight promotion the operator can now see and abandon. Only
-		// a failure of the existence check itself is "could not ask". (In a shallow clone a
-		// commit beyond its depth also reads missing.)
+		// LandingUnknownError forever, so every listing and resume errored (foreman's read of
+		// #307; #311). A commit the clone lacks (a re-clone, an unpushed commit gc'd) is no
+		// evidence this promotion landed: not landed, as before #307. What this removes is the
+		// error loop, nothing more: the env stays held by the promotion as in flight, and abandon
+		// still refuses it while PushedSHA from the earlier walk keeps LandedSHA() set (#341).
+		// Only a failure of the existence check itself is "could not ask". Unlike
+		// mergeWasReverted there is no shallow-clone check: a commit beyond a shallow clone's
+		// depth reads missing, so a landed, superseded promotion reads never pushed (#342).
 		exists, oerr := d.Git.ObjectExists(ctx, s.CloneDir, s.CommitSHA)
 		if oerr != nil {
 			return Observation{}, fmt.Errorf("checking whether this clone has commit %s: %w", s.CommitSHA, oerr)
