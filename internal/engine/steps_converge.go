@@ -99,9 +99,10 @@ func (s *PromotionState) argoApplications() []argo.Application {
 // a resumed one is repaired before Drive ever sees it (internal/service.Service.Resume) — so an
 // appName EditApps genuinely never names should not arise; if it somehow did, this returns no
 // edits for that
-// app, which drives blobsIntact to its vacuous-true/landedIntact path and reports carries=true,
-// superseded=false — an unverified but harmless default, since the switch above still checks
-// that app's own sync/health status rather than skipping it (only superseded=true skips).
+// app, which drives blobsIntact to its vacuous-true/landedIntact path and reports revCarried —
+// an unverified but harmless default, since Observe still checks that app's own sync/health
+// status rather than skipping it (only revSuperseded skips) — and gives rolloutCause nothing to
+// read, so it names no cause and Blocks on none.
 func (s *PromotionState) editsForApp(appName string) (edits []gitops.Edit, expectedBlobs map[string]string) {
 	expectedBlobs = make(map[string]string)
 	for _, e := range s.Edits {
@@ -241,10 +242,12 @@ func (ArgoSyncedStep) Name() StepName { return StepArgoSynced }
 // Observe implements Step. Health Degraded, or an operation phase of Failed/Error, Blocks
 // immediately for that Application — never waits out the deadline first (invariant 3) —
 // regardless of what its own revision currently reads, since a promotion has no business
-// declaring itself synced-and-rolled-out while the app it just changed is unhealthy. The one
-// exception is an Application whose every occurrence of this promotion's a later change
-// superseded, at the revision Argo synced and still at the base tip (revisionCarries): its
-// health is the later change's, and it is skipped first.
+// declaring itself synced-and-rolled-out while the app it just changed is unhealthy. The two
+// exceptions are asked first, and both are an Application whose every occurrence of this
+// promotion's a later change superseded at the revision Argo synced (revisionCarries): when the
+// base tip still supersedes it too, its health is the later change's and it is skipped; when
+// the base has since undone that supersede, the synced revision and its health no longer stand
+// for this promotion, and the step waits for Argo to sync the tip (#265).
 func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observation, error) {
 	if s.LandedSHA() == "" {
 		return Observation{Satisfied: false}, nil
@@ -266,11 +269,22 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			}
 			return Observation{}, fmt.Errorf("reading Argo Application %s: %w", app, err)
 		}
-		carries, superseded, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &base)
+		carries, why, err := a.revisionCarries(ctx, s, app.Name, st.SyncRevision, &base)
 		if err != nil {
 			return Observation{}, err
 		}
-		if superseded {
+		if carries == revStale {
+			// Argo synced a revision that superseded this promotion, but the base has since
+			// undone that supersede (revisionCarries). That revision no longer stands for this
+			// promotion, and nor do its health and operation phase: they are the later
+			// deploy's, and the likeliest way to get here is reverting that deploy BECAUSE it
+			// broke — so a Degraded Block now would Block this promotion on the failure of the
+			// deploy that replaced it (#265). Wait for Argo to sync the tip; the next poll
+			// judges that revision, health gates included.
+			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, %s", app.Name, st.SyncRevision, why))
+			continue
+		}
+		if carries == revSuperseded {
 			// This app's synced revision landed and was replaced by a later, legitimate
 			// change (AGENTS.md §4.1: superseded is satisfied, not reverted) — the live
 			// containers now legitimately run someone else's later change, not this
@@ -292,7 +306,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			return Observation{Blocked: fmt.Sprintf("%s operation phase is %s", app, st.OperationPhase)}, nil
 		}
 		switch {
-		case !carries:
+		case carries == revNotCarried:
 			notSynced = append(notSynced, fmt.Sprintf("%s: revision %s, want %s%s", app.Name, orNone(st.SyncRevision), s.LandedSHA(), why))
 		case st.SyncStatus != argo.SyncStatusSynced || st.HealthStatus != argo.HealthStatusHealthy:
 			msg := fmt.Sprintf("%s: sync=%s health=%s", app.Name, orNone(st.SyncStatus), orNone(st.HealthStatus))
@@ -317,18 +331,38 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 	return Observation{Satisfied: true, Detail: "synced and healthy at " + s.LandedSHA()}, nil
 }
 
-// revisionCarries reports whether the revision Argo says it synced to actually carries this
-// promotion's change, and a parenthetical for the Waiting detail when it does not. superseded
-// is true only for the landedSuperseded verdict, and only when no occurrence of this promotion's
-// in the Application is still intact — an Application with one superseded occurrence and one
-// intact one is still health-gated — and only when the base tip still supersedes it too.
-// carries is true for landedIntact and for a landedSuperseded rev the base tip still agrees
-// with (or that is health-gated by an intact occurrence); a superseding rev the base has since
-// undone is NOT carried, since Argo has not synced what the base now says. The caller needs to
-// tell carried-and-superseded apart from carried: a superseded app's live containers legitimately run a LATER, unrelated change,
-// so comparing them against this promotion's own stale Edit.New (rolloutCause, below) would be
-// meaningless at best and a wrong Block at worst — a bug found against an earlier
-// version of this split.
+// carriage is what the revision Argo synced says about one Application's share of this
+// promotion — revisionCarries' answer.
+type carriage int
+
+const (
+	// revNotCarried: rev does not carry this promotion's change (Argo has not caught up, or rev
+	// reverted or dropped it). Waits, behind the Degraded and Failed-operation Blocks.
+	revNotCarried carriage = iota
+	// revCarried: rev carries this promotion's change and at least one occurrence of it is
+	// still this promotion's, so the Application's health is this promotion's business.
+	revCarried
+	// revSuperseded: every occurrence of this promotion's in the Application was superseded by
+	// a later change at rev, and still is at the base tip. Its health is the later change's;
+	// the Application needs nothing further from this step.
+	revSuperseded
+	// revStale: rev superseded every occurrence, but the base has since undone that supersede.
+	// rev no longer stands for this promotion, and nor do its health and operation phase; the
+	// step waits for Argo to sync the tip, with no health gate on the stale revision (#265).
+	revStale
+)
+
+// revisionCarries reports what the revision Argo says it synced says about this promotion's
+// change in appName, and a clause for the Waiting detail when it is revNotCarried or revStale.
+// revSuperseded needs the landedSuperseded verdict, no occurrence of this promotion's in the
+// Application still intact — an Application with one superseded occurrence and one intact one
+// is still health-gated, revCarried — and the base tip still superseding it too; a superseding
+// rev the base has since undone is revStale, since Argo has not synced what the base now says.
+// The caller needs revSuperseded apart from revCarried: a superseded app's live containers
+// legitimately run a LATER, unrelated change, so comparing them against this promotion's own
+// stale Edit.New (rolloutCause, below) would be meaningless at best and a wrong Block at worst —
+// a bug found against an earlier version of this split. And it needs revStale apart from
+// revNotCarried: a stale revision's health is the later change's, not this promotion's (#265).
 //
 // Three cases, in order:
 //
@@ -345,12 +379,12 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 //
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
-func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, base *baseFetch) (carries, superseded bool, why string, err error) {
+func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, base *baseFetch) (carries carriage, why string, err error) {
 	if rev == s.LandedSHA() {
-		return true, false, "", nil
+		return revCarried, "", nil
 	}
 	if a.Git == nil || rev == "" || s.CloneDir == "" {
-		return false, false, "", nil
+		return revNotCarried, "", nil
 	}
 	// The revision Argo reports is one this clone may never have seen: fetch the base before
 	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
@@ -358,7 +392,7 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 	if !base.done {
 		tip, ok, ferr := a.Git.FetchBranch(ctx, s.CloneDir, "origin", s.Base)
 		if ferr != nil {
-			return false, false, "", ferr
+			return revNotCarried, "", ferr
 		}
 		*base = baseFetch{done: true, tip: tip, ok: ok}
 	}
@@ -368,16 +402,16 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		// Argo can report a revision this clone genuinely does not have (a force-pushed base,
 		// a revision from another remote). Treated as "not carried", which is Waiting, which
 		// re-observes.
-		return false, false, "", nil
+		return revNotCarried, "", nil
 	}
 	edits, blobs := s.editsForApp(appName)
 	verdict, detail, lerr := observeLanded(ctx, a.Git, s.CloneDir, rev, edits, blobs)
 	if lerr != nil {
-		return false, false, "", lerr
+		return revNotCarried, "", lerr
 	}
 	switch verdict {
 	case landedIntact:
-		return true, false, "", nil
+		return revCarried, "", nil
 	case landedSuperseded:
 		// Exempting this Application from its health check takes two more things than
 		// observeLanded's set verdict (#168):
@@ -393,37 +427,45 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		//     the supersede — the image put back, a rewrite, the branch gone — a stale
 		//     superseding revision is no evidence this promotion is still replaced (Codex,
 		//     #263). Argo has then not synced what the base says, so rev does not stand for
-		//     this promotion: not carried, which waits for Argo to catch up and still meets the
-		//     Degraded and Failed-operation Blocks first.
+		//     this promotion, and nor does its health: revStale, which waits for Argo to sync
+		//     the tip without the Degraded and Failed-operation Blocks (#265) — the likeliest
+		//     way a supersede is undone is reverting a later deploy that broke, and that
+		//     deploy's broken health is exactly what Argo is still reporting.
 		//
 		// The first failing leaves the Application carried and health-gated: rev carries this
 		// promotion's landing, and one of its occurrences is this promotion's still.
 		replaced, rerr := a.replacedAt(ctx, s, rev, edits)
 		if rerr != nil || !replaced {
-			return true, false, "", rerr
+			return revCarried, "", rerr
 		}
 		if base.tip == rev {
-			return true, true, "", nil
-		}
-		stale := func(why string) (bool, bool, string, error) {
-			return false, false, fmt.Sprintf(" (Argo synced %s, which superseded this promotion, but %s)", rev, why), nil
+			return revSuperseded, "", nil
 		}
 		if !base.ok {
-			return stale("origin has no branch " + s.Base + " now")
+			return revStale, fmt.Sprintf("want origin/%s (the revision Argo synced superseded this promotion, but origin has no branch %s now)", s.Base, s.Base), nil
+		}
+		stale := func(why string) (carriage, string, error) {
+			return revStale, fmt.Sprintf("want %s (the revision Argo synced superseded this promotion, but %s's tip %s)", base.tip, s.Base, why), nil
 		}
 		atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), base.tip)
-		if terr != nil || !atTip {
-			return stale(fmt.Sprintf("%s's tip %s no longer contains this promotion's landing", s.Base, base.tip))
+		if terr != nil {
+			// Both commits are in the clone (LandedSHA() was just found in rev's history, and
+			// the tip was just fetched), so this is a genuine failure, not an answer. Reported,
+			// for the poll to ask again, never dressed as "the tip no longer contains it".
+			return revNotCarried, "", fmt.Errorf("checking whether %s's tip %s contains this promotion's landing %s: %w", s.Base, base.tip, s.LandedSHA(), terr)
+		}
+		if !atTip {
+			return stale("no longer contains this promotion's landing")
 		}
 		if replaced, rerr = a.replacedAt(ctx, s, base.tip, edits); rerr != nil {
-			return false, false, "", rerr
+			return revNotCarried, "", rerr
 		}
 		if !replaced {
-			return stale(fmt.Sprintf("%s's tip %s no longer supersedes it", s.Base, base.tip))
+			return stale("no longer supersedes it")
 		}
-		return true, true, "", nil
+		return revSuperseded, "", nil
 	default:
-		return false, false, " (" + detail + ")", nil
+		return revNotCarried, " (" + detail + ")", nil
 	}
 }
 

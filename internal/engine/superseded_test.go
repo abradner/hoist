@@ -402,13 +402,60 @@ func TestArgoSyncedDoesNotBlockASupersededApplicationOnTheLaterDeploysHealth(t *
 	}
 }
 
+// ancestryFailsAt is a git.Git whose IsAncestor fails for one descendant, every other call real.
+type ancestryFailsAt struct {
+	git.Git
+	descendant string
+}
+
+func (f ancestryFailsAt) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	if descendant == f.descendant {
+		return false, errors.New("git merge-base: fatal: exit status 128")
+	}
+	return f.Git.IsAncestor(ctx, dir, ancestor, descendant)
+}
+
+// TestArgoSyncedTipAncestryFailureIsReportedNotJudged (#265): when Argo's synced revision
+// superseded this promotion and the base has moved on since, the step asks whether the tip
+// still has this promotion's landing in its history. Both commits are in the clone by then, so
+// a failure of that question is a failure, reported for the poll to ask again — never a Wait
+// claiming the tip "no longer contains this promotion's landing", and never an exemption.
+func TestArgoSyncedTipAncestryFailureIsReportedNotJudged(t *testing.T) {
+	w := newWorld(t)
+	s := w.promote()
+	w.merge(s)
+	w.supersede(supersededRef)
+	synced, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+	if err != nil || !ok {
+		t.Fatalf("reading origin/%s: %v (ok=%v)", s.Base, err, ok)
+	}
+	supersedeNth(t, w.fx, 0, "ghcr.io/example/app:v4@sha256:"+strings.Repeat("4", 64))
+	tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+	if err != nil || !ok || tip == synced {
+		t.Fatalf("setup: the base should have moved past the synced revision: %v (ok=%v)", err, ok)
+	}
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: synced, HealthStatus: argo.HealthStatusHealthy})
+	obs, err := ArgoSyncedStep{Argo: a, Git: ancestryFailsAt{Git: w.g, descendant: tip}}.Observe(context.Background(), s)
+	if err == nil {
+		t.Fatalf("a failed ancestry check must be reported, got %+v", obs)
+	}
+	if obs.Satisfied || strings.Contains(obs.Detail, "no longer contains") {
+		t.Fatalf("a failed ancestry check is no answer; got %+v", obs)
+	}
+}
+
 // TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip (Codex, #263): Argo reports the revision it
 // last synced, which can lag the base. When that revision superseded this promotion but the
 // base has since moved on in a way that undoes the supersede — the image put back to what this
 // promotion edited away from, or to this promotion's own reference, or a base rewritten without
 // this promotion's landing, or gone — Argo's stale revision is no evidence the promotion is
-// still replaced. The Application then keeps its Degraded gate, and a Healthy one is not
-// "synced and healthy" either: Argo has not synced what the base now says, so the step waits.
+// still replaced, and nor is its health this promotion's: Argo has not synced what the base now
+// says, so the step waits for the tip, whatever the stale revision's health or operation phase
+// (#265 — those belong to the later deploy, and reverting a deploy that broke is the likeliest
+// way a supersede is undone). The Waiting line names the tip it waits for, not LandedSHA(),
+// which is already in the stale revision's history.
 //
 // The controls are the movements that do not undo it, which in a live repo are the common
 // case: an unrelated commit after the supersede, and a third deploy of the same image repo.
@@ -480,21 +527,40 @@ func TestArgoSyncedSupersedeMustStillHoldAtTheBaseTip(t *testing.T) {
 			// step never reaches the tip check this test is about.
 			runHost(t, s.CloneDir, "fetch", "-q", "origin")
 			tc.then(t, w, s)
-			for _, health := range []string{argo.HealthStatusDegraded, argo.HealthStatusHealthy} {
+			tip, tipOK, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+			if err != nil {
+				t.Fatalf("reading origin/%s: %v", s.Base, err)
+			}
+			for _, st := range []argo.Status{
+				{HealthStatus: argo.HealthStatusDegraded},
+				{HealthStatus: "Progressing", OperationPhase: argo.OperationFailed},
+				{HealthStatus: argo.HealthStatusHealthy},
+			} {
+				st.SyncStatus, st.SyncRevision = argo.SyncStatusSynced, synced
+				label := "health=" + st.HealthStatus + " phase=" + st.OperationPhase
 				a := &argo.Fake{}
-				a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
-					argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: synced, HealthStatus: health})
+				a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp}, st)
 				obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
 				if err != nil {
-					t.Fatalf("health=%s: Observe: %v", health, err)
+					t.Fatalf("%s: Observe: %v", label, err)
 				}
-				switch {
-				case tc.exempt && !obs.Satisfied:
-					t.Errorf("health=%s: still superseded at the base tip, so exempt; want Satisfied, got %+v", health, obs)
-				case !tc.exempt && health == argo.HealthStatusDegraded && obs.Blocked == "":
-					t.Errorf("health=%s: no longer superseded at the base tip; want the Degraded Block, got %+v", health, obs)
-				case !tc.exempt && health == argo.HealthStatusHealthy && (!obs.Waiting || !strings.Contains(obs.Detail, tc.why)):
-					t.Errorf("health=%s: Argo has not synced what the base now says; want Waiting naming %q, got %+v", health, tc.why, obs)
+				if tc.exempt {
+					if !obs.Satisfied {
+						t.Errorf("%s: still superseded at the base tip, so exempt; want Satisfied, got %+v", label, obs)
+					}
+					continue
+				}
+				// Not exempt: Argo has not synced what the base now says, so the revision it did
+				// sync no longer stands for this promotion, and nor does that revision's health
+				// or operation — those are the later deploy's (#265). Wait for the tip.
+				if !obs.Waiting || obs.Blocked != "" || !strings.Contains(obs.Detail, tc.why) {
+					t.Errorf("%s: want Waiting naming %q, not a Block on the stale revision's health, got %+v", label, tc.why, obs)
+				}
+				if tipOK && !strings.Contains(obs.Detail, "want "+tip) {
+					t.Errorf("%s: the step waits for Argo to sync the tip; Detail should say want %s, got %q", label, tip, obs.Detail)
+				}
+				if strings.Contains(obs.Detail, "want "+s.LandedSHA()) {
+					t.Errorf("%s: LandedSHA is already in the synced revision's history, so it is not what the step waits for; got %q", label, obs.Detail)
 				}
 			}
 		})
