@@ -12,7 +12,6 @@ import (
 	apprestart "github.com/abradner/hoist/internal/app/restart"
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
-	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 )
@@ -155,45 +154,16 @@ func watchSnapshot(s service.WatchSnapshot) watch.Snapshot {
 	return out
 }
 
-// buildRestartFuncs adapts internal/restart's core into the plain function values the restart
-// screen takes, so internal/app never reaches for pkg/rollout or a kubeconfig itself
-// (AGENTS.md §4.8) — the same shape svc.Plan and buildTagsFunc already give the plan
-// and picker screens.
-//
-// Each of Read/Do/Observe asks svc.Rollout(kubeContext) itself, at call time, rather than
-// closing over a client built once at boot: a boot-time cluster failure
-// is retried on R exactly as buildWatchFunc's is, since svc.Rollout only memoizes a success.
-// The returned Funcs is never the zero value; a cluster that cannot be reached surfaces as the
-// real error from whichever call needed it, and the root shows that instead of a generic "none
-// is configured" (see openRestart's own doc comment).
-func buildRestartFuncs(svc *service.Service, kubeContext string, poll config.PollConfig) apprestart.Funcs {
-	interval := time.Duration(poll.Rollout)
-	if interval <= 0 {
-		interval = 3 * time.Second
-	}
+// buildRestartFuncs hands the restart screen the service's restart use case as the plain function
+// values it takes, so internal/app never reaches for pkg/rollout or a kubeconfig itself (AGENTS.md
+// §4.8). The service types are the screen's own (restart.Plan, restart.Progress), so these are
+// method values, not adapters.
+func buildRestartFuncs(svc *service.Service) apprestart.Funcs {
 	return apprestart.Funcs{
-		Read: func(ctx context.Context, env string, names []string) (restart.Plan, error) {
-			ro, err := svc.Rollout(kubeContext)
-			if err != nil {
-				return restart.Plan{}, err
-			}
-			return restart.Read(ctx, ro, env, names)
-		},
-		Do: func(ctx context.Context, p restart.Plan, at time.Time) ([]string, error) {
-			ro, err := svc.Rollout(kubeContext)
-			if err != nil {
-				return nil, err
-			}
-			return restart.Do(ctx, ro, p, at)
-		},
-		Observe: func(ctx context.Context, env string, names []string, at time.Time) ([]restart.Progress, error) {
-			ro, err := svc.Rollout(kubeContext)
-			if err != nil {
-				return nil, err
-			}
-			return restart.Observe(ctx, ro, env, names, at)
-		},
-		Interval: interval,
+		Read:     svc.RestartRead,
+		Do:       svc.RestartDo,
+		Observe:  svc.RestartObserve,
+		Interval: svc.RestartInterval(),
 	}
 }
 

@@ -720,7 +720,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	// cluster unreachable this instant is retried on the next w/R/F5 rather than wedged for the
 	// rest of the session, and svc.Repo() always answers with whatever LoadRepo/RefreshRepo most
 	// recently stored, so a family an F5 refresh just added is visible immediately.
-	restartFn := buildRestartFuncs(svc, eff.kubeContext, cfg.Poll)
+	restartFn := buildRestartFuncs(svc)
 	historyFn := buildHistoryFuncs(eff.cfg, f, forgeErr, eff.base, svc)
 	configText, err := configViewText(cfg)
 	if err != nil {

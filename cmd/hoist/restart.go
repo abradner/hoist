@@ -11,9 +11,9 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
-	"github.com/abradner/hoist/pkg/rollout"
 )
 
 // runRestart is `hoist restart`: roll an env's Deployments without changing the image references
@@ -80,18 +80,17 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 
-	// Production's gate. §4.5's PR-and-approval-comment gate cannot apply to an operation that
-	// commits nothing, so what stands in its place is a second, distinct acknowledgement — the
-	// same shape --confirm-direct already uses, and the same reasoning: a production restart
-	// must never be one keystroke or one line of shell history. Checked before the cluster is
-	// touched, and a --dry-run of something that would be refused still says so.
-	if code := checkProductionRestart(eff, *env, *confirmProduction, stderr); code != 0 {
+	// Production's gate, checked before the cluster is touched; a --dry-run of something that
+	// would be refused still says so.
+	set := settingsFor(cfg, eff)
+	svc := service.New(set, serviceDeps())
+	if err := set.CheckRestartConfirmed(*env, *confirmProduction); err != nil {
+		code, _ := renderStartError(io.Discard, stderr, "hoist restart", err)
 		return code
 	}
 
-	// eff.kubeContext is already the flag, else the selected repo's kube.context (selectRepo).
-	kctx := eff.kubeContext
-	ro, usedContext, err := newRollout(kctx)
+	// set.KubeContext is already the flag, else the selected repo's kube.context (selectRepo).
+	_, usedContext, err := svc.RolloutNamed(set.KubeContext)
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
@@ -101,7 +100,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// Read every target first, so the operator sees the whole set — and every reason a restart
 	// of it would not be graceful — before any of it rolls.
-	pl, err := restart.Read(ctx, ro, *env, targets)
+	pl, err := svc.RestartRead(ctx, *env, targets)
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
@@ -116,7 +115,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 
 	at := time.Now().UTC()
-	restarted, rerr := restart.Do(ctx, ro, pl, at)
+	restarted, rerr := svc.RestartDo(ctx, pl, at)
 	if rerr != nil {
 		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(rerr.Error()))
 		// Say what did roll before the failure: some pods are already restarting, and an
@@ -128,7 +127,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
 
-	return watchRestart(ctx, ro, *env, restarted, at, cfg.Poll, stdout, stderr)
+	return watchRestart(ctx, svc, *env, restarted, at, stdout, stderr)
 }
 
 // splitFamilies turns the comma-separated --family value into a slice, dropping empties so
@@ -141,34 +140,6 @@ func splitFamilies(v string) []string {
 		}
 	}
 	return out
-}
-
-// checkProductionRestart is the whole of production's gate: a second, distinct acknowledgement
-// repeating the env's exact name. An env the config does not list as production needs none.
-func checkProductionRestart(eff effective, env, confirm string, stderr io.Writer) int {
-	if eff.cfg == nil {
-		// Fail closed. A flags-only run has no envs.production list, so every env would look
-		// non-production by omission and `hoist --repo /path restart --env <production>` would
-		// walk straight through the gate this function exists to be. checkDirectPreflight
-		// refuses the same shape for the same reason (AGENTS.md §8: never provide a fallback
-		// default for required configuration) — and here the answer cannot even be "refuse
-		// outright", because a restart against an unconfigured repo is a legitimate thing to
-		// want; it is "we cannot tell, so acknowledge it".
-		if confirm != env {
-			return failf(stderr, "hoist restart", exitUsage, "no configured repo, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway", env, env)
-		}
-		return 0
-	}
-	if !eff.cfg.Envs.IsProduction(env) {
-		return 0
-	}
-	if confirm == "" {
-		return failf(stderr, "hoist restart", exitUsage, "%s is a production env; restarting it requires --confirm-production=%s as well", env, env)
-	}
-	if confirm != env {
-		return failf(stderr, "hoist restart", exitUsage, "--confirm-production=%q does not match --env %q; repeat the exact env to acknowledge", confirm, env)
-	}
-	return 0
 }
 
 // printRestartTargets names what will roll, what it supersedes, and every reason it will not be
@@ -193,19 +164,16 @@ func printRestartTargets(w io.Writer, env, kubeContext string, pl restart.Plan) 
 // watchRestart follows the rollout the restart just started, at the configured cadence and
 // within the configured deadline. This is the same question RolledOutStep asks of a promotion,
 // asked directly: there is no promotion here to hang a step on.
-func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []string, at time.Time, poll config.PollConfig, stdout, stderr io.Writer) int {
-	interval := time.Duration(poll.Rollout)
-	if interval <= 0 {
-		interval = 3 * time.Second
-	}
-	if deadline := time.Duration(poll.Deadline); deadline > 0 {
+func watchRestart(ctx context.Context, svc *service.Service, env string, names []string, at time.Time, stdout, stderr io.Writer) int {
+	interval := svc.RestartInterval()
+	if deadline := svc.Settings().Deadline; deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
 	pending := append([]string(nil), names...)
 	for {
-		progress, err := restart.Observe(ctx, ro, env, pending, at)
+		progress, err := svc.RestartObserve(ctx, env, pending, at)
 		if err != nil {
 			return fail(stderr, "hoist restart", exitFailure, err)
 		}
