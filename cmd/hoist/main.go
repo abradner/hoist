@@ -396,8 +396,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
 	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
-	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required)")
-	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
+	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required unless envs.pairs names it from --to)")
+	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required unless envs.pairs names it from --from)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder — set repos[].promotable in the config file or pass this flag with your registry path. An empty list is an error, not \"everything\"")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
@@ -419,6 +419,13 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
+	}
+	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
+		f, t, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
+		if !ok {
+			return code
+		}
+		*from, *to = f, t
 	}
 	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
