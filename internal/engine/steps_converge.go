@@ -300,7 +300,7 @@ func (a ArgoSyncedStep) Observe(ctx context.Context, s *PromotionState) (Observa
 			// SyncStatus other than Synced is Argo's own problem to report, not a rollout
 			// question yet.
 			if st.SyncStatus == argo.SyncStatusSynced {
-				if cause, blocked := a.rolloutCause(ctx, s); cause != "" {
+				if cause, blocked := a.rolloutCause(ctx, s, app.Name, st.SyncRevision); cause != "" {
 					if blocked {
 						return Observation{Blocked: fmt.Sprintf("%s: %s", app.Name, cause)}, nil
 					}
@@ -457,11 +457,38 @@ func (a ArgoSyncedStep) replacedAt(ctx context.Context, s *PromotionState, rev s
 // to say yet. blocked is true only when a Deployment's own rollout has exceeded its deadline —
 // RolledOutStep would Block on that identical read one step later; surfacing it here saves the
 // operator a full extra poll cycle waiting to learn what RolledOutStep already knows.
-func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState) (detail string, blocked bool) {
+//
+// The read is scoped twice, because the deadline Block is a gate, not a courtesy (#259):
+//
+//   - To appName's own edits (editsForApp), never the whole promotion's: a Deployment that
+//     belongs to another Application is that Application's business, and this one's loop
+//     iteration has no standing to Block on it.
+//   - To the occurrences still this promotion's at rev, the revision Argo synced: an occurrence
+//     a later change superseded there is running that change, so its Deployment's rollout and
+//     deadline are the later change's — the per-occurrence rule RolledOutStep and
+//     revisionCarries apply (AGENTS.md §4.1). A Deployment whose every occurrence is superseded
+//     is not read at all; one with an intact occurrence beside a superseded one is read, and
+//     compared against its intact occurrences only.
+func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState, appName, rev string) (detail string, blocked bool) {
 	if a.Rollout == nil {
 		return "", false
 	}
-	deployments, _ := groupEditsByWorkload(s.Edits)
+	edits, _ := s.editsForApp(appName)
+	superseded, err := a.supersededAt(ctx, s, rev, edits)
+	if err != nil {
+		// The same reasoning as a transient rollout read below: no confident cause from a
+		// picture this read could not complete.
+		return "", false
+	}
+	all, _ := groupEditsByWorkload(edits)
+	deployments := make(map[string][]deploymentWant, len(all))
+	for name, wants := range all {
+		for _, w := range wants {
+			if !superseded[w.Occ] {
+				deployments[name] = append(deployments[name], w)
+			}
+		}
+	}
 	names := make([]string, 0, len(deployments))
 	for name := range deployments {
 		names = append(names, name)
@@ -498,6 +525,26 @@ func (a ArgoSyncedStep) rolloutCause(ctx context.Context, s *PromotionState) (de
 		}
 	}
 	return strings.Join(parts, "; "), false
+}
+
+// supersededAt is the set of edits' occurrences a later change superseded at rev. Without a Git,
+// a clone or a revision nothing can be judged and the set is empty: every occurrence reads as
+// this promotion's, the conservative direction (it can only add a Block, never remove one).
+func (a ArgoSyncedStep) supersededAt(ctx context.Context, s *PromotionState, rev string, edits []gitops.Edit) (map[editKey]bool, error) {
+	if a.Git == nil || s.CloneDir == "" || rev == "" || len(edits) == 0 {
+		return nil, nil
+	}
+	occs, err := observeOccurrences(ctx, a.Git, s.CloneDir, rev, edits)
+	if err != nil {
+		return nil, err
+	}
+	out := map[editKey]bool{}
+	for _, o := range occs {
+		if o.verdict == landedSuperseded {
+			out[keyOf(o.edit)] = true
+		}
+	}
+	return out, nil
 }
 
 // Act implements Step: nothing to do. Syncing is Argo's own auto-sync/self-heal acting on the

@@ -115,6 +115,13 @@ func (w *world) newPromotionState() *PromotionState {
 	s.Approval = approvalAuto
 	s.ArgoNamespace = testArgoNamespace
 	s.ArgoApps = []string{testApp}
+	// Every real promotion carries EditApps from construction (EnsureArgoApps), and the
+	// per-Application reads in ArgoSyncedStep are scoped by it (#259): one family, one
+	// Application, so every edit is testApp's.
+	s.EditApps = make(map[string]string, len(w.fx.plan.Edits))
+	for _, e := range w.fx.plan.Edits {
+		s.EditApps[e.File] = testApp
+	}
 	return s
 }
 
