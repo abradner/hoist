@@ -187,8 +187,16 @@ func (d DirectPushedStep) Observe(ctx context.Context, s *PromotionState) (Obser
 		// reverted judgement above is content-only), but "our commit is in the base's history"
 		// is a fact about whether we published, which is the question a supersede leaves open.
 		// ArgoSyncedStep pairs them the same way round.
+		//
+		// A failing ancestry query is "could not be asked", never "not landed": folding it into the
+		// unsatisfied answer below let BranchedStep rebuild the worktree of a promotion that had
+		// landed (#256). The error is returned, and landedGuard turns it into a retryable
+		// LandingUnknownError for every step it wraps.
 		landed, err := d.Git.IsAncestor(ctx, s.CloneDir, s.CommitSHA, remoteSHA)
-		if err != nil || !landed {
+		if err != nil {
+			return Observation{}, fmt.Errorf("is %s an ancestor of origin/%s: %w", s.CommitSHA, s.Base, err)
+		}
+		if !landed {
 			return Observation{Satisfied: false, Detail: fmt.Sprintf(
 				"origin/%s declares another reference for this promotion's image repo, but this promotion's own commit %s is not in its history — it was never pushed",
 				s.Base, s.CommitSHA,
