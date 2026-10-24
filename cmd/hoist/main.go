@@ -738,7 +738,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithHistory(historyFn).
 		WithDrift(buildDriftFunc(eff.kubeContext)).
 		WithRefreshRepo(buildRefreshRepoFunc(svc)).
-		WithWatch(buildWatchFunc(svc, eff.kubeContext, argoNamespaceOf(eff.cfg), cfg.Poll)).
+		WithWatch(buildWatchFunc(svc)).
 		WithRun(eff.base, eff.kubeContext)
 	final, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run()
 	if err != nil {

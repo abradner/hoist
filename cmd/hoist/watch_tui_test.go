@@ -13,6 +13,7 @@ import (
 
 	"github.com/abradner/hoist/internal/app/watch"
 	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/rollout"
@@ -22,14 +23,18 @@ import (
 // a Deployment and a Job) into a real *service.Service — the way runTUI builds one, so
 // buildWatchFunc's own svc.Argo/svc.Rollout/svc.Repo calls have something real to read — and
 // hands back the fakes the adapter is built over.
-func watchTUIFixture(t *testing.T) (*service.Service, *argo.Fake, *rollout.Fake) {
+func watchTUIFixture(t *testing.T, opts ...func(*service.Settings)) (*service.Service, *argo.Fake, *rollout.Fake) {
 	t.Helper()
 	cfgPath, fakeArgo, fakeRollout := newWatchFixture(t)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := service.New(service.Settings{RepoDir: cfg.Repos[0].Path, AppsRoot: cfg.Repos[0].AppsRoot}, serviceDeps())
+	set := service.Settings{RepoDir: cfg.Repos[0].Path, AppsRoot: cfg.Repos[0].AppsRoot, KubeContext: "test-context"}
+	for _, o := range opts {
+		o(&set)
+	}
+	svc := service.New(set, serviceDeps())
 	if _, err := svc.LoadRepo(context.Background(), service.RepoFromClone); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +46,9 @@ func watchTUIFixture(t *testing.T) (*service.Service, *argo.Fake, *rollout.Fake)
 // argo.Fake and rollout.Fake data, so the values the goldens are drawn from are the values
 // a real read produces.
 func TestBuildWatchFuncFlattensTheSameReadsHoistWatchMakes(t *testing.T) {
-	svc, fakeArgo, fakeRollout := watchTUIFixture(t)
+	svc, fakeArgo, fakeRollout := watchTUIFixture(t, func(s *service.Settings) {
+		s.Poll = engine.PollIntervals{Argo: 20 * time.Second, Rollout: 5 * time.Second}
+	})
 	app := argo.Application{Namespace: "argocd", Name: "app-app-production"}
 	reconciled := time.Date(2026, 9, 9, 11, 58, 0, 0, time.UTC)
 	fakeArgo.SetStatus(app, argo.Status{SyncStatus: "OutOfSync", SyncRevision: "abc123", HealthStatus: "Progressing", OperationPhase: "Running", ReconciledAt: reconciled})
@@ -52,8 +59,7 @@ func TestBuildWatchFuncFlattensTheSameReadsHoistWatchMakes(t *testing.T) {
 	})
 	fakeRollout.SetJobLike("app-production", "migrate", "Job", rollout.JobLikeStatus{Detail: "active=1 succeeded=0 failed=0"})
 
-	poll := config.PollConfig{Argo: config.Duration(20 * time.Second), Rollout: config.Duration(5 * time.Second)}
-	build := buildWatchFunc(svc, "test-context", "argocd", poll)
+	build := buildWatchFunc(svc)
 	if build == nil {
 		t.Fatal("buildWatchFunc must never return a nil builder (PR 7: the cluster is retried per call, never frozen at boot)")
 	}
@@ -89,7 +95,7 @@ func TestBuildWatchFuncNeverCallsRefresh(t *testing.T) {
 	svc, fakeArgo, fakeRollout := watchTUIFixture(t)
 	fakeArgo.SetStatus(argo.Application{Namespace: "argocd", Name: "app-app-production"}, argo.Status{SyncStatus: "OutOfSync", HealthStatus: argo.HealthStatusDegraded})
 	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{})
-	funcs, err := buildWatchFunc(svc, "test-context", "argocd", config.PollConfig{})("app", "app-production")
+	funcs, err := buildWatchFunc(svc)("app", "app-production")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +120,7 @@ func TestBuildWatchFuncNeverCallsRefresh(t *testing.T) {
 
 func TestBuildWatchFuncNamesAnUnknownCell(t *testing.T) {
 	svc, _, _ := watchTUIFixture(t)
-	build := buildWatchFunc(svc, "test-context", "argocd", config.PollConfig{})
+	build := buildWatchFunc(svc)
 	if _, err := build("ghost", "app-production"); err == nil || !strings.Contains(err.Error(), `no family "ghost" in app-production`) {
 		t.Errorf("unknown family: err = %v", err)
 	}
@@ -132,7 +138,7 @@ func TestBuildWatchFuncErrorsWithoutACluster(t *testing.T) {
 	prevArgo := newArgo
 	newArgo = func(string) (argo.Argo, string, error) { return nil, "", errors.New("kubeconfig: no such context") }
 	t.Cleanup(func() { newArgo = prevArgo })
-	build := buildWatchFunc(svc, "test-context", "argocd", config.PollConfig{})
+	build := buildWatchFunc(svc)
 	if build == nil {
 		t.Fatal("buildWatchFunc must never return a nil builder")
 	}
@@ -165,7 +171,7 @@ func TestClusterRetriedAfterBootFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { newArgo = prevArgo })
 
-	build := buildWatchFunc(svc, "test-context", "argocd", config.PollConfig{})
+	build := buildWatchFunc(svc)
 	if _, err := build("app", "app-production"); err == nil || !strings.Contains(err.Error(), "cluster unreachable") {
 		t.Fatalf("first call: err = %v, want the boot failure surfaced", err)
 	}
@@ -191,7 +197,7 @@ func TestClusterRetriedAfterBootFailure(t *testing.T) {
 // only once: the second build call would still 404 on the new family.
 func TestWatchFuncSeesFamilyAddedByRefresh(t *testing.T) {
 	svc, fakeArgo, fakeRollout := watchTUIFixture(t)
-	build := buildWatchFunc(svc, "test-context", "argocd", config.PollConfig{})
+	build := buildWatchFunc(svc)
 
 	if _, err := build("app2", "app-production"); err == nil || !strings.Contains(err.Error(), `no family "app2"`) {
 		t.Fatalf("before the refresh: err = %v, want app2 to not exist yet", err)

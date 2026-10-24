@@ -14,7 +14,6 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
-	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
@@ -120,57 +119,40 @@ func runLauncher(timeout time.Duration, name string, args ...string) error {
 	return exec.CommandContext(ctx, name, args...).Run()
 }
 
-// buildWatchFunc is the watch screen's adapter (AGENTS.md §4.8: cmd/hoist owns the adapter
-// from adaptors to a screen's plain function type): for one family in one env it resolves the
-// family's Application (gitops.Family.App — the same wrapper `hoist watch --app` looks up by
-// name) and the workloads it declares (familyWorkloads, shared with `hoist watch`), and returns
-// a watch.Func that makes the same Get/Deployment/JobLike reads `hoist watch` makes
-// (readWatchSnapshot) at the same cadence (watchInterval). It never calls Refresh: the Func
-// closes over readWatchSnapshot only, and the screen package cannot name argo.Argo at all.
-//
-// Every read below goes through svc, not a boot-time capture: the Argo
-// and rollout clients come from svc.Argo/svc.Rollout, which cache only on success (service.go's
-// own doc comment) — a cluster that could not be reached when the TUI opened is retried on the
-// very next w, never wedged for the rest of the session — and the repo comes from svc.Repo(),
-// the service's own current view, so a family an F5 refresh (or a landed promotion) just
-// added is visible the moment w is pressed rather than only after a restart. The returned
-// BuildFunc is never nil: a cluster that cannot be reached is reported as the real client error
-// from the call that failed, not as a generic "none is configured" the operator cannot act on
-// (AGENTS.md §4.5-adjacent principle 5 — warn with the actual reason).
-func buildWatchFunc(svc *service.Service, kubeContext, argoNamespace string, poll config.PollConfig) watch.BuildFunc {
+// buildWatchFunc is the watch screen's adapter: svc.OpenWatchFamily does the work (the family's
+// Application, its workloads, the clients, the cadence — all `hoist watch` makes too), and this
+// only maps its plain snapshot onto the screen's own type, which the screen package cannot import
+// the service for (it pins its import list). Each w opens afresh, so a cluster unreachable the
+// last time is retried and a family an F5 just added is found.
+func buildWatchFunc(svc *service.Service) watch.BuildFunc {
 	return func(family, env string) (watch.Funcs, error) {
-		a, err := svc.Argo(kubeContext)
+		w, err := svc.OpenWatchFamily(env, family)
 		if err != nil {
 			return watch.Funcs{}, err
 		}
-		ro, err := svc.Rollout(kubeContext)
-		if err != nil {
-			return watch.Funcs{}, err
-		}
-		r := svc.Repo().Repo
-		if r == nil {
-			return watch.Funcs{}, fmt.Errorf("watch: no repo loaded yet")
-		}
-		e, ok := r.Envs[env]
-		if !ok {
-			return watch.Funcs{}, fmt.Errorf("no env %q in the repo", env)
-		}
-		fam, ok := e.Families[family]
-		if !ok || fam == nil {
-			return watch.Funcs{}, fmt.Errorf("no family %q in %s", family, env)
-		}
-		if fam.App == "" {
-			return watch.Funcs{}, fmt.Errorf("%s in %s has no Argo Application", family, env)
-		}
-		app := argo.Application{Namespace: argoNamespace, Name: fam.App}
-		deployments, jobLikes := familyWorkloads(fam)
 		return watch.Funcs{
 			Read: func(ctx context.Context) (watch.Snapshot, error) {
-				return readWatchSnapshot(ctx, a, ro, app, env, deployments, jobLikes)
+				snap, err := w.Read(ctx)
+				if err != nil {
+					return watch.Snapshot{}, err
+				}
+				return watchSnapshot(snap), nil
 			},
-			Interval: watchInterval(poll),
+			Interval: w.Interval,
 		}, nil
 	}
+}
+
+func watchSnapshot(s service.WatchSnapshot) watch.Snapshot {
+	out := watch.Snapshot{
+		App: s.App, Namespace: s.Namespace,
+		SyncStatus: s.SyncStatus, HealthStatus: s.HealthStatus, Revision: s.Revision,
+		OperationPhase: s.OperationPhase, ReconciledAt: s.ReconciledAt,
+	}
+	for _, w := range s.Workloads {
+		out.Workloads = append(out.Workloads, watch.Workload(w))
+	}
+	return out
 }
 
 // buildRestartFuncs adapts internal/restart's core into the plain function values the restart

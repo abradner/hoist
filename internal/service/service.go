@@ -25,8 +25,8 @@ type Service struct {
 
 	mu       sync.Mutex
 	forges   map[string]forge.Forge
-	argos    map[string]argo.Argo
-	rollouts map[string]rollout.Rollout
+	argos    map[string]named[argo.Argo]
+	rollouts map[string]named[rollout.Rollout]
 
 	// cleanupKept remembers, for this process, a landed promotion whose cleanup was refused or
 	// failed AFTER origin was asked about it, keyed by id with the local branch tip it was
@@ -63,8 +63,8 @@ func New(settings Settings, deps Deps) *Service {
 		settings: settings,
 		deps:     deps,
 		forges:   map[string]forge.Forge{},
-		argos:    map[string]argo.Argo{},
-		rollouts: map[string]rollout.Rollout{},
+		argos:    map[string]named[argo.Argo]{},
+		rollouts: map[string]named[rollout.Rollout]{},
 	}
 }
 
@@ -97,43 +97,63 @@ func (s *Service) ForgeFor(ownerRepo string) (forge.Forge, error) {
 	return f, nil
 }
 
+// named is a cached cluster client with the kubeconfig context it was built for: the empty
+// context asks for the current one, and the commands that print which context they ran in need
+// the name the client resolved, not the one they asked for.
+type named[T any] struct {
+	client  T
+	context string
+}
+
 // Argo returns an Argo client for kubeContext, memoized on success exactly as ForgeFor is.
 func (s *Service) Argo(kubeContext string) (argo.Argo, error) {
+	a, _, err := s.ArgoNamed(kubeContext)
+	return a, err
+}
+
+// ArgoNamed is Argo plus the kubeconfig context the client resolved to.
+func (s *Service) ArgoNamed(kubeContext string) (argo.Argo, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.deps.NoCache {
-		if a, ok := s.argos[kubeContext]; ok {
-			return a, nil
+		if c, ok := s.argos[kubeContext]; ok {
+			return c.client, c.context, nil
 		}
 	}
-	a, _, err := s.deps.Argo(kubeContext)
+	a, used, err := s.deps.Argo(kubeContext)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !s.deps.NoCache {
-		s.argos[kubeContext] = a
+		s.argos[kubeContext] = named[argo.Argo]{a, used}
 	}
-	return a, nil
+	return a, used, nil
 }
 
 // Rollout returns a rollout client for kubeContext, memoized on success exactly as ForgeFor
 // and Argo are.
 func (s *Service) Rollout(kubeContext string) (rollout.Rollout, error) {
+	ro, _, err := s.RolloutNamed(kubeContext)
+	return ro, err
+}
+
+// RolloutNamed is Rollout plus the kubeconfig context the client resolved to.
+func (s *Service) RolloutNamed(kubeContext string) (rollout.Rollout, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.deps.NoCache {
-		if ro, ok := s.rollouts[kubeContext]; ok {
-			return ro, nil
+		if c, ok := s.rollouts[kubeContext]; ok {
+			return c.client, c.context, nil
 		}
 	}
-	ro, _, err := s.deps.Rollout(kubeContext)
+	ro, used, err := s.deps.Rollout(kubeContext)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !s.deps.NoCache {
-		s.rollouts[kubeContext] = ro
+		s.rollouts[kubeContext] = named[rollout.Rollout]{ro, used}
 	}
-	return ro, nil
+	return ro, used, nil
 }
 
 // Cluster returns a cluster client for kubeContext, and the kubeconfig context name it
