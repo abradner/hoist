@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -323,6 +324,11 @@ func SaveState(path string, s *PromotionState) error {
 	if err != nil {
 		return err
 	}
+	// A drive saves after every step on every poll, mostly with nothing changed; since each
+	// write is now a full flush to disk, an identical file is left as it is.
+	if old, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(old, data) {
+		return nil
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -348,7 +354,7 @@ func SaveState(path string, s *PromotionState) error {
 	}
 	// Flush to stable storage BEFORE the name becomes visible: rename/link without it can,
 	// after a power loss, leave the final name pointing at an empty or partial file.
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -363,10 +369,15 @@ func SaveState(path string, s *PromotionState) error {
 	return nil
 }
 
+// syncFile flushes a file's data to stable storage. A variable so a test can see that a save
+// (and a claim) flushes before the name becomes visible, and stops if the flush fails.
+var syncFile = (*os.File).Sync
+
 // syncDir flushes a directory's entries (a rename or link just made) to stable storage, so the
 // new name survives a power loss along with the file content Sync already flushed. Best effort:
-// not every filesystem supports fsync on a directory, and the file itself is already durable —
-// at worst the old name is what survives, which every caller already tolerates.
+// not every filesystem supports fsync on a directory, and its failure is ignored. Then a power
+// loss can lose the rename itself: the previous file survives, or, for a first save or a new
+// claim, no file at all.
 func syncDir(dir string) {
 	d, err := os.Open(dir)
 	if err != nil {

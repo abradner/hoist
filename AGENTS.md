@@ -1232,13 +1232,17 @@ test lives** (if one exists).
    of *observations* where the reader wanted a log of *changes*, and one fact published through two
    channels with each consumer assuming the other did not exist. Rule: `appendHistory` records
    changes by three rules keyed on the kind of entry — a STOPPING entry (`waiting: …`,
-   `blocked: …`, `act failed: …`) is skipped only when it equals History's LAST entry overall
-   (comparing against the step's own newest instead lost a real return: approval waiting, a check
-   re-runs, approval waiting again); an `already satisfied: …` entry is skipped when it equals
+   `blocked: …`, `act failed: …`) is skipped only when it equals History's last entry that is
+   not `acted` (comparing against the step's own newest instead lost a real return: approval
+   waiting, a check re-runs, approval waiting again; comparing against the last entry overall,
+   the first version of this rule, re-recorded the unchanged Argo sync wait on every poll,
+   because ArgoRefreshedStep re-acts each poll and its `acted` always sat between two identical
+   waits, #243); an `already satisfied: …` entry is skipped when it equals
    that step's own newest; `acted` is never skipped, since a second write to the world must leave
    a record. So History is the change log (the first occurrence keeps its time; readers `landedAt`,
    `waitingReporter`, `historyDetail` and `LastActivity` were checked and none needs per-poll
-   entries), and a state file written before this rule is compacted by the same rules in memory
+   entries; since History can now end in an `acted` that follows the wait it explains,
+   `historyDetail` reads the newest entry that is not `acted`), and a state file written before this rule is compacted by the same rules in memory
    when loaded (`engine.CompactHistory`, applied in `LoadState`; it reaches disk with the next
    ordinary save). `Hooks.Progress` carries preflight and signing-wait lines only; a step's
    outcome reaches a screen as a typed event — `Hooks.OnHistory(entry, state)`, called by the

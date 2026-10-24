@@ -238,13 +238,17 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 	}
 }
 
-// historyDetail is the most recent History entry's Detail, for a deadline message that says
-// what it was last observed waiting on rather than just naming the phase.
+// historyDetail is the newest History entry's Detail that is not "acted", for a deadline
+// message that says what it was last observed waiting on rather than just naming the phase.
+// "acted" is skipped because History records an unchanged wait once: a step that re-acts every
+// poll (ArgoRefreshedStep) leaves its "acted" after the wait it is still in (#243).
 func historyDetail(s *engine.PromotionState) string {
-	if len(s.History) == 0 {
-		return ""
+	for i := len(s.History) - 1; i >= 0; i-- {
+		if s.History[i].Detail != "acted" {
+			return s.History[i].Detail
+		}
 	}
-	return s.History[len(s.History)-1].Detail
+	return ""
 }
 
 // checkDirectPreflight is the CLI's single --direct gate, shared by `hoist promote` and

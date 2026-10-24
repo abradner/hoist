@@ -539,8 +539,9 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 // A quiet poll — every earlier step satisfied, the stopping step unchanged — appends nothing,
 // because the satisfied entries match their steps' newest and the stop matches the last entry.
 // Readers are indifferent to dropped repeats: landedAt wants the EARLIEST entry for a step;
-// waitingReporter and historyDetail want the newest waiting entry and the last entry, which a
-// repeat would only have re-stamped later; LastActivity becomes "when something last changed".
+// waitingReporter and historyDetail want the newest waiting entry and the newest entry that is
+// not "acted" (History can end in a re-acted refresh after its unchanged wait), which a repeat
+// would only have re-stamped later; LastActivity becomes "when something last changed".
 func appendHistory(s *PromotionState, name StepName, detail string) {
 	detail = redact.Strings(detail)
 	if historyDuplicate(s.History, name, detail) {
