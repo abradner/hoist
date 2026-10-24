@@ -79,6 +79,14 @@ func (e *BlockedError) Error() string {
 	return fmt.Sprintf("%s: blocked: %s", e.Step, e.Reason)
 }
 
+// ActBlockedError is what a step's Act returns when it discovers a stop that retrying will not
+// resolve — the Blocked outcome Observe cannot report because only the write attempt finds it
+// (a forge refusing a merge). DriveStatus turns it into the same *BlockedError an Observe-time
+// Blocked produces, so every face stops and shows Reason instead of failing and polling again.
+type ActBlockedError struct{ Reason string }
+
+func (e *ActBlockedError) Error() string { return e.Reason }
+
 // ErrWaiting is returned by Drive when a step is Waiting: the caller should report Detail
 // (e.g. "waiting for signing approval") and may retry later. It is not a failure.
 var ErrWaiting = errors.New("engine: waiting")
@@ -228,6 +236,13 @@ func DriveStatus(ctx context.Context, steps []Step, s *PromotionState, save func
 		if !obs.Satisfied {
 			if err := step.Act(ctx, s); err != nil {
 				s.Phase = step.Name()
+				var ab *ActBlockedError
+				if errors.As(err, &ab) {
+					appendHistory(s, step.Name(), "blocked: "+ab.Reason)
+					saveIfSet(s, save)
+					statuses = append(statuses, StepStatus{Step: step.Name(), Observation: Observation{Blocked: ab.Reason}})
+					return false, statuses, &BlockedError{Step: step.Name(), Reason: ab.Reason}
+				}
 				appendHistory(s, step.Name(), "act failed: "+err.Error())
 				saveIfSet(s, save)
 				statuses = append(statuses, StepStatus{Step: step.Name(), Observation: obs})
