@@ -52,17 +52,17 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	}
 	sel.repo, sel.appsRoot, sel.kubeContext = *repo, *appsRoot, *kubeContext
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
-	eff, err := selectRepo(cfg, sel)
+	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
-	if eff.repo == "" || *env == "" {
+	if set.RepoDir == "" || *env == "" {
 		fmt.Fprintln(stderr, "hoist restart: --repo and --env are required")
 		fs.Usage()
 		return exitUsage
 	}
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(set.RepoDir, set.AppsRoot)
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
@@ -82,7 +82,6 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	// Production's gate, checked before the cluster is touched; a --dry-run of something that
 	// would be refused still says so.
-	set := settingsFor(cfg, eff)
 	svc := service.New(set, serviceDeps())
 	if err := set.CheckRestartConfirmed(*env, *confirmProduction); err != nil {
 		code, _ := renderStartError(io.Discard, stderr, "hoist restart", err)

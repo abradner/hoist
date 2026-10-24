@@ -75,28 +75,27 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
 		return failf(stderr, "hoist promote", exitUsage, "%s", msg)
 	}
-	eff, err := selectRepo(cfg, sel)
+	set, err := selectRepo(cfg, sel)
 	if err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
-	if eff.repo == "" || *from == "" || *to == "" {
+	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist promote: --repo, --from and --to are required")
 		fs.Usage()
 		return exitUsage
 	}
-	if code := checkDirectPreflight("hoist promote", settingsFor(cfg, eff), *direct, *confirmDirect, *to, stderr); code != 0 {
+	if code := checkDirectPreflight("hoist promote", set, *direct, *confirmDirect, *to, stderr); code != 0 {
 		return code
 	}
 
-	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
+	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		return fail(stderr, "hoist promote", exitUsage, err)
 	}
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(set.RepoDir, set.AppsRoot)
 	if err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
-	set := settingsFor(cfg, eff)
 	set.Resolve = opts
 	svc := service.New(set, serviceDeps())
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {

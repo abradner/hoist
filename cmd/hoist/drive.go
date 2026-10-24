@@ -16,7 +16,7 @@ import (
 // value engine.PollInterval actually reads — internal/engine must not import internal/config
 // (it is shared with internal/app/flight, which has its own, differently-shaped config view),
 // so this conversion happens once, here, at the one place allowed to know both sides.
-// settingsFor (main.go) and buildPollDurations (wiring.go, which layers Deadline on top for
+// selectRepo (main.go) and buildPollDurations (wiring.go, which layers Deadline on top for
 // flight.PollDurations' own shape) both call this rather than each hand-copying the same four
 // fields a third and fourth time.
 func pollIntervals(poll config.PollConfig) engine.PollIntervals {

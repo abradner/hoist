@@ -33,28 +33,28 @@ func TestSelectRepoKubeContextPrecedence(t *testing.T) {
 		return m
 	}
 	eff, err := selectRepo(cfg, selection{kubeContext: "flag-ctx", given: given("kube-context")})
-	if err != nil || eff.kubeContext != "flag-ctx" {
-		t.Fatalf("flag given: kubeContext=%q err=%v, want flag-ctx", eff.kubeContext, err)
+	if err != nil || eff.KubeContext != "flag-ctx" {
+		t.Fatalf("flag given: kubeContext=%q err=%v, want flag-ctx", eff.KubeContext, err)
 	}
 	eff, err = selectRepo(cfg, selection{given: given()})
-	if err != nil || eff.kubeContext != "cfg-ctx" {
-		t.Fatalf("flag not given: kubeContext=%q err=%v, want cfg-ctx", eff.kubeContext, err)
+	if err != nil || eff.KubeContext != "cfg-ctx" {
+		t.Fatalf("flag not given: kubeContext=%q err=%v, want cfg-ctx", eff.KubeContext, err)
 	}
 	eff, err = selectRepo(&config.Config{}, selection{repo: "/y", kubeContext: "flag-ctx", given: given("repo", "kube-context")})
-	if err != nil || eff.kubeContext != "flag-ctx" {
-		t.Fatalf("flags only: kubeContext=%q err=%v, want flag-ctx", eff.kubeContext, err)
+	if err != nil || eff.KubeContext != "flag-ctx" {
+		t.Fatalf("flags only: kubeContext=%q err=%v, want flag-ctx", eff.KubeContext, err)
 	}
 }
 
 // --base is never empty on either face: unset means main, given means given.
 func TestSelectRepoBaseDefaultsToMain(t *testing.T) {
 	eff, err := selectRepo(&config.Config{}, selection{repo: "/y", given: map[string]bool{"repo": true}})
-	if err != nil || eff.base != "main" {
-		t.Fatalf("base=%q err=%v, want main", eff.base, err)
+	if err != nil || eff.Base != "main" {
+		t.Fatalf("base=%q err=%v, want main", eff.Base, err)
 	}
 	eff, err = selectRepo(&config.Config{}, selection{repo: "/y", base: "develop", given: map[string]bool{"repo": true, "base": true}})
-	if err != nil || eff.base != "develop" {
-		t.Fatalf("base=%q err=%v, want develop", eff.base, err)
+	if err != nil || eff.Base != "develop" {
+		t.Fatalf("base=%q err=%v, want develop", eff.Base, err)
 	}
 }
 
@@ -84,15 +84,15 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	// alone, never A's reconciled context.
 	sel := selection{repo: "/a", given: map[string]bool{"repo": true}}
 	effA, err := selectRepo(cfg, sel)
-	if err != nil || effA.kubeContext != "ctx-a" || effA.kubeOverride != "" {
-		t.Fatalf("no flag: kubeContext=%q kubeOverride=%q err=%v", effA.kubeContext, effA.kubeOverride, err)
+	if err != nil || effA.KubeContext != "ctx-a" || effA.KubeOverride != "" {
+		t.Fatalf("no flag: kubeContext=%q kubeOverride=%q err=%v", effA.KubeContext, effA.KubeOverride, err)
 	}
 	sel.kubeContext, sel.given["kube-context"] = "flag-ctx", true
 	effFlag, err := selectRepo(cfg, sel)
-	if err != nil || effFlag.kubeOverride != "flag-ctx" {
-		t.Fatalf("flag: kubeOverride=%q err=%v", effFlag.kubeOverride, err)
+	if err != nil || effFlag.KubeOverride != "flag-ctx" {
+		t.Fatalf("flag: kubeOverride=%q err=%v", effFlag.KubeOverride, err)
 	}
-	for _, tc := range []struct{ override, want string }{{effFlag.kubeOverride, "flag-ctx"}, {effA.kubeOverride, "ctx-b"}} {
+	for _, tc := range []struct{ override, want string }{{effFlag.KubeOverride, "flag-ctx"}, {effA.KubeOverride, "ctx-b"}} {
 		var argoCtx string
 		newArgo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
 		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
@@ -129,11 +129,11 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 // --digest-sources` reaches plan's: none means no resolution and no cluster adaptor is
 // even constructed. The default (pods first) is the positive control: it opens the cluster.
 func TestRootDigestSourcesReachTheTUIResolveFunc(t *testing.T) {
-	var got effective
-	var gotCfg *config.Config
+	var got service.Settings
+	var gotRF resolveFlags
 	orig := tuiRunner
 	t.Cleanup(func() { tuiRunner = orig })
-	tuiRunner = func(eff effective, cfg *config.Config, _, _ io.Writer) int { got, gotCfg = eff, cfg; return 42 }
+	tuiRunner = func(set service.Settings, rf resolveFlags, _, _ io.Writer) int { got, gotRF = set, rf; return 42 }
 	r, err := gitops.Discover(fixture, gitops.DefaultAppsRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -149,11 +149,11 @@ func TestRootDigestSourcesReachTheTUIResolveFunc(t *testing.T) {
 			t.Fatalf("%v: exit %d, want the runner's 42", tc.args, code)
 		}
 		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-		opts, err := service.NewResolveOptions(gotCfg, got.cfg, got.resolve.digestSources, got.resolve.registryAuth, got.resolve.clusterSecret, got.resolve.opRef, got.kubeContext)
+		opts, err := service.NewResolveOptions(got.Config, got.Repo, gotRF.digestSources, gotRF.registryAuth, gotRF.clusterSecret, gotRF.opRef, got.KubeContext)
 		if err != nil {
 			t.Fatal(err)
 		}
-		svc := service.New(service.Settings{RepoDir: got.repo, Promotable: got.promotable, Resolve: opts}, serviceDeps())
+		svc := service.New(service.Settings{RepoDir: got.RepoDir, Promotable: got.Promotable, Resolve: opts}, serviceDeps())
 		pc, err := svc.Plan(context.Background(), service.PlanRequest{Repo: r, Source: "app-staging", Target: "app-production"})
 		if err != nil {
 			t.Fatalf("%v: resolve: %v", tc.args, err)
@@ -225,11 +225,11 @@ registries:
   - prefix: ghcr.io/example/
     auth: [keychain]
 `)
-	var got effective
-	var gotCfg *config.Config
+	var got service.Settings
+	var gotRF resolveFlags
 	orig := tuiRunner
 	t.Cleanup(func() { tuiRunner = orig })
-	tuiRunner = func(eff effective, cfg *config.Config, _, _ io.Writer) int { got, gotCfg = eff, cfg; return 42 }
+	tuiRunner = func(set service.Settings, rf resolveFlags, _, _ io.Writer) int { got, gotRF = set, rf; return 42 }
 	prevForge := newForge
 	t.Cleanup(func() { newForge = prevForge })
 	newForge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
@@ -243,12 +243,12 @@ registries:
 		if code := run(tc.args, io.Discard, io.Discard); code != 42 {
 			t.Fatalf("%v: exit %d, want 42", tc.args, code)
 		}
-		regOpts, err := service.NewResolveOptions(gotCfg, got.cfg, got.resolve.digestSources, got.resolve.registryAuth, got.resolve.clusterSecret, got.resolve.opRef, got.kubeContext)
+		regOpts, err := service.NewResolveOptions(got.Config, got.Repo, gotRF.digestSources, gotRF.registryAuth, gotRF.clusterSecret, gotRF.opRef, got.KubeContext)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, authCfgs := installFakes(t, &k8s.Fake{}, &registry.Fake{})
-		svc := service.New(service.Settings{Config: gotCfg, Repo: got.cfg, KubeContext: got.kubeContext, Resolve: regOpts}, serviceDeps())
+		svc := service.New(service.Settings{Config: got.Config, Repo: got.Repo, KubeContext: got.KubeContext, Resolve: regOpts}, serviceDeps())
 		buildTagsFunc(svc)("ghcr.io/example/app")
 		h := buildHistoryFuncs(svc)
 		_, _ = h.Revision(context.Background(), image.Ref{Repo: "ghcr.io/example/app", Tag: "v1"})

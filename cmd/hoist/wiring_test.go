@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/app/session"
-	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/forge"
@@ -20,20 +19,20 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
-func loadCfgAndEffForFixture(t *testing.T, cfgPath string) (*config.Config, effective) {
+func settingsForFixture(t *testing.T, cfgPath string) service.Settings {
 	t.Helper()
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eff, err := selectRepo(cfg, selection{given: map[string]bool{}})
+	set, err := selectRepo(cfg, selection{given: map[string]bool{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if eff.cfg == nil {
+	if set.Repo == nil {
 		t.Fatal("fixture config should resolve to exactly one repo")
 	}
-	return cfg, eff
+	return set
 }
 
 // buildSvcForFixture builds the same *service.Service runTUI itself would build for cfgPath — the
@@ -43,17 +42,16 @@ func loadCfgAndEffForFixture(t *testing.T, cfgPath string) (*config.Config, effe
 // own RepoFromOrigin falls back to when there is nothing to fetch from, and what every test
 // fixture's origin already agrees with anyway) so StartRequest's own nil-Repo/nil-View defaults
 // resolve to something, mirroring runTUI's own svc.LoadRepo call at boot. Returns the Service
-// alongside the effective value, for tests that also need eff.repo/eff.appsRoot/eff.promotable
+// alongside its Settings, for tests that also need RepoDir/AppsRoot/Promotable
 // to build their own plan via gitops.Discover+BuildPlan the way runTUI's own plan screen does.
-func buildSvcForFixture(t *testing.T, cfgPath string) (*service.Service, effective) {
+func buildSvcForFixture(t *testing.T, cfgPath string) (*service.Service, service.Settings) {
 	t.Helper()
-	cfg, eff := loadCfgAndEffForFixture(t, cfgPath)
-	set := settingsFor(cfg, eff)
+	set := settingsForFixture(t, cfgPath)
 	svc := service.New(set, serviceDeps())
 	if _, err := svc.LoadRepo(context.Background(), service.RepoFromClone); err != nil {
 		t.Fatal(err)
 	}
-	return svc, eff
+	return svc, set
 }
 
 // startOpts is this test file's own stand-in for the mode a screen would confirm with — the TUI
@@ -137,11 +135,11 @@ func TestTUIStartPromotionDrivesRealPromotionEndToEnd(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,11 +213,11 @@ func TestDriveFuncForDoesNotMirrorHistoryIntoProgress(t *testing.T) {
 	cfgPath, clone, _ := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,11 +264,11 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,13 +331,13 @@ func TestTUIStartPromotionRefusesConflictingInFlight(t *testing.T) {
 func TestTUIStartPromotionRequiresGitHubConfig(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
-	eff.cfg.GitHub = ""
+	eff.Repo.GitHub = ""
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,11 +382,11 @@ func TestTUIStartPromotionSkipsAllNoOpPlan(t *testing.T) {
 	// would stop at that refusal and never reach the all-no-op path it exists to check.
 	runGitHost(t, clone, "push", "-q", "origin", "main")
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,11 +427,11 @@ func TestTUIStartPromotionReleasesClaimWithoutDriving(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,11 +526,11 @@ func TestBrowserCommandPerOS(t *testing.T) {
 func TestTUIStartPromotionRecordsDirectBeforeTheFirstSave(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
 	svc, eff := buildSvcForFixture(t, cfgPath)
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,11 +584,11 @@ func TestTUIStartPromotionAllNoOpBeatsForgeError(t *testing.T) {
 	runGitHost(t, clone, "add", ".")
 	runGitHost(t, clone, "commit", "-q", "-m", "simulate the PR having merged")
 	runGitHost(t, clone, "push", "-q", "origin", "main")
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

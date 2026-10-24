@@ -35,11 +35,11 @@ func TestTUIOverrideCINoneReachesTheEngineStepPerPromotion(t *testing.T) {
 	}
 	svc, eff := buildSvcForFixture(t, cfgPath)
 
-	r, err := gitops.Discover(eff.repo, eff.appsRoot)
+	r, err := gitops.Discover(eff.RepoDir, eff.AppsRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.promotable, nil)
+	plan, err := gitops.BuildPlan(r, "app-staging", "app-production", eff.Promotable, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

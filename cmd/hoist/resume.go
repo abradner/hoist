@@ -15,15 +15,11 @@ import (
 // promotionsSettings builds the service.Settings runPromotions/runResume/runAbandon share:
 // these three commands never select a single repo (a state file names its own, possibly
 // different from whatever --repo would have selected), so this is deliberately narrower than
-// settingsFor — just the config file, the operator's own --kube-context override, and the
+// selectRepo — just the config file, the operator's own --kube-context override, and the
 // poll/deadline/retain knobs every one of svc.List/svc.Resume/svc.Abandon needs.
 func promotionsSettings(cfg *config.Config, kubeOverride string) service.Settings {
-	set := service.Settings{Config: cfg, KubeOverride: kubeOverride}
-	if cfg != nil {
-		set.Poll = pollIntervals(cfg.Poll)
-		set.Deadline = time.Duration(cfg.Poll.Deadline)
-		set.Retain = time.Duration(cfg.State.Retain)
-	}
+	set := configSettings(cfg)
+	set.KubeOverride = kubeOverride
 	return set
 }
 
