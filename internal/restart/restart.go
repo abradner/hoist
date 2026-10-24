@@ -72,14 +72,13 @@ func Targets(r *gitops.Repo, env string, families []string) ([]string, error) {
 		if len(only) > 0 && !only[name] {
 			continue
 		}
-		for _, occ := range fam.Occurrences {
-			// Deployments only. A Job or CronJob has no rollout to trigger, and re-running one
-			// is a different operation with different consequences.
-			if occ.Kind != "Deployment" || seen[occ.Name] {
-				continue
+		// Deployments only. A Job or CronJob has no rollout to trigger, and re-running one is a
+		// different operation with different consequences.
+		for _, dep := range fam.Named("Deployment") {
+			if !seen[dep] {
+				seen[dep] = true
+				out = append(out, dep)
 			}
-			seen[occ.Name] = true
-			out = append(out, occ.Name)
 		}
 	}
 	if len(out) == 0 {
