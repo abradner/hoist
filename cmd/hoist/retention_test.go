@@ -71,7 +71,7 @@ func TestPromotionsArchivesOldTerminalPromotions(t *testing.T) {
 func TestPromotionsNeverArchivesAnInFlightPromotionRegardlessOfRetain(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to PR-opened: %v", err)
 	}
 	statePath, err := engine.StatePath(s.ID)
@@ -109,7 +109,7 @@ func TestPromotionsNeverArchivesAnInFlightPromotionRegardlessOfRetain(t *testing
 func TestPromotionsRepoFlagScopesListing(t *testing.T) {
 	cfgPath, clone, f := newPromoteFixture(t)
 	s := buildPROpenedState(t, clone)
-	if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+	if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 		t.Fatalf("driving to PR-opened: %v", err)
 	}
 	statePath, err := engine.StatePath(s.ID)

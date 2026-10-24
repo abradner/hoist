@@ -419,8 +419,8 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
 		panic(err)
 	}
-	newCluster = func(string) (k8s.Cluster, string, error) { return &k8s.Fake{}, "test-context", nil }
-	newRegistry = func(registry.AuthConfig) (registry.Registry, error) { return &registry.Fake{}, nil }
+	adaptors.Cluster = func(string) (k8s.Cluster, string, error) { return &k8s.Fake{}, "test-context", nil }
+	adaptors.Registry = func(registry.AuthConfig) (registry.Registry, error) { return &registry.Fake{}, nil }
 	code := m.Run()
 	_ = os.RemoveAll(dir) // best effort; the OS reaps its temp dir anyway
 	os.Exit(code)

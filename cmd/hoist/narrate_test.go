@@ -319,7 +319,7 @@ func TestAbandonAndPromotionsNarrate(t *testing.T) {
 		t.Helper()
 		cfgPath, clone, f := newPromoteFixture(t)
 		s = buildPROpenedState(t, clone)
-		if err := engine.Drive(context.Background(), engine.Steps(newGit, f, nil), s, nil); err != nil {
+		if err := engine.Drive(context.Background(), engine.Steps(adaptors.Git(), f, nil), s, nil); err != nil {
 			t.Fatalf("driving to PR-opened: %v", err)
 		}
 		savePlannedState(t, s)
@@ -460,9 +460,11 @@ func (g blockingPushGit) Push(ctx context.Context, worktreeDir, remote, branch s
 // finishes normally.
 func TestPromoteSaysItIsStillPushingWhileThePushRuns(t *testing.T) {
 	cfgPath, _, _ := newPromoteFixture(t)
-	prevEvery, prevTick, prevGit := silenceEvery, silenceTick, newGit
+	prevEvery, prevTick, prevGit := silenceEvery, silenceTick, adaptors.Git()
 	silenceEvery, silenceTick = time.Millisecond, time.Millisecond
-	t.Cleanup(func() { silenceEvery, silenceTick, newGit = prevEvery, prevTick, prevGit })
+	t.Cleanup(func() { silenceEvery, silenceTick = prevEvery, prevTick })
+	saved := adaptors
+	t.Cleanup(func() { adaptors = saved })
 
 	release := make(chan struct{})
 	var once sync.Once
@@ -471,7 +473,7 @@ func TestPromoteSaysItIsStillPushingWhileThePushRuns(t *testing.T) {
 			once.Do(func() { close(release) })
 		}
 	}}
-	newGit = blockingPushGit{Git: prevGit, release: release}
+	adaptors.Git = func() git.Git { return blockingPushGit{Git: prevGit, release: release} }
 
 	var out bytes.Buffer
 	if got := run([]string{"--config", cfgPath, "promote", "--from", "app-staging", "--to", "app-production"}, &out, errOut); got != 0 {

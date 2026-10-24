@@ -77,9 +77,9 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	if err := engine.SaveState(path, &engine.PromotionState{ID: "resume01", RepoFullName: "me/gitops-b", TargetEnv: "app-production"}); err != nil {
 		t.Fatal(err)
 	}
-	prevForge, prevArgo := newForge, newArgo
-	t.Cleanup(func() { newForge, newArgo = prevForge, prevArgo })
-	newForge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
+	prevForge, prevArgo := adaptors.Forge, adaptors.Argo
+	t.Cleanup(func() { adaptors.Forge, adaptors.Argo = prevForge, prevArgo })
+	adaptors.Forge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
 	// What runTUI hands over when the TUI was opened on repo A: the override is the flag
 	// alone, never A's reconciled context.
 	sel := selection{repo: "/a", given: map[string]bool{"repo": true}}
@@ -94,17 +94,17 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	}
 	for _, tc := range []struct{ override, want string }{{effFlag.KubeOverride, "flag-ctx"}, {effA.KubeOverride, "ctx-b"}} {
 		var argoCtx string
-		newArgo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
+		adaptors.Argo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
 		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
 		_, err := svc.Resume(context.Background(), "resume01", service.ResumeOpts{})
 		if err == nil || argoCtx != tc.want {
-			t.Fatalf("override %q: Resume's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+			t.Fatalf("override %q: Resume's adaptors.Argo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
 		}
 		// List re-observes against the same cluster Resume drives, or the pane and the
 		// flight screen disagree about one state file (aggregate review of stack #137).
 		argoCtx = ""
 		if _, err := svc.List(context.Background(), service.ListOpts{}); err != nil || argoCtx != tc.want {
-			t.Fatalf("override %q: List's newArgo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+			t.Fatalf("override %q: List's adaptors.Argo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
 		}
 		// And the CLI faces of the same two operations honour the root flag the same way.
 		argoCtx = ""
@@ -115,12 +115,12 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 		var out, errOut bytes.Buffer
 		runPromotions(nil, cfg, sel, &out, &errOut)
 		if argoCtx != tc.want {
-			t.Fatalf("override %q: promotions' newArgo got %q, want %q (out=%s err=%s)", tc.override, argoCtx, tc.want, out.String(), errOut.String())
+			t.Fatalf("override %q: promotions' adaptors.Argo got %q, want %q (out=%s err=%s)", tc.override, argoCtx, tc.want, out.String(), errOut.String())
 		}
 		argoCtx = ""
 		runResume([]string{"resume01"}, cfg, sel, &out, &errOut)
 		if argoCtx != tc.want {
-			t.Fatalf("override %q: resume's newArgo got %q, want %q", tc.override, argoCtx, tc.want)
+			t.Fatalf("override %q: resume's adaptors.Argo got %q, want %q", tc.override, argoCtx, tc.want)
 		}
 	}
 }
@@ -230,9 +230,9 @@ registries:
 	orig := tuiRunner
 	t.Cleanup(func() { tuiRunner = orig })
 	tuiRunner = func(set service.Settings, rf resolveFlags, _, _ io.Writer) int { got, gotRF = set, rf; return 42 }
-	prevForge := newForge
-	t.Cleanup(func() { newForge = prevForge })
-	newForge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
+	prevForge := adaptors.Forge
+	t.Cleanup(func() { adaptors.Forge = prevForge })
+	adaptors.Forge = func(string) (forge.Forge, error) { return &forge.Fake{}, nil }
 	for _, tc := range []struct {
 		args []string
 		want string

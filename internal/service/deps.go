@@ -13,9 +13,8 @@ import (
 )
 
 // Deps is the set of constructors a Service is built from — never the clients themselves.
-// cmd/hoist's serviceDeps() wraps its own package-level test seams (newGit, newForge, ...) in
-// closures that read the seam AT CALL TIME, so a test that reassigns one mid-test (about 108
-// do) still sees its own fake through any Service built before or after the reassignment;
+// cmd/hoist's serviceDeps() wraps its own package-level test seam (adaptors) in
+// closures that read the seam AT CALL TIME, so a test that reassigns one mid-test still sees its own fake through any Service built before or after the reassignment;
 // nothing here is a snapshot taken once.
 //
 // None of these constructors ever see a secret value directly — that is still resolved inside
@@ -32,7 +31,7 @@ type Deps struct {
 	Now      func() time.Time
 
 	// NoCache disables Service's own success-memoization of Forge/Argo/Rollout (service.go).
-	// Set only by a test that swaps a seam (newForge, newArgo, ...) BETWEEN calls against one
+	// Set only by a test that swaps a seam (adaptors.Forge, adaptors.Argo, ...) BETWEEN calls against one
 	// long-lived Service instance — the TUI's own session-lifetime Service is exactly that
 	// shape, and a memoized client built from the seam's first value would otherwise survive
 	// the swap. Production code never sets this; see service.go's own doc comment for why

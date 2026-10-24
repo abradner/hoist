@@ -15,7 +15,7 @@ import (
 // would let a deploy pass by accidentally matching a promotion's outcome.
 const digestThird = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 
-// rolloutFor repoints newRollout at a fake that reports the deployed image as live, so
+// rolloutFor repoints adaptors.Rollout at a fake that reports the deployed image as live, so
 // RolledOutStep can converge. newPromoteFixture configures its own rollout fake for the image
 // a *promotion* would land (v2); a deploy names its own image, so the expectation has to move
 // with it — otherwise the pipeline runs correctly all the way to rolled-out and then waits out
@@ -32,9 +32,9 @@ func rolloutFor(t *testing.T, image string) {
 		Images:    []rollout.ContainerImage{{Name: "app", Image: image}},
 		Complete:  true,
 	})
-	prev := newRollout
-	newRollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
-	t.Cleanup(func() { newRollout = prev })
+	prev := adaptors.Rollout
+	adaptors.Rollout = func(string) (rollout.Rollout, string, error) { return f, "test-context", nil }
+	t.Cleanup(func() { adaptors.Rollout = prev })
 }
 
 // The end-to-end shape: a deploy drives the same pipeline a promotion does — worktree, commit,

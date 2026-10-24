@@ -135,9 +135,9 @@ func TestBuildWatchFuncNamesAnUnknownCell(t *testing.T) {
 // the operator sees why, not a generic "none is configured" that could mean anything.
 func TestBuildWatchFuncErrorsWithoutACluster(t *testing.T) {
 	svc, _, _ := watchTUIFixture(t)
-	prevArgo := newArgo
-	newArgo = func(string) (argo.Argo, string, error) { return nil, "", errors.New("kubeconfig: no such context") }
-	t.Cleanup(func() { newArgo = prevArgo })
+	prevArgo := adaptors.Argo
+	adaptors.Argo = func(string) (argo.Argo, string, error) { return nil, "", errors.New("kubeconfig: no such context") }
+	t.Cleanup(func() { adaptors.Argo = prevArgo })
 	build := buildWatchFunc(svc)
 	if build == nil {
 		t.Fatal("buildWatchFunc must never return a nil builder")
@@ -160,16 +160,16 @@ func TestClusterRetriedAfterBootFailure(t *testing.T) {
 	fakeArgo.SetStatus(argo.Application{Namespace: "argocd", Name: "app-app-production"}, argo.Status{SyncStatus: "Synced", HealthStatus: "Healthy"})
 	fakeRollout.SetDeployment("app-production", "app", rollout.DeploymentStatus{})
 
-	prevArgo := newArgo
+	prevArgo := adaptors.Argo
 	calls := 0
-	newArgo = func(string) (argo.Argo, string, error) {
+	adaptors.Argo = func(string) (argo.Argo, string, error) {
 		calls++
 		if calls == 1 {
 			return nil, "", errors.New("cluster unreachable")
 		}
 		return fakeArgo, "test-context", nil
 	}
-	t.Cleanup(func() { newArgo = prevArgo })
+	t.Cleanup(func() { adaptors.Argo = prevArgo })
 
 	build := buildWatchFunc(svc)
 	if _, err := build("app", "app-production"); err == nil || !strings.Contains(err.Error(), "cluster unreachable") {
@@ -183,7 +183,7 @@ func TestClusterRetriedAfterBootFailure(t *testing.T) {
 		t.Fatalf("Read after retry: %v", err)
 	}
 	if calls != 2 {
-		t.Fatalf("newArgo called %d times, want exactly 2 (boot failure, then the retry)", calls)
+		t.Fatalf("adaptors.Argo called %d times, want exactly 2 (boot failure, then the retry)", calls)
 	}
 }
 
