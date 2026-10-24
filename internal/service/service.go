@@ -17,7 +17,7 @@ import (
 // build stays worth retrying on the next call — a `hoist watch`-style boot failure should
 // never wedge every later attempt for the rest of the session) and why Git/Cluster are never
 // memoized at all: Git carries no per-target state to cache (git.Exec{} is stateless, and a
-// test swaps adaptors.Git mid-run — abandon_test), and Cluster is opened fresh per call today (the
+// test may swap adaptors.Git between calls), and Cluster is opened fresh per call today (the
 // drift column already does this; caching it would be a behavior change).
 type Service struct {
 	settings Settings

@@ -511,7 +511,7 @@ func TestDeployDryRunUntouchedDistinguishesNarrowedFirstParty(t *testing.T) {
 
 // deployContexts runs a full deploy against the fixture with repos[].kube.context set to
 // "repo-ctx" and returns every kube context the Argo and rollout clients were asked for.
-func deployContexts(t *testing.T, extra ...string) []string {
+func deployContexts(t *testing.T, root []string, extra ...string) []string {
 	t.Helper()
 	cfgPath, _, _ := newPromoteFixture(t)
 	body, err := os.ReadFile(cfgPath)
@@ -535,10 +535,20 @@ func deployContexts(t *testing.T, extra ...string) []string {
 		return prevRollout(kc)
 	}
 
-	args := append([]string{"--config", cfgPath, "deploy", "--env", "app-production", "--image", "ghcr.io/example/app:v3@" + digestThird}, extra...)
+	args := append(append([]string{"--config", cfgPath}, root...), append([]string{"deploy", "--env", "app-production", "--image", "ghcr.io/example/app:v3@" + digestThird}, extra...)...)
 	var out, errOut bytes.Buffer
 	if code := run(args, &out, &errOut); code != 0 {
 		t.Fatalf("exit %d; stderr: %s", code, errOut.String())
+	}
+	// Both clients the drive builds must have been asked for, so a test that only sees one of them
+	// cannot pass for the other.
+	var argoSeen, rolloutSeen bool
+	for _, c := range got {
+		argoSeen = argoSeen || strings.HasPrefix(c, "argo:")
+		rolloutSeen = rolloutSeen || strings.HasPrefix(c, "rollout:")
+	}
+	if !argoSeen || !rolloutSeen {
+		t.Fatalf("a deploy should build both an Argo and a rollout client, saw %v", got)
 	}
 	return got
 }
@@ -549,10 +559,7 @@ func deployContexts(t *testing.T, extra ...string) []string {
 // other command takes flag, else repos[].kube.context, else current (selectRepo); deploy did the
 // last step by hand over the top of it. It fails with the override restored.
 func TestDeployUsesTheReposKubeContext(t *testing.T) {
-	got := deployContexts(t)
-	if len(got) == 0 {
-		t.Fatal("no cluster client was built (the control: a deploy drives Argo and the rollout)")
-	}
+	got := deployContexts(t, nil)
 	for _, c := range got {
 		if !strings.HasSuffix(c, ":repo-ctx") {
 			t.Errorf("a deploy asked for %q; want the repo's configured kube context repo-ctx every time (all: %v)", c, got)
@@ -561,13 +568,30 @@ func TestDeployUsesTheReposKubeContext(t *testing.T) {
 }
 
 func TestDeployKubeContextFlagStillWins(t *testing.T) {
-	got := deployContexts(t, "--kube-context", "flag-ctx")
-	if len(got) == 0 {
-		t.Fatal("no cluster client was built")
-	}
+	got := deployContexts(t, nil, "--kube-context", "flag-ctx")
 	for _, c := range got {
 		if !strings.HasSuffix(c, ":flag-ctx") {
 			t.Errorf("--kube-context flag-ctx: a deploy asked for %q (all: %v)", c, got)
+		}
+	}
+}
+
+// The root's --kube-context (before the command) wins over the repo's too, and a subcommand's own
+// flag wins over the root's: the same precedence as for every other command.
+func TestDeployKubeContextRootFlagAndSubcommandFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		root  []string
+		extra []string
+		want  string
+	}{
+		{"root flag alone", []string{"--kube-context", "root-ctx"}, nil, "root-ctx"},
+		{"subcommand flag over root flag", []string{"--kube-context", "root-ctx"}, []string{"--kube-context", "sub-ctx"}, "sub-ctx"},
+	} {
+		for _, c := range deployContexts(t, tc.root, tc.extra...) {
+			if !strings.HasSuffix(c, ":"+tc.want) {
+				t.Errorf("%s: a deploy asked for %q, want %s", tc.name, c, tc.want)
+			}
 		}
 	}
 }

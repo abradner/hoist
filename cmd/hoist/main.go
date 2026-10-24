@@ -131,9 +131,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fs.Usage()
 			return exitUsage
 		}
-		rf := sel.resolve
-		rf.kubeContext = "" // the root's --kube-context is Settings.KubeContext, not a resolve flag
-		return tuiRunner(set, rf, stdout, stderr)
+		return tuiRunner(set, sel.resolve, stdout, stderr)
 	}
 	switch cmd := fs.Arg(0); cmd {
 	case "plan":
@@ -396,8 +394,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
 	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
-	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required unless envs.pairs names it from --to)")
-	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required unless envs.pairs names it from --from)")
+	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (default: the one env envs.pairs promotes into --to; --from alone is refused)")
+	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote; anything else is third-party and only reported. The default is a placeholder — set repos[].promotable in the config file or pass this flag with your registry path. An empty list is an error, not \"everything\"")
 	digests := digestFlag{}
 	fs.Var(digests, "digest", "repo=repo:tag@sha256:<64 hex> — plan this reference for repo instead of what --from runs; it must carry both a tag and a digest, and wins over the source env; a repo that --from does not run is an error (repeatable, one per repo)")
@@ -420,12 +418,18 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
+	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
+	// default" only when the flag was not given at all.
+	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
+		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
+	}
+	pairNote := ""
 	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
-		f, t, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
+		f, t, note, code, ok := pairedEnvs("hoist plan", set, *from, *to, stderr)
 		if !ok {
 			return code
 		}
-		*from, *to = f, t
+		*from, *to, pairNote = f, t, note
 	}
 	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
@@ -433,11 +437,6 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		return exitUsage
 	}
 	prefixes := set.Promotable
-	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
-	// default" only when the flag was not given at all.
-	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
-		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
-	}
 	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitUsage, err)
@@ -452,6 +451,8 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		return fail(stderr, "hoist plan", exitFailure, err)
 	}
+	// Every refusal is behind us: say which env pair envs.pairs filled in (empty when none was).
+	fmt.Fprint(stderr, pairNote)
 	// Signal/deadline-aware, exactly like runPromote/runDeploy's own ctx (promote.go's own
 	// comment on this same call): resolution can talk to the cluster and the registry, so ^C
 	// or the poll deadline must be able to interrupt it here too, not just the write path.

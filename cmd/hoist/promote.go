@@ -12,7 +12,6 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runPromote is `hoist promote`: builds the same gitops.Plan `hoist plan --dry-run` would
@@ -34,8 +33,8 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command)")
 	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
-	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (required unless envs.pairs names it from --to)")
-	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required unless envs.pairs names it from --from)")
+	from := fs.String("from", "", "source env: the Argo destination namespace to read digests from (default: the one env envs.pairs promotes into --to; --from alone is refused)")
+	to := fs.String("to", "", "target env: the Argo destination namespace to rewrite (required)")
 	promotable := fs.String("promotable", sel.promotable, "comma-separated image repo prefixes hoist may promote (see hoist plan -h)")
 	base := fs.String("base", sel.base, "the GitOps repo's default branch: what the promotion branch is created from and the PR targets (may also be given before the command)")
 	direct := fs.Bool("direct", false, "commit straight to --base with no PR — non-production envs only. internal/engine.DirectCommitGateStep refuses this outright for any env listed in the selected repo's envs.production, regardless of this flag: this flag is not itself the gate, only how the CLI reaches it. Requires --confirm-direct=<env> too")
@@ -68,12 +67,13 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
+	pairNote := ""
 	if set.RepoDir != "" && sel.given["from"] != sel.given["to"] {
-		f, t, code, ok := pairedEnvs("hoist promote", set, *from, *to, stderr)
+		f, t, note, code, ok := pairedEnvs("hoist promote", set, *from, *to, stderr)
 		if !ok {
 			return code
 		}
-		*from, *to = f, t
+		*from, *to, pairNote = f, t, note
 	}
 	if set.RepoDir == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist promote: --repo, --from and --to are required")
@@ -97,6 +97,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
 		return fail(stderr, "hoist promote", exitFailure, err)
 	}
+	fmt.Fprint(stderr, pairNote)
 	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
 
@@ -161,8 +162,7 @@ func renderStartError(stdout, stderr io.Writer, cmdName string, err error) (code
 	if errors.As(err, &usage) {
 		return failf(stderr, cmdName, exitUsage, "%s", usage.Msg), true
 	}
-	fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))
-	return exitFailure, true
+	return fail(stderr, cmdName, exitFailure, err), true
 }
 
 // reportDriveResult renders Driver.Run's outcome the same way for hoist promote and
@@ -200,22 +200,14 @@ func reportDriveResult(stdout, stderr io.Writer, cmdName, sourceEnv, targetEnv s
 		}
 		return 0
 	case errors.Is(err, engine.ErrWaiting):
-		fmt.Fprintf(stderr, "%s: still waiting for signing approval; re-run to resume\n", cmdName)
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "still waiting for signing approval; re-run to resume")
 	case errors.Is(err, context.DeadlineExceeded):
-		fmt.Fprintf(stderr, "%s: %s at %s (poll.deadline elapsed); re-run to resume\n", cmdName, s.Phase, redact.Strings(historyDetail(s)))
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "%s at %s (poll.deadline elapsed); re-run to resume", s.Phase, historyDetail(s))
 	case errors.Is(err, context.Canceled):
-		fmt.Fprintf(stderr, "%s: interrupted while %s; re-run to resume\n", cmdName, s.Phase)
-		return exitFailure
+		return failf(stderr, cmdName, exitFailure, "interrupted while %s; re-run to resume", s.Phase)
 	default:
-		var blocked *engine.BlockedError
-		if errors.As(err, &blocked) {
-			fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(blocked.Error()))
-			return exitFailure
-		}
-		fmt.Fprintf(stderr, "%s: %s\n", cmdName, redact.Strings(err.Error()))
-		return exitFailure
+		// A BlockedError and any other error print the same way; both are redacted by fail.
+		return fail(stderr, cmdName, exitFailure, err)
 	}
 }
 
@@ -244,8 +236,7 @@ func historyDetail(s *engine.PromotionState) string {
 func checkDirectPreflight(cmdName string, set service.Settings, direct bool, confirmDirect, targetEnv string, stderr io.Writer) int {
 	mode := service.Mode{Direct: direct}
 	if err := set.PreflightConfig(mode); err != nil {
-		code, _ := renderStartError(io.Discard, stderr, cmdName, err)
-		return code
+		return refusal(stderr, cmdName, err)
 	}
 	if !direct {
 		return 0
@@ -261,8 +252,7 @@ func checkDirectPreflight(cmdName string, set service.Settings, direct bool, con
 	// is true: reaching here required --confirm-direct to equal the target exactly.
 	mode.Confirmed = true
 	if err := set.PreflightGate(targetEnv, mode); err != nil {
-		code, _ := renderStartError(io.Discard, stderr, cmdName, err)
-		return code
+		return refusal(stderr, cmdName, err)
 	}
 	return 0
 }

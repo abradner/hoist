@@ -43,8 +43,9 @@ type WatchWorkload struct {
 // Watch is a read-only handle on one Argo Application and the workloads its family declares,
 // opened by OpenWatchApp or OpenWatchFamily. It holds the two cluster clients it reads through,
 // and nothing here can write: Read calls Argo.Get, Rollout.Deployment and Rollout.JobLike only —
-// never Argo.Refresh — which is the whole of watch's read-only guarantee (a compile-time fact of
-// the calls below, and a test asserts no Refresh ever reaches a fake).
+// never Argo.Refresh — which is the whole of watch's read-only guarantee (argo.Argo does have a
+// Refresh method, so it holds by the calls below and by the tests that assert no Refresh ever
+// reaches a fake, not by the type).
 type Watch struct {
 	// App and Namespace name what is watched; KubeContext is the kubeconfig context the clients
 	// resolved to, by name.

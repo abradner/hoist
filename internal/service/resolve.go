@@ -280,7 +280,7 @@ func (m *multiRegistry) distinctClients() []registry.Registry {
 // registry when it is a source — then resolves the source env's promotable occurrences. The
 // registries[] entry for the registry source is chosen per image repo (F4): see
 // registryEntryFor and entryAuthConfig. Moved from cmd/hoist's own runResolution; s.deps.Cluster/
-// Registry replace the package-level adaptors.Cluster/adaptors.Registry test seams.
+// Registry are what the old package-level newCluster/newRegistry variables became.
 func (s *Service) resolveImages(ctx context.Context, r *gitops.Repo, from string, overrides map[string]image.Ref) (*Resolution, error) {
 	opts := s.settings.Resolve
 	prefixes := s.settings.Promotable

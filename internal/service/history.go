@@ -17,9 +17,12 @@ import (
 // the tag picker and both confirm screens share every resolved revision and delta, the migrations
 // policy read per app-repo revision, the registry clients, and the last HEAD a blame resolved.
 //
-// What it does not hold is a failure. A forge or registry client is remembered once it was built
-// and never when it was not (ForgeFor's rule), so a `gh` login fixed mid-session recovers history
-// and the live age at once instead of staying broken until a restart (CS-3).
+// What it does not hold is a failed client. A forge or registry client is remembered once it was
+// built and never when it was not (ForgeFor's rule), so a `gh` login that was missing when the
+// client was built and is fixed mid-session recovers history and the live age at once instead of
+// staying broken until a restart (CS-3). Two limits: a client that was built with a token that
+// later turned bad is remembered (go-gh fixes the token into the client), and a revision the
+// registry could not label is answered from git tags alone and cached by migrate.Cache.
 type history struct {
 	mu       sync.Mutex
 	regs     map[string]registry.Registry // image repo -> built client

@@ -48,7 +48,7 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "hoist gc: %s\n", redact.Strings(line))
 	}
 	for _, line := range rep.Failed {
-		failf(stderr, "hoist gc", exitFailure, "%s", line)
+		fmt.Fprintf(stderr, "hoist gc: %s\n", redact.Strings(line))
 	}
 	if err != nil {
 		return fail(stderr, "hoist gc", exitFailure, err)

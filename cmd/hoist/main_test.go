@@ -419,6 +419,16 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
 		panic(err)
 	}
+	// State and cache default to the same throwaway directory, so a test that forgets to isolate
+	// them (newPromoteFixture does, per test) still cannot write promotion state or worktrees under
+	// the maintainer's home. This does NOT make `promote` against testdata/repo safe: that is a
+	// worktree of the real hoist repository and a promote creates its branch there. Tests that can
+	// reach a real promote use newPromoteFixture or pairedPromoteFixture.
+	for _, v := range []string{"XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		if err := os.Setenv(v, filepath.Join(dir, strings.ToLower(v))); err != nil {
+			panic(err)
+		}
+	}
 	adaptors.Cluster = func(string) (k8s.Cluster, string, error) { return &k8s.Fake{}, "test-context", nil }
 	adaptors.Registry = func(registry.AuthConfig) (registry.Registry, error) { return &registry.Fake{}, nil }
 	code := m.Run()

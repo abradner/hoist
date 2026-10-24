@@ -155,11 +155,14 @@ hoist plan    --from app-staging --to app-production --dry-run
 hoist promote --from app-staging --to app-production
 ```
 
-With `envs.pairs` configured, one end is enough: `hoist promote --to app-production` takes the
-source from the pair that promotes into it, and `--from app-staging` alone takes the target. It
-says on stderr which pair it used. If the config cannot decide — nothing promotes into that env,
-several envs do, or there is no config file — the command refuses and names the flag to give; with
-neither flag it still asks for both.
+With `envs.pairs` configured, `--to` is enough: `hoist promote --to app-production` takes its source
+from the one env the config promotes into it (its immediate ancestor), and says on stderr which pair
+it used; `--from` is only for a source other than that one, such as `--from app-dev --to
+app-production` to skip a stage. `--from` on its own is refused: it does not say where to promote,
+and a command line that never names the target never writes into one. If the config cannot decide
+the source — nothing promotes into that env, several envs do (name `--from`), or no `repos[]` entry
+is selected (no config file, or a `--repo` path the config does not list) — the command refuses and
+names the flag to give; with neither flag it still asks for both.
 
 **What the CLI prints while it works.** `promote`, `deploy` and `resume` say what they are doing
 on stderr, one line as each phase starts and one as each write finishes; stdout stays the final
@@ -382,7 +385,10 @@ hoist deploy --env app-staging --image ghcr.io/me/web:v3@sha256:…
 ```
 
 After enter, everything is as for a promotion: the same pipeline, the same flight screen, the same
-gates.
+gates. The Argo refresh and the rollout watch run in `--kube-context` when given, else the repo's
+`kube.context`, else the kubeconfig's current context — as for every other command. (Before the
+change that made it so, `hoist deploy` ignored the repo's `kube.context` unless the flag was given,
+so a deploy in a repo that sets one went to the current context.)
 
 ## Restart a family
 

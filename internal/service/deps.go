@@ -14,8 +14,10 @@ import (
 
 // Deps is the set of constructors a Service is built from — never the clients themselves.
 // cmd/hoist's serviceDeps() wraps its own package-level test seam (adaptors) in
-// closures that read the seam AT CALL TIME, so a test that reassigns one mid-test still sees its own fake through any Service built before or after the reassignment;
-// nothing here is a snapshot taken once.
+// closures that read the seam AT CALL TIME, so a Service built before a test reassigns one still
+// reaches the new fake the next time it builds that client (a client the Service already built and
+// memoised, Forge/Argo/Rollout, stays: see Service). Nothing here is a snapshot taken once; the
+// call-time read is pinned by TestServiceDepsReadTheAdaptorsAtCallTime in cmd/hoist.
 //
 // None of these constructors ever see a secret value directly — that is still resolved inside
 // pkg/k8s and pkg/registry exactly as it is today (AGENTS.md §4.10, R-002); Deps only decides

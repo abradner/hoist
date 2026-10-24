@@ -8,6 +8,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/engine"
+	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/rollout"
 )
@@ -25,7 +26,7 @@ func TestCheckRestartConfirmed(t *testing.T) {
 		{"production, none given", configured, "app-production", "", "app-production is a production env; restarting it requires --confirm-production=app-production as well"},
 		{"production, wrong env repeated", configured, "app-production", "app-staging", `--confirm-production="app-staging" does not match --env "app-production"; repeat the exact env to acknowledge`},
 		{"production, acknowledged", configured, "app-production", "app-production", ""},
-		{"no config, none given", service.Settings{}, "app-production", "", "no configured repo, so hoist cannot tell whether app-production is production; pass --confirm-production=app-production to restart it anyway"},
+		{"no config, none given", service.Settings{}, "app-production", "", "no repos[] entry is selected, so hoist cannot tell whether app-production is production; pass --confirm-production=app-production to restart it anyway"},
 		{"no config, acknowledged", service.Settings{}, "app-production", "app-production", ""},
 	} {
 		err := tc.set.CheckRestartConfirmed(tc.env, tc.confirm)
@@ -75,5 +76,64 @@ func TestRestartAsksTheClusterPerCall(t *testing.T) {
 	}
 	if len(pl.Targets) != 1 || pl.Targets[0].Name != "app" {
 		t.Errorf("plan = %+v, want the one Deployment asked for", pl)
+	}
+}
+
+// The restart calls use Settings.KubeContext, every one of them: a restart patches a LIVE
+// Deployment, so which cluster it lands on is the one thing it must not get wrong. The fakes of
+// the CLI tests ignore the context they are handed; this one records it.
+func TestRestartCallsAskForTheSettingsKubeContext(t *testing.T) {
+	fr := &rollout.Fake{}
+	fr.SetDeployment("app-production", "app", rollout.DeploymentStatus{})
+	var asked []string
+	svc := service.New(service.Settings{KubeContext: "staging-ctx"}, service.Deps{
+		Rollout: func(kc string) (rollout.Rollout, string, error) { asked = append(asked, kc); return fr, kc, nil },
+	})
+	ctx := context.Background()
+	pl, err := svc.RestartRead(ctx, "app-production", []string{"app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	if _, err := svc.RestartDo(ctx, pl, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RestartObserve(ctx, "app-production", []string{"app"}, at); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) == 0 {
+		t.Fatal("no rollout client was asked for (positive control)")
+	}
+	for _, kc := range asked {
+		if kc != "staging-ctx" {
+			t.Errorf("a restart call asked for kube context %q, want staging-ctx (all: %v)", kc, asked)
+		}
+	}
+}
+
+// Do and Observe ask for the client when called too, not only Read: a cluster that was down on
+// the first R is retried by whichever call needs it next.
+func TestRestartDoAndObserveRetryAFailedCluster(t *testing.T) {
+	fr := &rollout.Fake{}
+	fr.SetDeployment("app-production", "app", rollout.DeploymentStatus{})
+	attempts := 0
+	svc := service.New(service.Settings{}, service.Deps{
+		Rollout: func(string) (rollout.Rollout, string, error) {
+			attempts++
+			if attempts <= 2 {
+				return nil, "", errors.New("cluster unreachable")
+			}
+			return fr, "ctx", nil
+		},
+	})
+	ctx := context.Background()
+	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.DeploymentStatus{{Name: "app"}}}, time.Now()); err == nil {
+		t.Fatal("RestartDo against a down cluster succeeded")
+	}
+	if _, err := svc.RestartObserve(ctx, "app-production", []string{"app"}, time.Now()); err == nil {
+		t.Fatal("RestartObserve against a down cluster succeeded")
+	}
+	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.DeploymentStatus{{Name: "app"}}}, time.Now()); err != nil {
+		t.Errorf("RestartDo after the cluster came back: %v (the failure was remembered)", err)
 	}
 }
