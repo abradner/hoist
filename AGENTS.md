@@ -233,8 +233,10 @@ a promotion it replaced, and an Application with one superseded occurrence and o
 stays health-gated. When a health-gated Application is Synced but not Healthy, the step names
 the Deployment still converging, and Blocks on one past its progress deadline; that read
 (`rolloutCause`) covers only that Application's own edits, and only the occurrences not
-superseded at the revision Argo synced, so neither another Application's Deployment nor a later
-deploy's failed rollout can Block it (#259). Argo's revision can lag the base: when the base has since undone the
+superseded at the revision Argo synced, so that read cannot Block on another Application's
+Deployment or on a later deploy's failed rollout (#259). It does not override the Application's
+own health: an Application holding both an intact and a superseded occurrence is still
+health-gated, so a later deploy's failed rollout in it can still Block through Degraded. Argo's revision can lag the base: when the base has since undone the
 supersede (the image put back, a rewrite, the branch gone), the stale revision no longer stands
 for this promotion, and nor do its health and operation phase — they are the later deploy's, and
 reverting a deploy that broke is the likeliest way a supersede is undone — so the step waits for
