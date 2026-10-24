@@ -383,27 +383,34 @@ const (
 // With a nil Git only case 1 can be decided, so everything else is "not carried" — the exact
 // pre-#165 behaviour, and no caller in this repo takes that path.
 func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, appName, rev string, base *baseFetch) (carries carriage, why string, err error) {
-	// The shortcut holds only where LandedSHA() is this promotion's own commit, at which its
-	// edits are intact by construction: the merge commit on the PR path, and on the direct path
-	// the pushed commit while PushedSHA is still it. A supersede moves a direct promotion's
-	// PushedSHA to the superseding tip (DirectPushedStep records the revision that carries the
-	// content), and that revision has to be judged like any other descendant, or the later
-	// deploy's health would gate the promotion it replaced (#291).
 	// The anchor is this promotion's own commit: the merge commit on the PR path, and on the
 	// direct path the pushed commit itself (CommitSHA), not PushedSHA. DirectPushedStep moves
 	// PushedSHA to whatever tip still carries the content, on every walk, so anchoring there
 	// made any Argo revision older than the live tip "not carried" and blocked on the health of
 	// a later deploy's revision (foreman's read of #326). At its own commit a promotion's edits
 	// are intact by construction, so that revision is carried outright.
+	//
+	// Only while that commit is in the landed history, though: the base can carry a direct
+	// promotion's exact content without its commit (rewritten with the content kept, or the
+	// identical bytes committed by someone else), which DirectPushedStep reads intact by
+	// content and records as the tip. Anchored on a commit that will never enter that history,
+	// Argo synced and Healthy at the tip waited forever (Codex on #336); there the tip
+	// DirectPushedStep just found intact is the anchor. A supersede needs this promotion's
+	// commit in the base's history (DirectPushedStep), so it always takes the first branch.
 	anchor := s.LandedSHA()
-	if s.Direct && s.CommitSHA != "" {
-		anchor = s.CommitSHA
+	if a.Git == nil || rev == "" || s.CloneDir == "" {
+		if rev != "" && rev == anchor && (!s.Direct || s.PushedSHA == s.CommitSHA) {
+			return revCarried, "", nil
+		}
+		return revNotCarried, "", nil
+	}
+	if s.Direct && s.CommitSHA != "" && s.CommitSHA != anchor {
+		if own, aerr := a.Git.IsAncestor(ctx, s.CloneDir, s.CommitSHA, anchor); aerr == nil && own {
+			anchor = s.CommitSHA
+		}
 	}
 	if rev == anchor {
 		return revCarried, "", nil
-	}
-	if a.Git == nil || rev == "" || s.CloneDir == "" {
-		return revNotCarried, "", nil
 	}
 	// The revision Argo reports is one this clone may never have seen: fetch the base before
 	// asking about its object graph, exactly as DirectPushedStep.Observe does. Once per
@@ -466,9 +473,9 @@ func (a ArgoSyncedStep) revisionCarries(ctx context.Context, s *PromotionState, 
 		stale := func(why string) (carriage, string, error) {
 			return revStale, fmt.Sprintf("want %s (the revision Argo synced superseded this promotion, but %s's tip %s)", base.tip, s.Base, why), nil
 		}
-		atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, s.LandedSHA(), base.tip)
+		atTip, terr := a.Git.IsAncestor(ctx, s.CloneDir, anchor, base.tip)
 		if terr != nil {
-			// Both commits are in the clone (LandedSHA() was just found in rev's history, and
+			// Both commits are in the clone (the anchor was just found in rev's history, and
 			// the tip was just fetched), so this is a genuine failure, not an answer. Reported,
 			// for the poll to ask again, never dressed as "the tip no longer contains it".
 			return revNotCarried, "", fmt.Errorf("checking whether %s's tip %s contains this promotion's landing %s: %w", s.Base, base.tip, s.LandedSHA(), terr)

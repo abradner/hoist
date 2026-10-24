@@ -94,3 +94,48 @@ func TestDirectModeMissingCommitIsNotLandedNotAnError(t *testing.T) {
 		}
 	}
 }
+
+// TestArgoSyncedDirectPathContentIntactWithoutItsCommit (Codex on #336): the base can carry a
+// direct promotion's exact content without its commit — the base rewritten with the content
+// kept, or someone committing the identical bytes. DirectPushedStep reads that intact (content
+// is the test for intact) and records the tip. Argo synced and Healthy at that tip is carried;
+// anchoring on the promotion's own commit, which will never enter that history, waited forever.
+func TestArgoSyncedDirectPathContentIntactWithoutItsCommit(t *testing.T) {
+	w := newWorld(t)
+	s := w.directDeploy()
+	s.EditApps = map[string]string{}
+	for _, e := range s.Edits {
+		s.EditApps[e.File] = testApp
+	}
+	// Rewrite the base: drop the promotion's commit and land the same bytes in another one.
+	other := filepath.Join(t.TempDir(), "rewrite-clone")
+	runHost(t, "", "clone", "-q", w.fx.originDir, other)
+	file := s.Edits[0].File
+	want, err := os.ReadFile(filepath.Join(other, file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, other, "reset", "-q", "--hard", s.CommitSHA+"^")
+	if err := os.WriteFile(filepath.Join(other, file), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHost(t, other, "commit", "-q", "-a", "-m", "the same content, another commit")
+	runHost(t, other, "push", "-q", "--force", "origin", "HEAD:main")
+	tip, ok, err := w.g.LsRemoteBranch(context.Background(), s.CloneDir, "origin", s.Base)
+	if err != nil || !ok || tip == s.CommitSHA {
+		t.Fatalf("setup: tip %s should be a different commit from %s (ok=%v err=%v)", tip, s.CommitSHA, ok, err)
+	}
+	if obs, err := (DirectPushedStep{Git: w.g}).Observe(context.Background(), s); err != nil || !obs.Satisfied {
+		t.Fatalf("setup: identical content at the tip reads intact: %+v, %v", obs, err)
+	}
+	a := &argo.Fake{}
+	a.SetStatus(argo.Application{Namespace: testArgoNamespace, Name: testApp},
+		argo.Status{SyncStatus: argo.SyncStatusSynced, SyncRevision: tip, HealthStatus: argo.HealthStatusHealthy})
+	obs, err := ArgoSyncedStep{Argo: a, Git: w.g}.Observe(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.Satisfied {
+		t.Fatalf("Argo synced and Healthy at a tip carrying this promotion's content: want Satisfied, got %+v", obs)
+	}
+}
