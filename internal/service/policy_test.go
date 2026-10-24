@@ -90,8 +90,9 @@ func pairSettings(pairs map[string]string) service.Settings {
 	return service.Settings{Repo: &config.RepoConfig{Envs: config.EnvsConfig{Pairs: pairs}}}
 }
 
-// TestPairEnvs: one end given and the config pairs the other — filled in; ambiguous, unpaired or
-// unconfigured — refused with the flag to give; both or neither — returned as they are.
+// TestPairEnvs: --to alone and the config pairs a source into it — filled in; ambiguous, unpaired or
+// unconfigured — refused with the flag to give; --from alone — refused, the target is never derived;
+// both or neither — returned as they are.
 func TestPairEnvs(t *testing.T) {
 	one := pairSettings(map[string]string{"stg": "prod"})
 	many := pairSettings(map[string]string{"stg": "prod", "canary": "prod"})
@@ -105,13 +106,13 @@ func TestPairEnvs(t *testing.T) {
 		{"both given", one, "a", "b", "a", "b", ""},
 		{"neither given", one, "", "", "", "", ""},
 		{"to alone", one, "", "prod", "stg", "prod", ""},
-		{"from alone", one, "stg", "", "stg", "prod", ""},
+		{"from alone is refused, even when it is paired", one, "stg", "", "", "", "--from stg alone does not say where to promote; name the target with --to (--to alone takes its source from envs.pairs)"},
 		{"to with no source", one, "", "stg", "", "", "no envs.pairs entry promotes into stg; name the source with --from"},
-		{"from with no target", one, "prod", "", "", "", "no envs.pairs entry says where prod promotes to; name the target with --to"},
+		{"from alone, a chain end", one, "prod", "", "", "", "--from prod alone does not say where to promote; name the target with --to (--to alone takes its source from envs.pairs)"},
 		{"to with several sources", many, "", "prod", "", "", "several envs.pairs entries promote into prod (canary, stg); name the source with --from"},
-		{"from, and no pair at all", pairSettings(nil), "stg", "", "", "", "no envs.pairs entry says where stg promotes to; name the target with --to"},
+		{"from alone, no pair at all", pairSettings(nil), "stg", "", "", "", "--from stg alone does not say where to promote; name the target with --to (--to alone takes its source from envs.pairs)"},
 		{"to, no configured repo", service.Settings{}, "", "prod", "", "", "no repos[] entry is selected, so envs.pairs is unknown; name the source with --from"},
-		{"from, no configured repo", service.Settings{}, "stg", "", "", "", "no repos[] entry is selected, so envs.pairs is unknown; name the target with --to"},
+		{"from alone, no configured repo", service.Settings{}, "stg", "", "", "", "--from stg alone does not say where to promote; name the target with --to (--to alone takes its source from envs.pairs)"},
 	} {
 		f, to, err := tc.set.PairEnvs(tc.from, tc.to)
 		if tc.wantErr != "" {

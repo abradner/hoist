@@ -24,8 +24,10 @@ func pairsConfigWithGitHub(t *testing.T) string {
 
 // #173: envs.pairs states which env promotes into which, and until now only the TUI read it.
 // `hoist plan` and `hoist promote` demanded both --from and --to even when the config already
-// named the other one. With one given, the other is the configured pair; the dry run's output is
-// byte for byte the explicit command's, and stderr says which pair it used.
+// named the source. --to is the required end and --from is optional: given only --to, the source
+// is the one env the config promotes into it (its immediate ancestor); the dry run's output is
+// byte for byte the explicit command's, and stderr says which pair it used. A lone --from is
+// refused, never completed (see TestALoneFromIsRefusedNotCompleted).
 func TestPlanTakesTheMissingEnvFromEnvsPairs(t *testing.T) {
 	cfg := pairsConfig(t)
 	args := func(extra ...string) []string {
@@ -41,7 +43,6 @@ func TestPlanTakesTheMissingEnvFromEnvsPairs(t *testing.T) {
 		note  string
 	}{
 		{"--to alone", []string{"--to", "app-production"}, "--from not given; envs.pairs promotes app-staging into app-production"},
-		{"--from alone", []string{"--from", "app-staging"}, "--to not given; envs.pairs promotes app-staging into app-production"},
 	} {
 		code, got, errOut := run3(t, args(tc.extra...)...)
 		if code != 0 {
@@ -67,7 +68,8 @@ func TestPlanRefusesWhenEnvsPairsCannotFillTheOtherEnvIn(t *testing.T) {
 		want  string
 	}{
 		{"nothing promotes into the target", pairsConfig(t), []string{"--to", "app-staging"}, "no envs.pairs entry promotes into app-staging; name the source with --from"},
-		{"the source has no target", pairsConfig(t), []string{"--from", "app-production"}, "no envs.pairs entry says where app-production promotes to; name the target with --to"},
+		{"a lone --from, paired", pairsConfig(t), []string{"--from", "app-staging"}, "--from app-staging alone does not say where to promote; name the target with --to"},
+		{"a lone --from, a chain end", pairsConfig(t), []string{"--from", "app-production"}, "--from app-production alone does not say where to promote; name the target with --to"},
 		{"several sources", pairsConfig(t, "app-canary: app-production"), []string{"--to", "app-production"}, "several envs.pairs entries promote into app-production (app-canary, app-staging); name the source with --from"},
 		{"no configured repo", "", []string{"--to", "app-production"}, "no repos[] entry is selected, so envs.pairs is unknown; name the source with --from"},
 	} {
@@ -104,7 +106,7 @@ func TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs(t *testing.T) {
 				full = append(full, "--dry-run")
 			}
 			code, out, errOut := run3(t, full...)
-			if code != exitUsage || !strings.Contains(errOut, "hoist "+cmd+": --repo, --from and --to are required") || strings.Contains(errOut, "envs.pairs promotes") || out != "" {
+			if code != exitUsage || !strings.Contains(errOut, "hoist "+cmd+": --repo, --from and --to are required") || strings.Contains(errOut, "not given; envs.pairs promotes") || out != "" {
 				t.Errorf("%s %q: exit %d, stdout %q, stderr %.200q; want the plain refusal and nothing planned or started", cmd, args, code, out, errOut)
 			}
 		}
@@ -123,9 +125,9 @@ func TestPlanWithNeitherEnvIsStillRefused(t *testing.T) {
 	}
 }
 
-// promote resolves the pair the same way, before anything is planned or written: with the pair
-// filled in from the config it drives the promotion `promote --from … --to …` drives, and with
-// nothing to fill it in it refuses without touching the repo or the forge.
+// promote resolves the source the same way, before anything is planned or written: with it filled in
+// from the config it drives the promotion `promote --from … --to …` drives, and with nothing to
+// fill it in it refuses without touching the repo or the forge.
 func TestPromoteTakesTheMissingEnvFromEnvsPairs(t *testing.T) {
 	cfgPath, clone, _ := newPromoteFixture(t)
 	body, err := os.ReadFile(cfgPath)
@@ -193,12 +195,35 @@ func TestPairingNoteIsNotPrintedForARefusedCommand(t *testing.T) {
 		if !strings.Contains(errOut, reason) {
 			t.Errorf("%s: refused for some other reason than the unknown digest source:\n%.300s", tc.name, errOut)
 		}
-		if strings.Contains(errOut, "envs.pairs promotes") {
+		if strings.Contains(errOut, "not given; envs.pairs promotes") {
 			t.Errorf("%s: the refused command announced a pairing first:\n%s", tc.name, errOut)
 		}
 	}
 	// Positive control: the same plan with a valid digest source does print the note.
 	if code, _, errOut := run3(t, "--config", pairsConfig(t), "--digest-sources", "none", "plan", "--dry-run", "--to", "app-production"); code != 0 || !strings.Contains(errOut, "--from not given; envs.pairs promotes app-staging into app-production") {
 		t.Errorf("control: exit %d, stderr %.200q", code, errOut)
+	}
+}
+
+// A lone --from is meaningless: it does not say where to promote, and completing it from the config
+// would let a command line that never names an env write into one (production included, with
+// approval: auto: no human step). It is refused by plan and by promote, and promote starts nothing:
+// no branch, no state, no PR. The positive control is the same source with --to, which runs.
+func TestALoneFromIsRefusedNotCompleted(t *testing.T) {
+	cfg := pairsConfigWithGitHub(t)
+	for _, args := range [][]string{
+		{"plan", "--dry-run", "--from", "app-staging"},
+		{"promote", "--from", "app-staging"},
+	} {
+		code, out, errOut := run3(t, append([]string{"--config", cfg, "--digest-sources", "none"}, args...)...)
+		if code != exitUsage || out != "" || !strings.Contains(errOut, "--from app-staging alone does not say where to promote; name the target with --to") {
+			t.Errorf("%v: exit %d, stdout %q, stderr %.250q", args, code, out, errOut)
+		}
+		if strings.Contains(errOut, "not given; envs.pairs promotes") {
+			t.Errorf("%v: a refused command announced a pairing:\n%s", args, errOut)
+		}
+	}
+	if code, _, errOut := run3(t, "--config", cfg, "--digest-sources", "none", "plan", "--dry-run", "--from", "app-staging", "--to", "app-production"); code != 0 {
+		t.Errorf("control: the explicit pair failed: exit %d: %.200s", code, errOut)
 	}
 }

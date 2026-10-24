@@ -41,25 +41,23 @@ func commandContext(deadline time.Duration) (context.Context, context.CancelFunc
 	return ctx, func() { cancel(); stop() }
 }
 
-// pairedEnvs resolves --from and --to for plan and promote: with both or neither given they are
-// returned unchanged (the caller's own "required" refusal covers neither), and with exactly one
-// given — the caller checks that the flag was GIVEN, not that its value is non-empty, so
-// `--to "$UNSET"` stays the refusal it always was (§9 entry 16) — the other is the pair
-// envs.pairs configures (service.Settings.PairEnvs, #173). note is the stderr line that names the
-// pair used, so the operator sees which promotion they are about to plan or start; it is returned,
-// not printed, so the caller prints it only once every other refusal has been passed and the note
-// never announces a command that is then refused. ok is false when the config could not fill the
-// other env in; code is then the exit code.
+// pairedEnvs resolves --from for plan and promote: --to is the required end, and with --to given
+// and --from not, the source is the one env envs.pairs promotes into it (service.Settings.PairEnvs,
+// #173). A lone --from is refused: the target is never derived. With both or neither given they are
+// returned unchanged (the caller's own "required" refusal covers neither). The caller checks that
+// each flag was GIVEN, not that its value is non-empty, so `--to "$UNSET"` stays the refusal it
+// always was (§9 entry 16). note is the stderr line that names the pair used, so the operator sees
+// which promotion they are about to plan or start; it is returned, not printed, so the caller
+// prints it only once every other refusal has been passed and the note never announces a command
+// that is then refused. ok is false when the config could not fill the source in; code is then the
+// exit code.
 func pairedEnvs(who string, set service.Settings, from, to string, stderr io.Writer) (f, t, note string, code int, ok bool) {
 	pf, pt, err := set.PairEnvs(from, to)
 	if err != nil {
 		return "", "", "", refusal(stderr, who, err), false
 	}
-	switch {
-	case from == "" && pf != "":
+	if from == "" && pf != "" {
 		note = fmt.Sprintf("%s: --from not given; envs.pairs promotes %s into %s\n", who, pf, pt)
-	case to == "" && pt != "":
-		note = fmt.Sprintf("%s: --to not given; envs.pairs promotes %s into %s\n", who, pf, pt)
 	}
 	return pf, pt, note, 0, true
 }

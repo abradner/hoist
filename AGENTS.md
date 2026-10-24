@@ -1438,8 +1438,10 @@ test lives** (if one exists).
    root's flag, usually `""`, so the repo's configured context was lost and a deploy's Argo refresh
    and rollout watch went to whatever the kubeconfig's current context was; every other command was
    right and the flag help promised the right thing. The same stack's first draft of #173 (fill in
-   the missing `--from`/`--to` from `envs.pairs`) tested "missing" with `*to == ""`, so
-   `--to "$UNSET"` was quietly planned into the paired env instead of refused. Both were found by
+   the missing end from `envs.pairs`) tested "missing" with `*to == ""`, so `--to "$UNSET"` was
+   quietly planned into the paired env instead of refused. (Operator review then settled the
+   design: `--to` is the required end, `--from` defaults to the target's one ancestor, and a lone
+   `--from` is refused, so no target is ever derived.) Both were found by
    an independent read, not a test. Root cause: a layer re-asserted at the call site "to be safe"
    after the one place that owns the rule had already applied it; and a value standing in for the
    question whether the flag was given. Rule: a precedence is applied in one function

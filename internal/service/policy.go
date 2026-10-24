@@ -107,40 +107,30 @@ func (s Settings) PreflightGate(target string, m Mode) error {
 	return nil
 }
 
-// PairEnvs fills in whichever of from and to the operator left out from envs.pairs (source env ->
-// target env), so `hoist plan` and `hoist promote` can be told one end of a promotion the config
-// already pairs (#173) — the matrix's `p` has always done this. With both given, or neither, it
-// returns them as they are: neither names no promotion at all (a config with several pairs does
-// not say which is meant), and the caller refuses it as it always did.
+// PairEnvs fills in a promotion's source from envs.pairs (source env -> target env), so
+// `hoist plan` and `hoist promote` need only name where to promote TO (#173): --to is the required
+// end, and --from is optional, defaulting to the one env envs.pairs promotes into it (the target's
+// immediate ancestor). The target is never derived: a lone --from does not say where to promote,
+// and filling it in would let a command line that never names an env write into it (production
+// included), so it is refused, as it was before pairs were read by the CLI at all. With both given,
+// or neither, from and to are returned as they are; neither names no promotion (a config with
+// several pairs does not say which is meant) and the caller refuses it as it always did.
 //
-// Given only to, the source is the one env envs.pairs promotes into it; given only from, the
-// target is the one it pairs from names. Anything short of exactly one is a *UsageError that says
-// what the config could not decide and which flag to give, so a defaulting that is ambiguous is
-// refused, never guessed (principle 5 warns, but a wrong source env reads the wrong digests).
+// Given only to, the source is the one env envs.pairs promotes into it. Anything short of exactly
+// one is a *UsageError that says what the config could not decide and which flag to give, so a
+// defaulting that is ambiguous is refused, never guessed (principle 5 warns, but a wrong source env
+// reads the wrong digests).
 func (s Settings) PairEnvs(from, to string) (string, string, error) {
 	if (from == "") == (to == "") {
 		return from, to, nil
 	}
-	if s.Repo == nil {
-		flag := "--from"
-		if to == "" {
-			flag = "--to"
-		}
-		what := "source"
-		if to == "" {
-			what = "target"
-		}
-		return "", "", &UsageError{Msg: fmt.Sprintf("no repos[] entry is selected, so envs.pairs is unknown; name the %s with %s", what, flag)}
-	}
-	envs := s.Repo.Envs
 	if to == "" {
-		target, ok := envs.Pairs[from]
-		if !ok || target == "" {
-			return "", "", &UsageError{Msg: fmt.Sprintf("no envs.pairs entry says where %s promotes to; name the target with --to", from)}
-		}
-		return from, target, nil
+		return "", "", &UsageError{Msg: fmt.Sprintf("--from %s alone does not say where to promote; name the target with --to (--to alone takes its source from envs.pairs)", from)}
 	}
-	switch sources := envs.SourcesOf(to); len(sources) {
+	if s.Repo == nil {
+		return "", "", &UsageError{Msg: "no repos[] entry is selected, so envs.pairs is unknown; name the source with --from"}
+	}
+	switch sources := s.Repo.Envs.SourcesOf(to); len(sources) {
 	case 0:
 		return "", "", &UsageError{Msg: fmt.Sprintf("no envs.pairs entry promotes into %s; name the source with --from", to)}
 	case 1:
