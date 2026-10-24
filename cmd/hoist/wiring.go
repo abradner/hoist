@@ -18,23 +18,14 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
-// buildPollDurations translates config.PollConfig's CI/Approval/Argo/Rollout/Deadline into
-// flight.PollDurations — the plain-value shape the flight screen actually needs (AGENTS.md
-// §4.8: the screen never imports internal/config itself). All five are translated now that the
-// screen drives the Argo and rollout steps too; it previously stopped at Merged, so poll.argo
-// and poll.rollout had no analogue to carry (issue #64). The CI/Approval/Argo/Rollout four are
-// the identical conversion pollIntervals (drive.go) makes for engine.PollIntervals — reused here
-// rather than a third hand-copy of the same four fields, plus Deadline, which flight.PollDurations
-// carries and engine.PollIntervals does not.
-func buildPollDurations(poll config.PollConfig) flight.PollDurations {
-	pi := pollIntervals(poll)
-	return flight.PollDurations{
-		CI:       pi.CI,
-		Approval: pi.Approval,
-		Argo:     pi.Argo,
-		Rollout:  pi.Rollout,
-		Deadline: time.Duration(poll.Deadline),
-	}
+// flightPoll is the flight screen's slice of the poll config (AGENTS.md §4.8: the screen never
+// imports internal/config). The app root reads two of its values: Deadline bounds a promotion that
+// is still being built, and Approval is how often the in-flight listing re-observes
+// (session.Config.ListEvery, internal/app/app.go). The CI, Argo and rollout cadences the other
+// fields once carried belong to the session controller and the engine now, and are left zero (T7
+// removes the dead fields from flight.PollDurations, AR-L4).
+func flightPoll(poll config.PollConfig) flight.PollDurations {
+	return flight.PollDurations{Approval: time.Duration(poll.Approval), Deadline: time.Duration(poll.Deadline)}
 }
 
 // browserOpener builds the launch mechanism flight.OpenPRMsg's handler calls when
@@ -49,29 +40,19 @@ var browserOpener = func(timeout time.Duration) func(url string) error {
 }
 
 // browserCommand is the pure half of defaultOpenBrowser: for a given runtime.GOOS value, it
-// picks the program and arguments that would open url in the operator's default browser —
-// `open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler <url>` on Windows —
-// without ever touching os/exec. The Windows branch deliberately avoids `cmd /c start`: cmd.exe
-// parses metacharacters like `&|<>` in its command line, so a URL containing one would be split
-// and reinterpreted rather than passed through verbatim — a real command-injection risk in
-// general, even though today's one caller only ever passes a forge-returned PR URL (see
-// defaultOpenBrowser's own doc comment). rundll32's FileProtocolHandler entry point takes the
-// URL as a single opaque argument and never invokes a shell, so no such splitting can happen
-// Any other GOOS falls back to xdg-open's Unix convention rather than
-// erroring outright, on the theory that a BSD or other Unix system hoist happens to run on is
-// more likely to have xdg-open than not. Taking goos as a parameter (rather than reading runtime.GOOS
-// itself) is the seam wiring_test.go uses to exercise every branch on every OS, without a build
-// tag per branch and without ever calling exec.Command in a test (no test in this repo launches
-// a real browser).
+// picks the program and arguments that would open url in the operator's default browser — `open`
+// on macOS, `xdg-open` on everything else — without ever touching os/exec. hoist is released for
+// darwin and linux only (.goreleaser.yaml), so there is no Windows branch to maintain; any other
+// GOOS gets xdg-open's Unix convention rather than an error, on the theory that a BSD hoist is
+// built on by hand is more likely to have it than not. Taking goos as a parameter (rather than
+// reading runtime.GOOS itself) is the seam wiring_test.go uses to exercise every branch on every
+// OS, without a build tag per branch and without ever calling exec.Command in a test (no test in
+// this repo launches a real browser).
 func browserCommand(goos, url string) (name string, args []string) {
-	switch goos {
-	case "darwin":
+	if goos == "darwin" {
 		return "open", []string{url}
-	case "windows":
-		return "rundll32", []string{"url.dll,FileProtocolHandler", url}
-	default:
-		return "xdg-open", []string{url}
 	}
+	return "xdg-open", []string{url}
 }
 
 // defaultOpenBrowser opens url in the operator's default browser (no new dependency, AGENTS.md
@@ -96,10 +77,9 @@ func browserCommand(goos, url string) (name string, args []string) {
 //
 // The only caller today is flight.OpenPRMsg's handler (app.go), whose url is always
 // PRURL(state) — a PR URL the forge itself returned when this promotion opened it, not
-// something an attacker gets to choose in the common case. browserCommand's own Windows
-// hardening (no cmd.exe metacharacter parsing) is worth having regardless: it is free, and
-// this function's contract ("open this url") should not depend on trusting every caller to
-// have vetted url first.
+// something an attacker gets to choose in the common case. The URL is passed as one argument
+// to a launcher that runs no shell, so no metacharacter in it can split into a second command
+// whoever supplies it.
 func defaultOpenBrowser(timeout time.Duration, url string) error {
 	name, args := browserCommand(runtime.GOOS, url)
 	if err := runLauncher(timeout, name, args...); err != nil {

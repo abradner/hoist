@@ -499,7 +499,6 @@ func TestBrowserCommandPerOS(t *testing.T) {
 		wantArgs []string
 	}{
 		{"darwin", "open", []string{url}},
-		{"windows", "rundll32", []string{"url.dll,FileProtocolHandler", url}},
 		{"linux", "xdg-open", []string{url}},
 		{"freebsd", "xdg-open", []string{url}}, // unlisted GOOS falls back to the Unix convention
 	}
