@@ -112,13 +112,12 @@ func runAbandon(args []string, cfg *config.Config, stdout, stderr io.Writer) int
 		return exitUsage
 	}
 	if *confirm != id {
-		fmt.Fprintf(stderr, "hoist abandon: --confirm-abandon must repeat %s exactly to confirm — nothing was touched\n", id)
-		return exitUsage
+		return failf(stderr, "hoist abandon", exitUsage, "--confirm-abandon must repeat %s exactly to confirm — nothing was touched", id)
 	}
 
 	set := promotionsSettings(cfg, "")
 	svc := service.New(set, serviceDeps())
-	ctx, stop := boundedCommandContext(set.Deadline)
+	ctx, stop := commandContext(set.Deadline)
 	defer stop()
 
 	n := newNarrator(stderr, *quiet)
@@ -132,8 +131,7 @@ func runAbandon(args []string, cfg *config.Config, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "hoist abandon: %s\n", line)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist abandon: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist abandon", exitFailure, err)
 	}
 	fmt.Fprintf(stdout, "hoist abandon: %s abandoned\n", id)
 	return 0

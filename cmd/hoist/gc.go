@@ -8,6 +8,7 @@ import (
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // runGC is `hoist gc [--dry-run]`: removes what finished promotions left on this machine — the
@@ -36,22 +37,21 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 
 	set := promotionsSettings(cfg, "")
 	svc := service.New(set, serviceDeps())
-	ctx, stop := boundedCommandContext(set.Deadline)
+	ctx, stop := commandContext(set.Deadline)
 	defer stop()
 
 	rep, err := svc.GC(ctx, service.GCOpts{DryRun: *dryRun})
 	for _, line := range rep.Removed {
-		fmt.Fprintf(stdout, "hoist gc: %s\n", line)
+		fmt.Fprintf(stdout, "hoist gc: %s\n", redact.Strings(line))
 	}
 	for _, line := range rep.Kept {
-		fmt.Fprintf(stdout, "hoist gc: %s\n", line)
+		fmt.Fprintf(stdout, "hoist gc: %s\n", redact.Strings(line))
 	}
 	for _, line := range rep.Failed {
-		fmt.Fprintf(stderr, "hoist gc: %s\n", line)
+		failf(stderr, "hoist gc", exitFailure, "%s", line)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist gc: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist gc", exitFailure, err)
 	}
 	// A failure is not a decision to keep something: the summary still says what was done, and
 	// the exit code says not everything could be.

@@ -1,13 +1,10 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"time"
 
 	"github.com/abradner/hoist/internal/config"
@@ -59,8 +56,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
 	if eff.repo == "" || *env == "" || *img == "" {
 		fmt.Fprintln(stderr, "hoist deploy: --repo, --env and --image are required")
@@ -69,8 +65,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	}
 	ref, err := image.Parse(*img)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: --image %s: %v\n", *img, err)
-		return exitUsage
+		return failf(stderr, "hoist deploy", exitUsage, "--image %s: %v", *img, err)
 	}
 
 	// The same single gate `hoist promote` uses, in the same position: before anything is
@@ -91,19 +86,13 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
 	set := settingsFor(cfg, eff)
 	set.KubeContext = *kubeContext
 	svc := service.New(set, serviceDeps())
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
-	}
 
 	// service.Plan attaches WarnDeployIntoProduction itself for every deploy it builds, so the
 	// dry-run output, the confirm screen and the PR body all carry it by construction — the CLI
@@ -112,8 +101,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 	// dry-run return below, which does nothing more with ctx).
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Target: *env, Deploy: &ref})
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist deploy", exitFailure, err)
 	}
 	plan := pc.Plan
 
@@ -126,8 +114,7 @@ func runDeploy(args []string, cfg *config.Config, sel selection, stdout, stderr 
 			configured = eff.cfg.Promotable
 		}
 		if err := printPlan(stdout, r, &plan, eff.promotable, configured, nil); err != nil {
-			fmt.Fprintf(stderr, "hoist deploy: %v\n", err)
-			return exitFailure
+			return fail(stderr, "hoist deploy", exitFailure, err)
 		}
 		return 0
 	}

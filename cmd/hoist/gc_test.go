@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/service"
 	"github.com/abradner/hoist/pkg/git"
+	"github.com/abradner/hoist/pkg/redact"
 )
 
 // TestPromoteLeavesNoWorktreeOrLocalBranchBehind is the operator's report at the CLI: a
@@ -118,5 +120,31 @@ func TestGCSummaryDoesNotClaimADecisionItDidNotMake(t *testing.T) {
 		if got := gcSummary(tc.rep, tc.dryRun); got != tc.want {
 			t.Errorf("%s: gcSummary = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestGCRedactsItsErrors: gc was the one command that printed an error unredacted (CS-4). A state
+// directory that cannot be read fails the sweep with an error naming its path; with that path
+// registered as a secret, the final line on stderr must not carry it. The control is the same
+// failure unredacted in the error itself, so the test cannot pass by the failure not happening.
+func TestGCRedactsItsErrors(t *testing.T) {
+	cfgPath, _, _ := newPromoteFixture(t)
+	const secret = "tok-7c41e9-state"
+	state := filepath.Join(t.TempDir(), secret)
+	if err := os.WriteFile(state, []byte("a file where the state directory should be"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+	redact.Register(secret)
+
+	var out, errOut strings.Builder
+	if got := run([]string{"--config", cfgPath, "gc"}, &out, &errOut); got != exitFailure {
+		t.Fatalf("exit %d, want %d; stderr: %s", got, exitFailure, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "hoist gc:") {
+		t.Fatalf("stderr %q does not report the failed sweep (the control: gc must fail here)", errOut.String())
+	}
+	if strings.Contains(errOut.String(), secret) {
+		t.Errorf("gc printed a registered value on stderr: %s", errOut.String())
 	}
 }

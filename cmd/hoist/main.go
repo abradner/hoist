@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -114,28 +113,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// was given a command's name as its value, the command was swallowed (#245).
 	if fs.NArg() == 0 {
 		if name, value, swallowed := subcommandTakenAsValue(fs, args); swallowed {
-			fmt.Fprintf(stderr, "hoist: --%s takes a value, and %q is also a command. Read as the value of --%[1]s there is no command, which opens the matrix; read as the command, --%[1]s has no value; nothing was run. For a value genuinely called %[2]q write --%[1]s=%[2]s; to run the command, give --%[1]s its value first.\n", name, value)
-			return exitUsage
+			return failf(stderr, "hoist", exitUsage, "--%s takes a value, and %q is also a command. Read as the value of --%[1]s there is no command, which opens the matrix; read as the command, --%[1]s has no value; nothing was run. For a value genuinely called %[2]q write --%[1]s=%[2]s; to run the command, give --%[1]s its value first.", name, value)
 		}
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist", exitFailure, err)
 	}
 	sel := selection{repo: *repo, appsRoot: *appsRoot, promotable: *promotable, base: *base, kubeContext: *kubeContext, resolve: rf, given: map[string]bool{}}
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	// The same refusal `hoist plan` gives an explicit empty --digest-sources/--registry-auth,
 	// here at the root so the no-command launch never resolves with an empty chain.
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
-		fmt.Fprintf(stderr, "hoist: %s\n", msg)
-		return exitUsage
+		return failf(stderr, "hoist", exitUsage, "%s", msg)
 	}
 	if fs.NArg() == 0 {
 		eff, err := selectRepo(cfg, sel)
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist: %v\n", err)
-			return exitFailure
+			return fail(stderr, "hoist", exitFailure, err)
 		}
 		if eff.repo == "" {
 			fs.Usage()
@@ -446,8 +441,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	if eff.repo == "" || *from == "" || *to == "" {
 		fmt.Fprintln(stderr, "hoist plan: --repo, --from and --to are required")
@@ -458,44 +452,31 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 	// An empty list given explicitly is an error, as --promotable "" is: "" means "use the
 	// default" only when the flag was not given at all.
 	if msg, bad := emptyResolveFlag(sel.given, rf); bad {
-		fmt.Fprintf(stderr, "hoist plan: %s\n", msg)
-		return exitUsage
+		return failf(stderr, "hoist plan", exitUsage, "%s", msg)
 	}
 	opts, err := service.NewResolveOptions(cfg, eff.cfg, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
-		return exitUsage
+		return fail(stderr, "hoist plan", exitUsage, err)
 	}
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	set := settingsFor(cfg, eff)
 	set.Resolve = opts
 	svc := service.New(set, serviceDeps())
 	if err := svc.CheckOverrides(r, *from, digests); err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	// Signal/deadline-aware, exactly like runPromote/runDeploy's own ctx (promote.go's own
 	// comment on this same call): resolution can talk to the cluster and the registry, so ^C
 	// or the poll deadline must be able to interrupt it here too, not just the write path.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := commandContext(time.Duration(cfg.Poll.Deadline))
 	defer stop()
-	if deadline := time.Duration(cfg.Poll.Deadline); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, deadline)
-		defer cancel()
-	}
 	pc, err := svc.Plan(ctx, service.PlanRequest{Repo: r, Source: *from, Target: *to, Overrides: digests})
 	if err != nil {
-		// The CLI printer's own guard (R-002): a cluster or registry error is already
-		// redacted at its adaptor, but this is the last stop before stderr, so a value
-		// registered anywhere in the process is scrubbed here too.
-		fmt.Fprintf(stderr, "hoist plan: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	plan, rep := pc.Plan, pc.Resolution
 	var configured []string
@@ -503,8 +484,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		configured = eff.cfg.Promotable
 	}
 	if err := printPlan(stdout, r, &plan, prefixes, configured, rep); err != nil {
-		fmt.Fprintf(stderr, "hoist plan: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist plan", exitFailure, err)
 	}
 	// The id promote would give this exact plan (issue #15): it needs the forge repo name,
 	// which is config, so a flags-only run — no repos[].github to hash — prints none rather
@@ -520,8 +500,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		}
 	}
 	if !*dryRun {
-		fmt.Fprintln(stderr, "hoist plan: plan never writes — nothing was written. The output above is what it would change; run `hoist promote` to act on it.")
-		return exitReadOnlyWrite
+		return failf(stderr, "hoist plan", exitReadOnlyWrite, "plan never writes — nothing was written. The output above is what it would change; run `hoist promote` to act on it.")
 	}
 	return 0
 }
@@ -547,8 +526,7 @@ func runConfig(args []string, cfg *config.Config, stdout, stderr io.Writer) int 
 		}
 		out, err := cfg.Redacted().Marshal()
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist config show: %v\n", err)
-			return exitFailure
+			return fail(stderr, "hoist config show", exitFailure, err)
 		}
 		fmt.Fprintf(stdout, "# %s\n%s", cfg.File, out)
 		return 0
@@ -686,8 +664,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	// `hoist plan` refuses it.
 	regOpts, err := service.NewResolveOptions(cfg, eff.cfg, eff.resolve.digestSources, eff.resolve.registryAuth, eff.resolve.clusterSecret, eff.resolve.opRef, eff.kubeContext)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitUsage
+		return fail(stderr, "hoist", exitUsage, err)
 	}
 	set := settingsFor(cfg, eff)
 	set.Resolve = regOpts
@@ -702,8 +679,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	// screen never had before.
 	view, err := svc.LoadRepo(context.Background(), service.RepoFromOrigin)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist", exitFailure, err)
 	}
 	if view.Fallback != nil {
 		fmt.Fprintf(stderr, "hoist: could not read origin/%s (%v) — showing %s's own local content instead\n", eff.base, view.Fallback, eff.repo)
@@ -748,8 +724,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 	historyFn := buildHistoryFuncs(eff.cfg, f, forgeErr, eff.base, svc)
 	configText, err := configViewText(cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist", exitFailure, err)
 	}
 	root := app.New(r, eff.promotable, envs, svc.Plan, svc, promo, tagsFn, restartFn).
 		WithConfigView(cfg.File, cfg.Found, configText)
@@ -767,8 +742,7 @@ func runTUI(eff effective, cfg *config.Config, stdout, stderr io.Writer) int {
 		WithRun(eff.base, eff.kubeContext)
 	final, err := tea.NewProgram(root, tea.WithOutput(stdout)).Run()
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist", exitFailure, err)
 	}
 	// Keymap rule 4: q (with a confirm) and ctrl+c (immediate) both leave any running drive
 	// tracked exactly where it was — nothing is cancelled, only this process's own watch of it

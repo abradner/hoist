@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"path"
 	"sort"
 	"strings"
@@ -17,7 +15,6 @@ import (
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/pkg/argo"
 	"github.com/abradner/hoist/pkg/gitops"
-	"github.com/abradner/hoist/pkg/redact"
 	"github.com/abradner/hoist/pkg/rollout"
 )
 
@@ -48,8 +45,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist watch: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist watch", exitFailure, err)
 	}
 	if eff.repo == "" && *app == "" {
 		fmt.Fprintln(stderr, "hoist watch: --repo and --app are required")
@@ -69,8 +65,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist watch: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist watch", exitFailure, err)
 	}
 	var target *gitops.ArgoApp
 	for i := range r.Apps {
@@ -85,8 +80,7 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 			names = append(names, a.Name)
 		}
 		sort.Strings(names)
-		fmt.Fprintf(stderr, "hoist watch: no Application %q found under %s (known: %s)\n", *app, eff.appsRoot, strings.Join(names, ", "))
-		return exitFailure
+		return failf(stderr, "hoist watch", exitFailure, "no Application %q found under %s (known: %s)", *app, eff.appsRoot, strings.Join(names, ", "))
 	}
 	fam := r.Envs[target.Namespace].Families[path.Base(target.SourcePath)]
 
@@ -96,26 +90,23 @@ func runWatch(args []string, cfg *config.Config, sel selection, stdout, stderr i
 
 	a, usedCtx, err := newArgo(ctxName)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist watch: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist watch", exitFailure, err)
 	}
 	ro, _, err := newRollout(ctxName)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist watch: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist watch", exitFailure, err)
 	}
 
 	deployments, jobLikes := familyWorkloads(fam)
 	fmt.Fprintf(stdout, "hoist watch: %s (namespace %s, kube context %s)\n", target.Name, target.Namespace, usedCtx)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := commandContext(0)
 	defer stop()
 
 	renderOnce := func() int {
 		snap, err := watchAppSnapshot(ctx, a, ro, argo.Application{Namespace: argoNamespace, Name: target.Name}, target.Namespace, deployments, jobLikes)
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist watch: %s\n", redact.Strings(err.Error()))
-			return exitFailure
+			return fail(stderr, "hoist watch", exitFailure, err)
 		}
 		fmt.Fprint(stdout, snap)
 		return 0

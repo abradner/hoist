@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 	"strings"
 	"time"
 
@@ -56,8 +54,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	fs.Visit(func(f *flag.Flag) { sel.given[f.Name] = true })
 	eff, err := selectRepo(cfg, sel)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 	if eff.repo == "" || *env == "" {
 		fmt.Fprintln(stderr, "hoist restart: --repo and --env are required")
@@ -67,8 +64,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 
 	r, err := gitops.Discover(eff.repo, eff.appsRoot)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 	// An explicitly supplied selector that normalises to nothing is refused rather than treated
 	// as "all". `--family "$FAMILY"` with the variable unset would otherwise restart every
@@ -77,13 +73,11 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	// error, which is a distinction fs.Visit can make and the value alone cannot.
 	families := splitFamilies(*family)
 	if sel.given["family"] && len(families) == 0 {
-		fmt.Fprintln(stderr, "hoist restart: --family was given but names no family; omit it to restart every family in --env")
-		return exitUsage
+		return failf(stderr, "hoist restart", exitUsage, "--family was given but names no family; omit it to restart every family in --env")
 	}
 	targets, err := restart.Targets(r, *env, families)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist restart: %v\n", err)
-		return exitFailure
+		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 
 	// Production's gate. §4.5's PR-and-approval-comment gate cannot apply to an operation that
@@ -99,24 +93,21 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	kctx := eff.kubeContext
 	ro, usedContext, err := newRollout(kctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := commandContext(0)
 	defer stop()
 
 	// Read every target first, so the operator sees the whole set — and every reason a restart
 	// of it would not be graceful — before any of it rolls.
 	pl, err := restart.Read(ctx, ro, *env, targets)
 	if err != nil {
-		fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
-		return exitFailure
+		return fail(stderr, "hoist restart", exitFailure, err)
 	}
 	printRestartTargets(stdout, *env, usedContext, pl)
 	if len(pl.Targets) == 0 {
-		fmt.Fprintf(stderr, "hoist restart: none of %s's Deployments exist in the cluster\n", *env)
-		return exitFailure
+		return failf(stderr, "hoist restart", exitFailure, "none of %s's Deployments exist in the cluster", *env)
 	}
 
 	if *dryRun {
@@ -164,8 +155,7 @@ func checkProductionRestart(eff effective, env, confirm string, stderr io.Writer
 		// outright", because a restart against an unconfigured repo is a legitimate thing to
 		// want; it is "we cannot tell, so acknowledge it".
 		if confirm != env {
-			fmt.Fprintf(stderr, "hoist restart: no configured repo, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway\n", env, env)
-			return exitUsage
+			return failf(stderr, "hoist restart", exitUsage, "no configured repo, so hoist cannot tell whether %s is production; pass --confirm-production=%s to restart it anyway", env, env)
 		}
 		return 0
 	}
@@ -173,12 +163,10 @@ func checkProductionRestart(eff effective, env, confirm string, stderr io.Writer
 		return 0
 	}
 	if confirm == "" {
-		fmt.Fprintf(stderr, "hoist restart: %s is a production env; restarting it requires --confirm-production=%s as well\n", env, env)
-		return exitUsage
+		return failf(stderr, "hoist restart", exitUsage, "%s is a production env; restarting it requires --confirm-production=%s as well", env, env)
 	}
 	if confirm != env {
-		fmt.Fprintf(stderr, "hoist restart: --confirm-production=%q does not match --env %q; repeat the exact env to acknowledge\n", confirm, env)
-		return exitUsage
+		return failf(stderr, "hoist restart", exitUsage, "--confirm-production=%q does not match --env %q; repeat the exact env to acknowledge", confirm, env)
 	}
 	return 0
 }
@@ -219,8 +207,7 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 	for {
 		progress, err := restart.Observe(ctx, ro, env, pending, at)
 		if err != nil {
-			fmt.Fprintf(stderr, "hoist restart: %s\n", redact.Strings(err.Error()))
-			return exitFailure
+			return fail(stderr, "hoist restart", exitFailure, err)
 		}
 		var still []string
 		for _, pr := range progress {
@@ -228,11 +215,9 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 			case pr.Superseded:
 				// Something else restarted it while this one was in flight, so the rollout now
 				// running is not this command's to report as its own success.
-				fmt.Fprintf(stderr, "hoist restart: %s was restarted by something else while this one was in flight; the pods are rolling, but not for this command\n", pr.Name)
-				return exitFailure
+				return failf(stderr, "hoist restart", exitFailure, "%s was restarted by something else while this one was in flight; the pods are rolling, but not for this command", pr.Name)
 			case pr.Blocked != "":
-				fmt.Fprintf(stderr, "hoist restart: %s: %s\n", pr.Name, pr.Blocked)
-				return exitFailure
+				return failf(stderr, "hoist restart", exitFailure, "%s: %s", pr.Name, pr.Blocked)
 			case pr.Done:
 				fmt.Fprintf(stdout, "  %s: %s\n", pr.Name, pr.Detail)
 			default:
@@ -246,8 +231,7 @@ func watchRestart(ctx context.Context, ro rollout.Rollout, env string, names []s
 		pending = still
 		select {
 		case <-ctx.Done():
-			fmt.Fprintf(stderr, "hoist restart: still rolling: %s (%v)\n", strings.Join(pending, ", "), ctx.Err())
-			return exitFailure
+			return failf(stderr, "hoist restart", exitFailure, "still rolling: %s (%v)", strings.Join(pending, ", "), ctx.Err())
 		case <-time.After(interval):
 		}
 	}
