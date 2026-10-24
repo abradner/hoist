@@ -158,8 +158,8 @@ func claimConflictError(repoFullName, targetEnv, path string) error {
 
 // tryClaim is the atomic exclusive-create primitive: exactly one concurrent caller for a given
 // path ever succeeds, every other gets an error satisfying errors.Is(err, os.ErrExist). It
-// writes data to a temp file in the same directory first, closes it (so the content is fully
-// flushed), and only then links it into place — never a bare os.OpenFile(O_CREATE|O_EXCL)
+// writes data to a temp file in the same directory first, fsyncs and closes it (so the content is
+// on stable storage), and only then links it into place — never a bare os.OpenFile(O_CREATE|O_EXCL)
 // followed by a separate Write. That distinction is load-bearing: with OpenFile-then-Write, path
 // exists (as an empty or partially-written file) for the whole window between the create and the
 // write finishing, so a concurrent loser reading it in that window could see empty/truncated
@@ -184,10 +184,20 @@ func tryClaim(path string, data []byte) error {
 		_ = tmp.Close()
 		return err
 	}
+	// Flush to stable storage BEFORE the name becomes visible: rename/link without it can,
+	// after a power loss, leave the final name pointing at an empty or partial file.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Link(tmpName, path)
+	if err := os.Link(tmpName, path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
 }
 
 // releaseOwnClaim is what ClaimInFlight's returned release closure actually calls. There is no
