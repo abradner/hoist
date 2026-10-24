@@ -526,7 +526,7 @@ func Status(ctx context.Context, steps []Step, s *PromotionState) (done bool, st
 // History records CHANGES, not every re-observation, by three rules keyed on the kind of entry:
 //
 //   - A STOPPING entry ("waiting: …", "blocked: …", "act failed: …") is skipped only when it
-//     equals the LAST entry in History overall (same step, same detail): a hundred polls of
+//     equals the LAST non-"acted" entry in History (same step, same detail): a hundred polls of
 //     "waiting: CI: 3/4 checks complete" leave one entry, the first, with the time it started
 //     being true. Comparing against the step's own newest entry instead would lose a real
 //     return: approval waiting -> a check re-runs -> approval waiting again must record the
@@ -555,8 +555,16 @@ func historyDuplicate(h []HistoryEntry, name StepName, detail string) bool {
 	case detail == "acted":
 		return false
 	case isStoppingDetail(detail):
-		if n := len(h); n > 0 {
-			return h[n-1].Step == name && h[n-1].Detail == detail
+		// "acted" entries are writes, not observations of the world's state, so they do not
+		// separate two identical stops: a step that keeps re-acting (ArgoRefreshedStep while Argo
+		// is slow to reconcile) leaves "acted, wait, acted, wait, …" and only the acts are news
+		// (#243). Anything else between the two — another step's wait, a satisfied step that
+		// changed — still makes the second stop a new fact.
+		for i := len(h) - 1; i >= 0; i-- {
+			if h[i].Detail == "acted" {
+				continue
+			}
+			return h[i].Step == name && h[i].Detail == detail
 		}
 		return false
 	}
