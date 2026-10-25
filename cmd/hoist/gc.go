@@ -13,7 +13,7 @@ import (
 
 // runGC is `hoist gc [--dry-run]`: removes what finished promotions left on this machine — the
 // worktree and local branch of every promotion observed landed, orphaned worktrees under the
-// hoist cache directory, and long-unused registry cache entries (service.GC has the rules).
+// hoist cache directory, cached repo views of clones no longer configured, and long-unused registry cache entries (service.GC has the rules).
 // --dry-run makes every check a real run makes and prints what it would remove.
 //
 // It reads the config file's repos[] for the checkouts it may act in, like `hoist promotions`

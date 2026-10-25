@@ -613,7 +613,8 @@ lands, without a separate entry (#249).
 `hoist gc` sweeps what that leaves and what older versions left. It does the same landed-promotion
 cleanup for every state file, then removes *orphaned* worktrees — a directory under
 `$XDG_CACHE_HOME/hoist/worktrees` that no live state file names, which is what every abandoned
-promotion left behind before abandon cleaned up after itself — and registry cache entries
+promotion left behind before abandon cleaned up after itself — the cached origin view
+(`$XDG_CACHE_HOME/hoist/repo-view/<hash>`) of any clone no longer in the config or `--repo`, and registry cache entries
 (`$XDG_CACHE_HOME/hoist/registry`) nothing has read for 90 days. An orphan has no state file to
 re-observe, so it is removed only when it is unmistakably hoist's own: its name is a promotion
 id, it is a registered worktree of a configured clone on that id's `hoist/<env>/<id>` branch, and
