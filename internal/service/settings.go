@@ -28,6 +28,10 @@ type Settings struct {
 	// DIFFERENT repo's own state file, where Repo (below) does not name that other repo's
 	// config entry. KubeContextFor is how a caller applies it against some other RepoConfig.
 	KubeOverride string
+	// KubeOverrideSet says the flag was given at all. A given-but-empty --kube-context means
+	// the kubeconfig's current context, not "the config decides", so "" alone cannot carry it
+	// (#295; AGENTS.md §9 entry 20).
+	KubeOverrideSet bool
 
 	// Repo is the selected repo's own config entry, nil when running on flags alone (no
 	// repos[] configured, or --repo named an unconfigured path). Config is the whole loaded
@@ -61,7 +65,10 @@ func (s Settings) ProductionEnvs() []string {
 // operator's own --kube-context override wins outright, exactly as it does for the selected
 // repo in selectRepo; otherwise that repo's own configured context.
 func (s Settings) KubeContextFor(rc config.RepoConfig) string {
-	return KubeContextFor(rc, s.KubeOverride)
+	if s.KubeOverrideSet {
+		return s.KubeOverride
+	}
+	return rc.Kube.Context
 }
 
 // KubeContextFor is the free-function form of the same precedence, for a caller that has not

@@ -18,7 +18,7 @@ import (
 // keeps every scenario below unchanged (same fixture, same assertions) while now driving the
 // moved implementation instead of a cmd/hoist-local copy of it.
 func abandonPromotion(ctx context.Context, cfg *config.Config, id string) ([]string, error) {
-	svc := service.New(promotionsSettings(cfg, ""), serviceDeps())
+	svc := service.New(promotionsSettings(cfg, "", false), serviceDeps())
 	return svc.Abandon(ctx, id)
 }
 

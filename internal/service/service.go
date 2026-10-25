@@ -184,7 +184,11 @@ func (s *Service) Cluster(kubeContext string) (k8s.Cluster, string, error) {
 // different cluster context. A Service that already holds the right Settings can still get the
 // same answer via its own ArgoRolloutFor method below.
 func ArgoRolloutFor(deps Deps, rc config.RepoConfig, kubeOverride string) (argo.Argo, rollout.Rollout, error) {
-	kctx := KubeContextFor(rc, kubeOverride)
+	return argoRolloutAt(deps, KubeContextFor(rc, kubeOverride))
+}
+
+// argoRolloutAt opens Argo and the rollout watcher in one already-decided kube context.
+func argoRolloutAt(deps Deps, kctx string) (argo.Argo, rollout.Rollout, error) {
 	a, _, err := deps.Argo(kctx)
 	if err != nil {
 		return nil, nil, err

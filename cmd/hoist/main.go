@@ -361,7 +361,7 @@ func selectRepo(cfg *config.Config, sel selection) (service.Settings, error) {
 		set.Base = defaultBase
 	}
 	if sel.given["kube-context"] {
-		set.KubeOverride = sel.kubeContext
+		set.KubeOverride, set.KubeOverrideSet = sel.kubeContext, true
 	}
 	if len(cfg.Repos) == 0 {
 		return set, nil

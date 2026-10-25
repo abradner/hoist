@@ -92,10 +92,13 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	if err != nil || effFlag.KubeOverride != "flag-ctx" {
 		t.Fatalf("flag: kubeOverride=%q err=%v", effFlag.KubeOverride, err)
 	}
-	for _, tc := range []struct{ override, want string }{{effFlag.KubeOverride, "flag-ctx"}, {effA.KubeOverride, "ctx-b"}} {
+	for _, tc := range []struct {
+		override, want string
+		set            bool
+	}{{effFlag.KubeOverride, "flag-ctx", effFlag.KubeOverrideSet}, {effA.KubeOverride, "ctx-b", effA.KubeOverrideSet}} {
 		var argoCtx string
 		adaptors.Argo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
-		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
+		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override, KubeOverrideSet: tc.set}, serviceDeps())
 		_, err := svc.Resume(context.Background(), "resume01", service.ResumeOpts{})
 		if err == nil || argoCtx != tc.want {
 			t.Fatalf("override %q: Resume's adaptors.Argo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)

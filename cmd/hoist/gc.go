@@ -37,7 +37,7 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	set := promotionsSettings(cfg, "")
+	set := promotionsSettings(cfg, "", false)
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(set.Deadline)
 	defer stop()

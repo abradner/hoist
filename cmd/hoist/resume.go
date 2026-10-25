@@ -17,10 +17,22 @@ import (
 // different from whatever --repo would have selected), so this is deliberately narrower than
 // selectRepo — just the config file, the operator's own --kube-context override, and the
 // poll/deadline/retain knobs every one of svc.List/svc.Resume/svc.Abandon needs.
-func promotionsSettings(cfg *config.Config, kubeOverride string) service.Settings {
+func promotionsSettings(cfg *config.Config, kubeOverride string, given bool) service.Settings {
 	set := configSettings(cfg)
-	set.KubeOverride = kubeOverride
+	set.KubeOverride, set.KubeOverrideSet = kubeOverride, given
 	return set
+}
+
+// kubeContextGiven reports whether --kube-context was given at all, before the command or on
+// it: a given-but-empty one means the kubeconfig's current context (#295).
+func kubeContextGiven(fs *flag.FlagSet, sel selection) bool {
+	given := sel.given["kube-context"]
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "kube-context" {
+			given = true
+		}
+	})
+	return given
 }
 
 // runPromotions is `hoist promotions`: lists every promotion state file under
@@ -49,7 +61,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 		}
 		return exitUsage
 	}
-	set := promotionsSettings(cfg, *kubeContext)
+	set := promotionsSettings(cfg, *kubeContext, kubeContextGiven(fs, sel))
 	svc := service.New(set, serviceDeps())
 
 	ctx, stop := commandContext(set.Deadline)
@@ -158,7 +170,7 @@ func runResume(args []string, cfg *config.Config, sel selection, stdout, stderr 
 		return exitUsage
 	}
 
-	set := promotionsSettings(cfg, *kubeContext)
+	set := promotionsSettings(cfg, *kubeContext, kubeContextGiven(fs, sel))
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(set.Deadline)
 	defer stop()
