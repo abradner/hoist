@@ -66,6 +66,15 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 	if err != nil {
 		return fail(stderr, "hoist promotions", exitFailure, err)
 	}
+	// A listing that finished ends with the one-line hint when `hoist gc` has a lot to collect
+	// (#298): to stderr, so stdout stays the listing, and never under --quiet's reach — it is not
+	// narration. It removes nothing.
+	finish := func() int {
+		if h := gcHint(ctx, svc); h != "" {
+			fmt.Fprintln(stderr, h)
+		}
+		return 0
+	}
 	if len(listed) == 0 && !*archived {
 		if *repoFilter != "" {
 			// Named explicitly rather than folded into the bare message below: a --repo typo
@@ -73,10 +82,10 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			// otherwise print identically to "you have no promotions at all", with nothing to
 			// suggest the filter itself might be the reason.
 			fmt.Fprintf(stdout, "hoist promotions: no promotions found for --repo %s\n", *repoFilter)
-			return 0
+			return finish()
 		}
 		fmt.Fprintln(stdout, "hoist promotions: no promotions found")
-		return 0
+		return finish()
 	}
 	// archivedThisRun tracks ids this same invocation just moved to the archive (Listed.Archived),
 	// so --archived's own listing below (which reads ArchiveDir fresh, after the loop) does not
@@ -121,7 +130,7 @@ func runPromotions(args []string, cfg *config.Config, sel selection, stdout, std
 			fmt.Fprintf(stdout, "%s  %-20s  archived (last activity %s)\n", s.ID, s.TargetEnv, s.LastActivity().Format(time.RFC3339))
 		}
 	}
-	return 0
+	return finish()
 }
 
 // runResume is `hoist resume`: re-drives a specific promotion, identified either positionally

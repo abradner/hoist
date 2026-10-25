@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/abradner/hoist/internal/config"
 	"github.com/abradner/hoist/internal/service"
@@ -81,4 +83,31 @@ func gcSummary(rep service.GCReport, dryRun bool) string {
 	default:
 		return fmt.Sprintf("%d removed%s", len(rep.Removed), incomplete)
 	}
+}
+
+// gcHintThreshold is how much hoist gc could collect before `hoist promotions` says so: more
+// than this many removable orphaned worktrees, or more than this many registry cache entries
+// past the prune age, each counted on its own (#298). Fixed, not configured — it only decides
+// whether a one-line hint is printed, and a hint threshold nobody tunes is not worth a config key.
+const gcHintThreshold = 20
+
+// gcHint is the line `hoist promotions` ends with when hoist gc has a lot to collect, and ""
+// when it has not (or could not be asked: a hint is never worth an error). The counts are
+// service.Collectable's, which is GC's own dry run — the same checks, nothing removed.
+func gcHint(ctx context.Context, svc *service.Service) string {
+	c, err := svc.Collectable(ctx)
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	if c.Worktrees > gcHintThreshold {
+		parts = append(parts, fmt.Sprintf("%d orphaned worktrees", c.Worktrees))
+	}
+	if c.RegistryEntries > gcHintThreshold {
+		parts = append(parts, fmt.Sprintf("%d registry cache entries unused for over 90 days", c.RegistryEntries))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("hoist: %s are left on this machine; `hoist gc --dry-run` lists what `hoist gc` would remove", strings.Join(parts, " and "))
 }
