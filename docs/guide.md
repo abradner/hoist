@@ -632,7 +632,7 @@ promotion left behind before abandon cleaned up after itself — the cached orig
 (`$XDG_CACHE_HOME/hoist/repo-view/<hash>`) of any clone no longer in the config or `--repo`, and registry cache entries
 (`$XDG_CACHE_HOME/hoist/registry`) nothing has read for 90 days. An orphan has no state file to
 re-observe, so it is removed only when it is unmistakably hoist's own: its name is a promotion
-id, it is a registered worktree of a configured clone on that id's `hoist/<env>/<id>` branch, and
+id, it is a registered worktree of a configured clone (or of the clone a root `--repo` names) on that id's `hoist/<env>/<id>` branch, and
 `git status` in it is clean. A commit that exists only on that branch does not save it — that is
 what an abandoned promotion looks like, and why orphans are never removed automatically. Anything
 else under that directory is kept and named with the reason. Run `--dry-run` first: it makes the

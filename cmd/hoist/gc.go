@@ -115,10 +115,20 @@ func gcHint(ctx context.Context, svc *service.Service) string {
 // gcSettings is promotionsSettings plus the clone a root --repo names: gc keeps the repo view
 // of every configured clone and of that one, so `hoist --repo <clone> gc` on flags alone does
 // not delete the view of the clone it was just pointed at (Codex on #347).
+//
+// A root --repo is a name, a path or a clone dir, as everywhere else (config.Repo): a configured
+// repo's name or path maps to its clone dir, exactly as selectRepo maps it. Only a --repo the
+// config does not know is taken as a path. RepoDir also joins the clones gc asks about orphaned
+// worktrees, so one registered in that clone is judged by the same evidence as any other.
 func gcSettings(cfg *config.Config, sel selection) service.Settings {
 	set := promotionsSettings(cfg, "", false)
-	if sel.repo != "" {
-		set.RepoDir = sel.repo
+	if sel.repo == "" {
+		return set
 	}
+	if rc, err := cfg.Repo(sel.repo); err == nil {
+		set.RepoDir = rc.Dir // "" when that entry has no path: nothing extra to keep
+		return set
+	}
+	set.RepoDir = sel.repo
 	return set
 }
