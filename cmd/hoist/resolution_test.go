@@ -417,7 +417,8 @@ registries:
 		t.Fatal(err)
 	}
 	rc := cfg.Repos[0]
-	opts, err := service.NewResolveOptions(cfg, &rc, "", "", "", "", "")
+	// The kube context is the caller's already-decided one (selectRepo), not re-derived here.
+	opts, err := service.NewResolveOptions(cfg, &rc, "", "", "", "", rc.Kube.Context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,5 +552,39 @@ func TestPlanAuthDiagnosticIsDeterministicAcrossRegistryEntries(t *testing.T) {
 	}
 	if !strings.Contains(out, "all auth sources failed (env)") {
 		t.Fatalf("diagnostic did not name the sorted-first entry's auth order:\n%s", out)
+	}
+}
+
+// An explicitly empty --kube-context is a given flag meaning "the kubeconfig's current context",
+// and selectRepo already decides that for the Argo and rollout clients. Digest resolution used to
+// re-derive the context from the flag's VALUE, read "" as not given, and read pods from the
+// repo's kube.context — two clusters in one command (#295). Both spellings, root and subcommand,
+// are checked, with the flag absent and given as controls. It fails with NewResolveOptions
+// applying KubeContextFor to its argument again.
+func TestPlanWithAnEmptyKubeContextReadsPodsFromTheCurrentContext(t *testing.T) {
+	cfgPath := writeConfig(t, `
+repos:
+  - path: `+absFixture(t)+`
+    promotable: [ghcr.io/example/]
+    kube: { context: repo-ctx }
+`)
+	tail := []string{"plan", "--from", "app-staging", "--to", "app-production", "--dry-run", "--digest-sources", "pods"}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"flag absent: the repo's context", append([]string{"--config", cfgPath}, tail...), "repo-ctx"},
+		{"flag given: wins", append([]string{"--config", cfgPath, "--kube-context", "flag-ctx"}, tail...), "flag-ctx"},
+		{"root flag given empty: current context", append([]string{"--config", cfgPath, "--kube-context="}, tail...), ""},
+		{"subcommand flag given empty: current context", append([]string{"--config", cfgPath}, append(tail, "--kube-context=")...), ""},
+	} {
+		contexts, _ := installFakes(t, &k8s.Fake{}, &registry.Fake{})
+		if code, _, errOut := run3(t, tc.args...); code != 0 {
+			t.Fatalf("%s: exit %d: %s", tc.name, code, errOut)
+		}
+		if len(*contexts) != 1 || (*contexts)[0] != tc.want {
+			t.Errorf("%s: pods were read from contexts %q, want exactly %q", tc.name, *contexts, tc.want)
+		}
 	}
 }

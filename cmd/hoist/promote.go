@@ -84,7 +84,7 @@ func runPromote(args []string, cfg *config.Config, sel selection, stdout, stderr
 		return code
 	}
 
-	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
+	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, set.KubeContext)
 	if err != nil {
 		return fail(stderr, "hoist promote", exitUsage, err)
 	}

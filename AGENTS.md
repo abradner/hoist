@@ -1461,13 +1461,15 @@ test lives** (if one exists).
    after the one place that owns the rule had already applied it; and a value standing in for the
    question whether the flag was given. Rule: a precedence is applied in one function
    (`selectRepo` for the repo, apps root, promotable prefixes, base and kube context;
-   `service.NewResolveOptions` for the digest-resolution flags — which still re-applies the
-   kube-context override by value, https://github.com/abradner/hoist/issues/295), and a command never assigns a
+   `service.NewResolveOptions` for the digest-resolution flags, which takes the kube context
+   `selectRepo` already decided and does not re-derive it: it did until #295, so `hoist
+   --kube-context "" plan` read pods from the repo's context while Argo used the current one), and a command never assigns a
    `Settings` field it received from there. Whether a flag was given is `sel.given[name]`
    (set by `fs.Visit`), never `value == ""` (see also entry 16). Regression tests, in
    `cmd/hoist`: `TestDeployUsesTheReposKubeContext` (fails with the override line restored: `a
    deploy asked for "argo:"`), `TestDeployKubeContextFlagStillWins`, and
-   `TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs` (fails with the value check restored).
+   `TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs` (fails with the value check restored), and
+   `TestPlanWithAnEmptyKubeContextReadsPodsFromTheCurrentContext` (#295; fails with the re-derivation restored).
 
 21. **A "clean" removal that falls through to a force helper is not clean on the branch nobody
    looks at.** What happened: `RemoveCleanWorktree` promises git's own non-force removal, so a file

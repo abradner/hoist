@@ -65,7 +65,10 @@ the command they are what the plan screen resolves with and what the tag picker 
 history authenticate to the registry with, exactly as on `plan` or `promote`; the drift column
 always asks the pods alone. A flag before the command takes the next word as its value, so
 `hoist --kube-context promotions` is refused (exit 2) rather than read as a context called
-`promotions`; for a value that really is a command's name, write `--kube-context=promotions`.
+`promotions`; for a value that really is a command's name, write `--kube-context=promotions`. A
+`--kube-context=` given empty means the kubeconfig's current context, for the pods digest
+resolution reads as much as for Argo and the rollout watch (#295) — it does not fall back to the
+repo's `kube.context`.
 
 ```
 ╭─ hoist · matrix · my-gitops ─────────────────────────────────────────────────╮
