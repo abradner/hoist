@@ -496,7 +496,8 @@ func TestBuildPlanTargetNewerIsSilentWhenNotProvablyNewer(t *testing.T) {
 		{"target is a branch tag", "v202610010000", "main"},
 		{"source is a branch tag", "main", "v202610230000"},
 		{"sha-shaped tags", "sha-aaaaaaa", "sha-bbbbbbb"},
-		{"timestamp with a suffix", "v202610010000", "v202610230000-hotfix"},
+		{"equal stamps, target suffixed", "v202610010000", "v202610010000-hotfix"},
+		{"suffix not after a dash", "v202610010000", "v202610230000hotfix"},
 		{"eleven digits", "v20261001000", "v20261023000"},
 	}
 	for _, c := range cases {
@@ -512,5 +513,37 @@ func TestBuildPlanTargetNewerIsSilentWhenNotProvablyNewer(t *testing.T) {
 				t.Errorf("unexpected %s warning: %+v", WarnTargetNewer, ws)
 			}
 		})
+	}
+}
+
+// TestBuildPlanTargetNewerCatchesTheSuffixedHotfixThatOpenedTheIssue is #24's own incident:
+// production ran a -hotfix- build stamped after staging's, and a promotion would have rolled it
+// back. A v<12 digits> stamp followed by "-" is still a timestamp; the stamp alone decides.
+func TestBuildPlanTargetNewerCatchesTheSuffixedHotfixThatOpenedTheIssue(t *testing.T) {
+	r := twoEnvRepo(t,
+		deployment("api", "api", "ghcr.io/example/api:v202609010812@"+digestA),
+		deployment("api", "api", "ghcr.io/example/api:v202609012350-hotfix-abc123@"+digestC))
+	p, err := BuildPlan(r, "staging", "production", promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws := targetNewerWarnings(p); len(ws) != 1 {
+		t.Fatalf("the -hotfix- build in production is newer than staging's: want one %s warning, got %+v", WarnTargetNewer, p.Warnings)
+	}
+}
+
+// TestBuildPlanTargetNewerIsSilentForTheSameImage: two timestamp tags on one digest are one
+// image (a re-tag, a reproducible rebuild). Promoting it rolls nothing back, so the warning
+// would be a false claim in a production PR body.
+func TestBuildPlanTargetNewerIsSilentForTheSameImage(t *testing.T) {
+	r := twoEnvRepo(t,
+		deployment("api", "api", "ghcr.io/example/api:v202610010000@"+digestA),
+		deployment("api", "api", "ghcr.io/example/api:v202610230000@"+digestA))
+	p, err := BuildPlan(r, "staging", "production", promotable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws := targetNewerWarnings(p); len(ws) != 0 {
+		t.Errorf("same digest, so nothing is rolled back: unexpected %s warning %+v", WarnTargetNewer, ws)
 	}
 }
