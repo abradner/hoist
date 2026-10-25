@@ -560,7 +560,7 @@ func TestPlanAuthDiagnosticIsDeterministicAcrossRegistryEntries(t *testing.T) {
 // re-derive the context from the flag's VALUE, read "" as not given, and read pods from the
 // repo's kube.context — two clusters in one command (#295). Both spellings, root and subcommand,
 // are checked, with the flag absent and given as controls. It fails with NewResolveOptions
-// applying KubeContextFor to its argument again.
+// re-deriving the context from the flag's value again.
 func TestPlanWithAnEmptyKubeContextReadsPodsFromTheCurrentContext(t *testing.T) {
 	cfgPath := writeConfig(t, `
 repos:

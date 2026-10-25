@@ -15,8 +15,9 @@ import (
 // promotionsSettings builds the service.Settings runPromotions/runResume/runAbandon share:
 // these three commands never select a single repo (a state file names its own, possibly
 // different from whatever --repo would have selected), so this is deliberately narrower than
-// selectRepo — just the config file, the operator's own --kube-context override, and the
-// poll/deadline/retain knobs every one of svc.List/svc.Resume/svc.Abandon needs.
+// selectRepo — just the config file, the operator's own --kube-context override (whether it
+// was given, even empty, for svc.List and svc.Resume; svc.Abandon opens no cluster), and the
+// poll/deadline/retain knobs they need.
 func promotionsSettings(cfg *config.Config, kubeOverride string, given bool) service.Settings {
 	set := configSettings(cfg)
 	set.KubeOverride, set.KubeOverrideSet = kubeOverride, given
