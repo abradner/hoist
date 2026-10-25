@@ -8,7 +8,7 @@ import (
 
 // TestKubeContextForHonoursAGivenEmptyOverride (#295, whole-stack read of T10): an explicitly
 // empty --kube-context means the kubeconfig's current context. Start already used it after
-// #295, but list and resume (KubeContextFor, via ArgoRolloutFor) still read "" as "not given"
+// #295, but list and resume (Settings.KubeContextFor) still read "" as "not given"
 // and fell back to the repo's own context, so `hoist resume <id> --kube-context ""` drove Argo
 // and the rollout watch against a different cluster from the one the promotion started on.
 func TestKubeContextForHonoursAGivenEmptyOverride(t *testing.T) {

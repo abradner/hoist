@@ -1467,8 +1467,8 @@ test lives** (if one exists).
    `Settings` field it received from there. Whether a flag was given is `sel.given[name]`
    (set by `fs.Visit`), never `value == ""` (see also entry 16); a `Settings` that carries the
    flag onward carries that answer too (`KubeOverrideSet` beside `KubeOverride`, read by
-   `Settings.KubeContextFor` for `hoist promotions`, `resume`, `abandon` and the TUI's
-   in-flight pane — until the T10 followup they still read `""` as "not given", so a promotion
+   `Settings.KubeContextFor` for `hoist promotions`, `resume` and the TUI's in-flight pane
+   (`abandon` opens no cluster) — until the T10 followup they still read `""` as "not given", so a promotion
    started on the current context resumed against the repo's). Regression tests, in
    `cmd/hoist`: `TestDeployUsesTheReposKubeContext` (fails with the override line restored: `a
    deploy asked for "argo:"`), `TestDeployKubeContextFlagStillWins`, and
