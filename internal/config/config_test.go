@@ -531,7 +531,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Found || len(c.Repos) != 1 || len(c.Registries) != 1 || c.Repos[0].Name != "my-gitops" {
+	if !c.Found || len(c.Repos) != 1 || len(c.Registries) != 2 || c.Repos[0].Name != "my-gitops" {
 		t.Errorf("example: Found=%v repos=%d registries=%d", c.Found, len(c.Repos), len(c.Registries))
 		return
 	}

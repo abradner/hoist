@@ -504,3 +504,32 @@ func TestGCRemovesRepoViewsOfClonesThatAreNoLongerConfigured(t *testing.T) {
 		t.Fatalf("a second GC has nothing left to remove: %q, %v", again.Removed, err)
 	}
 }
+
+// TestGCKeepsTheRepoViewOfTheSelectedClone (Codex on #347): a clone the config does not list but
+// Settings.RepoDir names (`hoist --repo <clone> gc` on flags alone) keeps its repo view; the
+// same clone without it is removed (the control).
+func TestGCKeepsTheRepoViewOfTheSelectedClone(t *testing.T) {
+	fx := newInflightFixture(t)
+	selected := filepath.Join(t.TempDir(), "selected")
+	runGitHost(t, "", "clone", "-q", fx.clone, selected)
+	runGitHost(t, selected, "fetch", "-q", "origin")
+	view := repoViewFor(t, selected)
+
+	set := withConfig(fx).Settings()
+	set.RepoDir = selected
+	rep, err := New(set, fx.svc.deps).GC(context.Background(), GCOpts{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linesContaining(rep.Removed, view) != 0 {
+		t.Fatalf("the selected clone's view would be removed:\n%s", strings.Join(rep.Removed, "\n"))
+	}
+	set.RepoDir = ""
+	rep, err = New(set, fx.svc.deps).GC(context.Background(), GCOpts{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linesContaining(rep.Removed, view) != 1 {
+		t.Fatalf("control: without RepoDir the view is stale and listed once:\n%s", strings.Join(rep.Removed, "\n"))
+	}
+}

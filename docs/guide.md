@@ -665,7 +665,7 @@ tried and why, and falls back to anonymous. Each link is one config idea:
 
 | Link | Where the credential comes from |
 |---|---|
-| `env` | the variable named by `registries[].env` (any registry; the token is sent as the password, user `hoist`); with none named, `HOIST_GHCR_TOKEN` or `GHCR_TOKEN` for `ghcr.io` only, with `HOIST_GHCR_USER`/`GHCR_USER` as the user |
+| `env` | the variable named by `registries[].env`, sent only to the hosts that entry's prefix covers (the token is the password; the user is `hoist`, except on `ghcr.io`, where `HOIST_GHCR_USER`/`GHCR_USER` is used when set); with none named, `HOIST_GHCR_TOKEN` or `GHCR_TOKEN` for `ghcr.io` only, with the same user rule |
 | `keychain` | the docker keychain — whatever `docker login` stored in `~/.docker/config.json` |
 | `cluster` | an image pull secret in the cluster: `registries[].cluster: { namespace: …, secret: … }` |
 | `op` | 1Password: `registries[].op: op://vault/item/field`, read with `op read` |

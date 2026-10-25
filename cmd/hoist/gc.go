@@ -26,7 +26,7 @@ import (
 // scratch space hoist rebuilds from a plan, a cache entry is refetched, and anything that is
 // not provably hoist's own leftover is kept and named. What it never does is decide a promotion
 // is finished from a state file — a promotion is only cleaned up once re-observed landed.
-func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
+func runGC(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist gc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dryRun := fs.Bool("dry-run", false, "list what would be removed, and what would be kept and why, without removing anything (it still observes: origin's base branch is fetched)")
@@ -37,7 +37,7 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	set := promotionsSettings(cfg, "", false)
+	set := gcSettings(cfg, sel)
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(set.Deadline)
 	defer stop()
@@ -110,4 +110,15 @@ func gcHint(ctx context.Context, svc *service.Service) string {
 		return ""
 	}
 	return fmt.Sprintf("hoist: %s are left on this machine; `hoist gc --dry-run` lists what `hoist gc` would remove", strings.Join(parts, " and "))
+}
+
+// gcSettings is promotionsSettings plus the clone a root --repo names: gc keeps the repo view
+// of every configured clone and of that one, so `hoist --repo <clone> gc` on flags alone does
+// not delete the view of the clone it was just pointed at (Codex on #347).
+func gcSettings(cfg *config.Config, sel selection) service.Settings {
+	set := promotionsSettings(cfg, "", false)
+	if sel.repo != "" {
+		set.RepoDir = sel.repo
+	}
+	return set
 }
