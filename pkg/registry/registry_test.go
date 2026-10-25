@@ -578,11 +578,82 @@ func TestEnvSourceIsScopedToGHCR(t *testing.T) {
 	t.Setenv("GHCR_TOKEN", "pw-good")
 	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}})
 	_, err := c.Head(context.Background(), mustRef(t, "registry.example/app:v1"))
-	if err == nil || !strings.Contains(err.Error(), "env: only for ghcr.io, not registry.example") {
+	if err == nil || !strings.Contains(err.Error(), "env: no registries[].env for registry.example") {
 		t.Errorf("error = %v", err)
 	}
 	if !strings.Contains(err.Error(), "anonymous:") {
 		t.Errorf("the anonymous attempt was not reported: %v", err)
+	}
+}
+
+// #172: a registries[].env names the variable holding that registry's credential, for any
+// host. The fake registry accepts user "hoist" (the fixed user sent with a bare token) with
+// this password, so the request only succeeds if the named variable was actually read.
+func TestEnvSourceReadsTheNamedVariableForANonGHCRHost(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	tr.gate.users["hoist"] = "pw-named-env"
+	want := tr.pushImage(t, "example/app:v1")
+	t.Setenv("HOIST_TEST_QUAY_TOKEN", "pw-named-env")
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}, Env: "HOIST_TEST_QUAY_TOKEN"})
+	got, err := c.Head(context.Background(), mustRef(t, "registry.example/example/app:v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want.String() || c.AuthSourceUsed() != "env (HOIST_TEST_QUAY_TOKEN)" {
+		t.Errorf("Head = %s, used %q", got, c.AuthSourceUsed())
+	}
+}
+
+// Without registries[].env a non-GHCR host has no env source (no default), and the GHCR
+// pair does not leak across hosts.
+func TestEnvSourceWithoutANamedVariableIsSkippedForOtherHosts(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	t.Setenv("GHCR_TOKEN", "pw-good")
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}})
+	_, err := c.Head(context.Background(), mustRef(t, "registry.example/app:v1"))
+	if err == nil || !strings.Contains(err.Error(), "env: no registries[].env for registry.example") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// A named variable that is unset is reported by name, never by value, and does not fall
+// back to the GHCR pair.
+func TestEnvSourceNamedVariableUnsetIsReported(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	t.Setenv("GHCR_TOKEN", "pw-good")
+	t.Setenv("HOIST_TEST_UNSET_TOKEN", "")
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}, Env: "HOIST_TEST_UNSET_TOKEN"})
+	_, err := c.Head(context.Background(), mustRef(t, "ghcr.io/example/app:v1"))
+	if err == nil || !strings.Contains(err.Error(), "env: HOIST_TEST_UNSET_TOKEN is not set") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// The value read from the named variable is registered process-wide the moment it is read,
+// and never appears in the error a rejected credential produces.
+func TestEnvSourceNamedVariableValueIsRedacted(t *testing.T) {
+	noEnv(t)
+	neverOp(t)
+	tr := newTestRegistry(t)
+	const token = "NAMED-ENV-TOKEN-4c81e7"
+	t.Setenv("HOIST_TEST_ECR_TOKEN", token)
+	c := newClient(t, tr, AuthConfig{Order: []AuthSource{AuthEnv}, Env: "HOIST_TEST_ECR_TOKEN"})
+	// The gate does not know this token, so the request 401s and the error is built.
+	_, err := c.Head(context.Background(), mustRef(t, "registry.example/example/app:v1"))
+	if err == nil {
+		t.Fatal("expected the unknown credential to be rejected")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("the credential value is in the error: %v", err)
+	}
+	if got := redact.Strings("leaked " + token); strings.Contains(got, token) {
+		t.Errorf("named env token not registered process-wide: %q", got)
 	}
 }
 

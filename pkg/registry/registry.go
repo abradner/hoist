@@ -86,7 +86,7 @@ type AuthSource string
 
 // The credential sources, in their default order.
 const (
-	AuthEnv      AuthSource = "env"      // HOIST_GHCR_TOKEN, then GHCR_TOKEN; ghcr.io only
+	AuthEnv      AuthSource = "env"      // registries[].env, else HOIST_GHCR_TOKEN then GHCR_TOKEN for ghcr.io only
 	AuthKeychain AuthSource = "keychain" // ~/.docker/config.json and credential helpers
 	AuthCluster  AuthSource = "cluster"  // a kubernetes.io/dockerconfigjson Secret, opt-in
 	AuthOp       AuthSource = "op"       // `op read <ref>`, opt-in
@@ -123,6 +123,10 @@ type AuthConfig struct {
 	// ClusterSecret is "namespace/name" of the pull secret the cluster source reads.
 	// Empty means the cluster source is skipped.
 	ClusterSecret string
+	// Env names the environment variable holding this registry's credential
+	// (registries[].env). Empty means no named variable: the env source then serves
+	// ghcr.io only, from HOIST_GHCR_TOKEN/GHCR_TOKEN, and no other host.
+	Env string
 	// OpRef is the 1Password reference the op source reads. Empty means op is skipped and
 	// nothing is executed.
 	OpRef string
@@ -354,14 +358,23 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 	case "":
 		return link{name: "anonymous", auth: authn.Anonymous}, ""
 	case AuthEnv:
-		if host != "ghcr.io" {
-			return link{}, "env: only for ghcr.io, not " + host
+		// A registries[].env names the variable for any host and replaces the GHCR pair; with
+		// none, only ghcr.io has an env source (HOIST_GHCR_TOKEN, then GHCR_TOKEN) (#172).
+		vars := []string{"HOIST_GHCR_TOKEN", "GHCR_TOKEN"}
+		switch {
+		case c.cfg.Env != "":
+			vars = []string{c.cfg.Env}
+		case host != "ghcr.io":
+			return link{}, "env: no registries[].env for " + host
 		}
-		for _, v := range []string{"HOIST_GHCR_TOKEN", "GHCR_TOKEN"} {
+		for _, v := range vars {
 			if tok := os.Getenv(v); tok != "" {
-				user, hide := tokenUser(tok)
+				user, hide := tokenUser(tok, host == "ghcr.io")
 				return link{source: source, name: "env (" + v + ")", auth: &authn.Basic{Username: user, Password: tok}, hide: hide}, ""
 			}
+		}
+		if c.cfg.Env != "" {
+			return link{}, "env: " + c.cfg.Env + " is not set"
 		}
 		return link{}, "env: neither HOIST_GHCR_TOKEN nor GHCR_TOKEN is set"
 	case AuthKeychain:
@@ -404,7 +417,7 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 		if err != nil {
 			return link{}, "op: " + err.Error()
 		}
-		user, hide := tokenUser(val)
+		user, hide := tokenUser(val, true) // unchanged: op has always honoured the GHCR user variables
 		return link{source: source, name: "op", auth: &authn.Basic{Username: user, Password: val}, hide: hide}, ""
 	}
 	return link{}, string(source) + ": unknown source"
@@ -414,9 +427,13 @@ func (c *Client) link(ctx context.Context, source AuthSource, reg name.Registry)
 // fixedUser. It returns the strings to hide: the token, and the user when it came from
 // the environment. Both are registered process-wide the moment they are read (R-002):
 // see pkg/redact.Register.
-func tokenUser(token string) (string, []string) {
+func tokenUser(token string, ghcr bool) (string, []string) {
 	redact.Register(token)
 	for _, v := range []string{"HOIST_GHCR_USER", "GHCR_USER"} {
+		// The GHCR user variables name a GHCR user; they are never sent to another host.
+		if !ghcr {
+			break
+		}
 		if u := os.Getenv(v); u != "" {
 			// Not registered process-wide: a username is not a secret and, for GHCR, is the
 			// owner segment of every image path. It stays in this call's local hide list only.

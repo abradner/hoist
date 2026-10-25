@@ -308,6 +308,7 @@ func TestValidationErrorsNamePath(t *testing.T) {
 		{"auth empty", "registries:\n  - prefix: ghcr.io/\n    auth: []\n", "registries[0].auth: must not be empty"},
 		{"cluster half", "registries:\n  - prefix: ghcr.io/\n    cluster: { namespace: ns }\n", "registries[0].cluster: needs both namespace and secret"},
 		{"op shape", "registries:\n  - prefix: ghcr.io/\n    op: vault/item\n", "registries[0].op: want an op://"},
+		{"env shape", "registries:\n  - prefix: quay.io/\n    env: 1BAD-NAME\n", "registries[0].env: want an environment variable name"},
 		{"poll negative", "poll: { argo: -5s }\n", "poll.argo: must be a positive duration"},
 		{"state.retain negative", "state: { retain: -1h }\n", "state.retain: must be a positive duration"},
 		{"duplicate name", "repos:\n  - path: /x\n    name: a\n  - path: /y\n    name: a\n", "repos[1].name: \"a\" is also repos[0]"},
