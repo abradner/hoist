@@ -59,8 +59,9 @@ func SkippedStaging(source, target string, envs config.EnvsConfig) (staging stri
 }
 
 // WarnSkippedStagingProduction attaches gitops.WarnSkippedStaging to a promotion into a
-// production env from a source that is not its configured predecessor: "promoting straight to
-// production, skipping <staging>". Plan calls it for every promotion it builds, so the dry run,
+// production env from a source whose own configured pair is another env: "promoting straight
+// to production, skipping <staging>". A source with no pair (a qa or preview env) is silent, as
+// SkippedStaging says. Plan calls it for every promotion it builds, so the dry run,
 // the confirm screen and the PR body all carry it, as WarnDeployIntoProduction does for a deploy
 // (§4.5). It informs and never blocks (principle 5). A deploy has no source env, so it is a no-op
 // there.
