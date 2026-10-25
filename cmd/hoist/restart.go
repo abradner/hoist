@@ -15,11 +15,11 @@ import (
 	"github.com/abradner/hoist/pkg/gitops"
 )
 
-// runRestart is `hoist restart`: roll an env's Deployments without changing the image references
-// they declare.
+// runRestart is `hoist restart`: roll an env's Deployments, StatefulSets and DaemonSets without
+// changing the image references they declare.
 //
 // It talks to the cluster directly, and deliberately writes nothing to git. `kubectl rollout
-// restart` stamps the pod template's restart annotation on the live Deployment, and Argo does
+// restart` stamps the pod template's restart annotation on the live workload, and Argo does
 // not treat that as drift even with selfHeal on: its diff is a three-way merge, so a field Argo
 // never set and that is absent from the manifest is owned by someone else and left alone — the
 // same reason `kubectl apply` does not delete fields it never wrote.
@@ -36,9 +36,9 @@ import (
 func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist restart", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command). Read only to learn which Deployments each family declares — a restart writes nothing to it")
+	repo := fs.String("repo", sel.repo, "path to the GitOps repo checkout, or a configured repo's name (required unless the config file lists exactly one repo; may also be given before the command). Read only to learn which workloads each family declares — a restart writes nothing to it")
 	appsRoot := fs.String("apps-root", sel.appsRoot, "directory of Argo Application wrappers, relative to --repo (the selected repo's apps_root when configured)")
-	env := fs.String("env", "", "target env: the namespace whose Deployments to restart (required)")
+	env := fs.String("env", "", "target env: the namespace whose Deployments, StatefulSets and DaemonSets to restart (required)")
 	family := fs.String("family", "", "comma-separated family names to restart; default every family in --env")
 	confirmProduction := fs.String("confirm-production", "", "required when --env is listed in the selected repo's envs.production: repeat --env's exact value to acknowledge restarting production (refused otherwise)")
 	kubeContext := fs.String("kube-context", sel.kubeContext, "kubeconfig context to restart in (the selected repo's kube.context when configured; may also be given before the command)")
@@ -74,7 +74,7 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if sel.given["family"] && len(families) == 0 {
 		return failf(stderr, "hoist restart", exitUsage, "--family was given but names no family; omit it to restart every family in --env")
 	}
-	targets, err := restart.Targets(r, *env, families)
+	targets, skipped, err := restart.Targets(r, *env, families)
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
@@ -101,9 +101,10 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 	if err != nil {
 		return fail(stderr, "hoist restart", exitFailure, err)
 	}
+	pl.Skipped = skipped
 	printRestartTargets(stdout, *env, usedContext, pl)
 	if len(pl.Targets) == 0 {
-		return failf(stderr, "hoist restart", exitFailure, "none of %s's Deployments exist in the cluster", *env)
+		return failf(stderr, "hoist restart", exitFailure, "none of the workloads %s declares exist in the cluster", *env)
 	}
 
 	if *dryRun {
@@ -118,13 +119,13 @@ func runRestart(args []string, cfg *config.Config, sel selection, stdout, stderr
 		// operator needs to know which.
 		code := fail(stderr, "hoist restart", exitFailure, rerr)
 		if len(restarted) > 0 {
-			failf(stderr, "hoist restart", exitFailure, "already restarted: %s", strings.Join(restarted, ", "))
+			failf(stderr, "hoist restart", exitFailure, "already restarted: %s", restart.Labels(restarted))
 		}
 		return code
 	}
-	fmt.Fprintf(stdout, "\nrestarted %d Deployment(s) at %s\n", len(restarted), at.Format(time.RFC3339))
+	fmt.Fprintf(stdout, "\nrestarted %d %s(s) at %s\n", len(restarted), pl.Noun(), at.Format(time.RFC3339))
 
-	return watchRestart(ctx, svc, *env, restarted, at, stdout, stderr)
+	return watchRestart(ctx, svc, pl, restarted, at, stdout, stderr)
 }
 
 // splitFamilies turns the comma-separated --family value into a slice, dropping empties so
@@ -142,61 +143,82 @@ func splitFamilies(v string) []string {
 // printRestartTargets names what will roll, what it supersedes, and every reason it will not be
 // graceful — before anything is written.
 func printRestartTargets(w io.Writer, env, kubeContext string, pl restart.Plan) {
-	fmt.Fprintf(w, "restart %s (context %s): %d Deployment(s)\n\n", env, kubeContext, len(pl.Targets))
+	fmt.Fprintf(w, "restart %s (context %s): %d %s(s)\n\n", env, kubeContext, len(pl.Targets), pl.Noun())
 	for _, st := range pl.Targets {
 		was := st.RestartedAt
 		if was == "" {
 			was = "never restarted this way"
 		}
-		fmt.Fprintf(w, "  %s  (%d replica(s), %s, last restart: %s)\n", st.Name, st.Replicas, st.Strategy, was)
+		label := pl.Label(gitops.Workload{Kind: st.Kind, Name: st.Name})
+		fmt.Fprintf(w, "  %s  (%d %s(s), %s, last restart: %s)\n", label, st.Replicas, restart.CountNoun(st.Kind), st.Strategy, was)
 		for _, c := range st.GracefulRestartConcerns() {
 			fmt.Fprintf(w, "    warning: %s\n", c)
 		}
 	}
-	for _, name := range pl.Absent {
-		fmt.Fprintf(w, "  %s\n    warning: declared in the repo but not in the cluster — not restarted\n", name)
+	for _, a := range pl.Absent {
+		fmt.Fprintf(w, "  %s\n    warning: declared in the repo but not in the cluster — not restarted\n", pl.Label(a))
+	}
+	for _, sk := range pl.Skipped {
+		fmt.Fprintf(w, "  %s\n    not restarted: a %s has no rollout to restart\n", restart.Label(sk), sk.Kind)
 	}
 }
 
 // watchRestart follows the rollout the restart just started, at the configured cadence and
 // within the configured deadline. This is the same question RolledOutStep asks of a promotion,
 // asked directly: there is no promotion here to hang a step on.
-func watchRestart(ctx context.Context, svc *service.Service, env string, names []string, at time.Time, stdout, stderr io.Writer) int {
+//
+// An OnDelete StatefulSet or DaemonSet comes back Manual: its stamp landed, and its controller will
+// not roll it. It is named as stamped-not-rolled and stops being waited for, and the closing line
+// never counts it as rolled. The exit status is still 0 — the restart did everything it can do and
+// was warned about beforehand (principle 5) — but the output never claims a rollout that did not
+// happen (principle 1).
+func watchRestart(ctx context.Context, svc *service.Service, pl restart.Plan, restarted []gitops.Workload, at time.Time, stdout, stderr io.Writer) int {
+	env := pl.Env
 	interval := svc.RestartInterval()
 	if deadline := svc.Settings().Deadline; deadline > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deadline)
 		defer cancel()
 	}
-	pending := append([]string(nil), names...)
+	pending := append([]gitops.Workload(nil), restarted...)
+	var manual []gitops.Workload
 	for {
 		progress, err := svc.RestartObserve(ctx, env, pending, at)
 		if err != nil {
 			return fail(stderr, "hoist restart", exitFailure, err)
 		}
-		var still []string
+		var still []gitops.Workload
 		for _, pr := range progress {
+			w := gitops.Workload{Kind: pr.Kind, Name: pr.Name}
 			switch {
 			case pr.Superseded:
 				// Something else restarted it while this one was in flight, so the rollout now
 				// running is not this command's to report as its own success.
-				return failf(stderr, "hoist restart", exitFailure, "%s was restarted by something else while this one was in flight; the pods are rolling, but not for this command", pr.Name)
+				return failf(stderr, "hoist restart", exitFailure, "%s was restarted by something else while this one was in flight; the pods are rolling, but not for this command", restart.Label(w))
 			case pr.Blocked != "":
-				return failf(stderr, "hoist restart", exitFailure, "%s: %s", pr.Name, pr.Blocked)
+				return failf(stderr, "hoist restart", exitFailure, "%s: %s", restart.Label(w), pr.Blocked)
+			case pr.Manual != "":
+				fmt.Fprintf(stdout, "  %s: stamped, not rolled: %s\n", pl.Label(w), pr.Manual)
+				manual = append(manual, w)
 			case pr.Done:
-				fmt.Fprintf(stdout, "  %s: %s\n", pr.Name, pr.Detail)
+				fmt.Fprintf(stdout, "  %s: %s\n", pl.Label(w), pr.Detail)
 			default:
-				still = append(still, pr.Name)
+				still = append(still, w)
 			}
 		}
 		if len(still) == 0 {
-			fmt.Fprintf(stdout, "all %d Deployment(s) rolled\n", len(names))
+			if len(manual) == 0 {
+				fmt.Fprintf(stdout, "all %d %s(s) rolled\n", len(restarted), pl.Noun())
+			} else {
+				fmt.Fprintf(stdout, "%d of %d %s(s) rolled; not rolled, waiting for their pods to be deleted: %s\n",
+					len(restarted)-len(manual), len(restarted), pl.Noun(), restart.Labels(manual))
+			}
 			return 0
 		}
 		pending = still
 		select {
 		case <-ctx.Done():
-			return failf(stderr, "hoist restart", exitFailure, "still rolling: %s (%v)", strings.Join(pending, ", "), ctx.Err())
+			return failf(stderr, "hoist restart", exitFailure, "still rolling: %s (%v)", restart.Labels(pending), ctx.Err())
 		case <-time.After(interval):
 		}
 	}

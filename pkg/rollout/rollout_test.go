@@ -257,7 +257,7 @@ func TestRestartStampsThePodTemplateAndNothingElse(t *testing.T) {
 	r := FromClientset(cs)
 
 	at := time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC)
-	if err := r.Restart(context.Background(), "app-production", "app", at); err != nil {
+	if err := r.Restart(context.Background(), "app-production", "app", KindDeployment, at); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
@@ -294,7 +294,7 @@ func TestRestartStampsThePodTemplateAndNothingElse(t *testing.T) {
 // uses — so a caller can tell "gone" from a transient failure.
 func TestRestartOnAMissingDeploymentIsNotFound(t *testing.T) {
 	r := FromClientset(fake.NewSimpleClientset())
-	err := r.Restart(context.Background(), "app-production", "nope", time.Now())
+	err := r.Restart(context.Background(), "app-production", "nope", KindDeployment, time.Now())
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
@@ -311,7 +311,7 @@ func TestRestartPreservesOtherPodTemplateAnnotations(t *testing.T) {
 	cs := fake.NewSimpleClientset(d)
 	r := FromClientset(cs)
 
-	if err := r.Restart(context.Background(), "app-staging", "worker", time.Now()); err != nil {
+	if err := r.Restart(context.Background(), "app-staging", "worker", KindDeployment, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cs.AppsV1().Deployments("app-staging").Get(context.Background(), "worker", metav1.GetOptions{})
@@ -378,7 +378,7 @@ func TestGracefulRestartConcerns(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.st.GracefulRestartConcerns()
+			got := tc.st.Workload().GracefulRestartConcerns()
 			if tc.none {
 				if len(got) != 0 {
 					t.Fatalf("expected nothing to say, got %v", got)
@@ -478,7 +478,7 @@ func TestDeploymentAppliesTheFencepostRule(t *testing.T) {
 		t.Fatalf("MaxUnavailable = %d, want 1: with surge 0 the controller has no other way to progress", st.MaxUnavailable)
 	}
 	// And the warning follows: this pod really can be taken down first.
-	concerns := st.GracefulRestartConcerns()
+	concerns := st.Workload().GracefulRestartConcerns()
 	found := false
 	for _, c := range concerns {
 		if strings.Contains(c, "every pod can be down at once") {

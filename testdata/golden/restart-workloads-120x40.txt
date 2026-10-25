@@ -1,0 +1,40 @@
+╭─ hoist · restart · data/app-staging ─────────────────────────────────────────────────────────────────────────────────╮
+│app-staging / data                                                                                   not yet restarted│
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│3 workloads in app-staging                                                                                            │
+│                                                                                                                      │
+│   Deployment/web  2 replicas · RollingUpdate · last restart: never restarted this way                                │
+│                                                                                                                      │
+│   StatefulSet/db  3 replicas · OnDelete · last restart: never restarted this way                                     │
+│     ! update strategy is OnDelete: the restart stamps the pod template, but no pod restarts until it is deleted,     │
+│       and hoist will not report this StatefulSet as rolled                                                           │
+│                                                                                                                      │
+│   DaemonSet/agent  4 pods · RollingUpdate · last restart: never restarted this way                                   │
+│                                                                                                                      │
+│   CronJob/backup                                                                                                     │
+│     not restarted: a CronJob has no rollout to restart                                                               │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                          l activity · enter restart · esc back · ? help

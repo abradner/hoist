@@ -14,8 +14,12 @@ import (
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/uitest"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// webTarget is the one Deployment most of these tests restart.
+var webTarget = []gitops.Workload{{Kind: rollout.KindDeployment, Name: "web"}}
 
 // fakeFuncs is the whole of this screen's world, recorded so a test can see what it asked for.
 type fakeFuncs struct {
@@ -30,17 +34,17 @@ type fakeFuncs struct {
 
 func (f *fakeFuncs) funcs() Funcs {
 	return Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) {
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) {
 			return f.plan, f.readErr
 		},
-		Do: func(_ context.Context, p restart.Plan, _ time.Time) ([]string, error) {
+		Do: func(_ context.Context, p restart.Plan, _ time.Time) ([]gitops.Workload, error) {
 			f.restarts++
 			if f.doErr != nil {
-				return p.Names()[:f.doneUpTo], f.doErr
+				return p.Workloads()[:f.doneUpTo], f.doErr
 			}
-			return p.Names(), nil
+			return p.Workloads(), nil
 		},
-		Observe: func(context.Context, string, []string, time.Time) ([]restart.Progress, error) {
+		Observe: func(context.Context, string, []gitops.Workload, time.Time) ([]restart.Progress, error) {
 			i := f.obs
 			f.obs++
 			if i >= len(f.progress) {
@@ -55,8 +59,8 @@ func (f *fakeFuncs) funcs() Funcs {
 func onePlan() restart.Plan {
 	return restart.Plan{
 		Env: "app-staging",
-		Targets: []rollout.DeploymentStatus{{
-			Namespace: "app-staging", Name: "web",
+		Targets: []rollout.WorkloadStatus{{
+			Kind: rollout.KindDeployment, Namespace: "app-staging", Name: "web",
 			Replicas: 1, Strategy: "RollingUpdate",
 			Images: []rollout.ContainerImage{{Name: "web", Image: "ghcr.io/example/web:v1"}},
 		}},
@@ -75,7 +79,7 @@ func drain(t *testing.T, m Model, cmd tea.Cmd) Model {
 
 func ready(t *testing.T, f *fakeFuncs, production bool) Model {
 	t.Helper()
-	m := New("app-staging", "web", []string{"web"}, production, f.funcs(), ui.NewStyles(true)).SetSize(120, 30)
+	m := New("app-staging", "web", webTarget, production, f.funcs(), ui.NewStyles(true)).SetSize(120, 30)
 	return drain(t, m, m.Init())
 }
 
@@ -91,7 +95,7 @@ func TestScreenShowsTheTargetsAndTheirWarnings(t *testing.T) {
 			t.Errorf("view missing %q:\n%s", want, v)
 		}
 	}
-	// The concerns come from the live spec, through rollout.DeploymentStatus.
+	// The concerns come from the live spec, through rollout.WorkloadStatus.
 	if !strings.Contains(v, "no redundancy") {
 		t.Errorf("a single-replica Deployment should say so:\n%s", v)
 	}
@@ -139,8 +143,8 @@ func TestEnterRestartsAndFollowsTheRollout(t *testing.T) {
 	f := &fakeFuncs{
 		plan: onePlan(),
 		progress: [][]restart.Progress{
-			{{Name: "web", Detail: "1 of 1 updated"}},
-			{{Name: "web", Done: true, Detail: "successfully rolled out"}},
+			{{Kind: rollout.KindDeployment, Name: "web", Detail: "1 of 1 updated"}},
+			{{Kind: rollout.KindDeployment, Name: "web", Done: true, Detail: "successfully rolled out"}},
 		},
 	}
 	m := ready(t, f, false)
@@ -168,7 +172,7 @@ func TestEnterRestartsAndFollowsTheRollout(t *testing.T) {
 // AR-H4, screen half: an env nothing can vouch for (no config) gets the production gesture too,
 // in words that admit the doubt rather than claiming production. Real keys, as above.
 func TestUnknownProductionNeedsTheConfirmationAndSaysWhy(t *testing.T) {
-	f := &fakeFuncs{plan: onePlan(), progress: [][]restart.Progress{{{Name: "web", Done: true}}}}
+	f := &fakeFuncs{plan: onePlan(), progress: [][]restart.Progress{{{Kind: rollout.KindDeployment, Name: "web", Done: true}}}}
 	m := ready(t, f, false).WithUnknownProduction()
 	if !strings.Contains(m.View(), "production?") {
 		t.Errorf("the header should flag the doubt:\n%s", m.View())
@@ -187,7 +191,7 @@ func TestUnknownProductionNeedsTheConfirmationAndSaysWhy(t *testing.T) {
 // something that commits nothing, so this stands in its place. Driven through real keys: the
 // bool huh writes to lives on a superseded Model copy, so setting it directly proves nothing.
 func TestProductionNeedsTheExtraConfirmation(t *testing.T) {
-	f := &fakeFuncs{plan: onePlan(), progress: [][]restart.Progress{{{Name: "web", Done: true}}}}
+	f := &fakeFuncs{plan: onePlan(), progress: [][]restart.Progress{{{Kind: rollout.KindDeployment, Name: "web", Done: true}}}}
 	m := ready(t, f, true)
 	if !strings.Contains(m.View(), "production") {
 		t.Errorf("the header should say this is production:\n%s", m.View())
@@ -231,7 +235,7 @@ func TestProductionNeedsTheExtraConfirmation(t *testing.T) {
 func TestSupersededRestartIsNotReportedAsSuccess(t *testing.T) {
 	f := &fakeFuncs{
 		plan:     onePlan(),
-		progress: [][]restart.Progress{{{Name: "web", Superseded: true}}},
+		progress: [][]restart.Progress{{{Kind: rollout.KindDeployment, Name: "web", Superseded: true}}},
 	}
 	m := ready(t, f, false)
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -380,7 +384,7 @@ func TestRestartRollingGolden(t *testing.T) {
 // never-ticked spinner.Model this used to check with the plain static busyMarker: the spinner
 // was permanently frozen on its first frame, which reads as wedged rather than busy.
 func TestBusyMarkerShowsOnlyWhileBusy(t *testing.T) {
-	m := New("app-staging", "web", []string{"web"}, false, (&fakeFuncs{plan: onePlan()}).funcs(), ui.NewStyles(true)).SetSize(80, 24)
+	m := New("app-staging", "web", webTarget, false, (&fakeFuncs{plan: onePlan()}).funcs(), ui.NewStyles(true)).SetSize(80, 24)
 	hasMarker := func(m Model) bool {
 		return strings.Contains(ansi.Strip(m.headerSection()), busyMarker+" "+m.stateWord())
 	}
@@ -422,11 +426,11 @@ func TestBusyMarkerShowsOnlyWhileBusy(t *testing.T) {
 func TestStartedMsgFromAnotherInstanceIsForeign(t *testing.T) {
 	f := &fakeFuncs{plan: onePlan()}
 	a := ready(t, f, false)
-	b := New("app-staging", "web", []string{"web"}, false, f.funcs(), ui.NewStyles(true)).SetSize(120, 30)
+	b := New("app-staging", "web", webTarget, false, f.funcs(), ui.NewStyles(true)).SetSize(120, 30)
 	if b.state != stateReading {
 		t.Fatalf("setup: state = %v, want stateReading", b.state)
 	}
-	foreign := scope.Result[startedMsg]{From: a.scope.ID, V: startedMsg{done: []string{"web"}}}
+	foreign := scope.Result[startedMsg]{From: a.scope.ID, V: startedMsg{done: webTarget}}
 	got, cmd := b.Update(foreign)
 	if cmd != nil {
 		t.Error("a foreign startedMsg produced a command")
@@ -446,11 +450,11 @@ func TestRestartObserveTimeout(t *testing.T) {
 	funcs := f.funcs()
 	funcs.Interval = time.Millisecond
 	funcs.ObserveTimeout = 20 * time.Millisecond
-	funcs.Observe = func(ctx context.Context, _ string, _ []string, _ time.Time) ([]restart.Progress, error) {
+	funcs.Observe = func(ctx context.Context, _ string, _ []gitops.Workload, _ time.Time) ([]restart.Progress, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
 	m = drain(t, m, m.Init())
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = drain(t, m, cmd)
@@ -468,10 +472,10 @@ func TestRestartObserveTimeout(t *testing.T) {
 // state.
 func TestNewRefusesDoWithoutObserve(t *testing.T) {
 	funcs := Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
-		Do:   func(context.Context, restart.Plan, time.Time) ([]string, error) { return nil, nil },
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) { return onePlan(), nil },
+		Do:   func(context.Context, restart.Plan, time.Time) ([]gitops.Workload, error) { return nil, nil },
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
 	if m.state != stateFailed {
 		t.Fatalf("state = %v, want failed", m.state)
 	}
@@ -487,9 +491,9 @@ func TestNewRefusesDoWithoutObserve(t *testing.T) {
 // on this viewport-backed screen.
 func TestHomeEndScrollBody(t *testing.T) {
 	funcs := Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) { return onePlan(), nil },
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
 	m.body.SetContent(strings.Repeat("line\n", 40))
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
 	if !m.body.AtBottom() {
@@ -508,12 +512,12 @@ func TestHomeEndScrollBody(t *testing.T) {
 func TestRRereadsThePlan(t *testing.T) {
 	calls := 0
 	funcs := Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) {
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) {
 			calls++
 			return onePlan(), nil
 		},
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
 	m, cmd := m.Update(m.Init()())
 	if m.state != stateConfirm {
 		t.Fatalf("setup: state = %v, want stateConfirm", m.state)
@@ -545,10 +549,10 @@ func TestRRereadsThePlan(t *testing.T) {
 // this screen could never observe finishing.
 func TestRereadRefusedForConstructionMisconfiguration(t *testing.T) {
 	funcs := Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
-		Do:   func(context.Context, restart.Plan, time.Time) ([]string, error) { return nil, nil },
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) { return onePlan(), nil },
+		Do:   func(context.Context, restart.Plan, time.Time) ([]gitops.Workload, error) { return nil, nil },
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(120, 30)
 	if m.state != stateFailed || !m.refused {
 		t.Fatalf("setup: state=%v refused=%v, want stateFailed/true", m.state, m.refused)
 	}
@@ -566,9 +570,9 @@ func TestRereadRefusedForConstructionMisconfiguration(t *testing.T) {
 // the registry lists "d" as unbound on this screen.
 func TestDUnboundDoesNotScrollTheBody(t *testing.T) {
 	funcs := Funcs{
-		Read: func(context.Context, string, []string) (restart.Plan, error) { return onePlan(), nil },
+		Read: func(context.Context, string, []gitops.Workload) (restart.Plan, error) { return onePlan(), nil },
 	}
-	m := New("app-staging", "web", []string{"web"}, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
+	m := New("app-staging", "web", webTarget, false, funcs, ui.NewStyles(true)).SetSize(80, 10)
 	m.body.SetContent(strings.Repeat("line\n", 40))
 
 	m2, _ := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})

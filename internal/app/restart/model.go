@@ -3,8 +3,9 @@
 //
 // It is deliberately not the deploy confirm screen with a different noun. That screen's whole
 // content is a diff, and a restart has none — nothing in the manifest changes. What an operator
-// needs to see here instead is live: which Deployments, how many replicas each, what it last
-// restarted at, and every reason this particular restart will not be seamless.
+// needs to see here instead is live: which workloads (Deployments, StatefulSets, DaemonSets), how
+// many replicas each, what it last restarted at, every reason this particular restart will not be
+// seamless, and which of the family's workloads it does not roll at all.
 package restart
 
 import (
@@ -23,21 +24,22 @@ import (
 	"github.com/abradner/hoist/internal/ui"
 	"github.com/abradner/hoist/internal/ui/confirm"
 	"github.com/abradner/hoist/internal/ui/keys"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// ReadFunc reads what a restart of these Deployments would touch. Supplied by the root rather
+// ReadFunc reads what a restart of these workloads would touch. Supplied by the root rather
 // than reached for here: this package never opens a cluster connection of its own (AGENTS.md
 // §4.8).
-type ReadFunc func(ctx context.Context, env string, names []string) (restart.Plan, error)
+type ReadFunc func(ctx context.Context, env string, targets []gitops.Workload) (restart.Plan, error)
 
-// DoFunc performs the restart and returns the names it got through, in order, so a failure can
-// say what had already rolled. It takes no env: restart.Plan already carries one, and two
+// DoFunc performs the restart and returns the workloads it got through, in order, so a failure
+// can say what had already rolled. It takes no env: restart.Plan already carries one, and two
 // sources for the same fact is how they come to disagree.
-type DoFunc func(ctx context.Context, p restart.Plan, at time.Time) ([]string, error)
+type DoFunc func(ctx context.Context, p restart.Plan, at time.Time) ([]gitops.Workload, error)
 
 // ObserveFunc reads how far the rollout has got.
-type ObserveFunc func(ctx context.Context, env string, names []string, at time.Time) ([]restart.Progress, error)
+type ObserveFunc func(ctx context.Context, env string, targets []gitops.Workload, at time.Time) ([]restart.Progress, error)
 
 // Funcs is the whole of this screen's access to the world.
 type Funcs struct {
@@ -106,7 +108,7 @@ type planMsg struct {
 }
 type startedMsg struct {
 	at   time.Time
-	done []string
+	done []gitops.Workload
 	err  error
 }
 type progressMsg struct {
@@ -120,9 +122,12 @@ type Model struct {
 	styles ui.Styles
 	funcs  Funcs
 
-	env        string
-	family     string
-	names      []string
+	env     string
+	family  string
+	targets []gitops.Workload
+	// skipped is what the family declares that a restart does not roll (restart.Targets' second
+	// result), shown so the list is never quietly shorter than the family (#171).
+	skipped    []gitops.Workload
 	production bool
 	// unknown is true when no config says whether env is production, so the screen treats it as
 	// production for the gate (AR-H4) and says why it is asking.
@@ -142,10 +147,13 @@ type Model struct {
 	// without Observe) — a wiring mistake a re-read could never fix, unlike a stateFailed set
 	// later by a real Read call's own error, which "r" is allowed to retry.
 	refused bool
-	// done is which Deployments have finished rolling, kept on the model rather than anywhere
+	// done is which workloads have finished rolling, kept on the model rather than anywhere
 	// package-level: two of these screens can exist at once (two envs), and shared mutable
 	// state between them would be both a race and a lie.
-	done map[string]bool
+	done map[gitops.Workload]bool
+	// manual is which workloads were stamped but will not roll on their own (OnDelete), with
+	// the reason: final like done, and never counted as rolled.
+	manual map[gitops.Workload]string
 
 	// confirm is the production gate: §4.5 cannot apply to something that commits nothing, so
 	// what stands in its place is a second, deliberate gesture. Non-production envs do not get
@@ -184,8 +192,8 @@ func newViewport() viewport.Model {
 	return keys.NewViewport(false, true)
 }
 
-// New builds the screen for one family in one env. names are the Deployments the repo says that
-// family declares; nothing is read from the cluster until Init runs.
+// New builds the screen for one family in one env. targets are the restartable workloads the repo
+// says that family declares (restart.Targets); nothing is read from the cluster until Init runs.
 //
 // New refuses a Funcs with Do set but Observe left nil (FB-L3): without Observe, onProgress's
 // own tick chain has nothing to call once a restart is under way (observe's own `obs == nil`
@@ -193,10 +201,10 @@ func newViewport() viewport.Model {
 // "rolling" forever with no way to tell the operator the rollout finished, or even that it
 // started successfully. That is a wiring mistake, not a runtime condition to render around, so
 // it fails at construction with a named reason instead of reproducing FB-L3 live.
-func New(env, family string, names []string, production bool, funcs Funcs, styles ui.Styles) Model {
+func New(env, family string, targets []gitops.Workload, production bool, funcs Funcs, styles ui.Styles) Model {
 	m := Model{
 		styles: styles, funcs: funcs,
-		env: env, family: family, names: names, production: production,
+		env: env, family: family, targets: targets, production: production,
 		scope: scope.Open(),
 		state: stateReading,
 		body:  newViewport(),
@@ -218,6 +226,13 @@ func (m Model) WithUnknownProduction() Model {
 	return m
 }
 
+// WithSkipped names the family's workloads a restart does not roll (restart.Targets' second
+// result), listed under the targets as not restarted.
+func (m Model) WithSkipped(skipped []gitops.Workload) Model {
+	m.skipped = skipped
+	return m
+}
+
 // Close cancels this instance's outstanding Read/Do/Observe call. Called by the root's own pop
 // when this screen is actually removed from the stack (AGENTS.md §4.8).
 func (m Model) Close() { m.scope.Close() }
@@ -229,12 +244,12 @@ func (m Model) Init() tea.Cmd {
 	if m.state == stateFailed {
 		return nil
 	}
-	read, env, names, sc := m.funcs.Read, m.env, m.names, m.scope
+	read, env, targets, sc := m.funcs.Read, m.env, m.targets, m.scope
 	if read == nil {
 		return scope.DoCtx(sc, m.funcs.readTimeout(), func(context.Context) planMsg { return planMsg{err: fmt.Errorf("restarting is not wired up")} })
 	}
 	return scope.DoCtx(sc, m.funcs.readTimeout(), func(ctx context.Context) planMsg {
-		p, err := read(ctx, env, names)
+		p, err := read(ctx, env, targets)
 		return planMsg{plan: p, err: err}
 	})
 }
@@ -252,9 +267,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan = pm.plan
+		m.plan.Skipped = m.skipped
 		m.state = stateConfirm
 		if len(m.plan.Targets) == 0 {
-			m.state, m.notice = stateFailed, fmt.Sprintf("none of %s's Deployments exist in the cluster", m.env)
+			m.state, m.notice = stateFailed, fmt.Sprintf("none of the workloads %s declares in %s exist in the cluster", m.family, m.env)
 		}
 		return m.render(), nil
 	case scope.Result[startedMsg]:
@@ -266,7 +282,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if sm.err != nil {
 			m.state, m.notice = stateFailed, redact.Strings(sm.err.Error())
 			if len(sm.done) > 0 {
-				m.notice += fmt.Sprintf(" — already restarted: %s", strings.Join(sm.done, ", "))
+				m.notice += fmt.Sprintf(" — already restarted: %s", restart.Labels(sm.done))
 			}
 			return m.render(), nil
 		}
@@ -290,26 +306,34 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) onProgress(progress []restart.Progress) (Model, tea.Cmd) {
-	var pending []string
+	var pending []gitops.Workload
 	for _, pr := range progress {
+		w := gitops.Workload{Kind: pr.Kind, Name: pr.Name}
 		switch {
 		case pr.Superseded:
 			m.state = stateFailed
-			m.notice = fmt.Sprintf("%s was restarted by something else while this one was in flight; the pods are rolling, but not for this restart", pr.Name)
+			m.notice = fmt.Sprintf("%s was restarted by something else while this one was in flight; the pods are rolling, but not for this restart", restart.Label(w))
 			return m.render(), nil
 		case pr.Blocked != "":
-			m.state, m.notice = stateFailed, fmt.Sprintf("%s: %s", pr.Name, pr.Blocked)
+			m.state, m.notice = stateFailed, fmt.Sprintf("%s: %s", restart.Label(w), pr.Blocked)
 			return m.render(), nil
-		case !pr.Done:
-			pending = append(pending, pr.Name)
+		case !pr.Done && pr.Manual == "":
+			pending = append(pending, w)
 		}
 	}
 	if m.done == nil {
-		m.done = map[string]bool{}
+		m.done = map[gitops.Workload]bool{}
+	}
+	if m.manual == nil {
+		m.manual = map[gitops.Workload]string{}
 	}
 	for _, pr := range progress {
-		if pr.Done {
-			m.done[pr.Name] = true
+		w := gitops.Workload{Kind: pr.Kind, Name: pr.Name}
+		switch {
+		case pr.Manual != "":
+			m.manual[w] = pr.Manual
+		case pr.Done:
+			m.done[w] = true
 		}
 	}
 	if len(pending) == 0 {
@@ -346,7 +370,7 @@ func (m Model) onKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			if m.unknown {
 				why = "No config for this repo, so hoist cannot tell whether it is production."
 			}
-			m.confirm = confirm.New(fmt.Sprintf("Restart %s in %s? %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env, why), m.width)
+			m.confirm = confirm.New(fmt.Sprintf("Restart %s in %s? %s", ui.Plural(len(m.plan.Targets), m.plan.Noun()), m.env, why), m.width)
 			return m, tea.Batch(m.confirm.Init(), m.confirm.Focus())
 		}
 		return m.start()
@@ -423,21 +447,22 @@ func (m Model) tick() tea.Cmd {
 
 func (m Model) observe() tea.Cmd {
 	obs, env, at, sc := m.funcs.Observe, m.env, m.at, m.scope
-	names := m.pending()
-	if obs == nil || len(names) == 0 {
+	targets := m.pending()
+	if obs == nil || len(targets) == 0 {
 		return nil
 	}
 	return scope.DoCtx(sc, m.funcs.observeTimeout(), func(ctx context.Context) progressMsg {
-		pr, err := obs(ctx, env, names, at)
+		pr, err := obs(ctx, env, targets, at)
 		return progressMsg{progress: pr, err: err}
 	})
 }
 
-func (m Model) pending() []string {
-	var out []string
-	for _, t := range m.plan.Targets {
-		if !m.done[t.Name] {
-			out = append(out, t.Name)
+// pending is every target still rolling: neither done nor stamped-and-left (manual).
+func (m Model) pending() []gitops.Workload {
+	var out []gitops.Workload
+	for _, w := range m.plan.Workloads() {
+		if _, manual := m.manual[w]; !m.done[w] && !manual {
+			out = append(out, w)
 		}
 	}
 	return out
@@ -451,12 +476,17 @@ func (m Model) render() Model {
 	case stateReading:
 		b.WriteString(m.styles.Dim.Render("reading " + m.env + "…"))
 	default:
-		fmt.Fprintf(&b, "%s\n", m.styles.Title.Render(fmt.Sprintf("%s in %s", ui.Plural(len(m.plan.Targets), "Deployment"), m.env)))
+		fmt.Fprintf(&b, "%s\n", m.styles.Title.Render(fmt.Sprintf("%s in %s", ui.Plural(len(m.plan.Targets), m.plan.Noun()), m.env)))
 		for _, st := range m.plan.Targets {
+			w := gitops.Workload{Kind: st.Kind, Name: st.Name}
 			mark := " "
+			_, manual := m.manual[w]
 			switch {
-			case m.done[st.Name]:
+			case m.done[w]:
 				mark = m.styles.Good.Render("✔")
+			case manual:
+				// Stamped and left: not a rollout in progress, and not a finished one.
+				mark = m.styles.Warn.Render("–")
 			case m.state == stateRolling:
 				mark = m.styles.Warn.Render("…")
 			}
@@ -464,8 +494,12 @@ func (m Model) render() Model {
 			if was == "" {
 				was = "never restarted this way"
 			}
-			fmt.Fprintf(&b, "\n %s %s  %s\n", mark, m.styles.Accent.Render(st.Name), m.styles.Dim.Render(fmt.Sprintf("%s · %s · last restart: %s", ui.Plural(int(st.Replicas), "replica"), st.Strategy, was)))
-			for _, c := range st.GracefulRestartConcerns() {
+			fmt.Fprintf(&b, "\n %s %s  %s\n", mark, m.styles.Accent.Render(m.plan.Label(w)), m.styles.Dim.Render(fmt.Sprintf("%s · %s · last restart: %s", ui.Plural(int(st.Replicas), restart.CountNoun(st.Kind)), st.Strategy, was)))
+			concerns := st.GracefulRestartConcerns()
+			if reason, ok := m.manual[w]; ok {
+				concerns = append([]string{"stamped, not rolled: " + reason}, concerns...)
+			}
+			for _, c := range concerns {
 				c = fixImageParenPlural(c)
 				// Wrapped to what the frame and the indent leave, every continuation line
 				// indented under the "!": a concern is one sentence and reads as one.
@@ -480,8 +514,11 @@ func (m Model) render() Model {
 				}
 			}
 		}
-		for _, name := range m.plan.Absent {
-			fmt.Fprintf(&b, "\n   %s\n     %s\n", m.styles.Dim.Render(name), m.styles.Warn.Render("! declared in the repo but not in the cluster — not restarted"))
+		for _, w := range m.plan.Absent {
+			fmt.Fprintf(&b, "\n   %s\n     %s\n", m.styles.Dim.Render(m.plan.Label(w)), m.styles.Warn.Render("! declared in the repo but not in the cluster — not restarted"))
+		}
+		for _, w := range m.plan.Skipped {
+			fmt.Fprintf(&b, "\n   %s\n     %s\n", m.styles.Dim.Render(restart.Label(w)), m.styles.Dim.Render("not restarted: a "+w.Kind+" has no rollout to restart"))
 		}
 	}
 	m.body.SetContent(strings.TrimRight(b.String(), "\n"))
@@ -489,7 +526,7 @@ func (m Model) render() Model {
 }
 
 // imageParenPluralPrefix is pkg/rollout's own literal shape for the unpinned-image concern
-// (DeploymentStatus.GracefulRestartConcerns, "unpinned image(s) <list>: <reason>") — pkg/rollout
+// (WorkloadStatus.GracefulRestartConcerns, "unpinned image(s) <list>: <reason>") — pkg/rollout
 // is activity-shaped (§4.3) and cannot import internal/ui.Plural itself, so this screen, the one
 // place that renders the concern, corrects the plural at the TUI render point instead — this
 // always read "image(s)", even for exactly one, before this fix. Built by concatenation, not as
@@ -583,6 +620,11 @@ func (m Model) stateWord() string {
 	case stateRolling:
 		return "rolling"
 	case stateDone:
+		if n := len(m.manual); n > 0 {
+			// Never "all rolled" when some did not: an OnDelete workload was stamped and is
+			// waiting for its pods to be deleted.
+			return fmt.Sprintf("done · %d not rolled (OnDelete)", n)
+		}
 		return "all rolled"
 	default:
 		return "failed"

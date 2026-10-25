@@ -7,22 +7,22 @@
 // comparison is internal/engine's job (AGENTS.md §4.3: pkg/* is activity-shaped, with no
 // domain knowledge of the orchestration above it).
 //
-// This package reads cluster facts, with exactly one exception: Restart stamps a Deployment's
-// pod-template restart annotation, which is what makes its pods roll. That is the whole of the
+// This package reads cluster facts, with exactly one exception: Restart stamps a Deployment's,
+// StatefulSet's or DaemonSet's pod-template restart annotation, which is what makes its pods roll. That is the whole of the
 // write surface here, and it holds the same position pkg/argo.Refresh holds there — one named
 // write beside otherwise read-only methods, so "does this package write" has a short answer
 // rather than a survey.
 //
-// The rollout-completeness check is deploymentRolloutComplete below: logic ported from
+// The rollout-completeness checks are deploymentRolloutComplete below and its StatefulSet and
+// DaemonSet siblings in workload.go: logic ported from
 // k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go (Apache License 2.0) rather than
-// importing k8s.io/kubectl itself for the ~60 lines this needs (AGENTS.md §4.7).
+// importing k8s.io/kubectl itself for the ~100 lines this needs (AGENTS.md §4.7).
 package rollout
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -39,8 +39,8 @@ import (
 	"github.com/abradner/hoist/pkg/redact"
 )
 
-// ErrNotFound is wrapped by Deployment, JobLike and Restart when the named object does not
-// exist. For Restart it is terminal: a Deployment that is not there was not restarted, and no
+// ErrNotFound is wrapped by Deployment, Workload, JobLike and Restart when the named object does
+// not exist. For Restart it is terminal: a workload that is not there was not restarted, and no
 // retry changes that.
 var ErrNotFound = errors.New("rollout: object not found")
 
@@ -72,7 +72,8 @@ type DeploymentStatus struct {
 	// restarted this way. Read so a restart can say what it supersedes, and so a caller can
 	// tell its own stamp from someone else's.
 	RestartedAt string
-	// The fields below describe whether a restart of this Deployment can actually be graceful.
+	// The fields below describe whether a restart of this Deployment can actually be graceful
+	// (WorkloadStatus.GracefulRestartConcerns, through DeploymentStatus.Workload).
 	// They are read here because the read that fetches them is already being made; hoist warns
 	// on them and never blocks (AGENTS.md principle 5), since "roll it anyway" is a legitimate
 	// thing to want and the operator is the one who knows.
@@ -91,57 +92,6 @@ type DeploymentStatus struct {
 	ReadinessProbes int
 }
 
-// GracefulRestartConcerns lists, in a stable order, the reasons a restart of this Deployment is
-// unlikely to be seamless. Empty when there is nothing to say. Informational: the caller shows
-// them and proceeds (principle 5).
-//
-// Each is stated only when it is actually true of this Deployment's own settings. An earlier
-// version warned "only 1 replica: nothing serves while the new pod starts" on replica count
-// alone, which is wrong under the default strategy: 25% maxUnavailable of one replica rounds
-// down to zero, so the old pod keeps serving until the new one is ready. A warning that fires on
-// a Deployment that is in fact fine is worse than none, because it teaches the operator to skip
-// reading them.
-func (d DeploymentStatus) GracefulRestartConcerns() []string {
-	var out []string
-	switch {
-	case d.Replicas == 0:
-		// Nothing to roll, and none of the rest applies.
-		return []string{"scaled to 0 replicas: a restart changes the pod template but starts no pod"}
-	case d.Strategy == "Recreate":
-		out = append(out, "strategy is Recreate: every pod stops before any new one starts")
-	case d.MaxUnavailable >= d.Replicas:
-		out = append(out, fmt.Sprintf("maxUnavailable is %d of %d replica(s): every pod can be down at once", d.MaxUnavailable, d.Replicas))
-	case d.Replicas == 1:
-		// The old pod does keep serving here — the risk is what is behind it, which is nothing.
-		out = append(out, "only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails")
-	}
-	if d.ReadinessProbes == 0 {
-		out = append(out, "no readiness probe: a new pod counts as available the moment it starts, before it can serve")
-	}
-	// The one that undercuts "a restart changes nothing about what runs". It is true of the
-	// DECLARED reference and only that: a container on a mutable tag can pull a different digest
-	// when its replacement lands on a node without the image cached, or on every pull under
-	// imagePullPolicy: Always. This repo's own fixtures carry bare-tag Deployments, and so does
-	// the target repo, so this is not a hypothetical.
-	if un := d.unpinnedImages(); len(un) > 0 {
-		out = append(out, fmt.Sprintf("unpinned image(s) %s: a replacement pod can pull a different build than the one running now, so this restart may not be a no-op",
-			strings.Join(un, ", ")))
-	}
-	return out
-}
-
-// unpinnedImages lists this Deployment's live container references that name no digest, sorted.
-func (d DeploymentStatus) unpinnedImages() []string {
-	var out []string
-	for _, img := range d.Images {
-		if !strings.Contains(img.Image, "@sha256:") {
-			out = append(out, img.Image)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // JobLikeStatus is a Job or CronJob's current state, report-only (AGENTS.md invariant 4:
 // hoist never gates on these, only surfaces them).
 type JobLikeStatus struct {
@@ -155,13 +105,16 @@ type JobLikeStatus struct {
 type Rollout interface {
 	// Deployment reads namespace/name's current images and rollout completeness.
 	Deployment(ctx context.Context, namespace, name string) (DeploymentStatus, error)
+	// Workload reads namespace/name's current state for a restart, for any kind in
+	// RestartableKinds. A Deployment's answer is Deployment's own, converted.
+	Workload(ctx context.Context, namespace, name, kind string) (WorkloadStatus, error)
 	// JobLike reads namespace/name's current state, for kind "Job" or "CronJob".
 	JobLike(ctx context.Context, namespace, name, kind string) (JobLikeStatus, error)
 	// Restart rolls namespace/name's pods without changing what it runs, by stamping the pod
-	// template's restart annotation — exactly what `kubectl rollout restart` does. It is the
-	// ONE write in this package; everything else here reads (see the package doc, and
-	// pkg/argo.Refresh, which holds the same position there).
-	Restart(ctx context.Context, namespace, name string, at time.Time) error
+	// template's restart annotation — exactly what `kubectl rollout restart` does — for any kind
+	// in RestartableKinds. It is the ONE write in this package; everything else here reads (see
+	// the package doc, and pkg/argo.Refresh, which holds the same position there).
+	Restart(ctx context.Context, namespace, name, kind string, at time.Time) error
 }
 
 // client is Rollout over a client-go clientset, mirroring pkg/k8s.client's shape exactly.
@@ -315,22 +268,33 @@ const RestartStampLayout = "2006-01-02T15:04:05.000000000Z07:00"
 // Applications that report Synced. An earlier design wrote this into the manifest instead, on
 // the assumption that Argo would revert it; that assumption was wrong and cost a commit, a PR,
 // a CI run and an approval for what is one API call.)
-func (c *client) Restart(ctx context.Context, namespace, name string, at time.Time) error {
+func (c *client) Restart(ctx context.Context, namespace, name, kind string, at time.Time) error {
 	if namespace == "" || name == "" {
 		return errors.New("rollout: restart needs a namespace and a name")
 	}
 	// An explicit nine-digit layout, not time.RFC3339Nano, which strips trailing zeros and
 	// would occasionally render a second-resolution string — the exact case this avoids.
 	// Quoted by the JSON encoding itself: an annotation value must reach the API server as a
-	// string.
+	// string. All three kinds keep their pod template at spec.template, so one patch serves
+	// them all, as it does for kubectl.
 	stamp := at.UTC().Format(RestartStampLayout)
 	patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`, RestartAnnotation, stamp))
-	_, err := c.cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	var err error
+	switch kind {
+	case KindDeployment:
+		_, err = c.cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	case KindStatefulSet:
+		_, err = c.cs.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	case KindDaemonSet:
+		_, err = c.cs.AppsV1().DaemonSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	default:
+		return fmt.Errorf("rollout: cannot restart kind %q, want one of %s", kind, strings.Join(RestartableKinds(), ", "))
+	}
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("restarting Deployment %s/%s: %w", namespace, name, ErrNotFound)
+			return fmt.Errorf("restarting %s %s/%s: %w", kind, namespace, name, ErrNotFound)
 		}
-		return fmt.Errorf("restarting Deployment %s/%s: %s", namespace, name, c.describe(err))
+		return fmt.Errorf("restarting %s %s/%s: %s", kind, namespace, name, c.describe(err))
 	}
 	return nil
 }

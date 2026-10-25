@@ -231,14 +231,17 @@ func TestRestartFailsClosedWithNoConfiguredRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	names, err := restart.Targets(r, "app-production", nil)
+	targets, _, err := restart.Targets(r, "app-production", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var sts []rollout.DeploymentStatus
-	for _, n := range names {
+	for _, w := range targets {
+		if w.Kind != rollout.KindDeployment {
+			t.Fatalf("fixture changed: %s is not a Deployment, and this test registers Deployments only", restart.Label(w))
+		}
 		st := rolled("app-production")
-		st.Name = n
+		st.Name = w.Name
 		sts = append(sts, st)
 	}
 	restartFake(t, sts...)

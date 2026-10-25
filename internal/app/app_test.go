@@ -2334,11 +2334,11 @@ func TestRestartKeyOpensTheRestartScreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+	read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 		p := restart.Plan{Env: env}
 		for _, n := range names {
-			p.Targets = append(p.Targets, rollout.DeploymentStatus{
-				Namespace: env, Name: n, Replicas: 2, Strategy: "RollingUpdate", ReadinessProbes: 1,
+			p.Targets = append(p.Targets, rollout.WorkloadStatus{
+				Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 2, Strategy: "RollingUpdate", ReadinessProbes: 1,
 			})
 		}
 		return p, nil
@@ -2378,11 +2378,11 @@ func TestRestartEscNotesRolloutContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+	read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 		p := restart.Plan{Env: env}
 		for _, n := range names {
-			p.Targets = append(p.Targets, rollout.DeploymentStatus{
-				Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate",
+			p.Targets = append(p.Targets, rollout.WorkloadStatus{
+				Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 1, Strategy: "RollingUpdate",
 			})
 		}
 		return p, nil
@@ -2390,11 +2390,13 @@ func TestRestartEscNotesRolloutContinues(t *testing.T) {
 	// Do never actually returns within the test — esc fires before its command is ever run, so
 	// the screen's own state is still stateStarting (start()'s own synchronous transition) the
 	// moment BackMsg is emitted, exactly the window FB-L3 is about.
-	do := func(ctx context.Context, _ restart.Plan, _ time.Time) ([]string, error) {
+	do := func(ctx context.Context, _ restart.Plan, _ time.Time) ([]gitops.Workload, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) { return nil, nil }
+	observe := func(context.Context, string, []gitops.Workload, time.Time) ([]restart.Progress, error) {
+		return nil, nil
+	}
 	var tm tea.Model = New(r, []string{"ghcr.io/"}, config.EnvsConfig{}, nil, nil, Promotion{}, nil,
 		apprestart.Funcs{Read: read, Do: do, Observe: observe, Interval: time.Millisecond}).WithEnvsFromConfig()
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 300, Height: height})
@@ -2436,23 +2438,19 @@ func TestRestartEscNotesRolloutContinues(t *testing.T) {
 // restating a check the state machine already made. Control: the second instance's own started
 // answer, landing afterward, is what actually moves it past stateStarting.
 func TestRestartEarlierStartedDropped(t *testing.T) {
-	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+	read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 		p := restart.Plan{Env: env}
 		for _, n := range names {
-			p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+			p.Targets = append(p.Targets, rollout.WorkloadStatus{Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 1, Strategy: "RollingUpdate"})
 		}
 		return p, nil
 	}
-	do := func(_ context.Context, p restart.Plan, _ time.Time) ([]string, error) {
-		var names []string
-		for _, tg := range p.Targets {
-			names = append(names, tg.Name)
-		}
-		return names, nil
+	do := func(_ context.Context, p restart.Plan, _ time.Time) ([]gitops.Workload, error) {
+		return p.Workloads(), nil
 	}
 	// Observe is required alongside Do (restart.Model.New refuses one without the other,
 	// AGENTS.md §4.8's FB-L3 fix) even though this test never lets a drive reach it.
-	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) {
+	observe := func(context.Context, string, []gitops.Workload, time.Time) ([]restart.Progress, error) {
 		return nil, nil
 	}
 	r, err := gitops.Discover(fixtureRoot, "")
@@ -2518,16 +2516,18 @@ func TestRestartWithoutConfigAsksForTheProductionConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+	read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 		p := restart.Plan{Env: env}
 		for _, n := range names {
-			p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+			p.Targets = append(p.Targets, rollout.WorkloadStatus{Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 1, Strategy: "RollingUpdate"})
 		}
 		return p, nil
 	}
-	observe := func(context.Context, string, []string, time.Time) ([]restart.Progress, error) { return nil, nil }
+	observe := func(context.Context, string, []gitops.Workload, time.Time) ([]restart.Progress, error) {
+		return nil, nil
+	}
 	run := func(configured bool) (restarted bool, view string) {
-		do := func(context.Context, restart.Plan, time.Time) ([]string, error) {
+		do := func(context.Context, restart.Plan, time.Time) ([]gitops.Workload, error) {
 			restarted = true
 			return nil, nil
 		}
@@ -3639,10 +3639,10 @@ func TestHelpOverlayGoldens(t *testing.T) {
 	})
 
 	t.Run("restart", func(t *testing.T) {
-		read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 			p := restart.Plan{Env: env}
 			for _, n := range names {
-				p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+				p.Targets = append(p.Targets, rollout.WorkloadStatus{Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 1, Strategy: "RollingUpdate"})
 			}
 			return p, nil
 		}
@@ -3724,10 +3724,10 @@ func TestHelpOverlayOnEveryKeyedScreen(t *testing.T) {
 	})
 
 	t.Run("restart", func(t *testing.T) {
-		read := func(_ context.Context, env string, names []string) (restart.Plan, error) {
+		read := func(_ context.Context, env string, names []gitops.Workload) (restart.Plan, error) {
 			p := restart.Plan{Env: env}
 			for _, n := range names {
-				p.Targets = append(p.Targets, rollout.DeploymentStatus{Namespace: env, Name: n, Replicas: 1, Strategy: "RollingUpdate"})
+				p.Targets = append(p.Targets, rollout.WorkloadStatus{Kind: n.Kind, Namespace: env, Name: n.Name, Replicas: 1, Strategy: "RollingUpdate"})
 			}
 			return p, nil
 		}
