@@ -141,7 +141,7 @@ func (w WorkloadStatus) GracefulRestartConcerns() []string {
 	case w.Kind == KindStatefulSet:
 		if rolled := partitionedUpdates(w.Replicas, w.Partition, w.OrdinalStart); rolled < w.Replicas {
 			if rolled == 0 {
-				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d of %d replica(s): no pod restarts", w.Partition, w.Replicas))
+				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d, above every pod's ordinal (%d to %d): no pod restarts", w.Partition, w.OrdinalStart, w.OrdinalStart+w.Replicas-1))
 			} else {
 				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d: only pods with ordinal %d and above restart; the other %d keep running", w.Partition, w.Partition, w.Replicas-rolled))
 			}
@@ -315,14 +315,6 @@ func readinessProbes(containers []corev1.Container) int {
 	return n
 }
 
-// statefulSetRolloutComplete is kubectl's StatefulSetStatusViewer
-// (k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go, Apache License 2.0), ported for the
-// same reason deploymentRolloutComplete is (§4.7), with two deliberate differences. kubectl
-// refuses an OnDelete StatefulSet outright; here it is reported, never complete, with a detail
-// saying why, so a watch can name it instead of failing. And kubectl treats a RollingUpdate
-// block with no partition as complete without looking at the replicas; here an unset partition
-// is the API server's own default of 0, so the rollout is complete only once every pod is
-// updated.
 // partitionedUpdates is how many of a StatefulSet's pods a rolling update with this partition
 // replaces. The partition is an ordinal, and the pods are numbered from start (spec.ordinals),
 // so the ones at or above it are replicas minus those below it, clamped to 0..replicas (Codex on
@@ -338,6 +330,14 @@ func partitionedUpdates(replicas, partition, start int32) int32 {
 	return replicas - below
 }
 
+// statefulSetRolloutComplete is kubectl's StatefulSetStatusViewer
+// (k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go, Apache License 2.0), ported for the
+// same reason deploymentRolloutComplete is (§4.7), with two deliberate differences. kubectl
+// refuses an OnDelete StatefulSet outright; here it is reported, never complete, with a detail
+// saying why, so a watch can name it instead of failing. And kubectl treats a RollingUpdate
+// block with no partition as complete without looking at the replicas; here an unset partition
+// is the API server's own default of 0, so the rollout is complete only once every pod is
+// updated.
 func statefulSetRolloutComplete(s *appsv1.StatefulSet) (complete bool, detail string) {
 	if s.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
 		return false, fmt.Sprintf("statefulset %q uses the OnDelete update strategy: its pods take the new template only when deleted", s.Name)
