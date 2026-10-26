@@ -404,10 +404,12 @@ hoist restart --env app-staging --family web            # --dry-run to only list
 
 This is the one operation that writes to the cluster instead of to git. It stamps the same
 `kubectl.kubernetes.io/restartedAt` annotation `kubectl rollout restart` does on the pod template
-of every Deployment the family declares, and Argo leaves that alone even with self-heal on (its
-diff is a three-way merge; a field it never set and the manifest does not carry is not drift).
-So there is no plan, no branch, no PR, no state file, and nothing to resume: running it again
-restarts again, which is the operation.
+of every Deployment, StatefulSet and DaemonSet the family declares, and Argo leaves that alone
+even with self-heal on (its diff is a three-way merge; a field it never set and the manifest does
+not carry is not drift). So there is no plan, no branch, no PR, no state file, and nothing to
+resume: running it again restarts again, which is the operation. A Job or CronJob the family
+declares is listed as "not restarted" — it has no rollout to trigger, and re-running one is a
+different operation.
 
 ```
 ╭─ hoist · restart · web/app-staging ──────────────────────────────────────────╮
@@ -430,8 +432,18 @@ restarts again, which is the operation.
 Pressing `enter` on a production target overlays a confirmation dialog before anything rolls
 (`--confirm-production=<env>` is the CLI's own second acknowledgement, below).
 
-Every target is named first, with its replica count, strategy and last restart, and every reason
-the restart will not be graceful is a sentence. None of them blocks. A production env takes a
+Every target is named first, with its replica count (pods, for a DaemonSet: one per node it runs
+on), strategy and last restart, and every reason the restart will not be graceful is a sentence.
+When a family mixes kinds the heading says "workloads" and each target is named `Kind/name`. None
+of them blocks. The one to read twice is `update strategy is OnDelete` on a StatefulSet or
+DaemonSet: the stamp is written, but its controller replaces no pod until someone deletes it.
+hoist still stamps it (as `kubectl rollout restart` would), and then reports it as "stamped, not
+rolled" — marked `–` on the screen, whose header then reads `done · 1 not rolled (OnDelete)`
+rather than `all rolled`, and named on the CLI's closing line ("2 of 3 workload(s) rolled; not
+rolled, waiting for their pods to be deleted: StatefulSet/db"), which still exits 0. Restarting
+those pods is then `kubectl delete pod`, by hand. A StatefulSet's `rollingUpdate.partition`
+likewise leaves the pods below it on the old template (warned up front), and the CLI's watch
+says "partitioned roll out complete" when the rest are done. A production env takes a
 second acknowledgement — a confirmation dialog on the screen, `--confirm-production=<env>` at the
 CLI — because nothing is committed and nothing reviews it. With no config entry for the repo
 (a flags-only run) hoist cannot tell which envs are production, so every env takes that

@@ -140,7 +140,8 @@ environment declares and the one under the cursor. Releases lead the list; tags 
 digest and moving tags like `latest` or a branch name sit below their own dividers, so a handful
 of real builds are not buried among them — nothing is hidden, and `/` filters across all three.
 
-**Restart a family** — roll an environment's Deployments without changing what they declare:
+**Restart a family** — roll an environment's Deployments, StatefulSets and DaemonSets without
+changing what they declare:
 
 ```bash
 hoist restart --env app-staging --family web

@@ -13,8 +13,8 @@
 │       replacement fails  ╭─ help · restart ──────────────────────────────────────────────╮                           │
 │     ! no readiness probe:│NAVIGATE                       │ ACT                           │n serve                    │
 │                          │esc      back (keeps running)  │ enter    restart (confirms)   │                           │
-│                          │↑        scroll                │                               │                           │
-│                          │↓        scroll                │                               │                           │
+│   CronJob/counta-purge   │↑        scroll                │                               │                           │
+│     not restarted: a Cron│↓        scroll                │                               │                           │
 │                          │pgup     page                  │                               │                           │
 │                          │pgdn     page                  │                               │                           │
 │                          │home     top                   │                               │                           │

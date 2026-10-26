@@ -10,8 +10,12 @@ import (
 	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/internal/restart"
 	"github.com/abradner/hoist/internal/service"
+	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/rollout"
 )
+
+// appTarget is the one Deployment these tests restart.
+var appTarget = []gitops.Workload{{Kind: rollout.KindDeployment, Name: "app"}}
 
 func TestCheckRestartConfirmed(t *testing.T) {
 	configured := service.Settings{Repo: &config.RepoConfig{Envs: config.EnvsConfig{Production: []string{"app-production"}}}}
@@ -67,10 +71,10 @@ func TestRestartAsksTheClusterPerCall(t *testing.T) {
 			return fr, "ctx", nil
 		},
 	})
-	if _, err := svc.RestartRead(context.Background(), "app-production", []string{"app"}); err == nil || err.Error() != "cluster unreachable" {
+	if _, err := svc.RestartRead(context.Background(), "app-production", appTarget); err == nil || err.Error() != "cluster unreachable" {
 		t.Fatalf("first call: err = %v, want the cluster's own error", err)
 	}
-	pl, err := svc.RestartRead(context.Background(), "app-production", []string{"app"})
+	pl, err := svc.RestartRead(context.Background(), "app-production", appTarget)
 	if err != nil {
 		t.Fatalf("second call: %v (a failed client must be retried)", err)
 	}
@@ -90,7 +94,7 @@ func TestRestartCallsAskForTheSettingsKubeContext(t *testing.T) {
 		Rollout: func(kc string) (rollout.Rollout, string, error) { asked = append(asked, kc); return fr, kc, nil },
 	})
 	ctx := context.Background()
-	pl, err := svc.RestartRead(ctx, "app-production", []string{"app"})
+	pl, err := svc.RestartRead(ctx, "app-production", appTarget)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +102,7 @@ func TestRestartCallsAskForTheSettingsKubeContext(t *testing.T) {
 	if _, err := svc.RestartDo(ctx, pl, at); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.RestartObserve(ctx, "app-production", []string{"app"}, at); err != nil {
+	if _, err := svc.RestartObserve(ctx, "app-production", appTarget, at); err != nil {
 		t.Fatal(err)
 	}
 	if len(asked) == 0 {
@@ -127,13 +131,13 @@ func TestRestartDoAndObserveRetryAFailedCluster(t *testing.T) {
 		},
 	})
 	ctx := context.Background()
-	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.DeploymentStatus{{Name: "app"}}}, time.Now()); err == nil {
+	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.WorkloadStatus{{Kind: rollout.KindDeployment, Name: "app"}}}, time.Now()); err == nil {
 		t.Fatal("RestartDo against a down cluster succeeded")
 	}
-	if _, err := svc.RestartObserve(ctx, "app-production", []string{"app"}, time.Now()); err == nil {
+	if _, err := svc.RestartObserve(ctx, "app-production", appTarget, time.Now()); err == nil {
 		t.Fatal("RestartObserve against a down cluster succeeded")
 	}
-	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.DeploymentStatus{{Name: "app"}}}, time.Now()); err != nil {
+	if _, err := svc.RestartDo(ctx, restart.Plan{Env: "app-production", Targets: []rollout.WorkloadStatus{{Kind: rollout.KindDeployment, Name: "app"}}}, time.Now()); err != nil {
 		t.Errorf("RestartDo after the cluster came back: %v (the failure was remembered)", err)
 	}
 }

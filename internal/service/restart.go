@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/abradner/hoist/internal/restart"
+	"github.com/abradner/hoist/pkg/gitops"
 )
 
-// RestartRead reads every named Deployment's current state in env, so a caller can show what
+// RestartRead reads every named workload's current state in env — Deployments, StatefulSets and
+// DaemonSets alike (rollout.RestartableKinds) — so a caller can show what
 // would roll, and every reason it would not be graceful, before anything is written
 // (internal/restart.Read). Restart is the one use case that writes to the cluster rather than to
 // git, so it has no plan, branch, PR or state file: these three calls are the whole of it.
@@ -16,17 +18,17 @@ import (
 // Each of the three asks for the rollout client itself, at call time, rather than holding one:
 // Rollout memoises only a success, so a cluster that was unreachable when the TUI opened is
 // retried on the next R, and the error a failed call returns is the real one from the client.
-func (s *Service) RestartRead(ctx context.Context, env string, names []string) (restart.Plan, error) {
+func (s *Service) RestartRead(ctx context.Context, env string, targets []gitops.Workload) (restart.Plan, error) {
 	ro, err := s.Rollout(s.settings.KubeContext)
 	if err != nil {
 		return restart.Plan{}, err
 	}
-	return restart.Read(ctx, ro, env, names)
+	return restart.Read(ctx, ro, env, targets)
 }
 
 // RestartDo stamps the restart annotation on every target in p at at, stopping at the first
-// genuine failure and returning the names it got through, in order (internal/restart.Do).
-func (s *Service) RestartDo(ctx context.Context, p restart.Plan, at time.Time) ([]string, error) {
+// genuine failure and returning the workloads it got through, in order (internal/restart.Do).
+func (s *Service) RestartDo(ctx context.Context, p restart.Plan, at time.Time) ([]gitops.Workload, error) {
 	ro, err := s.Rollout(s.settings.KubeContext)
 	if err != nil {
 		return nil, err
@@ -34,14 +36,15 @@ func (s *Service) RestartDo(ctx context.Context, p restart.Plan, at time.Time) (
 	return restart.Do(ctx, ro, p, at)
 }
 
-// RestartObserve reads how far each named Deployment's rollout has got against the stamp a
-// restart wrote at at (internal/restart.Observe).
-func (s *Service) RestartObserve(ctx context.Context, env string, names []string, at time.Time) ([]restart.Progress, error) {
+// RestartObserve reads how far each named workload's rollout has got against the stamp a
+// restart wrote at at (internal/restart.Observe). An OnDelete workload comes back Manual, never
+// Done.
+func (s *Service) RestartObserve(ctx context.Context, env string, targets []gitops.Workload, at time.Time) ([]restart.Progress, error) {
 	ro, err := s.Rollout(s.settings.KubeContext)
 	if err != nil {
 		return nil, err
 	}
-	return restart.Observe(ctx, ro, env, names, at)
+	return restart.Observe(ctx, ro, env, targets, at)
 }
 
 // RestartInterval is how often a running restart's rollout is re-read: poll.rollout, or three

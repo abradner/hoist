@@ -1352,7 +1352,7 @@ func (m Model) quitConfirmAgreed() bool {
 	return v
 }
 
-// openRestart pushes the restart screen for one family in one env. The Deployment names come
+// openRestart pushes the restart screen for one family in one env. The workloads to restart come
 // from the repo here, in the root, for the same reason openDeploy builds its plan here: the
 // matrix names a choice, and working out what that choice would touch is the root's job
 // (AGENTS.md §4.8).
@@ -1363,11 +1363,11 @@ func (m Model) openRestart(family, target string) (tea.Model, tea.Cmd) {
 	if m.restartFn.Read == nil {
 		return m.noteErr("restarting needs a cluster connection, and none is configured"), nil
 	}
-	names, err := restart.Targets(m.repo, target, []string{family})
+	targets, skipped, err := restart.Targets(m.repo, target, []string{family})
 	if err != nil {
 		return m.noteErr(fmt.Sprintf("cannot restart %s in %s: %v", family, target, err)), nil
 	}
-	screen := apprestart.New(target, family, names, m.envs.IsProduction(target), m.restartFn, m.styles)
+	screen := apprestart.New(target, family, targets, m.envs.IsProduction(target), m.restartFn, m.styles).WithSkipped(skipped)
 	if !m.envsFromConfig {
 		// A flags-only run has no envs.production list, so IsProduction(target) is false by
 		// omission, not by knowledge (AR-H4).

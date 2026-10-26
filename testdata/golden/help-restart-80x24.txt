@@ -15,8 +15,8 @@
 │     !│r        re-read the cluster   │ ctrl+c   quit now             │       │
 │      │l        activity log          │                               │       │
 │      │                                                               │       │
-│      │a capital counts as shift                                      │       │
-│      ╰───────────────────────────────────────────────────────────────╯       │
+│   Cro│a capital counts as shift                                      │       │
+│     n╰───────────────────────────────────────────────────────────────╯       │
 │                                                                              │
 │                                                                              │
 │                                                                              │
