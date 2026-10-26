@@ -42,26 +42,41 @@ func WarnDeployIntoProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 }
 
 // SkippedStaging reports the configured pipeline predecessor of target's production env that a
-// promotion from source steps over: staging is the env envs.pairs sends source to, skip is true
-// when target is production but is not that configured pair. False when target is not
-// production, when it is exactly the configured pair, or when source has no pair to skip
+// promotion from source steps over. With a pair of its own, staging is the env envs.pairs sends
+// source to, and skip is true when target is production but is not that pair. Without one (a qa
+// or preview env), staging is the env(s) envs.pairs reaches target from, and skip is true when
+// source is not one of them. False when target is not production, when source is exactly
+// target's configured predecessor, or when nothing is configured to promote into target
 // (AGENTS.md §4.5). Moved from internal/app/plan unchanged; the plan screen's own sentence and
 // WarnSkippedStagingProduction read this one rule.
 func SkippedStaging(source, target string, envs config.EnvsConfig) (staging string, skip bool) {
 	if !envs.IsProduction(target) {
 		return "", false
 	}
-	staging, ok := envs.Pairs[source]
-	if !ok || staging == "" || staging == target {
+	if staging, ok := envs.Pairs[source]; ok && staging != "" {
+		if staging == target {
+			return "", false
+		}
+		return staging, true
+	}
+	// A source with no pair of its own (a qa or preview env) still skips the pipeline when the
+	// production env has a configured predecessor and this source is not one of them.
+	preds := envs.SourcesOf(target)
+	if len(preds) == 0 {
 		return "", false
 	}
-	return staging, true
+	for _, p := range preds {
+		if p == source {
+			return "", false
+		}
+	}
+	return strings.Join(preds, " or "), true
 }
 
 // WarnSkippedStagingProduction attaches gitops.WarnSkippedStaging to a promotion into a
-// production env from a source whose own configured pair is another env: "promoting straight
-// to production, skipping <staging>". A source with no pair (a qa or preview env) is silent, as
-// SkippedStaging says. Plan calls it for every promotion it builds, so the dry run,
+// production env from a source that is not its configured predecessor: "promoting straight to
+// production, skipping <staging>", whether or not the source has a pair of its own
+// (SkippedStaging). Plan calls it for every promotion it builds, so the dry run,
 // the confirm screen and the PR body all carry it, as WarnDeployIntoProduction does for a deploy
 // (§4.5). It informs and never blocks (principle 5). A deploy has no source env, so it is a no-op
 // there.
@@ -75,8 +90,17 @@ func WarnSkippedStagingProduction(pl *gitops.Plan, envs config.EnvsConfig) {
 	}
 	pl.Warnings = append(pl.Warnings, gitops.Warning{
 		Code:    gitops.WarnSkippedStaging,
-		Message: fmt.Sprintf("promoting %s straight to production (%s), skipping %s: the configured pipeline sends %s to %s first", pl.SourceEnv, pl.TargetEnv, staging, pl.SourceEnv, staging),
+		Message: skippedStagingMessage(pl.SourceEnv, pl.TargetEnv, staging, envs),
 	})
+}
+
+// skippedStagingMessage says what the pipeline does say: where the source is sent first when it
+// has a pair, and otherwise which env the pipeline reaches production from.
+func skippedStagingMessage(source, target, staging string, envs config.EnvsConfig) string {
+	if _, ok := envs.Pairs[source]; ok {
+		return fmt.Sprintf("promoting %s straight to production (%s), skipping %s: the configured pipeline sends %s to %s first", source, target, staging, source, staging)
+	}
+	return fmt.Sprintf("promoting %s straight to production (%s), skipping %s: the configured pipeline reaches %s from %s, and %s is not part of it", source, target, staging, target, staging, source)
 }
 
 // Preflight is StartPromotion's own early gate, called before any freshness check, claim or

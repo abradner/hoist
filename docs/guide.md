@@ -231,7 +231,11 @@ leave it out; `!` marks a repo with a warning). Right: the repo under the cursor
 full, where its digest came from, its warnings as plain sentences, and, when `repos[].apps` maps
 the image to its source repo, the commits between what the target declares and what is about to be
 written, with any migration among them — `orders` above has no app mapping to walk, so it reports
-"migrations not tracked for this app" rather than guessing. `d` swaps the right pane for the YAML
+"migrations not tracked for this app" rather than guessing. A promotion into a production env from
+anywhere but the env `envs.pairs` sends there (staging, say) carries a "skipped-staging" warning:
+on the plan screen, in `hoist plan`, and in the PR body. That holds whether the source is paired
+to somewhere else (dev, which promotes to staging) or has no pair at all (a qa or preview env). It
+informs and never blocks. `d` swaps the right pane for the YAML
 diff; `enter` means the same from either view. `e` opens a dialog to override the hovered repo's
 digest by hand (the CLI's `--digest`, validated the same way). `shift+d` switches to direct mode on
 a non-production target (see [direct mode](#direct-mode)); it is not offered at all on a production
