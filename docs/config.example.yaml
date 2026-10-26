@@ -58,10 +58,14 @@ registries:
     cluster: { namespace: app-staging, secret: ghcr-pull }   # opt-in: read a pull secret
     op: op://vault/item/field                   # opt-in: a 1Password reference (redacted by
                                                 # `config show`)
-    env: QUAY_TOKEN                             # opt-in: NAME of the environment variable holding
-                                                # this registry's credential (any host; no default:
-                                                # without it `env` serves ghcr.io only, from
-                                                # HOIST_GHCR_TOKEN / GHCR_TOKEN)
+    env: GHCR_ME_TOKEN                          # opt-in: NAME of the environment variable holding
+                                                # THIS entry's credential, sent only to the hosts
+                                                # this prefix covers (no default: without it `env`
+                                                # serves ghcr.io only, from HOIST_GHCR_TOKEN /
+                                                # GHCR_TOKEN; a named one replaces that pair)
+  - prefix: quay.io/me/
+    auth: [env]
+    env: QUAY_TOKEN                             # another registry, its own variable
 
 poll: { ci: 20s, approval: 30s, argo: 5s, rollout: 3s, deadline: 4h }   # M4/M5
 

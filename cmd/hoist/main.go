@@ -149,7 +149,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "abandon":
 		return runAbandon(fs.Args()[1:], cfg, stdout, stderr)
 	case "gc":
-		return runGC(fs.Args()[1:], cfg, stdout, stderr)
+		return runGC(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "watch":
 		return runWatch(fs.Args()[1:], cfg, sel, stdout, stderr)
 	case "config":
@@ -361,7 +361,7 @@ func selectRepo(cfg *config.Config, sel selection) (service.Settings, error) {
 		set.Base = defaultBase
 	}
 	if sel.given["kube-context"] {
-		set.KubeOverride = sel.kubeContext
+		set.KubeOverride, set.KubeOverrideSet = sel.kubeContext, true
 	}
 	if len(cfg.Repos) == 0 {
 		return set, nil

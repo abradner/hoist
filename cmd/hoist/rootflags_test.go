@@ -92,13 +92,26 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 	if err != nil || effFlag.KubeOverride != "flag-ctx" {
 		t.Fatalf("flag: kubeOverride=%q err=%v", effFlag.KubeOverride, err)
 	}
-	for _, tc := range []struct{ override, want string }{{effFlag.KubeOverride, "flag-ctx"}, {effA.KubeOverride, "ctx-b"}} {
+	// Given but empty: the kubeconfig's current context, never the promotion's own repo's (#295).
+	sel.kubeContext, sel.given["kube-context"] = "", true
+	effEmpty, err := selectRepo(cfg, sel)
+	if err != nil || !effEmpty.KubeOverrideSet || effEmpty.KubeOverride != "" {
+		t.Fatalf("empty flag: kubeOverride=%q set=%v err=%v", effEmpty.KubeOverride, effEmpty.KubeOverrideSet, err)
+	}
+	for _, tc := range []struct {
+		override, want string
+		set            bool
+	}{
+		{effFlag.KubeOverride, "flag-ctx", effFlag.KubeOverrideSet},
+		{effA.KubeOverride, "ctx-b", effA.KubeOverrideSet},
+		{effEmpty.KubeOverride, "", effEmpty.KubeOverrideSet},
+	} {
 		var argoCtx string
 		adaptors.Argo = func(c string) (argo.Argo, string, error) { argoCtx = c; return nil, c, errors.New("stop here") }
-		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override}, serviceDeps())
+		svc := service.New(service.Settings{Config: cfg, KubeOverride: tc.override, KubeOverrideSet: tc.set}, serviceDeps())
 		_, err := svc.Resume(context.Background(), "resume01", service.ResumeOpts{})
 		if err == nil || argoCtx != tc.want {
-			t.Fatalf("override %q: Resume's adaptors.Argo got %q (err=%v), want %q", tc.override, argoCtx, err, tc.want)
+			t.Fatalf("override %q (set=%v): Resume's adaptors.Argo got %q (err=%v), want %q", tc.override, tc.set, argoCtx, err, tc.want)
 		}
 		// List re-observes against the same cluster Resume drives, or the pane and the
 		// flight screen disagree about one state file (aggregate review of stack #137).
@@ -109,7 +122,7 @@ func TestInFlightResumeKubeContextIsTheOverrideElseThePromotionsOwnRepo(t *testi
 		// And the CLI faces of the same two operations honour the root flag the same way.
 		argoCtx = ""
 		sel := selection{given: map[string]bool{}}
-		if tc.override != "" {
+		if tc.set {
 			sel.kubeContext, sel.given["kube-context"] = tc.override, true
 		}
 		var out, errOut bytes.Buffer

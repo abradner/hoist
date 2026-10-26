@@ -1465,11 +1465,18 @@ test lives** (if one exists).
    `selectRepo` already decided and does not re-derive it: it did until #295, so `hoist
    --kube-context "" plan` read pods from the repo's context while Argo used the current one), and a command never assigns a
    `Settings` field it received from there. Whether a flag was given is `sel.given[name]`
-   (set by `fs.Visit`), never `value == ""` (see also entry 16). Regression tests, in
+   (set by `fs.Visit`), never `value == ""` (see also entry 16); a `Settings` that carries the
+   flag onward carries that answer too (`KubeOverrideSet` beside `KubeOverride`, read by
+   `Settings.KubeContextFor` for `hoist promotions`, `resume` and the TUI's in-flight pane
+   (`abandon` opens no cluster) — until the T10 followup they still read `""` as "not given", so a promotion
+   started on the current context resumed against the repo's). Regression tests, in
    `cmd/hoist`: `TestDeployUsesTheReposKubeContext` (fails with the override line restored: `a
    deploy asked for "argo:"`), `TestDeployKubeContextFlagStillWins`, and
    `TestAnEmptyEnvFlagIsRefusedNotFilledInFromEnvsPairs` (fails with the value check restored), and
-   `TestPlanWithAnEmptyKubeContextReadsPodsFromTheCurrentContext` (#295; fails with the re-derivation restored).
+   `TestPlanWithAnEmptyKubeContextReadsPodsFromTheCurrentContext` (#295; fails with the re-derivation restored),
+   and `TestPromotionsSettingsCarryAGivenEmptyKubeContext` with
+   `internal/service`'s `TestKubeContextForHonoursAGivenEmptyOverride` (fail with the
+   `!= ""` test restored).
 
 21. **A "clean" removal that falls through to a force helper is not clean on the branch nobody
    looks at.** What happened: `RemoveCleanWorktree` promises git's own non-force removal, so a file

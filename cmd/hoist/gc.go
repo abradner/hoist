@@ -26,7 +26,7 @@ import (
 // scratch space hoist rebuilds from a plan, a cache entry is refetched, and anything that is
 // not provably hoist's own leftover is kept and named. What it never does is decide a promotion
 // is finished from a state file — a promotion is only cleaned up once re-observed landed.
-func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
+func runGC(args []string, cfg *config.Config, sel selection, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hoist gc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dryRun := fs.Bool("dry-run", false, "list what would be removed, and what would be kept and why, without removing anything (it still observes: origin's base branch is fetched)")
@@ -37,7 +37,7 @@ func runGC(args []string, cfg *config.Config, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	set := promotionsSettings(cfg, "")
+	set := gcSettings(cfg, sel)
 	svc := service.New(set, serviceDeps())
 	ctx, stop := commandContext(set.Deadline)
 	defer stop()
@@ -110,4 +110,25 @@ func gcHint(ctx context.Context, svc *service.Service) string {
 		return ""
 	}
 	return fmt.Sprintf("hoist: %s are left on this machine; `hoist gc --dry-run` lists what `hoist gc` would remove", strings.Join(parts, " and "))
+}
+
+// gcSettings is promotionsSettings plus the clone a root --repo names: gc keeps the repo view
+// of every configured clone and of that one, so `hoist --repo <clone> gc` on flags alone does
+// not delete the view of the clone it was just pointed at (Codex on #347).
+//
+// A root --repo is a name, a path or a clone dir, as everywhere else (config.Repo): a configured
+// repo's name or path maps to its clone dir, exactly as selectRepo maps it. Only a --repo the
+// config does not know is taken as a path. RepoDir also joins the clones gc asks about orphaned
+// worktrees, so one registered in that clone is judged by the same evidence as any other.
+func gcSettings(cfg *config.Config, sel selection) service.Settings {
+	set := promotionsSettings(cfg, "", false)
+	if sel.repo == "" {
+		return set
+	}
+	if rc, err := cfg.Repo(sel.repo); err == nil {
+		set.RepoDir = rc.Dir // "" when that entry has no path: nothing extra to keep
+		return set
+	}
+	set.RepoDir = sel.repo
+	return set
 }

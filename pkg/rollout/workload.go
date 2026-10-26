@@ -75,8 +75,12 @@ type WorkloadStatus struct {
 	MaxUnavailable int32
 	MaxSurge       int32
 	// Partition is a StatefulSet's rollingUpdate.partition: pods with an ordinal below it keep
-	// the old template through a rolling update. 0 for every other kind.
+	// the old template through a rolling update. 0 for every other kind. It is an ordinal, not a
+	// count: with spec.ordinals.start the pods are numbered from OrdinalStart.
 	Partition int32
+	// OrdinalStart is a StatefulSet's spec.ordinals.start (0 when unset, and for every other
+	// kind): its pods are numbered OrdinalStart .. OrdinalStart+Replicas-1.
+	OrdinalStart int32
 	// ParallelPods is true for a StatefulSet whose podManagementPolicy is Parallel, the one
 	// policy under which its rollingUpdate.maxUnavailable is honoured; under the default
 	// OrderedReady pods are replaced one at a time whatever that field says.
@@ -135,11 +139,11 @@ func (w WorkloadStatus) GracefulRestartConcerns() []string {
 			out = append(out, "only 1 replica: it keeps serving until the replacement is ready, but there is no redundancy if the replacement fails")
 		}
 	case w.Kind == KindStatefulSet:
-		if w.Partition > 0 {
-			if w.Partition >= w.Replicas {
-				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d of %d replica(s): no pod restarts", w.Partition, w.Replicas))
+		if rolled := partitionedUpdates(w.Replicas, w.Partition, w.OrdinalStart); rolled < w.Replicas {
+			if rolled == 0 {
+				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d, above every pod's ordinal (%d to %d): no pod restarts", w.Partition, w.OrdinalStart, w.OrdinalStart+w.Replicas-1))
 			} else {
-				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d: only pods with ordinal %d and above restart; the other %d keep running", w.Partition, w.Partition, w.Partition))
+				out = append(out, fmt.Sprintf("rollingUpdate.partition is %d: only pods with ordinal %d and above restart; the other %d keep running", w.Partition, w.Partition, w.Replicas-rolled))
 			}
 		}
 		switch {
@@ -247,6 +251,9 @@ func statefulSetStatus(s *appsv1.StatefulSet) WorkloadStatus {
 			if ru.Partition != nil {
 				st.Partition = *ru.Partition
 			}
+			if s.Spec.Ordinals != nil {
+				st.OrdinalStart = s.Spec.Ordinals.Start
+			}
 			if ru.MaxUnavailable != nil {
 				mu = *ru.MaxUnavailable
 			}
@@ -308,6 +315,21 @@ func readinessProbes(containers []corev1.Container) int {
 	return n
 }
 
+// partitionedUpdates is how many of a StatefulSet's pods a rolling update with this partition
+// replaces. The partition is an ordinal, and the pods are numbered from start (spec.ordinals),
+// so the ones at or above it are replicas minus those below it, clamped to 0..replicas (Codex on
+// #350: with start 10, three replicas and partition 11, two pods roll, not 3-11).
+func partitionedUpdates(replicas, partition, start int32) int32 {
+	below := partition - start
+	if below < 0 {
+		below = 0
+	}
+	if below > replicas {
+		below = replicas
+	}
+	return replicas - below
+}
+
 // statefulSetRolloutComplete is kubectl's StatefulSetStatusViewer
 // (k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go, Apache License 2.0), ported for the
 // same reason deploymentRolloutComplete is (§4.7), with two deliberate differences. kubectl
@@ -334,11 +356,15 @@ func statefulSetRolloutComplete(s *appsv1.StatefulSet) (complete bool, detail st
 	if ru := s.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil {
 		partition = *ru.Partition
 	}
-	if partition > 0 {
-		if s.Status.UpdatedReplicas < replicas-partition {
-			return false, fmt.Sprintf("waiting for partitioned roll out to finish: %d out of %d new pods have been updated", s.Status.UpdatedReplicas, replicas-partition)
+	var start int32
+	if s.Spec.Ordinals != nil {
+		start = s.Spec.Ordinals.Start
+	}
+	if want := partitionedUpdates(replicas, partition, start); want < replicas {
+		if s.Status.UpdatedReplicas < want {
+			return false, fmt.Sprintf("waiting for partitioned roll out to finish: %d out of %d new pods have been updated", s.Status.UpdatedReplicas, want)
 		}
-		return true, fmt.Sprintf("partitioned roll out complete: %d new pods have been updated; %d below the partition were not", s.Status.UpdatedReplicas, partition)
+		return true, fmt.Sprintf("partitioned roll out complete: %d new pods have been updated; %d below the partition were not", s.Status.UpdatedReplicas, replicas-want)
 	}
 	if s.Status.UpdatedReplicas < replicas || s.Status.UpdateRevision != s.Status.CurrentRevision {
 		return false, fmt.Sprintf("waiting for statefulset rolling update to complete %d pods at revision %s", s.Status.UpdatedReplicas, s.Status.UpdateRevision)

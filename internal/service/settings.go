@@ -28,6 +28,10 @@ type Settings struct {
 	// DIFFERENT repo's own state file, where Repo (below) does not name that other repo's
 	// config entry. KubeContextFor is how a caller applies it against some other RepoConfig.
 	KubeOverride string
+	// KubeOverrideSet says the flag was given at all. A given-but-empty --kube-context means
+	// the kubeconfig's current context, not "the config decides", so "" alone cannot carry it
+	// (#295; AGENTS.md §9 entry 20).
+	KubeOverrideSet bool
 
 	// Repo is the selected repo's own config entry, nil when running on flags alone (no
 	// repos[] configured, or --repo named an unconfigured path). Config is the whole loaded
@@ -59,18 +63,12 @@ func (s Settings) ProductionEnvs() []string {
 // KubeContextFor is the one precedence a caller applies when it holds some OTHER RepoConfig
 // than the currently selected one (an in-flight promotion for a different repos[] entry): the
 // operator's own --kube-context override wins outright, exactly as it does for the selected
-// repo in selectRepo; otherwise that repo's own configured context.
+// repo in selectRepo, even when it was given empty (the kubeconfig's current context,
+// KubeOverrideSet); otherwise that repo's own configured context. The one place this
+// precedence is applied.
 func (s Settings) KubeContextFor(rc config.RepoConfig) string {
-	return KubeContextFor(rc, s.KubeOverride)
-}
-
-// KubeContextFor is the free-function form of the same precedence, for a caller that has not
-// built a Settings at all (cmd/hoist's own test-only buildResolveFunc entry point) but still
-// must not read rc.Kube.Context directly — every kube-context fallback in this codebase goes
-// through this one function so the precedence can never drift between callers again.
-func KubeContextFor(rc config.RepoConfig, override string) string {
-	if override != "" {
-		return override
+	if s.KubeOverrideSet {
+		return s.KubeOverride
 	}
 	return rc.Kube.Context
 }

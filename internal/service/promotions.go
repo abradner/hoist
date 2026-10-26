@@ -348,7 +348,7 @@ func (s *Service) listOne(ctx context.Context, g git.Git, st *engine.PromotionSt
 	if err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(fmt.Sprintf("could not build a forge client: %v", err)))}
 	}
-	a, ro, err := s.ArgoRolloutFor(rc, s.settings.KubeOverride)
+	a, ro, err := argoRolloutAt(s.deps, s.settings.KubeContextFor(rc))
 	if err != nil {
 		return Listed{State: *st, Err: errors.New(redact.Strings(fmt.Sprintf("could not build an Argo/rollout client: %s", err.Error())))}
 	}
@@ -442,7 +442,7 @@ func (s *Service) Resume(ctx context.Context, id string, o ResumeOpts) (Drive, e
 	if err != nil {
 		return nil, err
 	}
-	a, ro, err := s.ArgoRolloutFor(rc, s.settings.KubeOverride)
+	a, ro, err := argoRolloutAt(s.deps, s.settings.KubeContextFor(rc))
 	if err != nil {
 		return nil, err
 	}

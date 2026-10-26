@@ -168,23 +168,10 @@ func (s *Service) Cluster(kubeContext string) (k8s.Cluster, string, error) {
 	return s.deps.Cluster(kubeContext)
 }
 
-// ArgoRolloutFor builds the Argo and rollout clients for rc's own kube context via deps — what
-// `hoist promotions`/`hoist resume` need to observe or drive a promotion that may belong to a
-// DIFFERENT repos[] entry than the one a long-lived Service was built for, so the kube context
-// has to be read from rc, not from a Settings field. kubeOverride is the operator's own
-// --kube-context, applied through KubeContextFor exactly as it is for the currently selected
-// repo — the one rule every face that lists or resumes promotions applies, so a state file
-// from another repo is observed and driven against the cluster the operator named, not that
-// repo's default.
-//
-// A free function over Deps, not a Service method, because cmd/hoist's own callers
-// (cmd/hoist's runPromotions/runResume) build one of these per
-// promotion in a loop over possibly-different repos[] entries — exactly what buildArgoRolloutIn
-// (cmd/hoist/resume.go) did before this move, unmemoized, since each call may target a
-// different cluster context. A Service that already holds the right Settings can still get the
-// same answer via its own ArgoRolloutFor method below.
-func ArgoRolloutFor(deps Deps, rc config.RepoConfig, kubeOverride string) (argo.Argo, rollout.Rollout, error) {
-	kctx := KubeContextFor(rc, kubeOverride)
+// argoRolloutAt opens Argo and the rollout watcher in one already-decided kube context:
+// List and Resume pass Settings.KubeContextFor(rc), so a promotion is observed and driven in
+// the context the operator's --kube-context (given, even empty) or its own repo names.
+func argoRolloutAt(deps Deps, kctx string) (argo.Argo, rollout.Rollout, error) {
 	a, _, err := deps.Argo(kctx)
 	if err != nil {
 		return nil, nil, err
@@ -194,11 +181,6 @@ func ArgoRolloutFor(deps Deps, rc config.RepoConfig, kubeOverride string) (argo.
 		return nil, nil, err
 	}
 	return a, ro, nil
-}
-
-// ArgoRolloutFor is the Service-method form of the free function above, using s's own Deps.
-func (s *Service) ArgoRolloutFor(rc config.RepoConfig, kubeOverride string) (argo.Argo, rollout.Rollout, error) {
-	return ArgoRolloutFor(s.deps, rc, kubeOverride)
 }
 
 // RepoConfigFor finds cfg's repos[] entry whose GitHub name matches repoFullName — how both

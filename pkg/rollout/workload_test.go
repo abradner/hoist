@@ -208,6 +208,22 @@ func TestWorkloadRolloutCompleteness(t *testing.T) {
 			s.Status.UpdatedReplicas, s.Status.UpdateRevision = 1, "db-2"
 			return KindStatefulSet, FromClientset(fake.NewSimpleClientset(s))
 		}, true, "partitioned roll out complete"},
+		// spec.ordinals.start makes partition an absolute ordinal (Codex on #350): start 10, three
+		// replicas, partition 11 means ordinals 11 and 12 roll, so two pods must update.
+		{"statefulset partition with a start ordinal waits for its pods", func() (string, Rollout) {
+			s := baseStatefulSet("ns", "x")
+			s.Spec.Ordinals = &appsv1.StatefulSetOrdinals{Start: 10}
+			s.Spec.UpdateStrategy.RollingUpdate.Partition = i32(11)
+			s.Status.UpdatedReplicas, s.Status.UpdateRevision = 0, "db-2"
+			return KindStatefulSet, FromClientset(fake.NewSimpleClientset(s))
+		}, false, "0 out of 2 new pods"},
+		{"statefulset partition with a start ordinal reached", func() (string, Rollout) {
+			s := baseStatefulSet("ns", "x")
+			s.Spec.Ordinals = &appsv1.StatefulSetOrdinals{Start: 10}
+			s.Spec.UpdateStrategy.RollingUpdate.Partition = i32(11)
+			s.Status.UpdatedReplicas, s.Status.UpdateRevision = 2, "db-2"
+			return KindStatefulSet, FromClientset(fake.NewSimpleClientset(s))
+		}, true, "partitioned roll out complete"},
 		{"statefulset spec not observed", func() (string, Rollout) {
 			s := baseStatefulSet("ns", "x")
 			s.Generation = 2
@@ -271,6 +287,10 @@ func TestWorkloadGracefulRestartConcerns(t *testing.T) {
 			WorkloadStatus{Kind: KindStatefulSet, Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 1, Partition: 1, ReadinessProbes: 1}, []string{"only pods with ordinal 1 and above restart"}},
 		{"statefulset partition at or over replicas restarts nothing",
 			WorkloadStatus{Kind: KindStatefulSet, Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 1, Partition: 3, ReadinessProbes: 1}, []string{"no pod restarts"}},
+		{"statefulset partition counts from its start ordinal",
+			WorkloadStatus{Kind: KindStatefulSet, Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 1, Partition: 11, OrdinalStart: 10, ReadinessProbes: 1}, []string{"only pods with ordinal 11 and above restart; the other 1 keep running"}},
+		{"statefulset partition below its start ordinal restarts every pod",
+			WorkloadStatus{Kind: KindStatefulSet, Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 1, Partition: 5, OrdinalStart: 10, ReadinessProbes: 1}, nil},
 		// maxUnavailable is honoured only under the Parallel policy, so it is warned on only there.
 		{"statefulset maxUnavailable under OrderedReady says nothing",
 			WorkloadStatus{Kind: KindStatefulSet, Replicas: 3, Strategy: "RollingUpdate", MaxUnavailable: 3, ReadinessProbes: 1}, nil},
