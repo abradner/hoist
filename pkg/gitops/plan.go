@@ -38,25 +38,29 @@ const (
 	// <staging>", AGENTS.md §4.5). Informational and never blocking (principle 5). Constructed
 	// by the caller, like WarnProductionTarget: the pipeline is config.
 	WarnSkippedStaging = "skipped-staging"
-	// WarnTargetNewer: the target env already runs a newer build of an image repo than the one
-	// this plan would write, so the promotion would be a downgrade. Raised only when both tags
-	// are timestamp-shaped (v followed by 12 digits), where order is decided by the tag alone;
+	// WarnTargetNewer: the target env already declares a newer build of an image repo than the
+	// one this plan would write, so the promotion would be a downgrade. Raised only when both
+	// tags are timestamp-shaped (v followed by 12 digits, optionally then "-" and a suffix), the
+	// stamp is strictly newer, and the digests differ, where order is decided by the stamp alone;
 	// for any other tag shape the plan stays silent rather than guess (principle 1). Never
 	// blocking (principle 5).
 	WarnTargetNewer = "target-newer"
 )
 
-// timestampTag returns the sortable value of a v<12 digits> tag (e.g. v202610231530), or false.
+// timestampTag returns the sortable stamp of a timestamp tag, or false: v followed by exactly 12
+// digits (v202610231530), optionally followed by "-" and anything (v202609012350-hotfix-abc, the
+// build that opened #24). The stamp alone orders two tags; a suffix never does, so two tags with
+// the same stamp are not ordered.
 func timestampTag(tag string) (string, bool) {
-	if len(tag) != 13 || tag[0] != 'v' {
+	if len(tag) < 13 || tag[0] != 'v' || (len(tag) > 13 && tag[13] != '-') {
 		return "", false
 	}
-	for _, c := range tag[1:] {
+	for _, c := range tag[1:13] {
 		if c < '0' || c > '9' {
 			return "", false
 		}
 	}
-	return tag[1:], true
+	return tag[1:13], true
 }
 
 // targetNewerWarning reports the target occurrences of chosen's repo whose timestamp tag is
@@ -68,6 +72,10 @@ func targetNewerWarning(src, dst string, chosen image.Ref, targets []Occurrence)
 	}
 	var newer []Occurrence
 	for _, t := range targets {
+		// The same digest under a newer tag is the same image: promoting it rolls nothing back.
+		if chosen.Digest != "" && t.Ref.Digest == chosen.Digest {
+			continue
+		}
 		if ts, ok := timestampTag(t.Ref.Tag); ok && ts > cs {
 			newer = append(newer, t)
 		}
@@ -76,7 +84,7 @@ func targetNewerWarning(src, dst string, chosen image.Ref, targets []Occurrence)
 		return Warning{}, false
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s already runs a newer build of %s than %s would write (%s here, %s in %s): this promotion would roll it back:", dst, chosen.Repo, src, newer[0].Ref.Tag, chosen.Tag, src)
+	fmt.Fprintf(&b, "%s already declares a newer build of %s than %s would write (%s here, %s in %s): this promotion would roll it back:", dst, chosen.Repo, src, newer[0].Ref.Tag, chosen.Tag, src)
 	listOccurrences(&b, newer)
 	return Warning{Code: WarnTargetNewer, Message: b.String(), Occurrences: newer}, true
 }
