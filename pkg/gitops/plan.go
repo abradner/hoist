@@ -33,9 +33,9 @@ const (
 	// production is config, and pkg never imports internal. That is the same shape
 	// pkg/resolve's warnings already arrive in.
 	WarnProductionTarget = "production-target"
-	// WarnSkippedStaging: a promotion into a production env from a source that is not the
-	// env's configured pipeline predecessor ("deploying straight to production, skipping
-	// <staging>", AGENTS.md §4.5). Informational and never blocking (principle 5). Constructed
+	// WarnSkippedStaging: a promotion into a production env from a source whose own configured
+	// pair (envs.pairs) is another env ("deploying straight to production, skipping <staging>",
+	// AGENTS.md §4.5). A source with no pair of its own is not judged: that is silent. Informational and never blocking (principle 5). Constructed
 	// by the caller, like WarnProductionTarget: the pipeline is config.
 	WarnSkippedStaging = "skipped-staging"
 	// WarnTargetNewer: the target env already declares a newer build of an image repo than the
