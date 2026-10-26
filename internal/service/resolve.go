@@ -28,12 +28,15 @@ type ResolveOptions struct {
 	Registries    []config.RegistryConfig
 }
 
-// NewResolveOptions applies the precedence: a flag given wins outright, for every repo; else
-// the selected repo's config (kube.context, digest_sources); registry credentials (auth,
-// cluster, op) are resolved later, per image repo, in resolveImages — never here as one merged
-// chain (F4). digestSources "none" turns resolution off (M1's plan). Moved from cmd/hoist's own
-// resolutionOptions unchanged in behavior; kubeContext replaces resolveFlags.kubeContext since
-// this package does not know that cmd-only type.
+// NewResolveOptions applies the precedence for the digest-resolution flags: a flag given wins
+// outright, for every repo; else the selected repo's config (digest_sources). kubeContext is
+// NOT part of that: it is the context the caller already decided (Settings.KubeContext, from
+// selectRepo — flag if given, else repos[].kube.context, else "" for the kubeconfig's current
+// context), taken as is. Re-deriving it here from the value would read an explicitly empty
+// --kube-context as "not given" and send pods to a different cluster than Argo (#295).
+// Registry credentials (auth, cluster, op) are resolved later, per image repo, in
+// resolveImages — never here as one merged chain (F4). digestSources "none" turns resolution
+// off (M1's plan).
 func NewResolveOptions(cfg *config.Config, rc *config.RepoConfig, digestSources, registryAuth, clusterSecret, opRef, kubeContext string) (ResolveOptions, error) {
 	var opts ResolveOptions
 	if cfg != nil {
@@ -41,9 +44,6 @@ func NewResolveOptions(cfg *config.Config, rc *config.RepoConfig, digestSources,
 	}
 
 	opts.KubeContext = kubeContext
-	if rc != nil {
-		opts.KubeContext = KubeContextFor(*rc, kubeContext)
-	}
 
 	sources := splitList(digestSources)
 	switch {

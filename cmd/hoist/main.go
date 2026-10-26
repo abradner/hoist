@@ -352,7 +352,8 @@ func configSettings(cfg *config.Config) service.Settings {
 // to another repo with another context). A subcommand copies its own --base/--kube-context into
 // selection before selectRepo, so both fields hold that subcommand's answer, not only the
 // root's. The digest-resolution flags (#132) are not here: they are handed to NewResolveOptions
-// as given, "" meaning "the config decides", by the commands that resolve.
+// as given, "" meaning "the config decides", by the commands that resolve — except the kube
+// context, which NewResolveOptions takes from KubeContext here and never re-derives (#295).
 func selectRepo(cfg *config.Config, sel selection) (service.Settings, error) {
 	set := configSettings(cfg)
 	set.RepoDir, set.AppsRoot, set.Promotable, set.Base, set.KubeContext = sel.repo, sel.appsRoot, splitList(sel.promotable), sel.base, sel.kubeContext
@@ -437,7 +438,7 @@ func runPlan(args []string, cfg *config.Config, sel selection, stdout, stderr io
 		return exitUsage
 	}
 	prefixes := set.Promotable
-	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, rf.kubeContext)
+	opts, err := service.NewResolveOptions(cfg, set.Repo, rf.digestSources, rf.registryAuth, rf.clusterSecret, rf.opRef, set.KubeContext)
 	if err != nil {
 		return fail(stderr, "hoist plan", exitUsage, err)
 	}
