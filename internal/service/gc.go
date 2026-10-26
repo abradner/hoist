@@ -57,7 +57,9 @@ func (r *GCReport) file(what string, err error) {
 //  2. orphaned worktrees: a directory under <CacheDir>/worktrees that no live state file names,
 //     left by a promotion abandoned or archived before cleanup existed, or whose state file was
 //     deleted by hand;
-//  3. registry cache entries not used for registryCacheMaxAge.
+//  3. repo-view directories (<CacheDir>/repo-view/<hash>) of clones that are no longer
+//     configured (#247): see removeStaleRepoViews;
+//  4. registry cache entries not used for registryCacheMaxAge.
 //
 // An orphan has no state file, so nothing can be re-observed about it; what stands in for that
 // is evidence it is hoist's own worktree and holds nothing uncommitted: its name is a promotion
@@ -122,6 +124,11 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 		}
 	}
 
+	s.removeStaleRepoViews(ctx, cache, o.DryRun, &rep)
+	if cerr := ctx.Err(); cerr != nil {
+		return rep, cerr
+	}
+
 	now := time.Now()
 	if s.deps.Now != nil {
 		now = s.deps.Now()
@@ -138,6 +145,120 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 		rep.Failed = append(rep.Failed, "could not prune the registry cache: "+redact.Strings(err.Error()))
 	}
 	return rep, nil
+}
+
+// repoViewNameLen is the length of a repo-view directory name: repoViewDir keys it by the first
+// 8 bytes of a SHA-256, hex-encoded.
+const repoViewNameLen = 16
+
+// isRepoViewName reports whether name is a directory name repoViewDir could have produced.
+func isRepoViewName(name string) bool {
+	if len(name) != repoViewNameLen {
+		return false
+	}
+	for _, c := range name {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// removeStaleRepoViews removes the cached origin views (repoViewDir) that no configured clone
+// hashes to. The name is a one-way hash of the clone path, so staleness is decided by hashing
+// every clone this run knows about — each spelling, as configured and as resolved, since keeping
+// a view that was needed is the safe error — and removing the rest. A view holds only a
+// detached checkout of origin's base branch, which refreshRepoView recreates from scratch on
+// every refresh, so nothing in it is worth keeping once no clone refers to it. Only a directory
+// whose name is a hash hoist would produce, and which is a git worktree (its .git file names
+// the clone it is registered with), is removed; anything else is kept and named. The owning
+// clone is read from that file: when it still exists the removal goes through it, so its
+// .git/worktrees registration goes too; when it is gone, so is the registration, and the
+// directory alone is removed.
+func (s *Service) removeStaleRepoViews(ctx context.Context, cache string, dryRun bool, rep *GCReport) {
+	root := filepath.Join(cache, "repo-view")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			rep.Failed = append(rep.Failed, "could not read the repo view cache: "+redact.Strings(err.Error()))
+		}
+		return
+	}
+	wanted := map[string]bool{}
+	hold := func(dir string) {
+		if dir == "" {
+			return
+		}
+		for _, d := range []string{dir, resolvedPath(dir)} {
+			if v, err := repoViewDir(d); err == nil {
+				wanted[filepath.Base(v)] = true
+			}
+		}
+	}
+	hold(s.settings.RepoDir)
+	if cfg := s.settings.Config; cfg != nil {
+		for _, r := range cfg.Repos {
+			hold(r.Dir)
+		}
+	}
+	verb := "removed"
+	if dryRun {
+		verb = "would remove"
+	}
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		dir := filepath.Join(root, e.Name())
+		switch {
+		case !isRepoViewName(e.Name()):
+			rep.Kept = append(rep.Kept, "kept "+dir+": its name is not a repo view hash")
+			continue
+		case !e.IsDir():
+			rep.Kept = append(rep.Kept, "kept "+dir+": it is not a directory")
+			continue
+		case wanted[e.Name()]:
+			continue
+		}
+		clone, ok := worktreeOwner(dir)
+		if !ok {
+			rep.Kept = append(rep.Kept, "kept "+dir+": it is not a git worktree")
+			continue
+		}
+		if !dryRun {
+			var err error
+			if _, serr := os.Stat(clone); serr == nil {
+				err = s.Git().RemoveWorktree(ctx, clone, dir)
+			} else {
+				err = os.RemoveAll(dir)
+			}
+			if err != nil {
+				rep.Failed = append(rep.Failed, "could not remove repo view "+dir+": "+redact.Strings(err.Error()))
+				continue
+			}
+		}
+		rep.Removed = append(rep.Removed, fmt.Sprintf("%s repo view %s (its clone is no longer configured)", verb, dir))
+	}
+}
+
+// worktreeOwner reads the clone a linked worktree is registered with from its .git file
+// ("gitdir: <clone>/.git/worktrees/<name>"). ok is false when dir has no such file.
+func worktreeOwner(dir string) (clone string, ok bool) {
+	b, err := os.ReadFile(filepath.Join(dir, ".git"))
+	if err != nil {
+		return "", false
+	}
+	gitdir, found := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
+	if !found {
+		return "", false
+	}
+	gitdir = filepath.Clean(strings.TrimSpace(gitdir))
+	marker := string(filepath.Separator) + ".git" + string(filepath.Separator) + "worktrees" + string(filepath.Separator)
+	i := strings.LastIndex(gitdir, marker)
+	if i <= 0 {
+		return "", false
+	}
+	return gitdir[:i], true
 }
 
 // removeOrphan removes the worktree directory named name under the hoist cache, and its branch,

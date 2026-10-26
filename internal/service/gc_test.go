@@ -410,3 +410,97 @@ func TestGCLooksAgainForAStateFileBeforeRemovingAnOrphan(t *testing.T) {
 	}
 	mustExist(t, orphan)
 }
+
+// repoViewFor registers a repo-view worktree for clone at the directory refreshRepoView would
+// use, exactly as the TUI's first read of that clone leaves it.
+func repoViewFor(t *testing.T, clone string) string {
+	t.Helper()
+	dir, err := repoViewDir(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (git.Exec{}).WorktreeAtRef(context.Background(), clone, dir, "refs/remotes/origin/main"); err != nil {
+		t.Fatalf("repo view for %s: %v", clone, err)
+	}
+	return dir
+}
+
+// TestGCRemovesRepoViewsOfClonesThatAreNoLongerConfigured (#247): the repo-view directory is
+// keyed by a one-way hash of the clone path, so GC hashes every configured clone and removes
+// the 16-hex directories that match none — and only those. A directory with another name, or a
+// hash-named one that is not a worktree, is kept and named.
+func TestGCRemovesRepoViewsOfClonesThatAreNoLongerConfigured(t *testing.T) {
+	fx := newInflightFixture(t)
+	svc := withConfig(fx)
+
+	configured := repoViewFor(t, fx.clone)
+	// A clone that left the config but still exists: its view is removed through that clone, so
+	// the registration under its .git/worktrees goes too.
+	moved := filepath.Join(t.TempDir(), "moved")
+	runGitHost(t, "", "clone", "-q", fx.clone, moved)
+	runGitHost(t, moved, "fetch", "-q", "origin")
+	movedView := repoViewFor(t, moved)
+	// A clone that was deleted: nothing to deregister from, the directory alone is removed.
+	gone := filepath.Join(t.TempDir(), "gone")
+	runGitHost(t, "", "clone", "-q", fx.clone, gone)
+	runGitHost(t, gone, "fetch", "-q", "origin")
+	goneView := repoViewFor(t, gone)
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Dir(configured)
+	// Kept: a name hoist never produces, and a hash-shaped plain directory that is no worktree.
+	notes := filepath.Join(root, "notes")
+	plain := filepath.Join(root, strings.Repeat("ab", 8))
+	for _, d := range []string{notes, plain} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "keep.txt"), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := diskSnapshot(t, fx)
+	dry, err := svc.GC(context.Background(), GCOpts{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := diskSnapshot(t, fx); after != before {
+		t.Fatalf("a dry run changed something on disk:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	for _, p := range []string{movedView, goneView} {
+		if linesContaining(dry.Removed, "would remove repo view "+p) != 1 {
+			t.Errorf("dry run does not list %s exactly once:\n%s", p, strings.Join(dry.Removed, "\n"))
+		}
+	}
+	if len(dry.Removed) != 2 {
+		t.Errorf("dry run lists %d removals, want 2:\n%s", len(dry.Removed), strings.Join(dry.Removed, "\n"))
+	}
+	for _, p := range []string{plain, notes} {
+		if linesContaining(dry.Kept, p) != 1 {
+			t.Errorf("dry run does not name the kept %s:\n%s", p, strings.Join(dry.Kept, "\n"))
+		}
+	}
+
+	rep, err := svc.GC(context.Background(), GCOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	said := strings.NewReplacer("would remove ", "removed ").Replace(strings.Join(dry.Removed, "\n"))
+	if got := strings.Join(rep.Removed, "\n"); got != said {
+		t.Fatalf("the real run did not do what the dry run said:\ndry run (reworded):\n%s\nreal run:\n%s", said, got)
+	}
+	mustBeGone(t, movedView)
+	mustBeGone(t, goneView)
+	for _, p := range []string{configured, filepath.Join(plain, "keep.txt"), filepath.Join(notes, "keep.txt")} {
+		mustExist(t, p)
+	}
+	if strings.Contains(outGitHost(t, moved, "worktree", "list", "--porcelain"), movedView) {
+		t.Errorf("the moved clone still lists the removed repo view as a worktree")
+	}
+	if again, err := svc.GC(context.Background(), GCOpts{}); err != nil || len(again.Removed) != 0 {
+		t.Fatalf("a second GC has nothing left to remove: %q, %v", again.Removed, err)
+	}
+}
