@@ -33,7 +33,53 @@ const (
 	// production is config, and pkg never imports internal. That is the same shape
 	// pkg/resolve's warnings already arrive in.
 	WarnProductionTarget = "production-target"
+	// WarnSkippedStaging: a promotion into a production env from a source that is not the
+	// env's configured pipeline predecessor ("deploying straight to production, skipping
+	// <staging>", AGENTS.md §4.5). Informational and never blocking (principle 5). Constructed
+	// by the caller, like WarnProductionTarget: the pipeline is config.
+	WarnSkippedStaging = "skipped-staging"
+	// WarnTargetNewer: the target env already runs a newer build of an image repo than the one
+	// this plan would write, so the promotion would be a downgrade. Raised only when both tags
+	// are timestamp-shaped (v followed by 12 digits), where order is decided by the tag alone;
+	// for any other tag shape the plan stays silent rather than guess (principle 1). Never
+	// blocking (principle 5).
+	WarnTargetNewer = "target-newer"
 )
+
+// timestampTag returns the sortable value of a v<12 digits> tag (e.g. v202610231530), or false.
+func timestampTag(tag string) (string, bool) {
+	if len(tag) != 13 || tag[0] != 'v' {
+		return "", false
+	}
+	for _, c := range tag[1:] {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	return tag[1:], true
+}
+
+// targetNewerWarning reports the target occurrences of chosen's repo whose timestamp tag is
+// newer than chosen's, or ok=false when none provably is.
+func targetNewerWarning(src, dst string, chosen image.Ref, targets []Occurrence) (Warning, bool) {
+	cs, ok := timestampTag(chosen.Tag)
+	if !ok {
+		return Warning{}, false
+	}
+	var newer []Occurrence
+	for _, t := range targets {
+		if ts, ok := timestampTag(t.Ref.Tag); ok && ts > cs {
+			newer = append(newer, t)
+		}
+	}
+	if len(newer) == 0 {
+		return Warning{}, false
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s already runs a newer build of %s than %s would write (%s here, %s in %s): this promotion would roll it back:", dst, chosen.Repo, src, newer[0].Ref.Tag, chosen.Tag, src)
+	listOccurrences(&b, newer)
+	return Warning{Code: WarnTargetNewer, Message: b.String(), Occurrences: newer}, true
+}
 
 // BuildPlan plans the promotion of every promotable image repo from env src to env dst.
 //
@@ -155,6 +201,9 @@ func BuildPlanWith(r *Repo, src, dst string, promotable []string, digests map[st
 			return Plan{}, fmt.Errorf("%s: %s runs as %s in %s, %s", repo, chosen, occ[0].Container, src, why)
 		}
 		planned[repo] = true
+		if w, ok := targetNewerWarning(src, dst, chosen, targets); ok {
+			plan.Warnings = append(plan.Warnings, w)
+		}
 		for _, t := range targets {
 			e := Edit{Occurrence: t, New: chosen}
 			if err := checkEditable(&e); err != nil {
