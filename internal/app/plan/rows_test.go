@@ -194,9 +194,14 @@ func TestSkippedStaging(t *testing.T) {
 	if _, skip := SkippedStaging("app-staging", "app-staging-2", envs); skip {
 		t.Error("a non-production target must never warn")
 	}
-	// A source with no configured pair has nothing to report as skipped.
-	if _, skip := SkippedStaging("app-dev", "app-production", envs); skip {
-		t.Error("no configured pair for the source means nothing to skip")
+	// A source with no pair of its own (a qa or preview env) promoting straight into production
+	// skips the env the pipeline reaches production from (Alex, 2026-10-26: "warn").
+	if staging, skip := SkippedStaging("app-dev", "app-production", envs); !skip || staging != "app-staging" {
+		t.Errorf("an unpaired source into production skips the pipeline: got %q, %v", staging, skip)
+	}
+	// Control: a production env nothing is configured to promote into has nothing to skip.
+	if _, skip := SkippedStaging("app-dev", "app-production-2", config.EnvsConfig{Production: []string{"app-production-2"}}); skip {
+		t.Error("no pipeline into the target: nothing to skip")
 	}
 }
 
