@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/abradner/hoist/internal/config"
+	"github.com/abradner/hoist/internal/engine"
 	"github.com/abradner/hoist/pkg/git"
 	"github.com/abradner/hoist/pkg/gitops"
 	"github.com/abradner/hoist/pkg/k8s"
@@ -160,5 +162,105 @@ func TestPlanNamesTheBadPrefixesBeforeAskingTheCluster(t *testing.T) {
 	}
 	if _, err := newSvc("ghcr.io/example/").Plan(context.Background(), req); !errors.Is(err, noCluster) {
 		t.Fatalf("control: matching prefixes with an unreachable cluster should still fail on the cluster, got: %v", err)
+	}
+}
+
+// addDevEnv adds a third env (app-dev) to planFixtureRepo's tree, one family running the same
+// image repo as the other two, so a pipeline dev -> staging -> production can be configured and
+// then skipped.
+func addDevEnv(t *testing.T, root string) {
+	t.Helper()
+	digest := "sha256:" + strings.Repeat("2", 64)
+	wrapper := "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: app-app-dev\n  namespace: argocd\n" +
+		"spec:\n  project: default\n  source:\n    repoURL: https://git.example.test/example/gitops.git\n    targetRevision: main\n    path: cluster/apps/app-dev/app\n" +
+		"  destination:\n    server: https://kubernetes.default.svc\n    namespace: app-dev\n"
+	dep := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: ghcr.io/example/app:v3@" + digest + "\n"
+	for rel, content := range map[string]string{
+		"cluster/apps/app-dev-app.yaml":            wrapper,
+		"cluster/apps/app-dev/app/deployment.yaml": dep,
+	} {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func skipPlanService(root string) *Service {
+	return New(Settings{
+		RepoDir:    root,
+		AppsRoot:   "cluster/apps",
+		Base:       "main",
+		Promotable: []string{"ghcr.io/example/"},
+		Repo: &config.RepoConfig{GitHub: "me/gitops", Envs: config.EnvsConfig{
+			Production: []string{"app-production"},
+			Pairs:      map[string]string{"app-dev": "app-staging", "app-staging": "app-production"},
+		}},
+	}, Deps{Git: func() git.Git { return git.Exec{} }})
+}
+
+func skippedStagingWarnings(pl gitops.Plan) []gitops.Warning {
+	var out []gitops.Warning
+	for _, w := range pl.Warnings {
+		if w.Code == gitops.WarnSkippedStaging {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// TestPlanWarnsWhenAPromotionSkipsStagingIntoProduction: app-dev -> app-production while the
+// pipeline says app-dev promotes to app-staging. The warning is on the plan itself, so the
+// dry run and the PR body (engine.RenderPRBody prints plan.Warnings) carry it, not only the
+// plan screen's own sentence (AGENTS.md section 4.5).
+func TestPlanWarnsWhenAPromotionSkipsStagingIntoProduction(t *testing.T) {
+	root := planFixtureRepo(t)
+	addDevEnv(t, root)
+	svc := skipPlanService(root)
+
+	pc, err := svc.Plan(context.Background(), PlanRequest{Repo: mustDiscover(t, root), Source: "app-dev", Target: "app-production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := skippedStagingWarnings(pc.Plan)
+	if len(ws) != 1 {
+		t.Fatalf("want one %s warning, got %+v", gitops.WarnSkippedStaging, pc.Plan.Warnings)
+	}
+	if !strings.Contains(ws[0].Message, "straight to production") || !strings.Contains(ws[0].Message, "skipping app-staging") {
+		t.Errorf("message = %q", ws[0].Message)
+	}
+	body := engine.RenderPRBody("abc123", pc.Plan)
+	if !strings.Contains(body, "[skipped-staging]") || !strings.Contains(body, "skipping app-staging") {
+		t.Errorf("the PR body does not carry the warning:\n%s", body)
+	}
+}
+
+// Controls: the configured pair, a non-production target and a flags-only run (no pipeline is
+// known, so nothing is claimed) stay silent.
+func TestPlanDoesNotWarnSkippedStagingOffTheSkippingPath(t *testing.T) {
+	root := planFixtureRepo(t)
+	addDevEnv(t, root)
+	r := mustDiscover(t, root)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name         string
+		svc          *Service
+		source, dest string
+	}{
+		{"configured pair", skipPlanService(root), "app-staging", "app-production"},
+		{"non-production target", skipPlanService(root), "app-dev", "app-staging"},
+		{"flags only", planTestService(root), "app-dev", "app-production"},
+	} {
+		pc, err := tc.svc.Plan(ctx, PlanRequest{Repo: r, Source: tc.source, Target: tc.dest})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if ws := skippedStagingWarnings(pc.Plan); len(ws) != 0 {
+			t.Errorf("%s: warned: %+v", tc.name, ws)
+		}
 	}
 }
