@@ -37,6 +37,27 @@ type GCReport struct {
 	Removed []string
 	Kept    []string
 	Failed  []string
+	// OrphanWorktrees and RegistryEntries count the orphaned worktrees and the registry cache
+	// entries among Removed — what `hoist promotions` weighs against its hint threshold.
+	OrphanWorktrees int
+	RegistryEntries int
+}
+
+// Collectable is how much a `hoist gc` run would remove of the two kinds that pile up: orphaned
+// worktrees and registry cache entries past the prune age.
+type Collectable struct {
+	Worktrees       int
+	RegistryEntries int
+}
+
+// Collectable counts what GC would remove, using GC's own dry run so no check is restated: the
+// same orphan evidence and the same prune age. It leaves out the landed-promotion cleanup
+// (cleanupLanded), the one part of GC that asks origin and the forge, because the listing that
+// asks for this has just run it. It removes nothing and talks to no forge or cluster; git is
+// asked only locally.
+func (s *Service) Collectable(ctx context.Context) (Collectable, error) {
+	rep, err := s.gc(ctx, GCOpts{DryRun: true}, true)
+	return Collectable{Worktrees: rep.OrphanWorktrees, RegistryEntries: rep.RegistryEntries}, err
 }
 
 // file sorts err for what into Kept (a refusal: GC looked and decided) or Failed (anything else).
@@ -77,6 +98,11 @@ func (r *GCReport) file(what string, err error) {
 // state file by the time the second read happens, and a promotion starting mid-GC can never be
 // mistaken for an orphan.
 func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
+	return s.gc(ctx, o, false)
+}
+
+// gc is GC; skipLanded leaves out step 1 (see Collectable).
+func (s *Service) gc(ctx context.Context, o GCOpts, skipLanded bool) (GCReport, error) {
 	var rep GCReport
 
 	cache, err := engine.CacheDir()
@@ -96,6 +122,9 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 	live := make(map[string]bool, len(states))
 	for _, st := range states {
 		live[st.ID] = true
+		if skipLanded {
+			continue
+		}
 		lines, err := s.cleanupLanded(ctx, st, o.DryRun)
 		for _, line := range lines {
 			rep.Removed = append(rep.Removed, fmt.Sprintf("%s (promotion %s into %s, landed)", line, st.ID, st.TargetEnv))
@@ -113,8 +142,13 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 			continue
 		}
 		lines, err := s.removeOrphan(ctx, e.Name(), o.DryRun)
+		counted := false
 		for _, line := range lines {
 			rep.Removed = append(rep.Removed, line+" (no state file)")
+			if !counted && (strings.HasPrefix(line, "would remove worktree ") || strings.HasPrefix(line, "removed worktree ")) {
+				rep.OrphanWorktrees++
+				counted = true
+			}
 		}
 		if err != nil {
 			rep.file(filepath.Join(root, e.Name()), err)
@@ -138,6 +172,7 @@ func (s *Service) GC(ctx context.Context, o GCOpts) (GCReport, error) {
 	if o.DryRun {
 		verb = "would remove"
 	}
+	rep.RegistryEntries = len(pruned)
 	for _, p := range pruned {
 		rep.Removed = append(rep.Removed, fmt.Sprintf("%s registry cache entry %s (unused for over %d days)", verb, p, int(registryCacheMaxAge.Hours()/24)))
 	}

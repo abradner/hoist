@@ -631,6 +631,10 @@ distinct from deliberately kept, and its last line then says the sweep was incom
 than "nothing to remove". It works from the config file's `repos[]`, like
 `hoist promotions`. There is no TUI key for it (#246).
 
+`hoist promotions` ends with a one-line hint to run `hoist gc --dry-run` when more than 20 orphaned
+worktrees, or more than 20 registry cache entries past the 90-day age, are waiting (counted on their own,
+to stderr so the listing on stdout is unchanged). It uses gc's own checks and removes nothing.
+
 On the matrix, `tab` then `enter` on the pane does the same for what it lists, and `shift+x`
 there abandons the one under the cursor behind a confirm. A finished promotion leaves the pane;
 its state file is archived (see above) after `state.retain`, or you can delete it, or run
