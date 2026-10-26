@@ -123,3 +123,25 @@ func TestEntryAuthConfigCarriesOnlyItsOwnEnvVariable(t *testing.T) {
 		t.Errorf("unmatched repo env = %q, want none", envVar)
 	}
 }
+
+// TestRegistryEnvCredentialIsNeverLentToAnotherHost is the attacker's request for #172: a
+// config names an env credential for registry X, and the plan pulls from registry Y, or from a
+// host that only starts with X's name. Neither may get X's variable: each registry client is
+// built from the one registries[] entry that covers the repo (registryEntryFor, which matches on
+// path boundaries), and a repo no entry covers gets no named variable at all.
+func TestRegistryEnvCredentialIsNeverLentToAnotherHost(t *testing.T) {
+	registries := []config.RegistryConfig{{Prefix: "registry.x.example", Auth: []string{"env"}, Env: "X_TOKEN"}}
+	for _, repo := range []string{
+		"registry.y.example/team/app",                  // another registry
+		"registry.x.example.attacker.example/team/app", // a lookalike host
+		"other.example/registry.x.example/app",         // X's name inside another host's path
+	} {
+		if _, _, _, envVar := entryAuthConfig(registryEntryFor(registries, repo), ResolveOptions{}); envVar != "" {
+			t.Errorf("%s got env credential %q, configured for registry.x.example only", repo, envVar)
+		}
+	}
+	// Control: the covered repo does get it.
+	if _, _, _, envVar := entryAuthConfig(registryEntryFor(registries, "registry.x.example/team/app"), ResolveOptions{}); envVar != "X_TOKEN" {
+		t.Fatalf("registry.x.example/team/app env = %q, want X_TOKEN", envVar)
+	}
+}
