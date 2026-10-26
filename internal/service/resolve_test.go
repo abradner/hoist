@@ -43,23 +43,23 @@ func TestRegistryEntryForPicksLongestMatchNeverFirstOverlap(t *testing.T) {
 	// op ref must never appear for a repo the specific web entry covers, and the web
 	// entry's cluster secret must never appear for a repo only the broad entry covers.
 	webEntry := registryEntryFor(registries, "ghcr.io/example/web")
-	auth, clusterSecret, opRef := entryAuthConfig(webEntry, ResolveOptions{})
+	auth, clusterSecret, opRef, _ := entryAuthConfig(webEntry, ResolveOptions{})
 	if len(auth) != 1 || auth[0] != registry.AuthCluster || clusterSecret != "app-staging/web-pull" || opRef != "" {
 		t.Errorf("web entry: auth=%v clusterSecret=%q opRef=%q, want cluster/app-staging/web-pull/\"\"", auth, clusterSecret, opRef)
 	}
 	broadEntry := registryEntryFor(registries, "ghcr.io/example/marketing")
-	auth, clusterSecret, opRef = entryAuthConfig(broadEntry, ResolveOptions{})
+	auth, clusterSecret, opRef, _ = entryAuthConfig(broadEntry, ResolveOptions{})
 	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "" || opRef != "op://vault/broad/field" {
 		t.Errorf("broad entry: auth=%v clusterSecret=%q opRef=%q, want env/\"\"/op://vault/broad/field", auth, clusterSecret, opRef)
 	}
 	// A repo no entry covers gets the default chain, and neither entry's cluster secret
 	// or op ref.
-	auth, clusterSecret, opRef = entryAuthConfig(nil, ResolveOptions{})
+	auth, clusterSecret, opRef, _ = entryAuthConfig(nil, ResolveOptions{})
 	if len(auth) != len(registry.DefaultAuthOrder) || clusterSecret != "" || opRef != "" {
 		t.Errorf("unmatched repo: auth=%v clusterSecret=%q opRef=%q, want the default chain and nothing else", auth, clusterSecret, opRef)
 	}
 	// An explicit flag overrides every entry outright, for any repo.
-	auth, clusterSecret, opRef = entryAuthConfig(webEntry, ResolveOptions{Auth: []registry.AuthSource{registry.AuthEnv}, ClusterSecret: "x/y", OpRef: "op://flag/a/b"})
+	auth, clusterSecret, opRef, _ = entryAuthConfig(webEntry, ResolveOptions{Auth: []registry.AuthSource{registry.AuthEnv}, ClusterSecret: "x/y", OpRef: "op://flag/a/b"})
 	if len(auth) != 1 || auth[0] != registry.AuthEnv || clusterSecret != "x/y" || opRef != "op://flag/a/b" {
 		t.Errorf("flag override: auth=%v clusterSecret=%q opRef=%q", auth, clusterSecret, opRef)
 	}
@@ -100,5 +100,26 @@ func TestMultiRegistryRoutesDirectCallsByRepo(t *testing.T) {
 	}
 	if _, err := m.Tags(ctx, "ghcr.io/nobody/app"); err == nil {
 		t.Fatal("Tags for an unmatched repo must error, not use the primary client")
+	}
+}
+
+// #172: registries[].env reaches the registry client config from the entry that names it,
+// and from no other entry; there is no flag and no default.
+func TestEntryAuthConfigCarriesOnlyItsOwnEnvVariable(t *testing.T) {
+	registries := []config.RegistryConfig{
+		{Prefix: "quay.io/", Auth: []string{"env"}, Env: "QUAY_TOKEN"},
+		{Prefix: "ghcr.io/", Auth: []string{"env"}},
+	}
+	_, _, _, envVar := entryAuthConfig(registryEntryFor(registries, "quay.io/example/app"), ResolveOptions{})
+	if envVar != "QUAY_TOKEN" {
+		t.Errorf("quay entry env = %q, want QUAY_TOKEN", envVar)
+	}
+	_, _, _, envVar = entryAuthConfig(registryEntryFor(registries, "ghcr.io/example/app"), ResolveOptions{})
+	if envVar != "" {
+		t.Errorf("ghcr entry env = %q, want none (no default)", envVar)
+	}
+	_, _, _, envVar = entryAuthConfig(nil, ResolveOptions{})
+	if envVar != "" {
+		t.Errorf("unmatched repo env = %q, want none", envVar)
 	}
 }

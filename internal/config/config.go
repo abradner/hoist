@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -134,6 +135,10 @@ type RegistryConfig struct {
 	Auth    []string      `yaml:"auth"` // order tried; default env, keychain, cluster, op
 	Cluster ClusterSecret `yaml:"cluster"`
 	Op      string        `yaml:"op,omitempty"` // op://vault/item/field; redacted by Redacted
+	// Env names the environment variable holding this registry's credential (the env auth
+	// source). No default: without it the env source serves ghcr.io only, from
+	// HOIST_GHCR_TOKEN/GHCR_TOKEN. The name is not a secret; the value never reaches config.
+	Env string `yaml:"env,omitempty"`
 }
 
 // ClusterSecret is the pull secret the cluster auth source reads. Opt-in: both fields or
@@ -702,7 +707,13 @@ func validateRegistry(p *problems, k string, r RegistryConfig) {
 	if r.Op != "" && !strings.HasPrefix(r.Op, "op://") {
 		p.add(k+".op", "want an op://vault/item/field reference")
 	}
+	if r.Env != "" && !envVarName.MatchString(r.Env) {
+		p.add(k+".env", "want an environment variable name (letters, digits, underscore; not starting with a digit), got %q", r.Env)
+	}
 }
+
+// envVarName is what registries[].env may name: a portable environment variable name.
+var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // checkNoSurroundingWhitespace reports a value that yaml.v3 read literally (it never
 // trims scalars) but that a later exact-match comparison — an env name against a wrapper's

@@ -135,7 +135,7 @@ func registryEntryFor(registries []config.RegistryConfig, repo string) *config.R
 // registries[] entry (nil for a repo no entry covers). An explicit flag wins outright, the same
 // value for every repo; otherwise the entry decides, and only that entry's own values — never
 // another entry's, and never anything beyond the default auth order for a repo no entry covers.
-func entryAuthConfig(e *config.RegistryConfig, opts ResolveOptions) (auth []registry.AuthSource, clusterSecret, opRef string) {
+func entryAuthConfig(e *config.RegistryConfig, opts ResolveOptions) (auth []registry.AuthSource, clusterSecret, opRef, envVar string) {
 	auth = opts.Auth
 	if len(auth) == 0 {
 		if e != nil {
@@ -154,7 +154,10 @@ func entryAuthConfig(e *config.RegistryConfig, opts ResolveOptions) (auth []regi
 	if opRef == "" && e != nil {
 		opRef = e.Op
 	}
-	return auth, clusterSecret, opRef
+	if e != nil {
+		envVar = e.Env // config-only: there is no flag for it, and no default
+	}
+	return auth, clusterSecret, opRef, envVar
 }
 
 // Resolution is one Plan call's resolution section: which sources and credential chain were
@@ -319,7 +322,7 @@ func (s *Service) resolveImages(ctx context.Context, r *gitops.Repo, from string
 
 	clusterAuth := false
 	for _, e := range entryFor {
-		auth, clusterSecret, _ := entryAuthConfig(e, opts)
+		auth, clusterSecret, _, _ := entryAuthConfig(e, opts)
 		if has(auth, registry.AuthCluster) && clusterSecret != "" {
 			clusterAuth = true
 			break
@@ -352,8 +355,8 @@ func (s *Service) resolveImages(ctx context.Context, r *gitops.Repo, from string
 			e := entryFor[repo]
 			c, ok := built[e]
 			if !ok {
-				auth, clusterSecret, opRef := entryAuthConfig(e, opts)
-				cfg := registry.AuthConfig{Order: auth, OpRef: opRef}
+				auth, clusterSecret, opRef, envVar := entryAuthConfig(e, opts)
+				cfg := registry.AuthConfig{Order: auth, OpRef: opRef, Env: envVar}
 				if clusterSecret != "" && has(auth, registry.AuthCluster) {
 					cfg.ClusterSecret, cfg.Cluster = clusterSecret, cluster
 				}
@@ -399,8 +402,8 @@ func (s *Service) RegistryFor(imageRepo string) (registry.Registry, error) {
 		registries = s.settings.Config.Registries
 	}
 	entry := registryEntryFor(registries, imageRepo)
-	auth, clusterSecret, opRef := entryAuthConfig(entry, s.settings.Resolve)
-	cfg := registry.AuthConfig{Order: auth, OpRef: opRef}
+	auth, clusterSecret, opRef, envVar := entryAuthConfig(entry, s.settings.Resolve)
+	cfg := registry.AuthConfig{Order: auth, OpRef: opRef, Env: envVar}
 	if clusterSecret != "" && has(auth, registry.AuthCluster) {
 		if cluster, _, err := s.deps.Cluster(s.settings.KubeContext); err == nil {
 			cfg.ClusterSecret, cfg.Cluster = clusterSecret, cluster

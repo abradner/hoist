@@ -70,8 +70,10 @@ it reads private state and writes to systems that deploy software.
   lists: `pkg/k8s` and `pkg/registry` call `redact.Register` the instant a credential value is
   read (an env token, a cluster secret's password, `op`'s output), so it is scrubbed from every
   later message anywhere in the process — including the CLI's own printer — even from a path that
-  forgot to thread it through as a local hide argument. The env token is sent to `ghcr.io` only,
-  never to another host a manifest happens to name.
+  forgot to thread it through as a local hide argument. The env token is sent to `ghcr.io` only
+  (from `HOIST_GHCR_TOKEN`/`GHCR_TOKEN`) unless `registries[].env` names a variable for that
+  entry, in which case it goes to the hosts that entry covers and never to another host a
+  manifest happens to name.
 - **kubeconfig.** hoist trusts the context it is pointed at. It never writes anything to the
   cluster except the Argo refresh annotation; the deploy itself is Argo acting on a merged commit.
   A wrong context is the operator's risk: the context name in use is printed on every plan so a
